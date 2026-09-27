@@ -12,9 +12,13 @@
 //!
 //! THE HONEST PART, AND THE REASON THIS FILE IS NOT SHORTER. A run interrupted *between* a tool
 //! call and its result is genuinely ambiguous: the command may have run, may have half-run, may
-//! never have started. We cannot know, and re-running it would repeat whatever it did. So we do not
-//! guess — the model is told plainly that the call's outcome is unknown, and it decides. A resumed
-//! run that silently re-ran a `rm` would be worse than one that stopped.
+//! never have started. We cannot know, and re-running it would repeat whatever it did. So such a
+//! run is failed, naming the tool. A resumed run that silently re-ran a `rm` would be worse than
+//! one that stopped.
+//!
+//! A run interrupted BETWEEN steps is not ambiguous, and since #91 it is carried on: moved into
+//! its next generation, which fences off every write from a loop still alive behind a lapsed
+//! lease, at most `MAX_RESUMES` times (`formal/tla/RunLifecycle.tla`, finding 15).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,8 +42,9 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// Sweep forever. Started by the binary; stops when the process does.
-pub async fn sweep_forever(state: AgUiState) {
+/// Sweep forever. Started by the binary; stops when the process does. Takes the host state
+/// because a run it carries on can park on a card, and a card is minted through it.
+pub async fn sweep_forever(state: crate::host_state::HostState) {
     // A first sweep immediately: the most likely moment to find an abandoned run is just after the
     // restart that abandoned it.
     loop {
@@ -53,7 +58,10 @@ pub async fn sweep_forever(state: AgUiState) {
 }
 
 /// Claim what has been abandoned and resolve each one.
-pub async fn sweep_once(state: &AgUiState) -> Result<usize, opengrok_store::StoreError> {
+pub async fn sweep_once(
+    host: &crate::host_state::HostState,
+) -> Result<usize, opengrok_store::StoreError> {
+    let state = &host.agui;
     let claimed = state
         .auth
         .store
@@ -67,7 +75,7 @@ pub async fn sweep_once(state: &AgUiState) -> Result<usize, opengrok_store::Stor
 
     let mut resolved = 0;
     for run_id in claimed {
-        match resolve(state, &run_id).await {
+        match resolve(host, &run_id).await {
             Ok(()) => resolved += 1,
             Err(error) => {
                 // Left claimed; the lease expires and a later sweep tries again. A run that cannot
@@ -79,11 +87,62 @@ pub async fn sweep_once(state: &AgUiState) -> Result<usize, opengrok_store::Stor
     Ok(resolved)
 }
 
-/// Bring one abandoned run to an ending.
+/// What the sweep does with a run a restart abandoned (#91).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Verdict {
+    /// Carry it on in its next generation. `Some` is a person's answer whose call never started:
+    /// the resume must carry that answer out, not ask the model again.
+    Resume(Option<opengrok_core::run::AnsweredCall>),
+    /// End it, saying why.
+    Fail(String),
+}
+
+/// Resume or fail, from the log alone (`formal/tla/RunLifecycle.tla` Recover).
 ///
-/// Ending it is the point. A run that stays `running` is one a person watches forever; whether it
-/// finishes or fails, the client gets something it can render.
-async fn resolve(state: &AgUiState, run_id: &RunId) -> Result<(), opengrok_store::StoreError> {
+/// A LOG FROM BEFORE TOOL STARTS WERE JOURNALED cannot prove no tool was in flight: its round's
+/// `TOOL_CALL_START` with no result is the ambiguous case this file always failed, and still
+/// does. A run whose start of a tool is on record without the tool's result fails the same way,
+/// naming the tool (`RunError::ToolOutcomeUnknown`). Everything else was interrupted between two
+/// steps — nothing may have acted that the log does not show — and is carried on, at most
+/// `MAX_RESUMES` times.
+pub(crate) fn verdict(run: &opengrok_core::run::Run) -> Verdict {
+    let in_flight = |tools: &str| {
+        format!(
+            "this run was interrupted by a restart while `{tools}` was in flight; \
+             whether it completed is unknown, so it was not run again"
+        )
+    };
+    if let Some(call) = unresolved_tool_call(run) {
+        return Verdict::Fail(in_flight(&call));
+    }
+    match run.decide(RunCommand::Resume {
+        reason: String::new(),
+        at_ms: 0,
+    }) {
+        Ok(_) => Verdict::Resume(run.unstarted_answer.clone()),
+        Err(opengrok_core::run::RunError::ToolOutcomeUnknown(tools)) => {
+            Verdict::Fail(in_flight(&tools.join("`, `")))
+        }
+        Err(opengrok_core::run::RunError::ResumedTooOften) => Verdict::Fail(format!(
+            "this run was interrupted by a restart again after being carried on {} times, \
+             so it was not carried on again",
+            opengrok_core::run::MAX_RESUMES
+        )),
+        Err(other) => Verdict::Fail(format!(
+            "this run was interrupted by a restart and could not continue: {other}"
+        )),
+    }
+}
+
+/// Bring one abandoned run to an ending, or carry it on.
+///
+/// A run that stays `running` is one a person watches forever: whichever the verdict, it is
+/// settled here — resumed under a new generation, or failed with the reason.
+async fn resolve(
+    host: &crate::host_state::HostState,
+    run_id: &RunId,
+) -> Result<(), opengrok_store::StoreError> {
+    let state = &host.agui;
     let (run, seq) = state.auth.store.load_run(run_id).await?;
 
     // Already settled by somebody else between the claim and now.
@@ -101,23 +160,204 @@ async fn resolve(state: &AgUiState, run_id: &RunId) -> Result<(), opengrok_store
         return Ok(());
     }
 
-    let at_ms = now_ms();
-    let unresolved = unresolved_tool_call(&run);
-
-    // WE DO NOT KNOW WHETHER IT RAN, SO WE SAY SO. Re-running would repeat whatever it did, and
-    // pretending it failed would be a claim we cannot support.
-    let reason = match &unresolved {
-        Some(call) => format!(
-            "this run was interrupted by a restart while `{call}` was in flight; \
-             whether it completed is unknown, so it was not run again"
-        ),
-        None => "this run was interrupted by a restart and did not continue".to_string(),
+    let answered = match verdict(&run) {
+        Verdict::Fail(reason) => return fail_run(state, run_id, run, seq, &reason).await,
+        Verdict::Resume(answered) => answered,
+    };
+    let (account_id, coworker_id) = match carry_on_for(state, run_id, &run, &answered).await? {
+        Ok(who) => who,
+        Err(why) => {
+            let reason =
+                format!("this run was interrupted by a restart and was not carried on: {why}");
+            return fail_run(state, run_id, run, seq, &reason).await;
+        }
     };
 
+    let at_ms = now_ms();
     let mut run = run;
+    let resumed = run
+        .decide(RunCommand::Resume {
+            reason: "interrupted by a restart".to_string(),
+            at_ms,
+        })
+        .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
+    for event in &resumed {
+        run.apply(event);
+    }
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: at_ms,
+    };
+    state
+        .auth
+        .store
+        .append_run(run_id, seq, &resumed, &view, None)
+        .await?;
+    tracing::info!(run = %run_id, generation = run.generation, answered = answered.is_some(), "carried on a run a restart interrupted");
+
+    match answered {
+        // The person answered and the call never started: carry the answer out, exactly as the
+        // answer's own continuation would have, in the words the answer route uses.
+        Some(answered) => {
+            let outcome = crate::agui::routes::resume_outcome(answered.approved, &answered.call);
+            tokio::spawn(crate::agui::resume::resume_where_it_lives(
+                false,
+                host.clone(),
+                account_id,
+                run_id.clone(),
+                run.generation,
+                coworker_id,
+                answered.call,
+                run.emitted.len() as u32,
+                outcome,
+            ));
+        }
+        None => {
+            tokio::spawn(crate::agui::resume::resume_interrupted_run(
+                host.clone(),
+                account_id,
+                run_id.clone(),
+                run.generation,
+                coworker_id,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// How long after its last write an interrupted run is still carried on. Past it, the run is
+/// failed as it always was: a server down over a weekend must not wake on Monday and run a
+/// command somebody approved on Friday, or finish a turn its person has long stopped watching.
+pub const RESUME_WITHIN_MS: i64 = 10 * LEASE_MS;
+
+/// Who a resume would act for, or why it must not happen. Every check here is one the run's own
+/// start made, or one that only a resume needs; a refusal fails the run with the reason, and a
+/// store error leaves it for the next sweep rather than failing it with a reason that is untrue.
+async fn carry_on_for(
+    state: &AgUiState,
+    run_id: &RunId,
+    run: &opengrok_core::run::Run,
+    answered: &Option<opengrok_core::run::AnsweredCall>,
+) -> Result<
+    Result<(opengrok_core::id::AccountId, opengrok_core::id::CoworkerId), &'static str>,
+    opengrok_store::StoreError,
+> {
+    // AN MCP DOOR'S AUDIT RUN IS NEVER CARRIED ON. Its card is the record of a question the
+    // MCP client asked; the client's retry is what runs the tool, outside the run. Carrying the
+    // answer out here would run it a second time (`settle_mcp_answer`).
+    if crate::mcp_door::is_mcp_audit_run(run) {
+        return Ok(Err(
+            "it records a question from an MCP client, which asks again itself",
+        ));
+    }
+    // A FORM'S ANSWER IS NOT A YES. Submit types the values into the page and then writes the
+    // result; interrupted between the two, nothing in the log says what was typed, and running
+    // `request_user_form` again parks the run on a call already answered, behind a card no
+    // button can settle.
+    if answered
+        .as_ref()
+        .is_some_and(|answered| answered.call.reason == opengrok_core::run::SuspendReason::UserForm)
+    {
+        return Ok(Err(
+            "it was interrupted while a form's answer was being carried out",
+        ));
+    }
+    let Some(account_id) = state.auth.store.run_account(run_id).await? else {
+        return Ok(Err("nobody owns it"));
+    };
+    let Some(coworker_id) = run.coworker_id.clone() else {
+        return Ok(Err("it has no coworker"));
+    };
+    // THE PERSON MAY HAVE MOVED ON. A newer turn on the thread is already doing the work, and a
+    // hidden one is a turn they put away; carrying either on acts beside what they chose.
+    let newest = state
+        .auth
+        .store
+        .runs_for_thread_owned_by(run.thread_id.as_str(), &account_id, 1)
+        .await?;
+    let Some(newest) = newest.first() else {
+        return Ok(Err("its person has hidden it"));
+    };
+    if &newest.id != run_id {
+        return Ok(Err("a newer turn on its thread has taken over"));
+    }
+    if now_ms() - newest.updated_at_ms > RESUME_WITHIN_MS {
+        return Ok(Err(
+            "it was interrupted too long ago to carry on unattended",
+        ));
+    }
+    // Read here, not through `takes_work`, which folds a store error into "no": that would fail
+    // a run safe to carry on with a reason that is untrue. A coworker never hired loads as the
+    // default, not as an error, so only a real store failure takes the `?`.
+    let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await?;
+    if !coworker.hired || coworker.retired || coworker.is_group() {
+        return Ok(Err("its coworker can no longer take work"));
+    }
+    // POLICY IS ENFORCED ON EVERY ACTION, and a resume is one: a grant revoked while the run sat
+    // interrupted must stop it, as it would stop the person's next message. THE TURN DOOR'S OWN
+    // CHECK, `policy_to_use`, not a routine's `policy_for`: an org-mate on a shared coworker has
+    // no grant row of their own and talks to it under the owner's, so `policy_for` refused
+    // their interrupted turn while their next message was allowed.
+    let policy = state
+        .auth
+        .store
+        .policy_to_use(&account_id, &coworker_id)
+        .await?;
+    if opengrok_policy::decide(
+        &account_id,
+        &coworker_id,
+        opengrok_policy::Action::UseCoworker,
+        &policy,
+    )
+    .reason()
+    .is_some()
+    {
+        return Ok(Err(
+            "its coworker's policy no longer lets its person use it",
+        ));
+    }
+    Ok(Ok((account_id, coworker_id)))
+}
+
+/// Fail a run a continuation could not carry on after the sweep resumed it (#91), saying why.
+/// Best effort: the run is already claimed, and a failure to write leaves it for the next sweep.
+pub(crate) async fn fail_interrupted(state: &AgUiState, run_id: &RunId, why: &str) {
+    fail_continuation(
+        state,
+        run_id,
+        &format!("this run was interrupted by a restart and could not be carried on: {why}"),
+    )
+    .await;
+}
+
+/// Fail a run whose continuation could not start, with `reason` as the person will read it.
+/// A continuation that returned instead left the run `running` with its answer unspent: the
+/// sweep carried it on until `MAX_RESUMES`, then failed it for being carried on too often.
+pub(crate) async fn fail_continuation(state: &AgUiState, run_id: &RunId, reason: &str) {
+    let result = match state.auth.store.load_run(run_id).await {
+        Ok((run, seq)) => fail_run(state, run_id, run, seq, reason).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        tracing::warn!(run = %run_id, %error, "could not fail a run that could not be carried on");
+    }
+}
+
+/// End a run as `Failed` with `reason`, and close the bubble its dead process left streaming.
+async fn fail_run(
+    state: &AgUiState,
+    run_id: &RunId,
+    mut run: opengrok_core::run::Run,
+    seq: i64,
+    reason: &str,
+) -> Result<(), opengrok_store::StoreError> {
+    let at_ms = now_ms();
     let events = run
         .decide(RunCommand::Fail {
-            reason: reason.clone(),
+            reason: reason.to_string(),
             at_ms,
         })
         .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
@@ -154,9 +394,9 @@ async fn resolve(state: &AgUiState, run_id: &RunId) -> Result<(), opengrok_store
     //
     // Best effort on purpose: the run is already correctly failed, and a transcript that cannot be
     // reached must not turn a tidy-up into a failed sweep that retries forever.
-    close_streaming_entries(state, run_id, &run, &reason).await;
+    close_streaming_entries(state, run_id, &run, reason).await;
 
-    tracing::info!(run = %run_id, unresolved = ?unresolved, "ended an abandoned run");
+    tracing::info!(run = %run_id, %reason, "ended an abandoned run");
     Ok(())
 }
 
@@ -256,7 +496,11 @@ fn unresolved_tool_call(run: &opengrok_core::run::Run) -> Option<String> {
     let mut answered: Vec<String> = Vec::new();
 
     for payload in &run.emitted {
-        let kind = payload.get("type").and_then(|value| value.as_str())?;
+        // A frame with no type says nothing about a call; skipping it, rather than giving up on
+        // the scan, keeps a malformed frame from reading as "nothing in flight" and resuming.
+        let Some(kind) = payload.get("type").and_then(|value| value.as_str()) else {
+            continue;
+        };
         let id = payload
             .get("toolCallId")
             .and_then(|value| value.as_str())
@@ -319,69 +563,5 @@ impl Drop for Lease {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use opengrok_core::run::{Run, RunEvent};
-    use serde_json::json;
-
-    fn run_with(events: Vec<serde_json::Value>) -> Run {
-        let mut log = vec![RunEvent::Started {
-            thread_id: "t1".to_string(),
-            coworker_id: None,
-            model: None,
-            system: None,
-            skill_id: None,
-            prompt: None,
-            at_ms: 1,
-        }];
-        for (index, payload) in events.into_iter().enumerate() {
-            log.push(RunEvent::Emitted {
-                seq: index as i64,
-                payload,
-                at_ms: 2,
-            });
-        }
-        Run::replay(&log)
-    }
-
-    /// The ambiguous case: a call went out and no result came back.
-    #[test]
-    fn a_tool_call_without_a_result_is_the_unresolved_one() {
-        let run = run_with(vec![
-            json!({"type": "TOOL_CALL_START", "toolCallId": "c1", "toolCallName": "shell"}),
-        ]);
-        assert_eq!(unresolved_tool_call(&run).as_deref(), Some("shell"));
-    }
-
-    /// A completed call is settled and must not be reported as in flight — that would tell a
-    /// person their command might have run when the log says it did.
-    #[test]
-    fn a_tool_call_with_a_result_is_settled() {
-        let run = run_with(vec![
-            json!({"type": "TOOL_CALL_START", "toolCallId": "c1", "toolCallName": "shell"}),
-            json!({"type": "TOOL_CALL_RESULT", "toolCallId": "c1", "content": "done"}),
-        ]);
-        assert_eq!(unresolved_tool_call(&run), None);
-    }
-
-    /// With several calls, the one still open is the one that matters.
-    #[test]
-    fn the_open_call_is_found_among_settled_ones() {
-        let run = run_with(vec![
-            json!({"type": "TOOL_CALL_START", "toolCallId": "c1", "toolCallName": "read_file"}),
-            json!({"type": "TOOL_CALL_RESULT", "toolCallId": "c1", "content": "ok"}),
-            json!({"type": "TOOL_CALL_START", "toolCallId": "c2", "toolCallName": "shell"}),
-        ]);
-        assert_eq!(unresolved_tool_call(&run).as_deref(), Some("shell"));
-    }
-
-    /// A run that only talked has nothing in flight.
-    #[test]
-    fn a_run_with_no_tools_has_nothing_unresolved() {
-        let run = run_with(vec![
-            json!({"type": "TEXT_MESSAGE_CONTENT", "delta": "hello"}),
-        ]);
-        assert_eq!(unresolved_tool_call(&run), None);
-    }
-}
+#[path = "../tests/unit/recovery.rs"]
+mod tests;

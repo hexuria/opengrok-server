@@ -212,15 +212,21 @@ Each trace is TLC's shortest.
     on the resumed, still-running run finishes it; and a model call is the longest quiet stretch
     there is (`ModelCallIsQuiet`), so the sweep can resume while the old loop waits on a reply
     whose stream then breaks, and its `RUN_ERROR` fails the resumed run. The design that holds
-    (`RunLifecycle_resume`, 539,135 states, `NoOrphan` included; `MaxSuspends = 1` to keep it near
-    a minute single-worker): `ToolStarted` before every tool; the sweep resumes only a run whose
-    log shows no tool open, at most twice; every resume moves the run's generation on; and the
-    log refuses EVERY write from an older generation — its ending, its park and its
+    (`RunLifecycle.cfg`, 532,877 states, the code since PR b, `NoOrphan` included; `MaxSuspends = 1` to keep it
+    near a minute single-worker): `ToolStarted` before every tool; the sweep resumes only a run
+    whose log shows no tool open, at most twice; every resume moves the run's generation on; and
+    the log refuses EVERY write from an older generation — its ending, its park and its
     `ToolStarted` — so the replaced loop exits having written nothing. `OneDriver` no longer holds
-    under lapse (an older loop may still be at an await); `OneActing` is the claim instead. The
-    first PR ships only `ToolStarted` (`RunLifecycle.cfg` has `JournalsToolStart` and checks
-    `ToolStartIsOnRecord`); the resume, the fence on every journal write, and the cap follow, and
-    flip the main configuration.
+    under lapse (an older loop may still be at an await); `OneActing` is the claim instead. A fifth
+    counterexample came with PR b (`_fresh`, `FinishedRanApprovals`): a person answered a card and
+    the process died before the call started. Resumed as a fresh round, the answer is never
+    carried out — the model asks again and the person gets a second card, or the run finishes
+    without the call they approved. The resume carries the answer out instead
+    (`ResumeAtApprove`), through `resume_conversation`, as the answer route does. The model
+    has no refusals: `ResumeAtApprove` sends every unstarted answer through `ApproveAct`, which
+    runs the call, so `FinishedRanApprovals` is not "every answer executes". A no is carried on
+    as a refusal the model reads and the call never runs; a test holds that, not TLC
+    (`a_refusal_whose_turn_was_interrupted_reaches_the_model_and_nothing_runs`).
 
 ## Lean findings
 
@@ -337,6 +343,33 @@ The state graph was the object being minimised. The results:
     `a_failed_ownership_read_is_a_503_not_run_exists` (only the second of two reads would have
     to fail, and no test store injects that, so the mapping is tested alone).
 
+- #91, PR b:
+  - `crates/opengrok-core/src/run.rs`: `RunCommand::Resume` refuses a run not started, ended,
+    awaiting a person, with a tool open (naming it) or already resumed `MAX_RESUMES` times; a
+    resume moves `generation` on. `unstarted_answer` keeps an answered call until its
+    `ToolStarted` or its result.
+  - `crates/opengrok-server/src/agui/routes.rs`: `StoreJournal` carries the generation it was
+    started under, and `append_events_once` and `tools_starting` refuse a write from any other
+    (`JournalError::Fenced`); the loop closes that as a stop and writes nothing more.
+  - `crates/opengrok-server/src/recovery.rs`: `verdict` is the classifier; `resolve` appends
+    the `Resumed` and spawns the continuation — `resume_where_it_lives` for an unstarted
+    answer, `resume_interrupted_run` (`agui/resume.rs`, a fresh round through
+    `opengrok_harness::continue_interrupted`) otherwise.
+  - Every continuation is handed the generation it was spawned under (the answer's, or the one
+    the sweep's `Resumed` wrote) and journals under that one, not the one it finds at load, as
+    `AnswerCommit` takes `loopGen`: one that stalls past a lease before loading is fenced.
+  - The sweep does not carry on (and fails, saying why): an MCP door's audit run, a form's
+    answer, a turn hidden or followed by a newer one on its thread, a run quiet longer than
+    `RESUME_WITHIN_MS`, a coworker that cannot take work, or one the turn door's policy
+    (`policy_to_use`) no longer lets its person use. A store error in any of these leaves the
+    run for the next sweep. A continuation that cannot start (no log, no coworker, no tools)
+    fails the run saying so, rather than returning and leaving it to be resumed until the cap. None of these are in the model; they narrow when a resume happens, never what
+    one may do.
+  - Tests: `against_an_interrupted_run.rs` (between steps → finishes in generation 1; a tool open
+    → fails naming it; the third interruption fails; an unstarted answer is carried out once),
+    `against_a_stopped_run.rs::a_loop_from_before_a_resume_can_write_nothing`. Each was broken
+    on purpose (verdict ignoring the answer, resuming despite an open tool, no fence) and failed.
+
 ## Remaining hazards the models name but this change does not fix
 
 - **A reattached stream moves a round at a time.** The owner's retry follows the log, which
@@ -360,15 +393,15 @@ The state graph was the object being minimised. The results:
   log's refusal of the `Suspended` is the answer.
 - **Answer errors.** `answer_run` maps every `Conflict` to `alreadyAnswered`, including one
   caused by a concurrent Stop.
-- **A tool's start is recorded, and nothing reads it yet** (#91). Until the resume lands, an
-  interrupted run is still failed by the sweep whatever its log shows; `open_tools` (call id →
-  tool name) is there for the classifier that decides between resuming and failing, and for the
-  failure's sentence to name the tool.
-- **What the resume design still owes, for PR b** (#91). An answered approval whose call never
-  started (a crash after the answer, before the call) looks resumable, and a resume as a fresh
-  round would never run it — the model would ask again and the person get a second card; it
-  needs a resume through `resume_conversation`, and the model does not exercise it yet. And
-  each tool round now costs one more read of the whole log (`tools_starting`'s `load_run`); one
-  statement returning the projection's status and seq together would not.
-- **`run-tool-started` is not roll-back safe.** An older binary reads the event type as corrupt,
+- **Each tool round costs one more read of the whole log** (#91): `tools_starting` loads the run
+  to check its generation and status. One statement returning status, generation and seq
+  together would not.
+- **A resumed run starts its per-request guards afresh** (#91): the recipes it played before
+  the restart (`played`, #120) and the budget already spent are not read back from the log, so a
+  recipe may play again after a resume and a run may spend up to `MAX_RESUMES + 1` budgets. The
+  card-answer resume has carried only the approved call's recipe since before #91.
+- **A fenced loop's own stream is told `RUN_ERROR`, not a stop**: its ending is refused and
+  `unrecorded` substitutes the one error that is true of the write. A client still attached to
+  the replaced loop shows a failure while the run carries on under the sweep's loop.
+- **`run-tool-started` and `run-resumed` are not roll-back safe.** An older binary reads the event types as corrupt,
   so any run that has one — every run parked since — would fail to load after a rollback.

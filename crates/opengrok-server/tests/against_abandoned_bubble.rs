@@ -138,9 +138,12 @@ async fn abandon_a_run(
 /// the code. Sweeping until our own run reports `Failed` is the honest condition.
 async fn sweep_until_settled(state: &AgUiState, store: &PgStore, run_id: &RunId) {
     for _ in 0..40 {
-        opengrok_server::recovery::sweep_once(state)
-            .await
-            .expect("sweep");
+        opengrok_server::recovery::sweep_once(&opengrok_server::host_state::HostState::new(
+            state.clone(),
+            None,
+        ))
+        .await
+        .expect("sweep");
         if let Ok((run, _)) = store.load_run(run_id).await
             && run.status == RunStatus::Failed
         {

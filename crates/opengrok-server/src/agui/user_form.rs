@@ -1281,6 +1281,7 @@ pub(crate) async fn resume_settled(
         state,
         account_id,
         run_id,
+        run.generation,
         coworker_id,
         pending,
         resumed_seq,

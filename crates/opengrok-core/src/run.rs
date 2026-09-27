@@ -203,6 +203,15 @@ pub enum RunEvent {
         tools: Vec<StartedTool>,
         at_ms: i64,
     },
+    /// The sweep found the run interrupted and carried it on (#91) instead of failing it. The
+    /// generation is what fences the loop it replaced: every journal write carries the generation
+    /// its loop started under, and the log refuses one from an older generation, so a loop whose
+    /// lease lapsed while it was still alive can neither act again nor end the resumed run.
+    Resumed {
+        generation: u32,
+        reason: String,
+        at_ms: i64,
+    },
 }
 
 /// One call about to run, as `ToolStarted` records it. The tool's name rides with its id because
@@ -225,6 +234,7 @@ impl RunEvent {
             Self::Failed { .. } => "run-failed",
             Self::Stopped { .. } => "run-stopped",
             Self::ToolStarted { .. } => "run-tool-started",
+            Self::Resumed { .. } => "run-resumed",
         }
     }
 }
@@ -261,6 +271,11 @@ pub struct Run {
     /// Non-empty on a run that was interrupted while a tool may have been acting: its outcome is
     /// unknown.
     pub open_tools: std::collections::BTreeMap<String, String>,
+    /// The generation the run is in: bumped by every `Resumed`. 0 on a run never resumed.
+    pub generation: u32,
+    /// An answer whose call has not started (#91): set when a person answers, cleared when the
+    /// call's start or its result is journaled.
+    pub unstarted_answer: Option<AnsweredCall>,
 }
 
 impl Default for Run {
@@ -280,6 +295,8 @@ impl Default for Run {
             pending: None,
             answered: BTreeSet::new(),
             open_tools: std::collections::BTreeMap::new(),
+            generation: 0,
+            unstarted_answer: None,
         }
     }
 }
@@ -306,6 +323,26 @@ pub enum RunError {
     AlreadyAnswered,
     #[error("that run has already started")]
     AlreadyStarted,
+    /// A tool started and its result was never journaled: it may have acted, so the run is not
+    /// carried on blind. Names the tools, so the failure can say which.
+    #[error("interrupted while {} was running; whether it finished is unknown", .0.join(", "))]
+    ToolOutcomeUnknown(Vec<String>),
+    #[error("interrupted again after resuming {MAX_RESUMES} times")]
+    ResumedTooOften,
+    #[error("that run is waiting on a person, not interrupted")]
+    WaitingOnAPerson,
+}
+
+/// How many times an interrupted run is carried on before the next interruption fails it: a run
+/// that keeps taking its process down with it must stop being restarted (#91).
+pub const MAX_RESUMES: u32 = 2;
+
+/// A person's answer whose call has not started yet: what a resume after a crash between the two
+/// must carry out, rather than have the model ask again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnsweredCall {
+    pub call: PendingApproval,
+    pub approved: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +375,12 @@ pub enum RunCommand {
     /// the start is also the question "may they".
     StartTools {
         tools: Vec<StartedTool>,
+        at_ms: i64,
+    },
+    /// Carry an interrupted run on in its next generation (#91). Refused when a tool may have
+    /// acted, after `MAX_RESUMES`, and on a run that is not running.
+    Resume {
+        reason: String,
         at_ms: i64,
     },
     /// Stop and wait for a person.
@@ -398,16 +441,31 @@ impl Run {
                     && let Some(call) = payload.get("toolCallId").and_then(Value::as_str)
                 {
                     self.open_tools.remove(call);
+                    if self
+                        .unstarted_answer
+                        .as_ref()
+                        .is_some_and(|answered| answered.call.call_id == call)
+                    {
+                        self.unstarted_answer = None;
+                    }
                 }
                 self.emitted.push(payload.clone());
             }
             RunEvent::ToolStarted { tools, .. } => {
+                if self.unstarted_answer.as_ref().is_some_and(|answered| {
+                    tools
+                        .iter()
+                        .any(|started| started.call_id == answered.call.call_id)
+                }) {
+                    self.unstarted_answer = None;
+                }
                 self.open_tools.extend(
                     tools
                         .iter()
                         .map(|started| (started.call_id.clone(), started.tool.clone())),
                 );
             }
+            RunEvent::Resumed { generation, .. } => self.generation = *generation,
             RunEvent::Suspended {
                 call_id,
                 tool,
@@ -423,9 +481,18 @@ impl Run {
                     reason: *reason,
                 });
             }
-            RunEvent::Answered { call_id, .. } => {
+            RunEvent::Answered {
+                call_id, approved, ..
+            } => {
                 self.answered.insert(call_id.clone());
-                self.pending = None;
+                self.unstarted_answer = self
+                    .pending
+                    .take()
+                    .filter(|pending| pending.call_id == *call_id)
+                    .map(|call| AnsweredCall {
+                        call,
+                        approved: *approved,
+                    });
                 // Back to running whether the answer was yes OR no, and the sameness is deliberate:
                 // a refusal still has to be delivered to the model so it can choose something else,
                 // and delivering it is a turn. `approved` decides what the model is told, not
@@ -548,6 +615,31 @@ impl Run {
                     return Err(RunError::AlreadyEnded);
                 }
                 Ok(vec![RunEvent::ToolStarted { tools, at_ms }])
+            }
+
+            RunCommand::Resume { reason, at_ms } => {
+                if !self.started {
+                    return Err(RunError::NotStarted);
+                }
+                if self.status.is_terminal() {
+                    return Err(RunError::AlreadyEnded);
+                }
+                if self.status == RunStatus::AwaitingApproval {
+                    return Err(RunError::WaitingOnAPerson);
+                }
+                if !self.open_tools.is_empty() {
+                    return Err(RunError::ToolOutcomeUnknown(
+                        self.open_tools.values().cloned().collect(),
+                    ));
+                }
+                if self.generation >= MAX_RESUMES {
+                    return Err(RunError::ResumedTooOften);
+                }
+                Ok(vec![RunEvent::Resumed {
+                    generation: self.generation + 1,
+                    reason,
+                    at_ms,
+                }])
             }
 
             // THE PERSON PRESSED THE BUTTON; WHETHER THEY WON THE RACE WITH THE MODEL IS NOT THEIR
@@ -755,6 +847,181 @@ mod tests {
         assert_eq!(event.event_type(), "run-tool-started");
         let text = serde_json::to_string(&event).unwrap();
         assert_eq!(serde_json::from_str::<RunEvent>(&text).unwrap(), event);
+    }
+
+    fn start_shell(run: &mut Run, call_id: &str) {
+        apply_all(
+            run,
+            RunCommand::StartTools {
+                tools: vec![StartedTool {
+                    call_id: call_id.to_string(),
+                    tool: "shell".to_string(),
+                }],
+                at_ms: 2,
+            },
+        );
+    }
+
+    /// #91: A RESUME MOVES THE RUN INTO ITS NEXT GENERATION, and a loop of an older one is fenced
+    /// off by that number. It stays running: a resume is the run carrying on, not a new run.
+    #[test]
+    fn a_resume_moves_the_run_into_its_next_generation() {
+        let mut run = started();
+        assert_eq!(run.generation, 0);
+        apply_all(
+            &mut run,
+            RunCommand::Resume {
+                reason: "restart".to_string(),
+                at_ms: 3,
+            },
+        );
+        assert_eq!(run.generation, 1);
+        assert_eq!(run.status, RunStatus::Running);
+    }
+
+    /// A tool started and never answered may have acted: resuming would let the model run it
+    /// again, so the aggregate refuses and names the tool.
+    #[test]
+    fn a_run_with_a_tool_open_is_not_resumed() {
+        let mut run = started();
+        start_shell(&mut run, "call_a");
+        let refused = run.decide(RunCommand::Resume {
+            reason: "restart".to_string(),
+            at_ms: 3,
+        });
+        assert!(
+            matches!(&refused, Err(RunError::ToolOutcomeUnknown(tools)) if tools == &vec!["shell".to_string()]),
+            "expected the open tool to refuse the resume: {refused:?}"
+        );
+    }
+
+    /// A run that keeps being interrupted stops being resumed: twice, then no more.
+    #[test]
+    fn a_run_is_resumed_at_most_twice() {
+        let mut run = started();
+        for _ in 0..MAX_RESUMES {
+            apply_all(
+                &mut run,
+                RunCommand::Resume {
+                    reason: "restart".to_string(),
+                    at_ms: 3,
+                },
+            );
+        }
+        assert!(matches!(
+            run.decide(RunCommand::Resume {
+                reason: "restart".to_string(),
+                at_ms: 4
+            }),
+            Err(RunError::ResumedTooOften)
+        ));
+    }
+
+    /// Only a running run is resumed: an ended one stays ended, and a parked one is waiting on a
+    /// person, which is not an interruption.
+    #[test]
+    fn an_ended_or_parked_run_is_not_resumed() {
+        let mut failed = started();
+        apply_all(
+            &mut failed,
+            RunCommand::Fail {
+                reason: "x".to_string(),
+                at_ms: 2,
+            },
+        );
+        assert!(matches!(
+            failed.decide(RunCommand::Resume {
+                reason: "r".to_string(),
+                at_ms: 3
+            }),
+            Err(RunError::AlreadyEnded)
+        ));
+        let mut parked = started();
+        apply_all(
+            &mut parked,
+            RunCommand::Suspend {
+                call_id: "call_a".to_string(),
+                tool: "shell".to_string(),
+                arguments: json!({"command": "ls"}),
+                reason: SuspendReason::default(),
+                at_ms: 2,
+            },
+        );
+        assert!(matches!(
+            parked.decide(RunCommand::Resume {
+                reason: "r".to_string(),
+                at_ms: 3
+            }),
+            Err(RunError::WaitingOnAPerson)
+        ));
+    }
+
+    /// AN ANSWER IS KEPT UNTIL ITS CALL STARTS. A crash between the two leaves a run whose resume
+    /// must run the call the person approved — resumed as a fresh round, the model would ask
+    /// again and the person get a second card.
+    #[test]
+    fn an_answered_call_is_kept_until_it_starts() {
+        let mut run = started();
+        apply_all(
+            &mut run,
+            RunCommand::Suspend {
+                call_id: "call_a".to_string(),
+                tool: "shell".to_string(),
+                arguments: json!({"command": "ls"}),
+                reason: SuspendReason::default(),
+                at_ms: 2,
+            },
+        );
+        apply_all(
+            &mut run,
+            RunCommand::Answer {
+                call_id: "call_a".to_string(),
+                approved: true,
+                by: "ada".to_string(),
+                at_ms: 3,
+            },
+        );
+        let answered = run.unstarted_answer.clone().unwrap();
+        assert_eq!(answered.call.call_id, "call_a");
+        assert!(answered.approved);
+        start_shell(&mut run, "call_a");
+        assert!(run.unstarted_answer.is_none(), "its start settles it");
+
+        // A refusal is delivered as a result, never started: the result settles it.
+        let mut refused = started();
+        apply_all(
+            &mut refused,
+            RunCommand::Suspend {
+                call_id: "call_b".to_string(),
+                tool: "shell".to_string(),
+                arguments: json!({"command": "rm"}),
+                reason: SuspendReason::default(),
+                at_ms: 2,
+            },
+        );
+        apply_all(
+            &mut refused,
+            RunCommand::Answer {
+                call_id: "call_b".to_string(),
+                approved: false,
+                by: "ada".to_string(),
+                at_ms: 3,
+            },
+        );
+        assert!(
+            refused
+                .unstarted_answer
+                .as_ref()
+                .is_some_and(|a| !a.approved)
+        );
+        apply_all(
+            &mut refused,
+            RunCommand::Emit {
+                payload: json!({ "type": "TOOL_CALL_RESULT", "toolCallId": "call_b", "content": "refused" }),
+                at_ms: 4,
+            },
+        );
+        assert!(refused.unstarted_answer.is_none());
     }
 
     /// The turn's identity survives the wait. A role edited while a person answered an

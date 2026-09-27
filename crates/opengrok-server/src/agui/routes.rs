@@ -3059,6 +3059,7 @@ async fn start_claimed_turn(
         system,
         skill_id: recorded_skill,
         prompt: Some(asked.prompt),
+        generation: 0,
     };
 
     // THE CLAIM. Exactly one POST per run id appends the run's `Started` at the first seq, under
@@ -3146,6 +3147,11 @@ pub struct StoreJournal {
     /// What the person asked this turn (`RunEvent::Started::prompt`). Only a turn that starts the
     /// run writes it; a resume finds the run already started and passes `None`.
     pub prompt: Option<Vec<serde_json::Value>>,
+    /// The run's generation when this loop began (#91): 0 for a new turn, the run's own for a
+    /// continuation. THE FENCE: a write is refused once the run has moved on — resumed by the
+    /// sweep while this loop was still alive after a lapsed lease — so the replaced loop can
+    /// neither act again nor end the run that carried on (`RunLifecycle.tla` FenceAllWrites).
+    pub generation: u32,
 }
 
 #[async_trait::async_trait]
@@ -3160,6 +3166,9 @@ impl opengrok_harness::RunJournal for StoreJournal {
             .map_err(|error| match error {
                 AppendError::Ended => opengrok_harness::JournalError::Ended(format!(
                     "run {run_id} ended before its card could be recorded"
+                )),
+                AppendError::Fenced => opengrok_harness::JournalError::Fenced(format!(
+                    "run {run_id} was resumed by another loop"
                 )),
                 AppendError::Store(error) => {
                     opengrok_harness::JournalError::Unwritable(error.to_string())
@@ -3215,6 +3224,11 @@ impl opengrok_harness::RunJournal for StoreJournal {
                     continue;
                 }
             };
+            if run.generation != self.generation {
+                return Err(opengrok_harness::JournalError::Fenced(format!(
+                    "run {run_id} was resumed by another loop"
+                )));
+            }
             let at_ms = now_ms();
             let events = match run.decide(RunCommand::StartTools {
                 tools: tools.to_vec(),
@@ -3267,6 +3281,7 @@ impl StoreJournal {
             system: self.system.as_deref(),
             skill_id: self.skill_id.as_deref(),
             prompt: self.prompt.as_deref(),
+            generation: self.generation,
         }
     }
 
@@ -3363,6 +3378,8 @@ enum AppendError {
     /// The batch parks, and the run it parks has ended: the Stop won the race the loop's last
     /// `stopped` question could not see. Nothing was written (`RunJournal::record`).
     Ended,
+    /// The run was resumed into a newer generation than this loop's (#91). Nothing was written.
+    Fenced,
 }
 
 impl From<opengrok_store::StoreError> for AppendError {
@@ -3382,6 +3399,7 @@ struct RunStart<'a> {
     system: Option<&'a str>,
     skill_id: Option<&'a str>,
     prompt: Option<&'a [serde_json::Value]>,
+    generation: u32,
 }
 
 /// One attempt: read the run, decide what this batch appends, write it at the seq it read.
@@ -3403,6 +3421,9 @@ async fn append_events_once(
     let at_ms = now_ms();
 
     let (mut run, seq) = state.auth.store.load_run(&run_id).await?;
+    if run.started && run.generation != start.generation {
+        return Err(AppendError::Fenced);
+    }
     let mut to_append = Vec::new();
 
     if !run.started {
@@ -4383,8 +4404,18 @@ pub async fn answer_run(
         let host = host.clone();
         let account_id = account_id.clone();
         let run_id = run_id.clone();
+        let generation = run.generation;
         tokio::spawn(async move {
-            continue_run(host, account_id, run_id, pending, resumed_seq, outcome).await;
+            continue_run(
+                host,
+                account_id,
+                run_id,
+                generation,
+                pending,
+                resumed_seq,
+                outcome,
+            )
+            .await;
         });
     }
 
@@ -4407,7 +4438,7 @@ pub async fn answer_run(
 /// A refusal names what was refused rather than saying "declined" alone, so the model can choose
 /// something else instead of proposing the same call again, and so the transcript says why. The
 /// words follow the gateway's, which has been saying them to the other door's runs all along.
-fn resume_outcome(
+pub(crate) fn resume_outcome(
     approved: bool,
     pending: &opengrok_core::run::PendingApproval,
 ) -> opengrok_harness::ResumeOutcome {
@@ -4821,6 +4852,7 @@ async fn continue_run(
     host: crate::host_state::HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
+    generation: u32,
     answered: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
     outcome: opengrok_harness::ResumeOutcome,
@@ -4837,6 +4869,14 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "could not load an answered run to continue it");
         return;
     };
+    // THE GENERATION IS THE ONE THE ANSWER WAS GIVEN UNDER, not the one found at load. A
+    // continuation that stalls past a lease before it loads would otherwise read the generation
+    // the sweep resumed into and write under it, beside the sweep's own loop (`AnswerCommit`
+    // takes `loopGen` at the answer in `RunLifecycle.tla`).
+    if run.generation != generation {
+        tracing::warn!(run = %run_id, "an answered run was carried on by the sweep first");
+        return;
+    }
 
     // The coworker whose tools these are. Without it there is nothing to continue *as*.
     let Some(coworker_id) = run.coworker_id.clone() else {
@@ -4910,6 +4950,7 @@ async fn continue_run(
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
+        generation,
     };
 
     // The pin the turn started on, not the coworker's current one. A coworker that was

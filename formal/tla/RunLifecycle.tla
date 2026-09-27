@@ -29,8 +29,13 @@ CONSTANTS
     ResumeCap,         \* resumes a run may take before an interruption fails it
     ModelCallIsQuiet,  \* a model call is its own step: a long await that writes nothing, so the
                        \* sweep can find a run quiet while a loop is still waiting on a reply
-    FenceAllWrites     \* with Fenced: EVERY write from an older generation is refused — its
+    FenceAllWrites,    \* with Fenced: EVERY write from an older generation is refused — its
                        \* ending and its park too, not only its ToolStarted
+    ResumeAtApprove,   \* a resume of a run whose answered call never started goes through
+                       \* resume_conversation, running that call, rather than a fresh round
+    FenceTold          \* with Fenced: `stopped` also answers yes to an older generation. The
+                       \* code's `stopped` reads the projection, which has no generation, so the
+                       \* design has this off: an older loop learns only when a write is refused
 
 \* A lease is `run_view.leased_until_ms` and nothing else: no holder, no fencing token. The sweep
 \* cannot tell a dead process from a live one whose renewal failed (Lapse), so a resume can land
@@ -85,7 +90,7 @@ Init ==
 \* The journal's answer to "should this loop stop" (StoreJournal::stopped, routes.rs:3185). Fenced: also yes for a loop
 \* from before the latest resume.
 Told(l) == \/ IF EndedMeansStop THEN status \in Terminal ELSE status = "stopped"
-           \/ (Fenced /\ loopGen[l] < runGen)
+           \/ (Fenced /\ FenceTold /\ loopGen[l] < runGen)
 \* A fenced loop's ToolStarted write is refused, so its act does not happen.
 FencedOff(l) == JournalsToolStart /\ Fenced /\ loopGen[l] < runGen
 \* A loop from before the latest resume, and whether the log refuses what it writes.
@@ -245,7 +250,10 @@ Recover ==
     /\ \A l \in Loops : phase[l] \in {"unborn", "dead", "calling", "tool", "approve", "approveArmed", "armed"}
     /\ IF Resume /\ ~openTool /\ resumes < ResumeCap
          THEN LET l == MaxSuspends + 2 + resumes IN
-              /\ phase' = [phase EXCEPT ![l] = "live"]
+              \* An answer committed whose call never started: a fresh round would never run it
+              \* (the model, not knowing, asks again — a second card for something approved).
+              /\ phase' = [phase EXCEPT ![l] = IF ResumeAtApprove /\ approvedRuns < answers
+                                                  THEN "approve" ELSE "live"]
               /\ lease' = [lease EXCEPT ![l] = TRUE]
               /\ resumes' = resumes + 1
               /\ runGen' = runGen + 1
@@ -335,6 +343,9 @@ OneActing == \A l, m \in Loops : (l # m) => ~(phase[l] = "tool" /\ phase[m] = "t
 \* Only the current generation writes the run's ending or parks it: a loop the resume replaced
 \* must not finish, fail or park the resumed run — its fence's own "stop" included.
 OnlyCurrentGenerationWrites == ~staleWrote
+\* A run that finished ran every call a person approved (and did not Stop first). Without
+\* ResumeAtApprove a resume after the answer, before the call, finishes the run without it.
+FinishedRanApprovals == status = "finished" => approvedRuns >= answers
 \* PR a's claim, with JournalsToolStart: every tool that started is on record until its result.
 ToolStartIsOnRecord == unfinishedTool => openTool
 =============================================================================
