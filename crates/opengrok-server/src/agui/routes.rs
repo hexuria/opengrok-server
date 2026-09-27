@@ -3161,7 +3161,17 @@ impl opengrok_harness::RunJournal for StoreJournal {
         run_id: &str,
         events: &[Event],
     ) -> Result<(), opengrok_harness::JournalError> {
-        append_events(&self.state, run_id, &self.run_start(), events)
+        self.record_spent(run_id, events, &opengrok_core::run::RoundSpent::default())
+            .await
+    }
+
+    async fn record_spent(
+        &self,
+        run_id: &str,
+        events: &[Event],
+        spent: &opengrok_core::run::RoundSpent,
+    ) -> Result<(), opengrok_harness::JournalError> {
+        append_events(&self.state, run_id, &self.run_start(), events, spent)
             .await
             .map_err(|error| match error {
                 AppendError::Ended => opengrok_harness::JournalError::Ended(format!(
@@ -3214,6 +3224,25 @@ impl opengrok_harness::RunJournal for StoreJournal {
         run_id: &str,
         tools: &[opengrok_core::run::StartedTool],
     ) -> Result<(), opengrok_harness::JournalError> {
+        self.bookkeep(run_id, "its tool could start", |at_ms| {
+            RunCommand::StartTools {
+                tools: tools.to_vec(),
+                at_ms,
+            }
+        })
+        .await
+    }
+}
+
+impl StoreJournal {
+    /// A log-only write the loop makes before a round's tools run (#91): fenced by generation
+    /// like every journal write, refused on an ended run, and tried `APPEND_ATTEMPTS` times.
+    async fn bookkeep(
+        &self,
+        run_id: &str,
+        before: &str,
+        command: impl Fn(i64) -> RunCommand,
+    ) -> Result<(), opengrok_harness::JournalError> {
         let id = RunId::from_stored(run_id.to_string());
         let mut last_error = String::new();
         for _ in 0..APPEND_ATTEMPTS {
@@ -3230,14 +3259,11 @@ impl opengrok_harness::RunJournal for StoreJournal {
                 )));
             }
             let at_ms = now_ms();
-            let events = match run.decide(RunCommand::StartTools {
-                tools: tools.to_vec(),
-                at_ms,
-            }) {
+            let events = match run.decide(command(at_ms)) {
                 Ok(events) => events,
                 Err(opengrok_core::run::RunError::AlreadyEnded) => {
                     return Err(opengrok_harness::JournalError::Ended(format!(
-                        "run {run_id} ended before its tool could start"
+                        "run {run_id} ended before {before}"
                     )));
                 }
                 Err(error) => {
@@ -3361,14 +3387,15 @@ async fn append_events(
     run_id: &str,
     start: &RunStart<'_>,
     events: &[Event],
+    spent: &opengrok_core::run::RoundSpent,
 ) -> Result<(), AppendError> {
     for _ in 1..APPEND_ATTEMPTS {
-        match append_events_once(state, run_id, start, events).await {
+        match append_events_once(state, run_id, start, events, spent).await {
             Err(AppendError::Store(opengrok_store::StoreError::Conflict)) => continue,
             other => return other,
         }
     }
-    append_events_once(state, run_id, start, events).await
+    append_events_once(state, run_id, start, events, spent).await
 }
 
 /// Why a batch was not written.
@@ -3408,6 +3435,7 @@ async fn append_events_once(
     run_id: &str,
     start: &RunStart<'_>,
     events: &[Event],
+    spent: &opengrok_core::run::RoundSpent,
 ) -> Result<(), AppendError> {
     let RunStart {
         thread_id,
@@ -3437,6 +3465,21 @@ async fn append_events_once(
     }
     // A batch that parks must record its suspension, or record nothing.
     let parks = events.iter().any(is_suspend_frame);
+
+    // WHAT THE ROUND SPENT GOES DOWN WITH ITS FRAMES (#256), ahead of them in the same append:
+    // the result that closes a recipe's call and the record that it played land together, or
+    // neither does. Refused only on a run that has ended, whose frames are refused below too.
+    if !spent.is_empty()
+        && let Ok(recorded) = run.decide(RunCommand::RecordSpent {
+            spent: spent.clone(),
+            at_ms,
+        })
+    {
+        for event in &recorded {
+            run.apply(event);
+        }
+        to_append.extend(recorded);
+    }
 
     for event in events {
         let payload = serde_json::to_value(event).map_err(|error| {
@@ -4986,6 +5029,8 @@ async fn continue_run(
             },
             message_seq: resumed_seq,
             outcome,
+            // The recipes the run played before the card (#256); see `Spent::recipes_of`.
+            spent: opengrok_harness::Spent::recipes_of(&run),
         },
     )
     .await;

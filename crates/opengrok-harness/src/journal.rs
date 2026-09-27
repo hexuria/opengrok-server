@@ -75,12 +75,28 @@ pub trait RunJournal: Send + Sync {
     ) -> Result<(), JournalError> {
         Ok(())
     }
+
+    /// `record`, and what the round spent (#256) IN THE SAME WRITE: the recipes it played and
+    /// which budget it drew on. One write, so the result that closes a recipe's call and the
+    /// record that it played cannot land apart, and a run carried on after a restart reads back
+    /// every play whose call the log shows closed.
+    ///
+    /// The default records the round alone: a journal that keeps no log has no resume to protect.
+    async fn record_spent(
+        &self,
+        run_id: &str,
+        events: &[Event],
+        _spent: &opengrok_core::run::RoundSpent,
+    ) -> Result<(), JournalError> {
+        self.record(run_id, events).await
+    }
 }
 
 /// Keeps events in memory. For tests, and for a caller that has chosen not to persist.
 #[derive(Debug, Default)]
 pub struct MemoryJournal {
     recorded: std::sync::Mutex<Vec<(String, Vec<Event>)>>,
+    spent: std::sync::Mutex<Vec<(Vec<Event>, opengrok_core::run::RoundSpent)>>,
 }
 
 impl MemoryJournal {
@@ -104,6 +120,30 @@ impl MemoryJournal {
     pub fn event_count(&self) -> usize {
         self.batches().iter().map(Vec::len).sum()
     }
+
+    /// Every recipe `record_spent` recorded, in order.
+    pub fn recipes_played(&self) -> Vec<String> {
+        self.spent()
+            .into_iter()
+            .flat_map(|spent| spent.recipes)
+            .collect()
+    }
+
+    /// Every `record_spent`, in order.
+    pub fn spent(&self) -> Vec<opengrok_core::run::RoundSpent> {
+        self.spent_with_frames()
+            .into_iter()
+            .map(|(_, spent)| spent)
+            .collect()
+    }
+
+    /// Every `record_spent` with the frames it was written with.
+    pub fn spent_with_frames(&self) -> Vec<(Vec<Event>, opengrok_core::run::RoundSpent)> {
+        self.spent
+            .lock()
+            .map(|spent| spent.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait::async_trait]
@@ -113,6 +153,20 @@ impl RunJournal for MemoryJournal {
             .lock()
             .map_err(|_| JournalError::Unwritable("the journal's lock was poisoned".to_string()))?
             .push((run_id.to_string(), events.to_vec()));
+        Ok(())
+    }
+
+    async fn record_spent(
+        &self,
+        run_id: &str,
+        events: &[Event],
+        spent: &opengrok_core::run::RoundSpent,
+    ) -> Result<(), JournalError> {
+        self.record(run_id, events).await?;
+        self.spent
+            .lock()
+            .map_err(|_| JournalError::Unwritable("the journal's lock was poisoned".to_string()))?
+            .push((events.to_vec(), spent.clone()));
         Ok(())
     }
 }

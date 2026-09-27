@@ -2964,19 +2964,6 @@ fn recipe_runner() -> (ToolRunner, Arc<Mutex<usize>>) {
 /// without touching the box, and asking a second time ends the turn.
 #[tokio::test]
 async fn a_recipe_is_played_at_most_once_per_request() {
-    struct AlwaysRecipe(Mutex<usize>);
-    #[async_trait::async_trait]
-    impl ModelDoor for AlwaysRecipe {
-        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
-            let round = {
-                let mut count = self.0.lock().unwrap();
-                *count += 1;
-                *count
-            };
-            let script = recipe_deltas(&format!("c{round}"), "search-youtube");
-            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-        }
-    }
     let door = AlwaysRecipe(Mutex::new(0));
     let (runner, plays) = recipe_runner();
     let events = run_conversation(
@@ -3004,6 +2991,119 @@ async fn a_recipe_is_played_at_most_once_per_request() {
     assert!(
         assistant_text(&events).contains("search-youtube"),
         "the turn says which recipe it did not replay: {events:?}"
+    );
+}
+
+/// A door that asks for the same recipe every round (#120, #256).
+struct AlwaysRecipe(Mutex<usize>);
+#[async_trait::async_trait]
+impl ModelDoor for AlwaysRecipe {
+    async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let round = {
+            let mut count = self.0.lock().unwrap();
+            *count += 1;
+            *count
+        };
+        let script = recipe_deltas(&format!("c{round}"), "search-youtube");
+        Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+    }
+}
+
+fn resumed_context() -> RunContext {
+    RunContext::new("t1", "r1", 1)
+}
+
+/// #256. A recipe that played before a restart is still played in this request: the sweep's
+/// resume starts a new segment, and a segment that forgot it played the recipe again, typing
+/// or posting a second time.
+#[tokio::test]
+async fn a_recipe_played_before_a_restart_is_not_played_again_after_it() {
+    let door = AlwaysRecipe(Mutex::new(0));
+    let (runner, plays) = recipe_runner();
+    let spent = Spent {
+        recipes: ["search-youtube".to_string()].into_iter().collect(),
+        started_a_tool: true,
+        ..Spent::default()
+    };
+    let events = continue_interrupted(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("search youtube for kabisado"),
+        resumed_context(),
+        5,
+        spent,
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 0, "the box did not play it again");
+    let first = events
+        .iter()
+        .find(|event| event.event_type == EventType::ToolCallResult)
+        .and_then(|event| event.extra.get("content"))
+        .and_then(|content| content.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(first.starts_with("Not played again"), "{first:?}");
+}
+
+/// #256. What a round played is written to the journal as soon as the round learns it, so a
+/// resume can read it back.
+#[tokio::test]
+async fn a_recipe_the_loop_plays_is_written_to_the_journal() {
+    let door = AlwaysRecipe(Mutex::new(0));
+    let (runner, _) = recipe_runner();
+    let journal = MemoryJournal::new();
+    run_conversation(
+        &door,
+        Some(&runner),
+        &journal,
+        request("search youtube for kabisado"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert_eq!(journal.recipes_played(), vec!["search-youtube".to_string()]);
+    let (frames, spent) = journal.spent_with_frames().remove(0);
+    assert_eq!(spent.round, Some(opengrok_core::run::RoundKind::Spoken));
+    assert!(
+        frames
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallResult),
+        "the play is recorded in the write that closes its call: {frames:?}"
+    );
+}
+
+/// #256. A resumed segment spends what is left of the run's rounds, not a fresh budget: each
+/// resume used to hand the run another `MAX_ROUNDS`.
+#[tokio::test]
+async fn a_resumed_segment_spends_what_is_left_of_the_run_s_rounds() {
+    let door = Rounds::new(
+        (0..MAX_ROUNDS + 2)
+            .map(|n| shell_deltas(&format!("s{n}"), &format!("echo {n}")))
+            .collect(),
+        "done",
+    );
+    let (runner, _) = fix_then_test_runner(usize::MAX);
+    let spent = Spent {
+        spoken_rounds: MAX_ROUNDS - 1,
+        started_a_tool: true,
+        ..Spent::default()
+    };
+    continue_interrupted(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("keep going"),
+        resumed_context(),
+        5,
+        spent,
+    )
+    .await;
+    assert!(
+        door.calls() <= 2,
+        "one round left, then the wrap-up: {} calls",
+        door.calls()
     );
 }
 
@@ -3092,6 +3192,77 @@ async fn a_resumed_run_does_not_replay_the_recipe_it_was_approved_for() {
     .await;
     assert_eq!(*plays.lock().unwrap(), 1, "{events:?}");
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+}
+
+/// #256. Each round is counted once on the log, however it ends: the round a budget ran out on
+/// is written before the wrap-up call, and the wrap-up's own write must not count it again.
+#[tokio::test]
+async fn every_round_is_counted_once_on_the_log() {
+    let door = Rounds::new(
+        (0..MAX_ROUNDS + 2)
+            .map(|n| shell_deltas(&format!("s{n}"), &format!("echo {n}")))
+            .collect(),
+        "done",
+    );
+    let (runner, _) = fix_then_test_runner(usize::MAX);
+    let journal = MemoryJournal::new();
+    run_conversation(
+        &door,
+        Some(&runner),
+        &journal,
+        request("keep going"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let rounds = journal
+        .spent()
+        .iter()
+        .filter(|spent| spent.round.is_some())
+        .count();
+    assert_eq!(rounds, MAX_ROUNDS, "{:?}", journal.spent());
+}
+
+/// #256, the card path. A recipe played before the card is not played again after it, and the
+/// recipe the approved call plays goes on the log like any round's.
+#[tokio::test]
+async fn a_card_answered_later_in_a_request_does_not_replay_an_earlier_recipe() {
+    let door = Rounds::new(
+        vec![recipe_deltas("c2", "search-youtube")],
+        "Posted, and the search already ran.",
+    );
+    let (runner, plays) = recipe_runner();
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: opengrok_tools::RUN_RECIPE.to_string(),
+        arguments: serde_json::json!({ "recipe": "post-reply" }),
+    };
+    let journal = MemoryJournal::new();
+    let spent = Spent {
+        recipes: ["search-youtube".to_string()].into_iter().collect(),
+        ..Spent::default()
+    };
+    resume_conversation(
+        &door,
+        &runner,
+        &journal,
+        request("post the reply"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1).having_spent(spent),
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "only the approved recipe played");
+    assert_eq!(journal.recipes_played(), vec!["post-reply".to_string()]);
+    let (frames, spent) = journal.spent_with_frames().remove(0);
+    assert_eq!(spent.round, None, "an approved call is not a round");
+    assert!(
+        frames
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallResult
+                && event.extra.get("toolCallId").and_then(|id| id.as_str()) == Some("c1")),
+        "the play is recorded in the write that closes its call: {frames:?}"
+    );
 }
 
 /// A `run_recipe` that refuses a call with no `values` before anything plays, the way the

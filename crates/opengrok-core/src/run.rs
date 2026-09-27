@@ -212,6 +212,44 @@ pub enum RunEvent {
         reason: String,
         at_ms: i64,
     },
+    /// What a round spent (#256): the recipes it played on the box, and which budget it drew
+    /// on. A recipe plays at most once per request (#120) and the rounds are the run's, but the
+    /// loop kept both in memory only, so a run carried on after a restart forgot them: a recipe
+    /// that had typed, posted or bought could play again, on a fresh budget.
+    ///
+    /// WRITTEN IN THE SAME APPEND AS THE ROUND'S FRAMES, so the `TOOL_CALL_RESULT` that closes a
+    /// recipe's call and the record that it played land together: no crash can leave the call
+    /// closed and the play forgotten. Log-only, like `ToolStarted`: the frames a client reads say
+    /// `ok`, which cannot tell a recipe that stopped part way from one refused before the box.
+    Spent {
+        recipes: Vec<String>,
+        /// `None` for a call that ran outside a round: a card's approved call.
+        round: Option<RoundKind>,
+        at_ms: i64,
+    },
+}
+
+/// Which budget a round drew on, as the loop decides it: on the screen when every call was a
+/// successful `computer` action, spoken otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoundKind {
+    Spoken,
+    OnScreen,
+}
+
+/// One round's `Spent`, as the loop hands it to the journal with the round's frames.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoundSpent {
+    pub recipes: Vec<String>,
+    pub round: Option<RoundKind>,
+}
+
+impl RoundSpent {
+    /// Nothing to record: no recipe played, and no round counted.
+    pub fn is_empty(&self) -> bool {
+        self.recipes.is_empty() && self.round.is_none()
+    }
 }
 
 /// One call about to run, as `ToolStarted` records it. The tool's name rides with its id because
@@ -235,6 +273,7 @@ impl RunEvent {
             Self::Stopped { .. } => "run-stopped",
             Self::ToolStarted { .. } => "run-tool-started",
             Self::Resumed { .. } => "run-resumed",
+            Self::Spent { .. } => "run-spent",
         }
     }
 }
@@ -276,6 +315,11 @@ pub struct Run {
     /// An answer whose call has not started (#91): set when a person answers, cleared when the
     /// call's start or its result is journaled.
     pub unstarted_answer: Option<AnsweredCall>,
+    /// Recipes this request played (#256), from `Spent`. What a resumed segment must not play
+    /// again.
+    pub played_recipes: BTreeSet<String>,
+    /// Rounds the run spent, `(spoken, on screen)`, from `Spent` (#256).
+    pub rounds_spent: (usize, usize),
 }
 
 impl Default for Run {
@@ -297,6 +341,8 @@ impl Default for Run {
             open_tools: std::collections::BTreeMap::new(),
             generation: 0,
             unstarted_answer: None,
+            played_recipes: BTreeSet::new(),
+            rounds_spent: (0, 0),
         }
     }
 }
@@ -375,6 +421,11 @@ pub enum RunCommand {
     /// the start is also the question "may they".
     StartTools {
         tools: Vec<StartedTool>,
+        at_ms: i64,
+    },
+    /// What a round spent (#256). Refused on a run that has ended, as a start is.
+    RecordSpent {
+        spent: RoundSpent,
         at_ms: i64,
     },
     /// Carry an interrupted run on in its next generation (#91). Refused when a tool may have
@@ -464,6 +515,14 @@ impl Run {
                         .iter()
                         .map(|started| (started.call_id.clone(), started.tool.clone())),
                 );
+            }
+            RunEvent::Spent { recipes, round, .. } => {
+                self.played_recipes.extend(recipes.iter().cloned());
+                match round {
+                    Some(RoundKind::Spoken) => self.rounds_spent.0 += 1,
+                    Some(RoundKind::OnScreen) => self.rounds_spent.1 += 1,
+                    None => {}
+                }
             }
             RunEvent::Resumed { generation, .. } => self.generation = *generation,
             RunEvent::Suspended {
@@ -605,6 +664,20 @@ impl Run {
                     return Err(RunError::AlreadyEnded);
                 }
                 Ok(vec![RunEvent::Failed { reason, at_ms }])
+            }
+
+            RunCommand::RecordSpent { spent, at_ms } => {
+                if !self.started {
+                    return Err(RunError::NotStarted);
+                }
+                if self.status.is_terminal() {
+                    return Err(RunError::AlreadyEnded);
+                }
+                Ok(vec![RunEvent::Spent {
+                    recipes: spent.recipes,
+                    round: spent.round,
+                    at_ms,
+                }])
             }
 
             RunCommand::StartTools { tools, at_ms } => {
@@ -959,6 +1032,66 @@ mod tests {
     /// AN ANSWER IS KEPT UNTIL ITS CALL STARTS. A crash between the two leaves a run whose resume
     /// must run the call the person approved — resumed as a fresh round, the model would ask
     /// again and the person get a second card.
+    fn spend(run: &mut Run, recipes: &[&str], round: Option<RoundKind>) {
+        let spent = RoundSpent {
+            recipes: recipes.iter().map(|recipe| recipe.to_string()).collect(),
+            round,
+        };
+        for event in run
+            .decide(RunCommand::RecordSpent { spent, at_ms: 2 })
+            .unwrap()
+        {
+            run.apply(&event);
+        }
+    }
+
+    #[test]
+    fn what_a_run_spent_survives_a_reload() {
+        let mut run = started();
+        spend(&mut run, &["search-youtube"], Some(RoundKind::Spoken));
+        spend(&mut run, &[], Some(RoundKind::OnScreen));
+        spend(&mut run, &[], Some(RoundKind::OnScreen));
+        spend(&mut run, &["post-reply"], None);
+        let expected: BTreeSet<String> = ["post-reply", "search-youtube"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(run.played_recipes, expected);
+        assert_eq!(
+            run.rounds_spent,
+            (1, 2),
+            "an approved call outside a round counts no round"
+        );
+        let event = RunEvent::Spent {
+            recipes: vec!["search-youtube".to_string()],
+            round: Some(RoundKind::OnScreen),
+            at_ms: 2,
+        };
+        assert_eq!(event.event_type(), "run-spent");
+        let stored = serde_json::to_value(&event).unwrap();
+        assert_eq!(stored["round"], "on-screen");
+        let back: RunEvent = serde_json::from_value(stored).unwrap();
+        assert_eq!(back, event);
+    }
+
+    #[test]
+    fn an_ended_run_records_nothing_spent() {
+        let mut run = started();
+        for event in run.decide(RunCommand::Finish { at_ms: 2 }).unwrap() {
+            run.apply(&event);
+        }
+        assert_eq!(
+            run.decide(RunCommand::RecordSpent {
+                spent: RoundSpent {
+                    recipes: vec!["x".to_string()],
+                    round: None
+                },
+                at_ms: 3
+            }),
+            Err(RunError::AlreadyEnded)
+        );
+    }
+
     #[test]
     fn an_answered_call_is_kept_until_it_starts() {
         let mut run = started();
