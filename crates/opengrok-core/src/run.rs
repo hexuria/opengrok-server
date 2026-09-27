@@ -885,15 +885,14 @@ mod tests {
     fn a_run_with_a_tool_open_is_not_resumed() {
         let mut run = started();
         start_shell(&mut run, "call_a");
-        match run.decide(RunCommand::Resume {
+        let refused = run.decide(RunCommand::Resume {
             reason: "restart".to_string(),
             at_ms: 3,
-        }) {
-            Err(RunError::ToolOutcomeUnknown(tools)) => {
-                assert_eq!(tools, vec!["shell".to_string()])
-            }
-            other => panic!("expected the open tool to refuse the resume: {other:?}"),
-        }
+        });
+        assert!(
+            matches!(&refused, Err(RunError::ToolOutcomeUnknown(tools)) if tools == &vec!["shell".to_string()]),
+            "expected the open tool to refuse the resume: {refused:?}"
+        );
     }
 
     /// A run that keeps being interrupted stops being resumed: twice, then no more.
@@ -982,10 +981,7 @@ mod tests {
                 at_ms: 3,
             },
         );
-        let answered = run
-            .unstarted_answer
-            .clone()
-            .expect("the answer waits for its call");
+        let answered = run.unstarted_answer.clone().unwrap();
         assert_eq!(answered.call.call_id, "call_a");
         assert!(answered.approved);
         start_shell(&mut run, "call_a");
