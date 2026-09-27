@@ -76,13 +76,19 @@ pub trait RunJournal: Send + Sync {
         Ok(())
     }
 
-    /// Record that these recipes played on the box this request (#256), as soon as the round
-    /// that played them learns it, so a segment carried on after a restart does not play them
-    /// again. `Fenced` and `Ended` mean what they mean for `tools_starting`.
+    /// `record`, and what the round spent (#256) IN THE SAME WRITE: the recipes it played and
+    /// which budget it drew on. One write, so the result that closes a recipe's call and the
+    /// record that it played cannot land apart, and a run carried on after a restart reads back
+    /// every play whose call the log shows closed.
     ///
-    /// The default records nothing: a journal that keeps no log has no resume to protect.
-    async fn recipes_played(&self, _run_id: &str, _recipes: &[String]) -> Result<(), JournalError> {
-        Ok(())
+    /// The default records the round alone: a journal that keeps no log has no resume to protect.
+    async fn record_spent(
+        &self,
+        run_id: &str,
+        events: &[Event],
+        _spent: &opengrok_core::run::RoundSpent,
+    ) -> Result<(), JournalError> {
+        self.record(run_id, events).await
     }
 }
 
@@ -90,7 +96,7 @@ pub trait RunJournal: Send + Sync {
 #[derive(Debug, Default)]
 pub struct MemoryJournal {
     recorded: std::sync::Mutex<Vec<(String, Vec<Event>)>>,
-    played: std::sync::Mutex<Vec<String>>,
+    spent: std::sync::Mutex<Vec<(Vec<Event>, opengrok_core::run::RoundSpent)>>,
 }
 
 impl MemoryJournal {
@@ -115,11 +121,27 @@ impl MemoryJournal {
         self.batches().iter().map(Vec::len).sum()
     }
 
-    /// Every recipe `recipes_played` recorded, in order.
+    /// Every recipe `record_spent` recorded, in order.
     pub fn recipes_played(&self) -> Vec<String> {
-        self.played
+        self.spent()
+            .into_iter()
+            .flat_map(|spent| spent.recipes)
+            .collect()
+    }
+
+    /// Every `record_spent`, in order.
+    pub fn spent(&self) -> Vec<opengrok_core::run::RoundSpent> {
+        self.spent_with_frames()
+            .into_iter()
+            .map(|(_, spent)| spent)
+            .collect()
+    }
+
+    /// Every `record_spent` with the frames it was written with.
+    pub fn spent_with_frames(&self) -> Vec<(Vec<Event>, opengrok_core::run::RoundSpent)> {
+        self.spent
             .lock()
-            .map(|played| played.clone())
+            .map(|spent| spent.clone())
             .unwrap_or_default()
     }
 }
@@ -134,11 +156,17 @@ impl RunJournal for MemoryJournal {
         Ok(())
     }
 
-    async fn recipes_played(&self, _run_id: &str, recipes: &[String]) -> Result<(), JournalError> {
-        self.played
+    async fn record_spent(
+        &self,
+        run_id: &str,
+        events: &[Event],
+        spent: &opengrok_core::run::RoundSpent,
+    ) -> Result<(), JournalError> {
+        self.record(run_id, events).await?;
+        self.spent
             .lock()
             .map_err(|_| JournalError::Unwritable("the journal's lock was poisoned".to_string()))?
-            .extend(recipes.iter().cloned());
+            .push((events.to_vec(), spent.clone()));
         Ok(())
     }
 }

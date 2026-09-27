@@ -1023,14 +1023,16 @@ async fn a_loop_from_before_a_resume_can_write_nothing() {
         ),
         "and so is a tool's start"
     );
+    let played = opengrok_core::run::RoundSpent {
+        recipes: vec!["search-youtube".to_string()],
+        round: Some(opengrok_core::run::RoundKind::Spoken),
+    };
     assert!(
         matches!(
-            stale
-                .recipes_played(run_id.as_str(), &["search-youtube".to_string()])
-                .await,
+            stale.record_spent(run_id.as_str(), &round, &played).await,
             Err(JournalError::Fenced(_))
         ),
-        "and so is a recipe it played (#256)"
+        "and so is a round with what it spent (#256)"
     );
     let (after, after_seq) = h.store.load_run(&run_id).await.expect("load");
     assert_eq!(
@@ -1044,14 +1046,15 @@ async fn a_loop_from_before_a_resume_can_write_nothing() {
         .await
         .expect("the resumed generation writes as usual");
     journal(1)
-        .recipes_played(run_id.as_str(), &["search-youtube".to_string()])
+        .record_spent(run_id.as_str(), &round, &played)
         .await
-        .expect("and records what it played");
+        .expect("and records what its round spent, with the round");
     let (after, _) = h.store.load_run(&run_id).await.expect("load");
     assert!(
         after.played_recipes.contains("search-youtube"),
         "a played recipe is on the log for the next resume to read (#256)"
     );
+    assert_eq!(after.rounds_spent, (1, 0));
     assert_eq!(
         opengrok_harness::Spent::of(&after).recipes,
         ["search-youtube".to_string()].into_iter().collect(),

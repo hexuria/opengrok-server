@@ -212,16 +212,44 @@ pub enum RunEvent {
         reason: String,
         at_ms: i64,
     },
-    /// These recipes played on the box this request, written as soon as a round learns it
-    /// (#256). A recipe plays at most once per request (#120), and the loop kept that set only
-    /// in memory: a run carried on after a restart forgot it, and a recipe that had already
-    /// typed, posted or bought could be played again. Log-only, like `ToolStarted`: the frames
-    /// a client reads say `ok`, which cannot tell a recipe that stopped part way from one
-    /// refused before the box.
-    RecipesPlayed {
+    /// What a round spent (#256): the recipes it played on the box, and which budget it drew
+    /// on. A recipe plays at most once per request (#120) and the rounds are the run's, but the
+    /// loop kept both in memory only, so a run carried on after a restart forgot them: a recipe
+    /// that had typed, posted or bought could play again, on a fresh budget.
+    ///
+    /// WRITTEN IN THE SAME APPEND AS THE ROUND'S FRAMES, so the `TOOL_CALL_RESULT` that closes a
+    /// recipe's call and the record that it played land together: no crash can leave the call
+    /// closed and the play forgotten. Log-only, like `ToolStarted`: the frames a client reads say
+    /// `ok`, which cannot tell a recipe that stopped part way from one refused before the box.
+    Spent {
         recipes: Vec<String>,
+        /// `None` for a call that ran outside a round: a card's approved call.
+        round: Option<RoundKind>,
         at_ms: i64,
     },
+}
+
+/// Which budget a round drew on, as the loop decides it: on the screen when every call was a
+/// successful `computer` action, spoken otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RoundKind {
+    Spoken,
+    OnScreen,
+}
+
+/// One round's `Spent`, as the loop hands it to the journal with the round's frames.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoundSpent {
+    pub recipes: Vec<String>,
+    pub round: Option<RoundKind>,
+}
+
+impl RoundSpent {
+    /// Nothing to record: no recipe played, and no round counted.
+    pub fn is_empty(&self) -> bool {
+        self.recipes.is_empty() && self.round.is_none()
+    }
 }
 
 /// One call about to run, as `ToolStarted` records it. The tool's name rides with its id because
@@ -245,7 +273,7 @@ impl RunEvent {
             Self::Stopped { .. } => "run-stopped",
             Self::ToolStarted { .. } => "run-tool-started",
             Self::Resumed { .. } => "run-resumed",
-            Self::RecipesPlayed { .. } => "run-recipes-played",
+            Self::Spent { .. } => "run-spent",
         }
     }
 }
@@ -287,12 +315,11 @@ pub struct Run {
     /// An answer whose call has not started (#91): set when a person answers, cleared when the
     /// call's start or its result is journaled.
     pub unstarted_answer: Option<AnsweredCall>,
-    /// Recipes this request played (#256), from `RecipesPlayed`. What a resumed segment must
-    /// not play again.
+    /// Recipes this request played (#256), from `Spent`. What a resumed segment must not play
+    /// again.
     pub played_recipes: BTreeSet<String>,
-    /// Every batch of calls a round started, in order (#256): what a resumed segment counts
-    /// its spent rounds from.
-    pub tool_rounds: Vec<Vec<StartedTool>>,
+    /// Rounds the run spent, `(spoken, on screen)`, from `Spent` (#256).
+    pub rounds_spent: (usize, usize),
 }
 
 impl Default for Run {
@@ -315,7 +342,7 @@ impl Default for Run {
             generation: 0,
             unstarted_answer: None,
             played_recipes: BTreeSet::new(),
-            tool_rounds: Vec::new(),
+            rounds_spent: (0, 0),
         }
     }
 }
@@ -396,9 +423,9 @@ pub enum RunCommand {
         tools: Vec<StartedTool>,
         at_ms: i64,
     },
-    /// These recipes played this request (#256). Refused on a run that has ended, as a start is.
-    RecordPlayed {
-        recipes: Vec<String>,
+    /// What a round spent (#256). Refused on a run that has ended, as a start is.
+    RecordSpent {
+        spent: RoundSpent,
         at_ms: i64,
     },
     /// Carry an interrupted run on in its next generation (#91). Refused when a tool may have
@@ -431,32 +458,6 @@ pub enum RunCommand {
 }
 
 impl Run {
-    /// The rounds this run has already spent, as the loop counts them (#256): `(spoken,
-    /// computer)`. A round is on the computer when every call it started was a `computer` call
-    /// whose journaled result is `ok`, and spoken otherwise. Counted from `tool_rounds`, so a
-    /// round the loop answered entirely itself (a refused replay, a repeated listing) started
-    /// nothing and is not counted: the count is never more than the loop's own.
-    pub fn rounds_spent(&self) -> (usize, usize) {
-        let ok: BTreeSet<&str> = self
-            .emitted
-            .iter()
-            .filter(|frame| frame.get("type").and_then(Value::as_str) == Some("TOOL_CALL_RESULT"))
-            .filter(|frame| frame.get("ok").and_then(Value::as_bool) == Some(true))
-            .filter_map(|frame| frame.get("toolCallId").and_then(Value::as_str))
-            .collect();
-        let on_screen = self
-            .tool_rounds
-            .iter()
-            .filter(|round| {
-                !round.is_empty()
-                    && round
-                        .iter()
-                        .all(|call| call.tool == "computer" && ok.contains(call.call_id.as_str()))
-            })
-            .count();
-        (self.tool_rounds.len() - on_screen, on_screen)
-    }
-
     pub fn replay<'a>(events: impl IntoIterator<Item = &'a RunEvent>) -> Self {
         let mut state = Self::default();
         for event in events {
@@ -514,10 +515,14 @@ impl Run {
                         .iter()
                         .map(|started| (started.call_id.clone(), started.tool.clone())),
                 );
-                self.tool_rounds.push(tools.clone());
             }
-            RunEvent::RecipesPlayed { recipes, .. } => {
+            RunEvent::Spent { recipes, round, .. } => {
                 self.played_recipes.extend(recipes.iter().cloned());
+                match round {
+                    Some(RoundKind::Spoken) => self.rounds_spent.0 += 1,
+                    Some(RoundKind::OnScreen) => self.rounds_spent.1 += 1,
+                    None => {}
+                }
             }
             RunEvent::Resumed { generation, .. } => self.generation = *generation,
             RunEvent::Suspended {
@@ -661,14 +666,18 @@ impl Run {
                 Ok(vec![RunEvent::Failed { reason, at_ms }])
             }
 
-            RunCommand::RecordPlayed { recipes, at_ms } => {
+            RunCommand::RecordSpent { spent, at_ms } => {
                 if !self.started {
                     return Err(RunError::NotStarted);
                 }
                 if self.status.is_terminal() {
                     return Err(RunError::AlreadyEnded);
                 }
-                Ok(vec![RunEvent::RecipesPlayed { recipes, at_ms }])
+                Ok(vec![RunEvent::Spent {
+                    recipes: spent.recipes,
+                    round: spent.round,
+                    at_ms,
+                }])
             }
 
             RunCommand::StartTools { tools, at_ms } => {
@@ -1023,86 +1032,63 @@ mod tests {
     /// AN ANSWER IS KEPT UNTIL ITS CALL STARTS. A crash between the two leaves a run whose resume
     /// must run the call the person approved — resumed as a fresh round, the model would ask
     /// again and the person get a second card.
-    #[test]
-    fn the_recipes_a_run_played_survive_a_reload() {
-        let mut run = started();
-        for recipes in [
-            vec!["search-youtube".to_string()],
-            vec!["post-reply".to_string()],
-        ] {
-            for event in run
-                .decide(RunCommand::RecordPlayed { recipes, at_ms: 2 })
-                .unwrap()
-            {
-                run.apply(&event);
-            }
+    fn spend(run: &mut Run, recipes: &[&str], round: Option<RoundKind>) {
+        let spent = RoundSpent {
+            recipes: recipes.iter().map(|recipe| recipe.to_string()).collect(),
+            round,
+        };
+        for event in run
+            .decide(RunCommand::RecordSpent { spent, at_ms: 2 })
+            .unwrap()
+        {
+            run.apply(&event);
         }
+    }
+
+    #[test]
+    fn what_a_run_spent_survives_a_reload() {
+        let mut run = started();
+        spend(&mut run, &["search-youtube"], Some(RoundKind::Spoken));
+        spend(&mut run, &[], Some(RoundKind::OnScreen));
+        spend(&mut run, &[], Some(RoundKind::OnScreen));
+        spend(&mut run, &["post-reply"], None);
         let expected: BTreeSet<String> = ["post-reply", "search-youtube"]
             .into_iter()
             .map(str::to_string)
             .collect();
         assert_eq!(run.played_recipes, expected);
-        let event = RunEvent::RecipesPlayed {
+        assert_eq!(
+            run.rounds_spent,
+            (1, 2),
+            "an approved call outside a round counts no round"
+        );
+        let event = RunEvent::Spent {
             recipes: vec!["search-youtube".to_string()],
+            round: Some(RoundKind::OnScreen),
             at_ms: 2,
         };
-        assert_eq!(event.event_type(), "run-recipes-played");
-        let back: RunEvent = serde_json::from_value(serde_json::to_value(&event).unwrap()).unwrap();
+        assert_eq!(event.event_type(), "run-spent");
+        let stored = serde_json::to_value(&event).unwrap();
+        assert_eq!(stored["round"], "on-screen");
+        let back: RunEvent = serde_json::from_value(stored).unwrap();
         assert_eq!(back, event);
     }
 
     #[test]
-    fn an_ended_run_records_no_recipe() {
+    fn an_ended_run_records_nothing_spent() {
         let mut run = started();
         for event in run.decide(RunCommand::Finish { at_ms: 2 }).unwrap() {
             run.apply(&event);
         }
         assert_eq!(
-            run.decide(RunCommand::RecordPlayed {
-                recipes: vec!["x".to_string()],
+            run.decide(RunCommand::RecordSpent {
+                spent: RoundSpent {
+                    recipes: vec!["x".to_string()],
+                    round: None
+                },
                 at_ms: 3
             }),
             Err(RunError::AlreadyEnded)
-        );
-    }
-
-    #[test]
-    fn the_rounds_a_run_spent_are_counted_as_the_loop_counts_them() {
-        let mut run = started();
-        let start = |run: &mut Run, calls: &[(&str, &str)]| {
-            let tools = calls
-                .iter()
-                .map(|(call_id, tool)| StartedTool {
-                    call_id: call_id.to_string(),
-                    tool: tool.to_string(),
-                })
-                .collect();
-            for event in run
-                .decide(RunCommand::StartTools { tools, at_ms: 2 })
-                .unwrap()
-            {
-                run.apply(&event);
-            }
-        };
-        let result = |run: &mut Run, call_id: &str, ok: bool| {
-            let payload = serde_json::json!({
-                "type": "TOOL_CALL_RESULT", "toolCallId": call_id, "content": "", "ok": ok,
-            });
-            for event in run.decide(RunCommand::Emit { payload, at_ms: 2 }).unwrap() {
-                run.apply(&event);
-            }
-        };
-        start(&mut run, &[("s1", "computer")]);
-        result(&mut run, "s1", true);
-        start(&mut run, &[("s2", "computer")]);
-        result(&mut run, "s2", false);
-        start(&mut run, &[("r1", "shell"), ("s3", "computer")]);
-        result(&mut run, "r1", true);
-        result(&mut run, "s3", true);
-        assert_eq!(
-            run.rounds_spent(),
-            (2, 1),
-            "one clean look at the screen; a failed look and a mixed round are spoken"
         );
     }
 

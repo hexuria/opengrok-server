@@ -30,6 +30,7 @@ pub use model::{
     ChatMessage, DeltaStream, GatewayKey, ImagePart, ModelDelta, ModelDoor, ModelError,
     ModelRequest, ToolCallRef,
 };
+use opengrok_core::run::{RoundKind, RoundSpent};
 pub use projection::Projection;
 pub use review::{JUDGE_MARKER, JUDGE_SYSTEM, ModelJudge, judge_failure_streak, parse_verdict};
 pub use timing::RUN_TIMING_NAME;
@@ -588,7 +589,7 @@ pub enum ResumeOutcome {
 }
 
 /// What a run already spent before this segment (#256), read back from its log: the recipes
-/// it played (`RunEvent::RecipesPlayed`) and the rounds it used (`Run::rounds_spent`). A resumed
+/// it played and the rounds it used (`RunEvent::Spent`). A resumed
 /// segment starts from these, not afresh: a recipe plays at most once per REQUEST (#120), and
 /// the budget is the run's, however many segments it takes. The wall clock is the one guard
 /// that starts again: it measures a person waiting, and a restart's downtime is not the run's.
@@ -616,7 +617,7 @@ impl Spent {
 
     /// What `run` has on record: the sweep's resume, which nobody supervises.
     pub fn of(run: &opengrok_core::run::Run) -> Self {
-        let (spoken_rounds, computer_rounds) = run.rounds_spent();
+        let (spoken_rounds, computer_rounds) = run.rounds_spent;
         Self {
             recipes: run.played_recipes.iter().cloned().collect(),
             spoken_rounds,
@@ -735,6 +736,7 @@ pub async fn resume_conversation(
             verbose_timing,
             &mut None,
             Vec::new(),
+            &RoundSpent::default(),
             Ending::Stop,
         )
         .await;
@@ -764,6 +766,7 @@ pub async fn resume_conversation(
                         verbose_timing,
                         &mut None,
                         Vec::new(),
+                        &RoundSpent::default(),
                         start_refused(error),
                     )
                     .await,
@@ -785,6 +788,17 @@ pub async fn resume_conversation(
         all.extend(projection.push_tool_result(result));
         request.messages.push(tool_result_message(result));
     }
+    // What the approved call played, written WITH its result by whichever write takes it
+    // (#256): the result closes the call, and a play the log shows closed must be on record.
+    // Not a round: the budget is the round's, and this call was asked for before the card.
+    let approved_spent = RoundSpent {
+        recipes: results
+            .iter()
+            .filter(|result| approved_ran && result.call_id == approved.id)
+            .filter_map(|result| played_recipe(&approved, result))
+            .collect(),
+        round: None,
+    };
 
     // If the approved call itself is still waiting, something is wrong with the approval rather
     // than with the run; stop rather than loop.
@@ -802,6 +816,7 @@ pub async fn resume_conversation(
             verbose_timing,
             &mut None,
             all,
+            &approved_spent,
             Ending::Park(waiting),
         )
         .await;
@@ -809,7 +824,7 @@ pub async fn resume_conversation(
 
     // DURABLE BEFORE THE NEXT CALL, as every round is: the approved call has run, and the model
     // is about to be asked about what it did. This write's error used to be ignored.
-    if let Err(error) = record_round(journal, &run_id, &all).await {
+    if let Err(error) = record_round(journal, &run_id, &all, &approved_spent).await {
         // The results are not written again, only the ending (see `converse_raw`).
         let mut ending = close(
             journal,
@@ -820,6 +835,7 @@ pub async fn resume_conversation(
             verbose_timing,
             &mut None,
             Vec::new(),
+            &RoundSpent::default(),
             Ending::Fail(format!("the run could not be recorded: {error}")),
         )
         .await;
@@ -830,18 +846,8 @@ pub async fn resume_conversation(
     // The first half already recorded ToolCallStart (that is why this run is
     // resuming). converse_raw would otherwise start with started_a_tool = false
     // and treat a long post-HITL summary as a plan-only flood.
-    let approved_played: Vec<String> = results
-        .iter()
-        .filter(|result| approved_ran && result.call_id == approved.id)
-        .filter_map(|result| played_recipe(&approved, result))
-        .collect();
-    if !approved_played.is_empty()
-        && let Err(error) = journal.recipes_played(&run_id, &approved_played).await
-    {
-        tracing::warn!(run_id, %error, "could not record the recipe the approved call played");
-    }
     let mut played = spent.recipes;
-    played.extend(approved_played);
+    played.extend(approved_spent.recipes);
     let carried = Carried {
         started_a_tool: true,
         played,
@@ -1016,6 +1022,7 @@ async fn close(
     verbose_timing: bool,
     last_agent_shot: &mut Option<Event>,
     mut round: Vec<Event>,
+    spent: &RoundSpent,
     ending: Ending,
 ) -> Vec<Event> {
     if let Ending::Finish(Some(sentence)) = &ending
@@ -1048,7 +1055,7 @@ async fn close(
     }
     let mut from = round.len();
     round.extend(closing);
-    let mut written = record_round(journal, run_id, &round).await;
+    let mut written = record_round(journal, run_id, &round, spent).await;
     // A STOP THAT LANDED AFTER THE QUESTION ABOVE. The park's write found the run ended and wrote
     // nothing, so its card would have had no suspension behind it. The log already holds the
     // Stop; the round goes in again with the stop's ending, the one the log can back.
@@ -1071,7 +1078,7 @@ async fn close(
             timing::splice_before_run_end(&mut stopped, timing.event(projection));
         }
         round.extend(stopped);
-        written = record_round(journal, run_id, &round).await;
+        written = record_round(journal, run_id, &round, spent).await;
     }
     if let Err(error) = written {
         let refused = round.split_off(from);
@@ -1201,6 +1208,10 @@ async fn converse_raw(
     // Last computer-step TOOL_CALL_RESULT whose image is still `agent`. Promoted to `end`
     // or `failure` when the run closes so replay keeps one PNG, not every step.
     let mut last_agent_shot: Option<Event> = None;
+    // What the round under way spent (#256), written with its frames by whichever write ends or
+    // records it, and cleared once written so a later write cannot count it twice. Declared
+    // here, before `end_run!`, so the macro can name it.
+    let mut round_spent = RoundSpent::default();
     // Whether the model has produced anything at all this run — a word, a tool call, a thought.
     // A run that ends having produced nothing is a failure with a sentence, not a silent finish.
     let mut any_delta = false;
@@ -1246,6 +1257,7 @@ async fn converse_raw(
                     verbose_timing,
                     &mut last_agent_shot,
                     $round,
+                    &round_spent,
                     $ending,
                 )
                 .await,
@@ -1302,6 +1314,7 @@ async fn converse_raw(
 
     for round in 0..(budget.max_rounds + budget.max_computer_rounds) {
         let mut round_events = Vec::new();
+        round_spent = RoundSpent::default();
 
         // WHERE A STOP LANDS, THE FIRST OF TWO PLACES. No further model call: whatever the loop was
         // going to ask next is not asked, and nothing more is spent on it.
@@ -1647,20 +1660,8 @@ async fn converse_raw(
                     .filter(|(_, answered)| !**answered)
                     .filter_map(|((call, result), _)| played_recipe(call, result))
                     .collect();
-                // ON RECORD AS SOON AS IT IS KNOWN (#256), so a segment carried on after a restart
-                // reads it back. A fence or an ended run ends this loop as a start refused would;
-                // any other failure leaves this segment guarded by memory alone, and is logged.
-                if !now_played.is_empty() {
-                    match journal.recipes_played(run_id, &now_played).await {
-                        Ok(()) => {}
-                        Err(error @ (JournalError::Fenced(_) | JournalError::Ended(_))) => {
-                            end_run!(round_events, start_refused(error));
-                        }
-                        Err(error) => {
-                            tracing::warn!(run_id, %error, "could not record the recipes a round played");
-                        }
-                    }
-                }
+                // Written with this round's frames, whichever write takes them (#256).
+                round_spent.recipes.clone_from(&now_played);
                 played.extend(now_played);
 
                 // THE MODEL SEES WHAT IT CALLED (#189): its own message naming this round's
@@ -1921,6 +1922,11 @@ async fn converse_raw(
                 } else {
                     spoken_rounds += 1;
                 }
+                round_spent.round = Some(if on_screen {
+                    RoundKind::OnScreen
+                } else {
+                    RoundKind::Spoken
+                });
                 let over = if spoken_rounds >= budget.max_rounds {
                     Some(format!(
                         "this run reached its limit of {} model calls",
@@ -1941,7 +1947,10 @@ async fn converse_raw(
                         end_run!(round_events, Ending::Finish(Some(sentence)));
                     }
                     // DURABLE BEFORE THE WRAP-UP CALL, as before any call.
-                    if let Err(error) = record_round(journal, run_id, &round_events).await {
+                    let written = record_round(journal, run_id, &round_events, &round_spent).await;
+                    // Taken by that write, landed or not: never written a second time.
+                    round_spent = RoundSpent::default();
+                    if let Err(error) = written {
                         all.append(&mut round_events);
                         end_run!(
                             Vec::new(),
@@ -1956,7 +1965,9 @@ async fn converse_raw(
                 // dependency chain, so a crash after this point can be picked up. The chart/form
                 // and budget exits are decided ABOVE this write, so the round they end on goes
                 // down with their ending in one write rather than before it.
-                if let Err(error) = record_round(journal, run_id, &round_events).await {
+                let written = record_round(journal, run_id, &round_events, &round_spent).await;
+                round_spent = RoundSpent::default();
+                if let Err(error) = written {
                     // NOT WRITTEN AGAIN. A write that failed may have landed (a commit whose
                     // reply was lost), and writing the round a second time would put it in the
                     // log twice (`formal/tla/JournalAppend.tla` NoDuplicate). Only the ending
@@ -2191,8 +2202,15 @@ async fn record_round(
     journal: &dyn RunJournal,
     run_id: &str,
     events: &[Event],
+    spent: &RoundSpent,
 ) -> Result<(), JournalError> {
-    journal.record(run_id, &for_journal(events)).await
+    if spent.is_empty() {
+        journal.record(run_id, &for_journal(events)).await
+    } else {
+        journal
+            .record_spent(run_id, &for_journal(events), spent)
+            .await
+    }
 }
 
 fn is_agent_shot(event: &Event) -> bool {

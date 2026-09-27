@@ -355,13 +355,18 @@ The state graph was the object being minimised. The results:
     the `Resumed` and spawns the continuation — `resume_where_it_lives` for an unstarted
     answer, `resume_interrupted_run` (`agui/resume.rs`, a fresh round through
     `opengrok_harness::continue_interrupted`) otherwise.
-  - #256: a recipe played is written to the log as soon as its round learns it
-    (`RunJournal::recipes_played`, fenced like every write). The sweep's resume starts from
+  - #256: what a round spent — the recipes it played and which budget it drew on — is written
+    IN THE SAME APPEND as the round's frames (`RunJournal::record_spent`, `RunEvent::Spent`),
+    so the `TOOL_CALL_RESULT` that closes a recipe's call and the record that it played land
+    together or not at all; the same for a card's approved call. The sweep's resume starts from
     `Spent::of(&run)` (recipes and rounds); a card's continuation from `Spent::recipes_of`, as
-    each card has had a fresh round budget since before #256. Not modelled: a recipe that played is either on the log, and so in
-    `played`, or its call is still open, and the sweep does not resume a run with a call open
-    (`NothingReExecutes`). Tests: `a_recipe_played_before_a_restart_is_not_played_again_after_it`,
+    each card has had a fresh round budget since before #256. Not modelled: a recipe that played
+    is either on the log with its closed call, and so in `played`, or its call is still open,
+    and the sweep does not resume a run with a call open (`NothingReExecutes`). Tests:
+    `a_recipe_played_before_a_restart_is_not_played_again_after_it`,
     `a_recipe_the_loop_plays_is_written_to_the_journal`,
+    `a_card_answered_later_in_a_request_does_not_replay_an_earlier_recipe`,
+    `every_round_is_counted_once_on_the_log`,
     `a_resumed_segment_spends_what_is_left_of_the_run_s_rounds`, the fence test.
   - Every continuation is handed the generation it was spawned under (the answer's, or the one
     the sweep's `Resumed` wrote) and journals under that one, not the one it finds at load, as
@@ -405,13 +410,10 @@ The state graph was the object being minimised. The results:
   to check its generation and status. One statement returning status, generation and seq
   together would not.
 - **A resumed segment's wall clock starts again** (#256 carried the rest). The recipes a run
-  played (`RunEvent::RecipesPlayed`) and the rounds it spent (`Run::rounds_spent`, from
-  `ToolStarted`) are read back from the log; the wall clock is not, because it measures a person
-  waiting and a restart's downtime is not the run's. The round count leaves out rounds the loop
-  answered entirely itself (a refused replay, a repeated listing), which started nothing: it is
-  never more than the loop's own count, so it can only be generous by those rounds.
+  played and the rounds it spent are read back from the log (`RunEvent::Spent`); the wall clock
+  is not, because it measures a person waiting and a restart's downtime is not the run's.
 - **A fenced loop's own stream is told `RUN_ERROR`, not a stop**: its ending is refused and
   `unrecorded` substitutes the one error that is true of the write. A client still attached to
   the replaced loop shows a failure while the run carries on under the sweep's loop.
-- **`run-tool-started`, `run-resumed` and `run-recipes-played` are not roll-back safe.** An older binary reads the event types as corrupt,
+- **`run-tool-started`, `run-resumed` and `run-spent` are not roll-back safe.** An older binary reads the event types as corrupt,
   so any run that has one — every run parked since — would fail to load after a rollback.

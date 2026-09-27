@@ -3064,6 +3064,14 @@ async fn a_recipe_the_loop_plays_is_written_to_the_journal() {
     )
     .await;
     assert_eq!(journal.recipes_played(), vec!["search-youtube".to_string()]);
+    let (frames, spent) = journal.spent_with_frames().remove(0);
+    assert_eq!(spent.round, Some(opengrok_core::run::RoundKind::Spoken));
+    assert!(
+        frames
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallResult),
+        "the play is recorded in the write that closes its call: {frames:?}"
+    );
 }
 
 /// #256. A resumed segment spends what is left of the run's rounds, not a fresh budget: each
@@ -3186,6 +3194,36 @@ async fn a_resumed_run_does_not_replay_the_recipe_it_was_approved_for() {
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
 }
 
+/// #256. Each round is counted once on the log, however it ends: the round a budget ran out on
+/// is written before the wrap-up call, and the wrap-up's own write must not count it again.
+#[tokio::test]
+async fn every_round_is_counted_once_on_the_log() {
+    let door = Rounds::new(
+        (0..MAX_ROUNDS + 2)
+            .map(|n| shell_deltas(&format!("s{n}"), &format!("echo {n}")))
+            .collect(),
+        "done",
+    );
+    let (runner, _) = fix_then_test_runner(usize::MAX);
+    let journal = MemoryJournal::new();
+    run_conversation(
+        &door,
+        Some(&runner),
+        &journal,
+        request("keep going"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let rounds = journal
+        .spent()
+        .iter()
+        .filter(|spent| spent.round.is_some())
+        .count();
+    assert_eq!(rounds, MAX_ROUNDS, "{:?}", journal.spent());
+}
+
 /// #256, the card path. A recipe played before the card is not played again after it, and the
 /// recipe the approved call plays goes on the log like any round's.
 #[tokio::test]
@@ -3216,6 +3254,15 @@ async fn a_card_answered_later_in_a_request_does_not_replay_an_earlier_recipe() 
     .await;
     assert_eq!(*plays.lock().unwrap(), 1, "only the approved recipe played");
     assert_eq!(journal.recipes_played(), vec!["post-reply".to_string()]);
+    let (frames, spent) = journal.spent_with_frames().remove(0);
+    assert_eq!(spent.round, None, "an approved call is not a round");
+    assert!(
+        frames
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallResult
+                && event.extra.get("toolCallId").and_then(|id| id.as_str()) == Some("c1")),
+        "the play is recorded in the write that closes its call: {frames:?}"
+    );
 }
 
 /// A `run_recipe` that refuses a call with no `values` before anything plays, the way the

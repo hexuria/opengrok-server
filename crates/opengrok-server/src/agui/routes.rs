@@ -3161,7 +3161,17 @@ impl opengrok_harness::RunJournal for StoreJournal {
         run_id: &str,
         events: &[Event],
     ) -> Result<(), opengrok_harness::JournalError> {
-        append_events(&self.state, run_id, &self.run_start(), events)
+        self.record_spent(run_id, events, &opengrok_core::run::RoundSpent::default())
+            .await
+    }
+
+    async fn record_spent(
+        &self,
+        run_id: &str,
+        events: &[Event],
+        spent: &opengrok_core::run::RoundSpent,
+    ) -> Result<(), opengrok_harness::JournalError> {
+        append_events(&self.state, run_id, &self.run_start(), events, spent)
             .await
             .map_err(|error| match error {
                 AppendError::Ended => opengrok_harness::JournalError::Ended(format!(
@@ -3222,24 +3232,10 @@ impl opengrok_harness::RunJournal for StoreJournal {
         })
         .await
     }
-
-    async fn recipes_played(
-        &self,
-        run_id: &str,
-        recipes: &[String],
-    ) -> Result<(), opengrok_harness::JournalError> {
-        self.bookkeep(run_id, "its recipe could be recorded", |at_ms| {
-            RunCommand::RecordPlayed {
-                recipes: recipes.to_vec(),
-                at_ms,
-            }
-        })
-        .await
-    }
 }
 
 impl StoreJournal {
-    /// One log-only write the loop makes between its rounds (#91, #256): fenced by generation
+    /// A log-only write the loop makes before a round's tools run (#91): fenced by generation
     /// like every journal write, refused on an ended run, and tried `APPEND_ATTEMPTS` times.
     async fn bookkeep(
         &self,
@@ -3391,14 +3387,15 @@ async fn append_events(
     run_id: &str,
     start: &RunStart<'_>,
     events: &[Event],
+    spent: &opengrok_core::run::RoundSpent,
 ) -> Result<(), AppendError> {
     for _ in 1..APPEND_ATTEMPTS {
-        match append_events_once(state, run_id, start, events).await {
+        match append_events_once(state, run_id, start, events, spent).await {
             Err(AppendError::Store(opengrok_store::StoreError::Conflict)) => continue,
             other => return other,
         }
     }
-    append_events_once(state, run_id, start, events).await
+    append_events_once(state, run_id, start, events, spent).await
 }
 
 /// Why a batch was not written.
@@ -3438,6 +3435,7 @@ async fn append_events_once(
     run_id: &str,
     start: &RunStart<'_>,
     events: &[Event],
+    spent: &opengrok_core::run::RoundSpent,
 ) -> Result<(), AppendError> {
     let RunStart {
         thread_id,
@@ -3467,6 +3465,21 @@ async fn append_events_once(
     }
     // A batch that parks must record its suspension, or record nothing.
     let parks = events.iter().any(is_suspend_frame);
+
+    // WHAT THE ROUND SPENT GOES DOWN WITH ITS FRAMES (#256), ahead of them in the same append:
+    // the result that closes a recipe's call and the record that it played land together, or
+    // neither does. Refused only on a run that has ended, whose frames are refused below too.
+    if !spent.is_empty()
+        && let Ok(recorded) = run.decide(RunCommand::RecordSpent {
+            spent: spent.clone(),
+            at_ms,
+        })
+    {
+        for event in &recorded {
+            run.apply(event);
+        }
+        to_append.extend(recorded);
+    }
 
     for event in events {
         let payload = serde_json::to_value(event).map_err(|error| {
