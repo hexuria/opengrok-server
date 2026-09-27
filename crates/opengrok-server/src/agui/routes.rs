@@ -3192,6 +3192,69 @@ impl opengrok_harness::RunJournal for StoreJournal {
             }
         }
     }
+
+    /// `ToolStarted` in the run's log, before the tool runs (#91). The aggregate refuses it on a
+    /// run that has ended, which answers `Ended`: the loop stops, as `stopped` would have told it
+    /// at its next boundary.
+    ///
+    /// RETRIED ON ANY STORE ERROR, unlike a round: this only adds calls to a set, so a second
+    /// copy after a lost reply changes nothing, and a blip would otherwise fail the run at every
+    /// tool round. It costs a replay (`load_run`) the projection could answer in one statement.
+    async fn tools_starting(
+        &self,
+        run_id: &str,
+        tools: &[opengrok_core::run::StartedTool],
+    ) -> Result<(), opengrok_harness::JournalError> {
+        let id = RunId::from_stored(run_id.to_string());
+        let mut last_error = String::new();
+        for _ in 0..APPEND_ATTEMPTS {
+            let (mut run, seq) = match self.state.auth.store.load_run(&id).await {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    last_error = error.to_string();
+                    continue;
+                }
+            };
+            let at_ms = now_ms();
+            let events = match run.decide(RunCommand::StartTools {
+                tools: tools.to_vec(),
+                at_ms,
+            }) {
+                Ok(events) => events,
+                Err(opengrok_core::run::RunError::AlreadyEnded) => {
+                    return Err(opengrok_harness::JournalError::Ended(format!(
+                        "run {run_id} ended before its tool could start"
+                    )));
+                }
+                Err(error) => {
+                    return Err(opengrok_harness::JournalError::Unwritable(
+                        error.to_string(),
+                    ));
+                }
+            };
+            for event in &events {
+                run.apply(event);
+            }
+            let view = RunView {
+                id: id.clone(),
+                thread_id: self.thread_id.clone(),
+                status: run.status,
+                event_count: run.emitted.len() as i64,
+                updated_at_ms: at_ms,
+            };
+            match self
+                .state
+                .auth
+                .store
+                .append_run(&id, seq, &events, &view, self.account_id.as_ref())
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => last_error = error.to_string(),
+            }
+        }
+        Err(opengrok_harness::JournalError::Unwritable(last_error))
+    }
 }
 
 impl StoreJournal {

@@ -691,6 +691,31 @@ pub async fn resume_conversation(
     let approved_ran = matches!(outcome, ResumeOutcome::Approved);
     let results = match outcome {
         ResumeOutcome::Approved => {
+            // Its start on record first, as for every call a round runs (#91).
+            let started = opengrok_core::run::StartedTool {
+                call_id: approved.id.clone(),
+                tool: approved.name.clone(),
+            };
+            if let Err(error) = journal
+                .tools_starting(&run_id, std::slice::from_ref(&started))
+                .await
+            {
+                all.extend(
+                    close(
+                        journal,
+                        None,
+                        &run_id,
+                        &mut projection,
+                        &timing,
+                        verbose_timing,
+                        &mut None,
+                        Vec::new(),
+                        start_refused(error),
+                    )
+                    .await,
+                );
+                return all;
+            }
             // The person may have answered the card long after the box went to sleep.
             all.extend(
                 box_wake_frame(tools, &mut projection, std::slice::from_ref(&approved)).await,
@@ -851,6 +876,18 @@ enum Ending {
     Stop,
     /// Calls waiting on a person: a card each, then `RUN_FINISHED`.
     Park(Vec<Waiting>),
+}
+
+/// How a run ends when the start of its tools could not be written. A run that ended under the
+/// loop is the `stopped` answer the next boundary would have given; any other failure fails the
+/// run, saying the tool did not run — the person must not be left guessing whether it acted.
+fn start_refused(error: JournalError) -> Ending {
+    match error {
+        JournalError::Ended(_) => Ending::Stop,
+        JournalError::Unwritable(why) => Ending::Fail(format!(
+            "the run could not record that a tool was starting, so the tool did not run: {why}"
+        )),
+    }
 }
 
 /// End the run. The one place a run ends, whichever exit got here.
@@ -1394,9 +1431,6 @@ async fn converse_raw(
                         )))
                     );
                 }
-                let waking = box_wake_frame(runner, &mut projection, &calls).await;
-                emit_live(sink, &waking).await;
-                round_events.extend(waking);
                 let skip_listing = had_successful_listing && listing_only;
                 let answers: Vec<Option<opengrok_tools::ToolResult>> = calls
                     .iter()
@@ -1407,6 +1441,32 @@ async fn converse_raw(
                     .iter()
                     .map(|answer| skip_listing || answer.is_some())
                     .collect();
+                // WRITTEN BEFORE ANYTHING TOUCHES THE WORLD (#91). A start the log cannot hold is a
+                // tool that does not run: the round ends here, with nothing done that the log
+                // cannot account for.
+                let starting: Vec<opengrok_core::run::StartedTool> = if skip_listing {
+                    Vec::new()
+                } else {
+                    calls
+                        .iter()
+                        .zip(&answers)
+                        .filter(|(_, answer)| answer.is_none())
+                        .map(|(call, _)| opengrok_core::run::StartedTool {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                        })
+                        .collect()
+                };
+                if !starting.is_empty()
+                    && let Err(error) = journal.tools_starting(run_id, &starting).await
+                {
+                    end_run!(round_events, start_refused(error));
+                }
+                // Said once the start is on record, so a refused start never shows the computer
+                // waking for a tool that then did not run.
+                let waking = box_wake_frame(runner, &mut projection, &calls).await;
+                emit_live(sink, &waking).await;
+                round_events.extend(waking);
                 let tool_started = std::time::Instant::now();
                 let ((results, per_tool), auto_review_ms) = if skip_listing {
                     skipped_redundant_listing = true;

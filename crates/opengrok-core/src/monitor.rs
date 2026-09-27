@@ -26,6 +26,8 @@ use crate::id::{CoworkerId, RunId};
 /// the sweep can name one owning account for (`PgStore::stream_owner`), so a monitor on any of
 /// them can fire for its owner and nobody else. Left out on purpose:
 /// - `run-emitted`: written once per streamed frame, so a monitor on it would fire a run per token.
+/// - `run-tool-started`: written before every tool round — the journal's own bookkeeping, not a
+///   fact about the run a coworker should be woken for.
 /// - `session-*`, `account-registered`, `credentials-set`: a sign-in, a refresh, a signup — noise
 ///   at best, and nothing a coworker should be woken to reason about.
 /// - `org-*`: an org's stream has several members and no single owner, so it can match nobody.

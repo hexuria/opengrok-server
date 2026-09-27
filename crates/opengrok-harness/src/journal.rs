@@ -18,9 +18,10 @@ use opengrok_wire::agui::Event;
 pub enum JournalError {
     #[error("the run could not be recorded: {0}")]
     Unwritable(String),
-    /// The run ended before this batch could be written, and the batch opened a card: a
-    /// suspension the log refuses leaves a card whose answer can only be a 409. Nothing of the
-    /// batch was written, so the loop may write its round again with the ending the log holds.
+    /// The run ended before this could be written. For a batch that opened a card: a suspension
+    /// the log refuses leaves a card whose answer can only be a 409, so nothing of the batch was
+    /// written and the loop may write its round again with the ending the log holds. For a tool's
+    /// start (`tools_starting`): the tool does not run, and the loop stops.
     #[error("the run ended before this could be recorded: {0}")]
     Ended(String),
 }
@@ -54,6 +55,20 @@ pub trait RunJournal: Send + Sync {
     /// journal that cannot answer says `false`: a database hiccup must stop nothing.
     async fn stopped(&self, _run_id: &str) -> bool {
         false
+    }
+
+    /// Record that these calls are about to run, BEFORE they do (#91). Must not return until
+    /// the record is durable, and an error means the calls do not run: an action the log cannot
+    /// account for is the one thing a resumed run must never meet blind. `Ended` means the run
+    /// ended under the loop, as `stopped` would have said.
+    ///
+    /// The default records nothing: a journal that keeps no log has no resume to protect.
+    async fn tools_starting(
+        &self,
+        _run_id: &str,
+        _tools: &[opengrok_core::run::StartedTool],
+    ) -> Result<(), JournalError> {
+        Ok(())
     }
 }
 
