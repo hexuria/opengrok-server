@@ -4404,8 +4404,18 @@ pub async fn answer_run(
         let host = host.clone();
         let account_id = account_id.clone();
         let run_id = run_id.clone();
+        let generation = run.generation;
         tokio::spawn(async move {
-            continue_run(host, account_id, run_id, pending, resumed_seq, outcome).await;
+            continue_run(
+                host,
+                account_id,
+                run_id,
+                generation,
+                pending,
+                resumed_seq,
+                outcome,
+            )
+            .await;
         });
     }
 
@@ -4428,7 +4438,7 @@ pub async fn answer_run(
 /// A refusal names what was refused rather than saying "declined" alone, so the model can choose
 /// something else instead of proposing the same call again, and so the transcript says why. The
 /// words follow the gateway's, which has been saying them to the other door's runs all along.
-fn resume_outcome(
+pub(crate) fn resume_outcome(
     approved: bool,
     pending: &opengrok_core::run::PendingApproval,
 ) -> opengrok_harness::ResumeOutcome {
@@ -4842,6 +4852,7 @@ async fn continue_run(
     host: crate::host_state::HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
+    generation: u32,
     answered: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
     outcome: opengrok_harness::ResumeOutcome,
@@ -4858,6 +4869,14 @@ async fn continue_run(
         tracing::warn!(run = %run_id, "could not load an answered run to continue it");
         return;
     };
+    // THE GENERATION IS THE ONE THE ANSWER WAS GIVEN UNDER, not the one found at load. A
+    // continuation that stalls past a lease before it loads would otherwise read the generation
+    // the sweep resumed into and write under it, beside the sweep's own loop (`AnswerCommit`
+    // takes `loopGen` at the answer in `RunLifecycle.tla`).
+    if run.generation != generation {
+        tracing::warn!(run = %run_id, "an answered run was carried on by the sweep first");
+        return;
+    }
 
     // The coworker whose tools these are. Without it there is nothing to continue *as*.
     let Some(coworker_id) = run.coworker_id.clone() else {
@@ -4931,7 +4950,7 @@ async fn continue_run(
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
-        generation: run.generation,
+        generation,
     };
 
     // The pin the turn started on, not the coworker's current one. A coworker that was

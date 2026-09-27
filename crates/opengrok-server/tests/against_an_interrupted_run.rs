@@ -254,9 +254,19 @@ async fn harness(database_url: &str, email: &str) -> Harness {
 /// A run as a dead process left it: started, the given commands applied, and a log quiet for
 /// longer than a lease, so the sweep may claim it.
 async fn interrupted_run(h: &Harness, commands: Vec<RunCommand>) -> RunId {
-    let id = RunId::new();
     let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
     let quiet_since = now_ms() - 3 * opengrok_server::recovery::LEASE_MS;
+    seed_run(h, thread, quiet_since, commands).await
+}
+
+/// A run on `thread` whose last write was at `quiet_since`.
+async fn seed_run(
+    h: &Harness,
+    thread: String,
+    quiet_since: i64,
+    commands: Vec<RunCommand>,
+) -> RunId {
+    let id = RunId::new();
     let mut run = Run::default();
     let mut log = Vec::new();
     let start = RunCommand::Start {
@@ -474,13 +484,165 @@ async fn an_answer_whose_call_never_started_is_carried_out() {
             .any(|tool| tool.call_id == "call-ls"),
         "the answered call itself was started, not re-asked under a new id: {started:?}"
     );
-    assert!(
+    assert_eq!(
         h.stub
             .ran
             .lock()
             .expect("ran")
             .iter()
-            .any(|command| command.contains("ls")),
-        "and it ran on the coworker's computer"
+            .filter(|command| command.contains("ls"))
+            .count(),
+        1,
+        "and it ran on the coworker's computer, once"
     );
+    assert_eq!(run.status, RunStatus::Finished, "{:?}", run.failure);
+}
+
+fn suspend(call_id: &str, tool: &str, reason: SuspendReason) -> RunCommand {
+    RunCommand::Suspend {
+        call_id: call_id.to_string(),
+        tool: tool.to_string(),
+        arguments: json!({ "command": "ls" }),
+        reason,
+        at_ms: now_ms(),
+    }
+}
+
+fn answer(call_id: &str, approved: bool) -> RunCommand {
+    RunCommand::Answer {
+        call_id: call_id.to_string(),
+        approved,
+        by: "the person".to_string(),
+        at_ms: now_ms(),
+    }
+}
+
+/// Settled without being carried on: failed in its first generation, saying why.
+fn not_carried_on(run: &Run, why: &str) {
+    assert_eq!(run.status, RunStatus::Failed, "{:?}", run.failure);
+    assert_eq!(run.generation, 0, "not resumed");
+    let failure = format!("{:?}", run.failure);
+    assert!(failure.contains(why), "the reason names {why:?}: {failure}");
+}
+
+/// A NO IS CARRIED ON TOO, in the answer route's own words, and the call never runs.
+#[tokio::test]
+async fn a_refusal_whose_turn_was_interrupted_reaches_the_model_and_nothing_runs() {
+    let database_url = database_or_skip!();
+    let _sweeper = one_sweeper(&database_url).await;
+    let h = harness(&database_url, &email("refused")).await;
+    let run_id = interrupted_run(
+        &h,
+        vec![
+            suspend("call-ls", "shell", SuspendReason::PolicyApproval),
+            answer("call-ls", false),
+        ],
+    )
+    .await;
+
+    let run = settle(&h, &run_id).await;
+    assert_eq!(run.generation, 1, "carried on: {:?}", run.failure);
+    assert_eq!(run.status, RunStatus::Finished, "{:?}", run.failure);
+    assert!(
+        h.stub.ran.lock().expect("ran").is_empty(),
+        "a refused call never runs"
+    );
+    assert!(
+        run.emitted
+            .iter()
+            .any(|frame| frame["type"] == "TOOL_CALL_RESULT"
+                && frame["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("declined"))),
+        "the model was told the person declined"
+    );
+}
+
+/// A FORM'S ANSWER IS NOT A YES: interrupted between typing and writing the result, what was
+/// typed is unknown, and asking for the form again parks the run behind a card nothing settles.
+#[tokio::test]
+async fn a_form_whose_answer_was_interrupted_is_failed_not_carried_on() {
+    let database_url = database_or_skip!();
+    let _sweeper = one_sweeper(&database_url).await;
+    let h = harness(&database_url, &email("form")).await;
+    let run_id = interrupted_run(
+        &h,
+        vec![
+            suspend("call-form", "request_user_form", SuspendReason::UserForm),
+            answer("call-form", true),
+        ],
+    )
+    .await;
+    not_carried_on(&settle(&h, &run_id).await, "form");
+}
+
+/// The MCP client asks again itself; carrying its audit run's answer out would run the tool twice.
+#[tokio::test]
+async fn an_mcp_audit_run_is_never_carried_on() {
+    let database_url = database_or_skip!();
+    let _sweeper = one_sweeper(&database_url).await;
+    let h = harness(&database_url, &email("mcp")).await;
+    let thread = format!("mcp-{}", h.coworker.as_str());
+    let quiet_since = now_ms() - 3 * opengrok_server::recovery::LEASE_MS;
+    let run_id = seed_run(
+        &h,
+        thread,
+        quiet_since,
+        vec![
+            suspend("call-ls", "shell", SuspendReason::AutoReview),
+            answer("call-ls", true),
+        ],
+    )
+    .await;
+    not_carried_on(&settle(&h, &run_id).await, "MCP");
+    assert!(h.stub.ran.lock().expect("ran").is_empty(), "nothing ran");
+}
+
+/// A newer turn on the thread is already doing the work.
+#[tokio::test]
+async fn a_turn_the_person_moved_past_is_not_carried_on() {
+    let database_url = database_or_skip!();
+    let _sweeper = one_sweeper(&database_url).await;
+    let h = harness(&database_url, &email("moved-on")).await;
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let quiet_since = now_ms() - 3 * opengrok_server::recovery::LEASE_MS;
+    let old = seed_run(&h, thread.clone(), quiet_since, vec![said("Looking")]).await;
+    seed_run(
+        &h,
+        thread,
+        quiet_since + 1_000,
+        vec![RunCommand::Finish { at_ms: now_ms() }],
+    )
+    .await;
+    not_carried_on(&settle(&h, &old).await, "newer turn");
+}
+
+/// A turn the person put away stays put away.
+#[tokio::test]
+async fn a_hidden_turn_is_not_carried_on() {
+    let database_url = database_or_skip!();
+    let _sweeper = one_sweeper(&database_url).await;
+    let h = harness(&database_url, &email("hidden")).await;
+    let run_id = interrupted_run(&h, vec![said("Looking")]).await;
+    assert!(
+        h.store
+            .hide_run(&run_id, &h.account, now_ms())
+            .await
+            .expect("hide")
+    );
+    not_carried_on(&settle(&h, &run_id).await, "hidden");
+}
+
+/// A server down over a weekend does not wake on Monday and carry on Friday's turns.
+#[tokio::test]
+async fn a_run_interrupted_long_ago_is_failed_not_carried_on() {
+    let database_url = database_or_skip!();
+    let _sweeper = one_sweeper(&database_url).await;
+    let h = harness(&database_url, &email("long-ago")).await;
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let quiet_since = now_ms()
+        - opengrok_server::recovery::RESUME_WITHIN_MS
+        - opengrok_server::recovery::LEASE_MS;
+    let run_id = seed_run(&h, thread, quiet_since, vec![said("Looking")]).await;
+    not_carried_on(&settle(&h, &run_id).await, "too long ago");
 }

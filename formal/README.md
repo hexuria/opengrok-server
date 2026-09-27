@@ -351,6 +351,14 @@ The state graph was the object being minimised. The results:
     the `Resumed` and spawns the continuation — `resume_where_it_lives` for an unstarted
     answer, `resume_interrupted_run` (`agui/resume.rs`, a fresh round through
     `opengrok_harness::continue_interrupted`) otherwise.
+  - Every continuation is handed the generation it was spawned under (the answer's, or the one
+    the sweep's `Resumed` wrote) and journals under that one, not the one it finds at load, as
+    `AnswerCommit` takes `loopGen`: one that stalls past a lease before loading is fenced.
+  - The sweep does not carry on (and fails, saying why): an MCP door's audit run, a form's
+    answer, a turn hidden or followed by a newer one on its thread, a run quiet longer than
+    `RESUME_WITHIN_MS`, a coworker that cannot take work, or one the policy no longer lets its
+    person use. None of these are in the model; they narrow when a resume happens, never what
+    one may do.
   - Tests: `against_an_interrupted_run.rs` (between steps → finishes in generation 1; a tool open
     → fails naming it; the third interruption fails; an unstarted answer is carried out once),
     `against_a_stopped_run.rs::a_loop_from_before_a_resume_can_write_nothing`. Each was broken
@@ -386,5 +394,14 @@ The state graph was the object being minimised. The results:
   does; its own card-answer resume (`resume_suspended_run`) still returns without ending the run
   when the runner is missing; the sweep picks it up a lease later and, if the tools still will
   not load, carries it on twice before failing it.
+- **A resumed run starts its per-request guards afresh** (#91): the recipes it played before
+  the restart (`played`, #120) and the budget already spent are not read back from the log, so a
+  recipe may play again after a resume and a run may spend up to `MAX_RESUMES + 1` budgets. The
+  card-answer resume has carried only the approved call's recipe since before #91.
+- **A fenced loop's own stream is told `RUN_ERROR`, not a stop**: its ending is refused and
+  `unrecorded` substitutes the one error that is true of the write. A client still attached to
+  the replaced loop shows a failure while the run carries on under the sweep's loop.
+- **The policy guard on a resume has no Postgres test**; it is the decision a routine's firing
+  makes (`autonomy::fire`), called the same way.
 - **`run-tool-started` and `run-resumed` are not roll-back safe.** An older binary reads the event types as corrupt,
   so any run that has one — every run parked since — would fail to load after a rollback.

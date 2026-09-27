@@ -570,6 +570,7 @@ pub(crate) async fn resume_where_it_lives(
     state: HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
+    generation: u32,
     coworker_id: CoworkerId,
     pending: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
@@ -587,6 +588,7 @@ pub(crate) async fn resume_where_it_lives(
         state,
         account_id,
         run_id,
+        generation,
         coworker_id,
         pending,
         resumed_seq,
@@ -603,6 +605,7 @@ async fn resume_suspended_run(
     state: HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
+    generation: u32,
     coworker_id: CoworkerId,
     pending: opengrok_core::run::PendingApproval,
     resumed_seq: u32,
@@ -619,6 +622,11 @@ async fn resume_suspended_run(
     let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
         return;
     };
+    // The generation the answer (or the sweep's resume) was given under — see `continue_run`.
+    if run.generation != generation {
+        tracing::warn!(run = %run_id, "an answered run was carried on by another loop first");
+        return;
+    }
     let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
         return;
     };
@@ -673,7 +681,7 @@ async fn resume_suspended_run(
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
-        generation: run.generation,
+        generation,
     };
     let pin = run.pin_for_resume(&coworker.model);
     let request = ModelRequest {
@@ -760,14 +768,21 @@ pub(crate) async fn resume_interrupted_run(
     state: HostState,
     account_id: opengrok_core::id::AccountId,
     run_id: RunId,
+    generation: u32,
     coworker_id: CoworkerId,
 ) {
     // Held from the start, as every continuation holds one: the sweep's claim lapses in LEASE_MS.
     let _lease =
         crate::recovery::Lease::new(crate::recovery::hold(state.agui.clone(), run_id.clone()));
     let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
+        crate::recovery::fail_interrupted(&state.agui, &run_id, "its log could not be read").await;
         return;
     };
+    // Resumed into this generation by the sweep; one already moved past it is another loop's.
+    if run.generation != generation {
+        tracing::warn!(run = %run_id, "an interrupted run was carried on by another loop first");
+        return;
+    }
     let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
         crate::recovery::fail_interrupted(&state.agui, &run_id, "its coworker could not be loaded")
             .await;
@@ -802,7 +817,7 @@ pub(crate) async fn resume_interrupted_run(
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
-        generation: run.generation,
+        generation,
     };
     let pin = run.pin_for_resume(&coworker.model);
     let started_a_tool = run
@@ -830,8 +845,10 @@ pub(crate) async fn resume_interrupted_run(
         started_a_tool,
     )
     .await;
-    // It may park on a card, as any turn may; the card is minted as the first half's would be.
-    emit_suspensions(&state, &coworker_id, &account_id, &events).await;
+    // It may park on a card, as any turn may. ONLY A FORM GETS A TRANSCRIPT CARD, as on the live
+    // turn and `continue_run`: the run door's client draws the others from the stream itself,
+    // and a minted one would sit pending in the transcript for good.
+    emit_user_form_suspensions(&state, &coworker_id, &account_id, &events).await;
 }
 
 #[cfg(test)]

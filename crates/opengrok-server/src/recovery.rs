@@ -12,9 +12,13 @@
 //!
 //! THE HONEST PART, AND THE REASON THIS FILE IS NOT SHORTER. A run interrupted *between* a tool
 //! call and its result is genuinely ambiguous: the command may have run, may have half-run, may
-//! never have started. We cannot know, and re-running it would repeat whatever it did. So we do not
-//! guess — the model is told plainly that the call's outcome is unknown, and it decides. A resumed
-//! run that silently re-ran a `rm` would be worse than one that stopped.
+//! never have started. We cannot know, and re-running it would repeat whatever it did. So such a
+//! run is failed, naming the tool. A resumed run that silently re-ran a `rm` would be worse than
+//! one that stopped.
+//!
+//! A run interrupted BETWEEN steps is not ambiguous, and since #91 it is carried on: moved into
+//! its next generation, which fences off every write from a loop still alive behind a lapsed
+//! lease, at most `MAX_RESUMES` times (`formal/tla/RunLifecycle.tla`, finding 15).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -160,21 +164,12 @@ async fn resolve(
         Verdict::Fail(reason) => return fail_run(state, run_id, run, seq, &reason).await,
         Verdict::Resume(answered) => answered,
     };
-    // Carried on only for an owner and a coworker that can still take work: a resume on a
-    // retired coworker's key would bill the deployment, and a run nobody owns has no one to
-    // continue for.
-    let owner = state.auth.store.run_account(run_id).await?;
-    let coworker = run.coworker_id.clone();
-    let (account_id, coworker_id) = match (owner, coworker) {
-        (Some(account), Some(coworker))
-            if crate::autonomy::routes::takes_work(state, &coworker).await =>
-        {
-            (account, coworker)
-        }
-        _ => {
-            let reason = "this run was interrupted by a restart and could not be carried on: \
-                          its coworker can no longer take work";
-            return fail_run(state, run_id, run, seq, reason).await;
+    let (account_id, coworker_id) = match carry_on_for(state, run_id, &run, &answered).await? {
+        Ok(who) => who,
+        Err(why) => {
+            let reason =
+                format!("this run was interrupted by a restart and was not carried on: {why}");
+            return fail_run(state, run_id, run, seq, &reason).await;
         }
     };
 
@@ -205,18 +200,15 @@ async fn resolve(
 
     match answered {
         // The person answered and the call never started: carry the answer out, exactly as the
-        // answer's own continuation would have.
+        // answer's own continuation would have, in the words the answer route uses.
         Some(answered) => {
-            let outcome = if answered.approved {
-                opengrok_harness::ResumeOutcome::Approved
-            } else {
-                opengrok_harness::ResumeOutcome::Refused("the person refused this call".to_string())
-            };
+            let outcome = crate::agui::routes::resume_outcome(answered.approved, &answered.call);
             tokio::spawn(crate::agui::resume::resume_where_it_lives(
                 false,
                 host.clone(),
                 account_id,
                 run_id.clone(),
+                run.generation,
                 coworker_id,
                 answered.call,
                 run.emitted.len() as u32,
@@ -228,11 +220,99 @@ async fn resolve(
                 host.clone(),
                 account_id,
                 run_id.clone(),
+                run.generation,
                 coworker_id,
             ));
         }
     }
     Ok(())
+}
+
+/// How long after its last write an interrupted run is still carried on. Past it, the run is
+/// failed as it always was: a server down over a weekend must not wake on Monday and run a
+/// command somebody approved on Friday, or finish a turn its person has long stopped watching.
+pub const RESUME_WITHIN_MS: i64 = 10 * LEASE_MS;
+
+/// Who a resume would act for, or why it must not happen. Every check here is one the run's own
+/// start made, or one that only a resume needs; a refusal fails the run with the reason, and a
+/// store error leaves it for the next sweep rather than failing it with a reason that is untrue.
+async fn carry_on_for(
+    state: &AgUiState,
+    run_id: &RunId,
+    run: &opengrok_core::run::Run,
+    answered: &Option<opengrok_core::run::AnsweredCall>,
+) -> Result<
+    Result<(opengrok_core::id::AccountId, opengrok_core::id::CoworkerId), &'static str>,
+    opengrok_store::StoreError,
+> {
+    // AN MCP DOOR'S AUDIT RUN IS NEVER CARRIED ON. Its card is the record of a question the
+    // MCP client asked; the client's retry is what runs the tool, outside the run. Carrying the
+    // answer out here would run it a second time (`settle_mcp_answer`).
+    if crate::mcp_door::is_mcp_audit_run(run) {
+        return Ok(Err(
+            "it records a question from an MCP client, which asks again itself",
+        ));
+    }
+    // A FORM'S ANSWER IS NOT A YES. Submit types the values into the page and then writes the
+    // result; interrupted between the two, nothing in the log says what was typed, and running
+    // `request_user_form` again parks the run on a call already answered, behind a card no
+    // button can settle.
+    if answered
+        .as_ref()
+        .is_some_and(|answered| answered.call.reason == opengrok_core::run::SuspendReason::UserForm)
+    {
+        return Ok(Err(
+            "it was interrupted while a form's answer was being carried out",
+        ));
+    }
+    let Some(account_id) = state.auth.store.run_account(run_id).await? else {
+        return Ok(Err("nobody owns it"));
+    };
+    let Some(coworker_id) = run.coworker_id.clone() else {
+        return Ok(Err("it has no coworker"));
+    };
+    // THE PERSON MAY HAVE MOVED ON. A newer turn on the thread is already doing the work, and a
+    // hidden one is a turn they put away; carrying either on acts beside what they chose.
+    let newest = state
+        .auth
+        .store
+        .runs_for_thread_owned_by(run.thread_id.as_str(), &account_id, 1)
+        .await?;
+    let Some(newest) = newest.first() else {
+        return Ok(Err("its person has hidden it"));
+    };
+    if &newest.id != run_id {
+        return Ok(Err("a newer turn on its thread has taken over"));
+    }
+    if now_ms() - newest.updated_at_ms > RESUME_WITHIN_MS {
+        return Ok(Err(
+            "it was interrupted too long ago to carry on unattended",
+        ));
+    }
+    if !crate::autonomy::routes::takes_work(state, &coworker_id).await {
+        return Ok(Err("its coworker can no longer take work"));
+    }
+    // POLICY IS ENFORCED ON EVERY ACTION, and a resume is one: a grant revoked while the run sat
+    // interrupted must stop it, as it would stop the person's next message.
+    let policy = state
+        .auth
+        .store
+        .policy_for(&account_id, &coworker_id)
+        .await?;
+    if opengrok_policy::decide(
+        &account_id,
+        &coworker_id,
+        opengrok_policy::Action::UseCoworker,
+        &policy,
+    )
+    .reason()
+    .is_some()
+    {
+        return Ok(Err(
+            "its coworker's policy no longer lets its person use it",
+        ));
+    }
+    Ok(Ok((account_id, coworker_id)))
 }
 
 /// Fail a run a continuation could not carry on after the sweep resumed it (#91), saying why.
@@ -399,7 +479,11 @@ fn unresolved_tool_call(run: &opengrok_core::run::Run) -> Option<String> {
     let mut answered: Vec<String> = Vec::new();
 
     for payload in &run.emitted {
-        let kind = payload.get("type").and_then(|value| value.as_str())?;
+        // A frame with no type says nothing about a call; skipping it, rather than giving up on
+        // the scan, keeps a malformed frame from reading as "nothing in flight" and resuming.
+        let Some(kind) = payload.get("type").and_then(|value| value.as_str()) else {
+            continue;
+        };
         let id = payload
             .get("toolCallId")
             .and_then(|value| value.as_str())
