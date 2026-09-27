@@ -673,6 +673,7 @@ async fn resume_suspended_run(
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
+        generation: run.generation,
     };
     let pin = run.pin_for_resume(&coworker.model);
     let request = ModelRequest {

@@ -24,6 +24,11 @@ pub enum JournalError {
     /// start (`tools_starting`): the tool does not run, and the loop stops.
     #[error("the run ended before this could be recorded: {0}")]
     Ended(String),
+    /// The run was resumed into a newer generation than this loop's (#91): the sweep carried it
+    /// on while this loop was still alive after its lease lapsed. Nothing was written, and
+    /// nothing this loop writes after it will be either — it has been replaced.
+    #[error("the run was carried on by another loop: {0}")]
+    Fenced(String),
 }
 
 /// Somewhere a run's events are durably kept.

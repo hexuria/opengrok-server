@@ -883,7 +883,9 @@ enum Ending {
 /// run, saying the tool did not run — the person must not be left guessing whether it acted.
 fn start_refused(error: JournalError) -> Ending {
     match error {
-        JournalError::Ended(_) => Ending::Stop,
+        // A replaced loop's ending is refused like every other write it tries, so it leaves
+        // nothing behind; the stop is only what its own stream is told.
+        JournalError::Ended(_) | JournalError::Fenced(_) => Ending::Stop,
         JournalError::Unwritable(why) => Ending::Fail(format!(
             "the run could not record that a tool was starting, so the tool did not run: {why}"
         )),

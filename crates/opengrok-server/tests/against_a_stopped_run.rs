@@ -738,6 +738,7 @@ async fn a_round_journaled_while_a_stop_lands_keeps_its_frames() {
             system: None,
             skill_id: None,
             prompt: None,
+            generation: 0,
         });
 
         let writes: Vec<_> = (0..3)
@@ -815,6 +816,7 @@ async fn a_park_written_after_the_run_ended_is_refused_whole() {
             system: None,
             skill_id: None,
             prompt: None,
+            generation: 0,
         };
         let round = [
             Event::new(EventType::ToolCallStart, now_ms())
@@ -865,6 +867,7 @@ async fn a_tools_start_is_on_record_until_its_result_and_refused_once_the_run_ha
         system: None,
         skill_id: None,
         prompt: None,
+        generation: 0,
     };
 
     let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
@@ -936,4 +939,96 @@ async fn a_tools_start_is_on_record_until_its_result_and_refused_once_the_run_ha
     );
     let (run, _) = h.store.load_run(&stopped).await.expect("load");
     assert!(run.open_tools.is_empty(), "and nothing was written");
+}
+
+/// #91: THE FENCE. After a resume, a loop of the generation before it — one whose lease lapsed
+/// while it was still alive — can write nothing to the run: not a round, not its ending, not a
+/// tool's start. The resumed generation writes as usual.
+#[tokio::test]
+async fn a_loop_from_before_a_resume_can_write_nothing() {
+    use opengrok_harness::{JournalError, RunJournal};
+    use opengrok_wire::agui::{Event, EventType};
+
+    let database_url = database_or_skip!();
+    let email = format!("fence-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, _) = h.person(&email).await;
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let run_id = seed_run(
+        &h.store,
+        &account,
+        &thread,
+        now_ms(),
+        &["working"],
+        Ending::Running,
+    )
+    .await;
+
+    let (mut run, seq) = h.store.load_run(&run_id).await.expect("load");
+    let resumed = run
+        .decide(RunCommand::Resume {
+            reason: "restart".to_string(),
+            at_ms: now_ms(),
+        })
+        .expect("resume");
+    for event in &resumed {
+        run.apply(event);
+    }
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: thread.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: now_ms(),
+    };
+    let seq = h
+        .store
+        .append_run(&run_id, seq, &resumed, &view, Some(&account))
+        .await
+        .expect("the resume is recorded");
+
+    let journal = |generation: u32| opengrok_server::agui::routes::StoreJournal {
+        state: h.state.clone(),
+        thread_id: thread.clone(),
+        account_id: Some(account.clone()),
+        coworker_id: Some(CoworkerId::from_stored("cw_stop_test")),
+        model: Some("oag/cheap".to_string()),
+        system: None,
+        skill_id: None,
+        prompt: None,
+        generation,
+    };
+    let round = [Event::new(EventType::TextMessageContent, now_ms())
+        .with("messageId", "m-stale")
+        .with("delta", "from the replaced loop")];
+    let stale = journal(0);
+    assert!(
+        matches!(
+            stale.record(run_id.as_str(), &round).await,
+            Err(JournalError::Fenced(_))
+        ),
+        "a round from before the resume is refused"
+    );
+    let start = [opengrok_core::run::StartedTool {
+        call_id: "call-stale".to_string(),
+        tool: "shell".to_string(),
+    }];
+    assert!(
+        matches!(
+            stale.tools_starting(run_id.as_str(), &start).await,
+            Err(JournalError::Fenced(_))
+        ),
+        "and so is a tool's start"
+    );
+    let (after, after_seq) = h.store.load_run(&run_id).await.expect("load");
+    assert_eq!(
+        after_seq, seq,
+        "nothing of the replaced loop reached the log"
+    );
+    assert!(after.open_tools.is_empty());
+
+    journal(1)
+        .record(run_id.as_str(), &round)
+        .await
+        .expect("the resumed generation writes as usual");
 }

@@ -138,6 +138,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         // The hirer's instruction is this turn's question. Journaled like a person's message, so
         // a routine that parks on a card resumes knowing what it was told to do.
         prompt: Some(crate::agui::history::routine_prompt(&run_id, &prompt)),
+        generation: 0,
     };
 
     let request = ModelRequest {
