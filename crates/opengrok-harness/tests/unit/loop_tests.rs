@@ -5192,3 +5192,123 @@ async fn a_wrap_up_that_cannot_fit_ends_on_its_limit_uncalled() {
     assert_eq!(*calls.lock().unwrap(), 1, "no wrap-up call was sent");
     assert!(run_error(&events).contains("time limit"));
 }
+
+/// A journal that notes each tool start and whether the computer had already been touched when
+/// it was asked, and can be told to refuse the write.
+struct StartWatchingJournal {
+    computer: Arc<crate::tools::tests_support::RecordingComputer>,
+    refuse: bool,
+    starts: Mutex<Vec<(Vec<String>, bool)>>,
+}
+
+impl StartWatchingJournal {
+    fn new(computer: Arc<crate::tools::tests_support::RecordingComputer>, refuse: bool) -> Self {
+        Self {
+            computer,
+            refuse,
+            starts: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn starts(&self) -> Vec<(Vec<String>, bool)> {
+        self.starts.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+}
+
+#[async_trait::async_trait]
+impl RunJournal for StartWatchingJournal {
+    async fn record(&self, _run_id: &str, _events: &[Event]) -> Result<(), JournalError> {
+        Ok(())
+    }
+
+    async fn tools_starting(&self, _run_id: &str, call_ids: &[String]) -> Result<(), JournalError> {
+        let already_ran = self.computer.last_box().is_some();
+        if let Ok(mut starts) = self.starts.lock() {
+            starts.push((call_ids.to_vec(), already_ran));
+        }
+        if self.refuse {
+            return Err(JournalError::Unwritable("the database is down".to_string()));
+        }
+        Ok(())
+    }
+}
+
+/// #91: A TOOL'S START IS ON RECORD BEFORE IT RUNS. Without it a log interrupted mid-tool is
+/// indistinguishable from one interrupted between rounds, and only the second is safe to resume.
+#[tokio::test]
+async fn a_tools_start_is_journaled_before_it_runs() {
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let runner = tool_runner_on(computer.clone(), |executor| executor);
+    let journal = StartWatchingJournal::new(computer.clone(), false);
+    let door = CountingToolDoor(Arc::new(Mutex::new(0)));
+
+    run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
+
+    let starts = journal.starts();
+    assert!(!starts.is_empty(), "the start was journaled");
+    assert_eq!(
+        starts[0].0,
+        vec!["c1".to_string()],
+        "naming the call that ran"
+    );
+    assert!(!starts[0].1, "and before the computer was touched");
+    assert!(computer.last_box().is_some(), "the tool then ran");
+}
+
+/// A start that cannot be written is a tool that does not run. Running it anyway would put an
+/// action in the world the log cannot account for — the one case a resume must never meet blind.
+#[tokio::test]
+async fn a_tool_whose_start_cannot_be_journaled_never_runs() {
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let runner = tool_runner_on(computer.clone(), |executor| executor);
+    let journal = StartWatchingJournal::new(computer.clone(), true);
+    let door = CountingToolDoor(Arc::new(Mutex::new(0)));
+
+    let events =
+        run_conversation(&door, Some(&runner), &journal, request("go"), "t1", "r1", 1).await;
+
+    assert_eq!(computer.last_box(), None, "the tool did not run");
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == EventType::ToolCallResult),
+        "no result is invented for a call that never ran: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == EventType::RunError),
+        "the run ends as an error that says why: {events:?}"
+    );
+}
+
+/// The approved call takes the same road: its start is journaled first, and a start that
+/// cannot be written keeps it from running.
+#[tokio::test]
+async fn an_approved_call_whose_start_cannot_be_journaled_never_runs() {
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let runner = tool_runner_on(computer.clone(), |executor| executor);
+    let journal = StartWatchingJournal::new(computer.clone(), true);
+    let door = CountingToolDoor(Arc::new(Mutex::new(0)));
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: "shell".to_string(),
+        arguments: serde_json::json!({"command": "play the recipe"}),
+    };
+
+    resume_conversation(
+        &door,
+        &runner,
+        &journal,
+        request("go"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1),
+    )
+    .await;
+
+    assert_eq!(
+        journal.starts().first().map(|s| s.0.clone()),
+        Some(vec!["c1".to_string()])
+    );
+    assert_eq!(computer.last_box(), None, "the approved call did not run");
+}

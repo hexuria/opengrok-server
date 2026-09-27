@@ -3192,6 +3192,70 @@ impl opengrok_harness::RunJournal for StoreJournal {
             }
         }
     }
+
+    /// `ToolStarted` in the run's log, before the tool runs (#91). The aggregate refuses it on a
+    /// run that has ended, which answers `Ended`: the loop stops, as `stopped` would have told it
+    /// at its next boundary. Retried on a Conflict and only on one, as `append_events` is.
+    async fn tools_starting(
+        &self,
+        run_id: &str,
+        call_ids: &[String],
+    ) -> Result<(), opengrok_harness::JournalError> {
+        let id = RunId::from_stored(run_id.to_string());
+        let unwritable = |error: opengrok_store::StoreError| {
+            opengrok_harness::JournalError::Unwritable(error.to_string())
+        };
+        for attempt in 1..=APPEND_ATTEMPTS {
+            let (mut run, seq) = self
+                .state
+                .auth
+                .store
+                .load_run(&id)
+                .await
+                .map_err(unwritable)?;
+            let at_ms = now_ms();
+            let events = match run.decide(RunCommand::StartTools {
+                call_ids: call_ids.to_vec(),
+                at_ms,
+            }) {
+                Ok(events) => events,
+                Err(opengrok_core::run::RunError::AlreadyEnded) => {
+                    return Err(opengrok_harness::JournalError::Ended(format!(
+                        "run {run_id} ended before its tool could start"
+                    )));
+                }
+                Err(error) => {
+                    return Err(opengrok_harness::JournalError::Unwritable(
+                        error.to_string(),
+                    ));
+                }
+            };
+            for event in &events {
+                run.apply(event);
+            }
+            let view = RunView {
+                id: id.clone(),
+                thread_id: self.thread_id.clone(),
+                status: run.status,
+                event_count: run.emitted.len() as i64,
+                updated_at_ms: at_ms,
+            };
+            match self
+                .state
+                .auth
+                .store
+                .append_run(&id, seq, &events, &view, self.account_id.as_ref())
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(opengrok_store::StoreError::Conflict) if attempt < APPEND_ATTEMPTS => continue,
+                Err(error) => return Err(unwritable(error)),
+            }
+        }
+        Err(opengrok_harness::JournalError::Unwritable(
+            "every attempt lost the race to another writer".to_string(),
+        ))
+    }
 }
 
 impl StoreJournal {

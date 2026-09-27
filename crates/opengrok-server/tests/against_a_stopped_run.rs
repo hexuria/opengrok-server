@@ -843,3 +843,84 @@ async fn a_park_written_after_the_run_ended_is_refused_whole() {
         );
     }
 }
+
+/// #91: THE LOG HOLDS A TOOL'S START, AND ITS RESULT CLOSES IT. What a later resume reads to tell
+/// a crash between rounds (safe) from one mid-tool (the tool may have acted). And the write is
+/// also the question: on a run that has ended, it is refused, so the tool does not run.
+#[tokio::test]
+async fn a_tools_start_is_on_record_until_its_result_and_refused_once_the_run_has_ended() {
+    use opengrok_harness::{JournalError, RunJournal};
+    use opengrok_wire::agui::{Event, EventType};
+
+    let database_url = database_or_skip!();
+    let email = format!("tool-start-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, _) = h.person(&email).await;
+    let journal = |thread: &str| opengrok_server::agui::routes::StoreJournal {
+        state: h.state.clone(),
+        thread_id: thread.to_string(),
+        account_id: Some(account.clone()),
+        coworker_id: Some(CoworkerId::from_stored("cw_stop_test")),
+        model: Some("oag/cheap".to_string()),
+        system: None,
+        skill_id: None,
+        prompt: None,
+    };
+
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let run_id = seed_run(
+        &h.store,
+        &account,
+        &thread,
+        now_ms(),
+        &["working"],
+        Ending::Running,
+    )
+    .await;
+    let running = journal(&thread);
+    running
+        .tools_starting(run_id.as_str(), &["call-1".to_string()])
+        .await
+        .expect("the start is written");
+    let (run, _) = h.store.load_run(&run_id).await.expect("load");
+    assert!(
+        run.open_tools.contains("call-1"),
+        "the log shows the tool open"
+    );
+
+    running
+        .record(
+            run_id.as_str(),
+            &[Event::new(EventType::ToolCallResult, now_ms())
+                .with("toolCallId", "call-1")
+                .with("content", "done")],
+        )
+        .await
+        .expect("the result is written");
+    let (run, _) = h.store.load_run(&run_id).await.expect("load");
+    assert!(
+        run.open_tools.is_empty(),
+        "its result closed it: {:?}",
+        run.open_tools
+    );
+
+    let stopped_thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let stopped = seed_run(
+        &h.store,
+        &account,
+        &stopped_thread,
+        now_ms(),
+        &["working"],
+        Ending::Stopped,
+    )
+    .await;
+    let refused = journal(&stopped_thread)
+        .tools_starting(stopped.as_str(), &["call-2".to_string()])
+        .await;
+    assert!(
+        matches!(refused, Err(JournalError::Ended(_))),
+        "a tool does not start on an ended run: {refused:?}"
+    );
+    let (run, _) = h.store.load_run(&stopped).await.expect("load");
+    assert!(run.open_tools.is_empty(), "and nothing was written");
+}

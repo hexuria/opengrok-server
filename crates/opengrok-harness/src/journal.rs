@@ -55,6 +55,20 @@ pub trait RunJournal: Send + Sync {
     async fn stopped(&self, _run_id: &str) -> bool {
         false
     }
+
+    /// Record that these calls are about to run, BEFORE they do (#91). Must not return until
+    /// the record is durable, and an error means the calls do not run: an action the log cannot
+    /// account for is the one thing a resumed run must never meet blind. `Ended` means the run
+    /// ended under the loop, as `stopped` would have said.
+    ///
+    /// The default records nothing: a journal that keeps no log has no resume to protect.
+    async fn tools_starting(
+        &self,
+        _run_id: &str,
+        _call_ids: &[String],
+    ) -> Result<(), JournalError> {
+        Ok(())
+    }
 }
 
 /// Keeps events in memory. For tests, and for a caller that has chosen not to persist.
