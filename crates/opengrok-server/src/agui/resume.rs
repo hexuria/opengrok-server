@@ -619,7 +619,17 @@ async fn resume_suspended_run(
     // answer, sweep). Held before anything is loaded, so no early return runs unleased.
     let _lease =
         crate::recovery::Lease::new(crate::recovery::hold(state.agui.clone(), run_id.clone()));
+    // Anything that stops it from starting fails the run with the reason. Only a generation
+    // it no longer holds is a bare return: then another loop owns the run.
+    let cannot =
+        |why: &str| format!("this run could not be carried on after its card was answered: {why}");
     let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
+        crate::recovery::fail_continuation(
+            &state.agui,
+            &run_id,
+            &cannot("its log could not be read"),
+        )
+        .await;
         return;
     };
     // The generation the answer (or the sweep's resume) was given under — see `continue_run`.
@@ -628,6 +638,12 @@ async fn resume_suspended_run(
         return;
     }
     let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
+        crate::recovery::fail_continuation(
+            &state.agui,
+            &run_id,
+            &cannot("its coworker could not be loaded"),
+        )
+        .await;
         return;
     };
     // The runner carries the answered call id — as a GATE approval (the machine owner's or the
@@ -649,6 +665,12 @@ async fn resume_suspended_run(
     )
     .await
     else {
+        crate::recovery::fail_continuation(
+            &state.agui,
+            &run_id,
+            &cannot("its coworker's tools could not be loaded"),
+        )
+        .await;
         return;
     };
     // A YES on a leave-box action is the person's consent to leave through the tunnel for the

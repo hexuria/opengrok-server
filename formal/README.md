@@ -222,7 +222,11 @@ Each trace is TLC's shortest.
     the process died before the call started. Resumed as a fresh round, the answer is never
     carried out — the model asks again and the person gets a second card, or the run finishes
     without the call they approved. The resume carries the answer out instead
-    (`ResumeAtApprove`), through `resume_conversation`, as the answer route does.
+    (`ResumeAtApprove`), through `resume_conversation`, as the answer route does. The model
+    has no refusals: `ResumeAtApprove` sends every unstarted answer through `ApproveAct`, which
+    runs the call, so `FinishedRanApprovals` is not "every answer executes". A no is carried on
+    as a refusal the model reads and the call never runs; a test holds that, not TLC
+    (`a_refusal_whose_turn_was_interrupted_reaches_the_model_and_nothing_runs`).
 
 ## Lean findings
 
@@ -356,8 +360,10 @@ The state graph was the object being minimised. The results:
     `AnswerCommit` takes `loopGen`: one that stalls past a lease before loading is fenced.
   - The sweep does not carry on (and fails, saying why): an MCP door's audit run, a form's
     answer, a turn hidden or followed by a newer one on its thread, a run quiet longer than
-    `RESUME_WITHIN_MS`, a coworker that cannot take work, or one the policy no longer lets its
-    person use. None of these are in the model; they narrow when a resume happens, never what
+    `RESUME_WITHIN_MS`, a coworker that cannot take work, or one the turn door's policy
+    (`policy_to_use`) no longer lets its person use. A store error in any of these leaves the
+    run for the next sweep. A continuation that cannot start (no log, no coworker, no tools)
+    fails the run saying so, rather than returning and leaving it to be resumed until the cap. None of these are in the model; they narrow when a resume happens, never what
     one may do.
   - Tests: `against_an_interrupted_run.rs` (between steps → finishes in generation 1; a tool open
     → fails naming it; the third interruption fails; an unstarted answer is carried out once),
@@ -390,10 +396,6 @@ The state graph was the object being minimised. The results:
 - **Each tool round costs one more read of the whole log** (#91): `tools_starting` loads the run
   to check its generation and status. One statement returning status, generation and seq
   together would not.
-- **A resumed run whose coworker's tools cannot be loaded** runs without tools, as a routine
-  does; its own card-answer resume (`resume_suspended_run`) still returns without ending the run
-  when the runner is missing; the sweep picks it up a lease later and, if the tools still will
-  not load, carries it on twice before failing it.
 - **A resumed run starts its per-request guards afresh** (#91): the recipes it played before
   the restart (`played`, #120) and the budget already spent are not read back from the log, so a
   recipe may play again after a resume and a run may spend up to `MAX_RESUMES + 1` budgets. The
@@ -401,7 +403,5 @@ The state graph was the object being minimised. The results:
 - **A fenced loop's own stream is told `RUN_ERROR`, not a stop**: its ending is refused and
   `unrecorded` substitutes the one error that is true of the write. A client still attached to
   the replaced loop shows a failure while the run carries on under the sweep's loop.
-- **The policy guard on a resume has no Postgres test**; it is the decision a routine's firing
-  makes (`autonomy::fire`), called the same way.
 - **`run-tool-started` and `run-resumed` are not roll-back safe.** An older binary reads the event types as corrupt,
   so any run that has one — every run parked since — would fail to load after a rollback.

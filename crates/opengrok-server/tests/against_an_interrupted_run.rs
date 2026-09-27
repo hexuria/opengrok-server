@@ -133,7 +133,7 @@ impl Computer for StubBox {
     }
 }
 
-async fn seed_account(store: &PgStore, email: &str) -> AccountId {
+async fn seed_account(store: &PgStore, email: &str, org: &str) -> AccountId {
     let id = AccountId::new();
     let hash = hash_password("password1").expect("hash");
     let at_ms = now_ms();
@@ -143,7 +143,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
             password_hash: hash.clone(),
             first_name: "Test".to_string(),
             last_name: "User".to_string(),
-            org_id: String::new(),
+            org_id: org.to_string(),
             plan: Plan::Ultra,
             verified: true,
             enabled: true,
@@ -159,7 +159,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
         password_hash: Some(hash),
         first_name: "Test".to_string(),
         last_name: "User".to_string(),
-        org_id: None,
+        org_id: (!org.is_empty()).then(|| org.to_string()),
         verified: true,
         enabled: true,
         avatar_url: None,
@@ -177,9 +177,18 @@ struct Harness {
     host: HostState,
     account: AccountId,
     coworker: CoworkerId,
+    base: String,
+    token: String,
+    org: String,
 }
 
 async fn harness(database_url: &str, email: &str) -> Harness {
+    harness_with(database_url, email, true).await
+}
+
+/// `with_computer: false` is a deployment with no computer provider, so the coworker's tools
+/// cannot be loaded.
+async fn harness_with(database_url: &str, email: &str, with_computer: bool) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(database_url)
@@ -189,7 +198,8 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         .await
         .expect("migrations");
     let store = PgStore::new(pool);
-    let account = seed_account(&store, email).await;
+    let org = format!("org-{}", uuid::Uuid::now_v7().simple());
+    let account = seed_account(&store, email, &org).await;
     let stub = Arc::new(StubBox::default());
     let minter = Arc::new(TokenMinter::new(b"a-run-carried-on-after-a-restart"));
     let auth = AuthState::new(store.clone(), minter, email.to_string());
@@ -198,7 +208,7 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
-        computer: Some(stub.clone()),
+        computer: with_computer.then(|| stub.clone() as Arc<dyn Computer>),
         vault: None,
         connectors: Connectors {
             providers: Arc::new(BTreeMap::new()),
@@ -248,6 +258,9 @@ async fn harness(database_url: &str, email: &str) -> Harness {
         host,
         account,
         coworker,
+        base,
+        token,
+        org,
     }
 }
 
@@ -259,9 +272,20 @@ async fn interrupted_run(h: &Harness, commands: Vec<RunCommand>) -> RunId {
     seed_run(h, thread, quiet_since, commands).await
 }
 
-/// A run on `thread` whose last write was at `quiet_since`.
+/// `seed_run`, owned by `owner` rather than the coworker's hirer.
 async fn seed_run(
     h: &Harness,
+    thread: String,
+    quiet_since: i64,
+    commands: Vec<RunCommand>,
+) -> RunId {
+    seed_run_for(h, &h.account, thread, quiet_since, commands).await
+}
+
+/// A run on `thread` whose last write was at `quiet_since`.
+async fn seed_run_for(
+    h: &Harness,
+    owner: &AccountId,
     thread: String,
     quiet_since: i64,
     commands: Vec<RunCommand>,
@@ -296,7 +320,7 @@ async fn seed_run(
         updated_at_ms: quiet_since,
     };
     h.store
-        .append_run(&id, 0, &log, &view, Some(&h.account))
+        .append_run(&id, 0, &log, &view, Some(owner))
         .await
         .expect("append the interrupted run");
     id
@@ -645,4 +669,53 @@ async fn a_run_interrupted_long_ago_is_failed_not_carried_on() {
         - opengrok_server::recovery::LEASE_MS;
     let run_id = seed_run(&h, thread, quiet_since, vec![said("Looking")]).await;
     not_carried_on(&settle(&h, &run_id).await, "too long ago");
+}
+
+/// THE TURN DOOR'S POLICY, NOT A ROUTINE'S. An org-mate talks to a coworker shared with the org
+/// under its owner's grant, with no grant row of their own; their interrupted turn is carried
+/// on, as their next message would be allowed.
+#[tokio::test]
+async fn an_org_mates_turn_on_a_shared_coworker_is_carried_on() {
+    let database_url = database_or_skip!();
+    let _sweeper = one_sweeper(&database_url).await;
+    let h = harness(&database_url, &email("owner")).await;
+    let shared = reqwest::Client::new()
+        .patch(format!("{}/coworkers/{}", h.base, h.coworker.as_str()))
+        .header("authorization", format!("Bearer {}", h.token))
+        .json(&json!({ "visibility": "org" }))
+        .send()
+        .await
+        .expect("share");
+    assert_eq!(shared.status(), 200, "{:?}", shared.text().await);
+    let mate = seed_account(&h.store, &email("mate"), &h.org).await;
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let quiet_since = now_ms() - 3 * opengrok_server::recovery::LEASE_MS;
+    let run_id = seed_run_for(&h, &mate, thread, quiet_since, vec![said("Looking")]).await;
+
+    let run = settle(&h, &run_id).await;
+    assert_eq!(run.generation, 1, "carried on: {:?}", run.failure);
+    assert_eq!(run.status, RunStatus::Finished, "{:?}", run.failure);
+}
+
+/// A continuation that cannot start fails the run saying why, rather than leaving it running
+/// for the sweep to carry on until it is failed for being carried on too often.
+#[tokio::test]
+async fn an_answer_whose_tools_cannot_be_loaded_fails_saying_so() {
+    let database_url = database_or_skip!();
+    let _sweeper = one_sweeper(&database_url).await;
+    let h = harness_with(&database_url, &email("no-tools"), false).await;
+    let run_id = interrupted_run(
+        &h,
+        vec![
+            suspend("call-ls", "shell", SuspendReason::PolicyApproval),
+            answer("call-ls", true),
+        ],
+    )
+    .await;
+
+    let run = settle(&h, &run_id).await;
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.generation, 1, "carried on once, then failed");
+    let failure = format!("{:?}", run.failure);
+    assert!(failure.contains("tools could not be loaded"), "{failure}");
 }

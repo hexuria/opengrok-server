@@ -289,15 +289,22 @@ async fn carry_on_for(
             "it was interrupted too long ago to carry on unattended",
         ));
     }
-    if !crate::autonomy::routes::takes_work(state, &coworker_id).await {
+    // Read here, not through `takes_work`, which folds a store error into "no": that would fail
+    // a run safe to carry on with a reason that is untrue. A coworker never hired loads as the
+    // default, not as an error, so only a real store failure takes the `?`.
+    let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await?;
+    if !coworker.hired || coworker.retired || coworker.is_group() {
         return Ok(Err("its coworker can no longer take work"));
     }
     // POLICY IS ENFORCED ON EVERY ACTION, and a resume is one: a grant revoked while the run sat
-    // interrupted must stop it, as it would stop the person's next message.
+    // interrupted must stop it, as it would stop the person's next message. THE TURN DOOR'S OWN
+    // CHECK, `policy_to_use`, not a routine's `policy_for`: an org-mate on a shared coworker has
+    // no grant row of their own and talks to it under the owner's, so `policy_for` refused
+    // their interrupted turn while their next message was allowed.
     let policy = state
         .auth
         .store
-        .policy_for(&account_id, &coworker_id)
+        .policy_to_use(&account_id, &coworker_id)
         .await?;
     if opengrok_policy::decide(
         &account_id,
@@ -318,10 +325,20 @@ async fn carry_on_for(
 /// Fail a run a continuation could not carry on after the sweep resumed it (#91), saying why.
 /// Best effort: the run is already claimed, and a failure to write leaves it for the next sweep.
 pub(crate) async fn fail_interrupted(state: &AgUiState, run_id: &RunId, why: &str) {
-    let reason =
-        format!("this run was interrupted by a restart and could not be carried on: {why}");
+    fail_continuation(
+        state,
+        run_id,
+        &format!("this run was interrupted by a restart and could not be carried on: {why}"),
+    )
+    .await;
+}
+
+/// Fail a run whose continuation could not start, with `reason` as the person will read it.
+/// A continuation that returned instead left the run `running` with its answer unspent: the
+/// sweep carried it on until `MAX_RESUMES`, then failed it for being carried on too often.
+pub(crate) async fn fail_continuation(state: &AgUiState, run_id: &RunId, reason: &str) {
     let result = match state.auth.store.load_run(run_id).await {
-        Ok((run, seq)) => fail_run(state, run_id, run, seq, &reason).await,
+        Ok((run, seq)) => fail_run(state, run_id, run, seq, reason).await,
         Err(error) => Err(error),
     };
     if let Err(error) = result {
