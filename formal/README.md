@@ -356,8 +356,9 @@ The state graph was the object being minimised. The results:
     answer, `resume_interrupted_run` (`agui/resume.rs`, a fresh round through
     `opengrok_harness::continue_interrupted`) otherwise.
   - #256: a recipe played is written to the log as soon as its round learns it
-    (`RunJournal::recipes_played`, fenced like every write), and every resume starts from
-    `Spent::of(&run)`. Not modelled: a recipe that played is either on the log, and so in
+    (`RunJournal::recipes_played`, fenced like every write). The sweep's resume starts from
+    `Spent::of(&run)` (recipes and rounds); a card's continuation from `Spent::recipes_of`, as
+    each card has had a fresh round budget since before #256. Not modelled: a recipe that played is either on the log, and so in
     `played`, or its call is still open, and the sweep does not resume a run with a call open
     (`NothingReExecutes`). Tests: `a_recipe_played_before_a_restart_is_not_played_again_after_it`,
     `a_recipe_the_loop_plays_is_written_to_the_journal`,

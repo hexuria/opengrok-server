@@ -603,7 +603,18 @@ pub struct Spent {
 }
 
 impl Spent {
-    /// What `run` has on record.
+    /// What a card's continuation carries: the recipes only. Each card has had a fresh round
+    /// budget since before #256, a person approving every step between, and a run of many
+    /// approvals would otherwise run out of rounds on the approvals themselves (each approved
+    /// call is a started batch). A recipe plays once per request whoever resumes it.
+    pub fn recipes_of(run: &opengrok_core::run::Run) -> Self {
+        Self {
+            recipes: run.played_recipes.iter().cloned().collect(),
+            ..Self::default()
+        }
+    }
+
+    /// What `run` has on record: the sweep's resume, which nobody supervises.
     pub fn of(run: &opengrok_core::run::Run) -> Self {
         let (spoken_rounds, computer_rounds) = run.rounds_spent();
         Self {

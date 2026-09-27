@@ -743,8 +743,8 @@ async fn resume_suspended_run(
             },
             message_seq: resumed_seq,
             outcome,
-            // What the run spent before the card (#256): its recipes, its rounds.
-            spent: opengrok_harness::Spent::of(&run),
+            // The recipes the run played before the card (#256); see `Spent::recipes_of`.
+            spent: opengrok_harness::Spent::recipes_of(&run),
         },
     )
     .await;

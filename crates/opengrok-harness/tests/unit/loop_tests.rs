@@ -3186,6 +3186,38 @@ async fn a_resumed_run_does_not_replay_the_recipe_it_was_approved_for() {
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
 }
 
+/// #256, the card path. A recipe played before the card is not played again after it, and the
+/// recipe the approved call plays goes on the log like any round's.
+#[tokio::test]
+async fn a_card_answered_later_in_a_request_does_not_replay_an_earlier_recipe() {
+    let door = Rounds::new(
+        vec![recipe_deltas("c2", "search-youtube")],
+        "Posted, and the search already ran.",
+    );
+    let (runner, plays) = recipe_runner();
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: opengrok_tools::RUN_RECIPE.to_string(),
+        arguments: serde_json::json!({ "recipe": "post-reply" }),
+    };
+    let journal = MemoryJournal::new();
+    let spent = Spent {
+        recipes: ["search-youtube".to_string()].into_iter().collect(),
+        ..Spent::default()
+    };
+    resume_conversation(
+        &door,
+        &runner,
+        &journal,
+        request("post the reply"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1).having_spent(spent),
+    )
+    .await;
+    assert_eq!(*plays.lock().unwrap(), 1, "only the approved recipe played");
+    assert_eq!(journal.recipes_played(), vec!["post-reply".to_string()]);
+}
+
 /// A `run_recipe` that refuses a call with no `values` before anything plays, the way the
 /// executor refuses a missing parameter, and plays (and counts) one that has them.
 fn binding_recipe_runner() -> (ToolRunner, Arc<Mutex<usize>>) {
