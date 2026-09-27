@@ -61,6 +61,9 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | A round journaled while a Stop lands is kept | safety | `JournalAppend` `RoundKept` |
 | No round is written twice | safety | `JournalAppend` `NoDuplicate` |
 | At most one run of a bot holds a live recipe lease | safety | `RecipeLease` `AtMostOneLive` |
+| A resume never drives a run on while a tool's outcome is unknown (#91) | safety | `NothingReExecutes` |
+| A run that keeps crashing is resumed at most twice (#91) | safety | `ResumesAtMostTwice` |
+| Never two tools of one run at once, across a resume (#91) | safety | `OneActing` |
 | Every recipe start answers, won or refused | liveness | `RecipeLease` `EveryStartAnswers` |
 
 ## TLA+ findings
@@ -191,6 +194,22 @@ Each trace is TLC's shortest.
     in the same transaction: inside the insert, the lock would be granted after the snapshot had
     already missed the winner's row. A unique index cannot do it, since an expired lease stays
     non-null. The lease still lapses unfenced, the limit `RunLifecycle_lapse` states.
+15. **A resume beside a live loop** (#91; `RunLifecycle_resume_unfenced`, `_blind`,
+    `_uncapped`). #91 asks the sweep to resume a run interrupted between rounds instead of
+    failing it. The first model of that failed three ways, each kept as a configuration:
+    without `ToolStarted` in the log, a crash mid-tool is resumed and the tool's outcome is lost
+    (`NothingReExecutes`); with no cap, a run that keeps crashing keeps being resumed
+    (`ResumesAtMostTwice`); and — the one the issue does not name — a lease is only
+    `leased_until_ms`, with no holder, so a renewal that fails on a live process looks exactly
+    like a crash. The sweep then resumes the run beside a loop still alive at an await, and when
+    that loop reaches its act, two tools run at once (`OneActing`). The design that holds
+    (`RunLifecycle_resume`, 187,914 states, `NoOrphan` included): `ToolStarted` before every
+    tool; the sweep resumes only a run whose log shows no tool open, at most twice; and every
+    resume moves the run's generation on, so an older loop is told to stop at its next boundary
+    and its next `ToolStarted` write is refused — the fence. `OneDriver` no longer holds under
+    lapse (an older loop may still be at an await); `OneActing` is the claim instead. The first
+    PR ships only `ToolStarted` (`RunLifecycle.cfg` has `JournalsToolStart`); the resume, the
+    fence and the cap follow, and flip the main configuration.
 
 ## Lean findings
 
@@ -330,3 +349,6 @@ The state graph was the object being minimised. The results:
   log's refusal of the `Suspended` is the answer.
 - **Answer errors.** `answer_run` maps every `Conflict` to `alreadyAnswered`, including one
   caused by a concurrent Stop.
+- **A tool's start is recorded, and nothing reads it yet** (#91). Until the resume lands, an
+  interrupted run is still failed by the sweep whatever its log shows; `open_tools` is there for
+  the classifier that decides between resuming and failing.
