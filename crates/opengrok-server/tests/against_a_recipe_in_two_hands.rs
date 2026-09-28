@@ -698,7 +698,7 @@ async fn a_workflow_walk_survives_its_caller_hanging_up() {
 }
 
 #[tokio::test]
-async fn a_recipe_whose_tape_cannot_be_stored_is_not_a_200() {
+async fn a_tape_that_cannot_be_stored_is_refused_as_the_tape() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let owner = h.person().await;
@@ -716,32 +716,20 @@ async fn a_recipe_whose_tape_cannot_be_stored_is_not_a_200() {
             ]})),
         )
         .await;
-    if status == 200 {
-        let kinds: Vec<&str> = body["versions"]
+    assert_eq!(
+        status, 422,
+        "a tape no store can keep is refused as the tape, not as a store outage: {body}"
+    );
+    assert!(body.to_string().contains("NUL"), "and says why: {body}");
+    let (_, mine) = h.call(&owner, "GET", "/recipes?filter=mine", None).await;
+    assert!(
+        mine["recipes"]
             .as_array()
-            .expect("versions")
+            .expect("recipes")
             .iter()
-            .filter_map(|version| version["kind"].as_str())
-            .collect();
-        assert!(
-            kinds.contains(&"raw") && kinds.contains(&"filtered"),
-            "a 200 is a recipe with both of its versions: {body}"
-        );
-    } else {
-        assert!(
-            status >= 500,
-            "the store refused, and said so: {status} {body}"
-        );
-        let (_, mine) = h.call(&owner, "GET", "/recipes?filter=mine", None).await;
-        assert!(
-            mine["recipes"]
-                .as_array()
-                .expect("recipes")
-                .iter()
-                .all(|row| row["name"] != name.as_str()),
-            "and no half-written recipe is left in the list: {mine}"
-        );
-    }
+            .all(|row| row["name"] != name.as_str()),
+        "and no recipe is left in the list: {mine}"
+    );
 }
 
 /// Run a recipe on one of this person's bots and wait for it; the run's id.

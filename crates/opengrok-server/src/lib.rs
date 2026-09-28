@@ -81,6 +81,11 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
         .merge(computers::router(state.clone()))
         .nest("/mcp", mcp_door::router(host))
         .merge(connections::routes::router(state));
+    // A 502, 503 OR 504 THE SERVER WRITES ITSELF IS A SENTENCE IN `{"error": …}`. NativeChat reads
+    // any of the three as "the server is out of reach" unless its body says otherwise, so a
+    // handler's plain-text refusal (a box down, a store that did not answer) read as the server
+    // gone. One layer turns every such plain-text body into the JSON a client shows.
+    let app = app.layer(axum::middleware::from_fn(gateway_errors_as_json));
     // The wire corpus (#255): test builds only, and only while `OG_RECORD_WIRE` is set. Added
     // before the console is mounted, so it sees the API's routes and not the static files.
     #[cfg(feature = "record-wire")]
@@ -110,6 +115,40 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
             tower_http::request_id::MakeRequestUuid,
         ))
         .layer(axum::middleware::from_fn(bound_request_id))
+}
+
+/// Wrap a plain-text 502/503/504 body as `{"error": text}` (see `router`). A JSON body is left as
+/// the handler wrote it, and so is a streamed or empty one.
+async fn gateway_errors_as_json(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{StatusCode, header};
+    let response = next.run(request).await;
+    let gateway_ish = matches!(
+        response.status(),
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+    );
+    let plain = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/plain"));
+    if !(gateway_ish && plain) {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
+        return axum::response::Response::from_parts(parts, axum::body::Body::empty());
+    };
+    let sentence = String::from_utf8_lossy(&bytes).trim().to_string();
+    let json = serde_json::json!({ "error": sentence }).to_string();
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/json"),
+    );
+    parts.headers.remove(header::CONTENT_LENGTH);
+    axum::response::Response::from_parts(parts, axum::body::Body::from(json))
 }
 
 /// The longest client-supplied request id we keep. A UUID is 36. Past

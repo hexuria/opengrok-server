@@ -481,6 +481,16 @@ pub(crate) fn tape_into_steps(
             "the tape is over 5 MB; teach a shorter task".to_string(),
         ));
     }
+    // A NUL IS REFUSED HERE, NOT BY THE STORE. Postgres will not keep one in `jsonb`, so the
+    // store's refusal came back as a 503 that no retry could ever turn into a 200 (NativeChat,
+    // reading the wire corpus). It is the tape that cannot be kept, and a 422 says so.
+    if value.to_string().contains("\\u0000") {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the tape holds a NUL character (U+0000), which cannot be stored; teach it again"
+                .to_string(),
+        ));
+    }
     let steps = opengrok_recipes::filter(raw, screen);
     if let Err(why) = opengrok_recipes::lint(&steps, screen) {
         return Err((
@@ -1339,7 +1349,7 @@ async fn play(run: Played) -> Response {
             // Pruned like a run that played: a bot whose box is down otherwise grows a failed row
             // per try, and nothing ever takes them away (#227).
             tidy_history(&state.auth.store, &recipe_id, version, &coworker).await;
-            return (StatusCode::BAD_GATEWAY, why).into_response();
+            return (StatusCode::BAD_GATEWAY, Json(json!({ "error": why }))).into_response();
         }
     };
 
