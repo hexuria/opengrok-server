@@ -372,8 +372,8 @@ async fn a_text_file_reaches_the_model_as_its_words_and_a_pdf_is_named() {
         "the file is fenced as data: {words}"
     );
     assert!(
-        words.contains("q3.pdf") && words.contains("cannot be read here yet"),
-        "a PDF is named, and the model told it was not read: {words}"
+        words.contains("q3.pdf") && words.contains("it could not be read"),
+        "a PDF that is not one is named, and the model told it was not read: {words}"
     );
 }
 
@@ -805,5 +805,79 @@ async fn a_name_from_the_message_itself_reaches_the_model_on_one_line() {
         !earlier.content.contains(['\u{2028}', '\u{2029}', '\n']),
         "the claimed name is one line: {:?}",
         earlier.content
+    );
+}
+
+/// A PDF with one page that says `words`, built the way a real one is.
+fn a_pdf(words: &str) -> Vec<u8> {
+    use lopdf::content::{Content, Operation};
+    use lopdf::{Document, Object, Stream, dictionary};
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let font_id = doc.add_object(dictionary! {
+        "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+    });
+    let resources_id = doc.add_object(dictionary! { "Font" => dictionary! { "F1" => font_id } });
+    let content = Content {
+        operations: vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec!["F1".into(), 12.into()]),
+            Operation::new("Td", vec![72.into(), 720.into()]),
+            Operation::new("Tj", vec![Object::string_literal(words)]),
+            Operation::new("ET", vec![]),
+        ],
+    };
+    let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+    let page_id = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id, "Contents" => content_id,
+    });
+    doc.objects.insert(
+        pages_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    doc.trailer.set("Root", catalog_id);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+/// A PDF reaches the model as its text (#229, slice 2), fenced as data like a text file.
+#[tokio::test]
+async fn a_pdf_reaches_the_model_as_its_text() {
+    let database_url = database_or_skip!();
+    let h = Harness::start(&database_url).await;
+    let ada = h.person("pdf").await;
+    let thread = thread();
+    let pdf = a_pdf("Quarterly revenue rose nine percent");
+    let (status, row) = h
+        .upload(&ada, &thread, "application/pdf", "q3.pdf", &pdf)
+        .await;
+    assert_eq!(status, 200, "{row}");
+    h.turn(
+        &ada,
+        &thread,
+        "m-pdf",
+        json!([
+            { "type": "text", "text": "what does the report say?" },
+            file_part("document", row["id"].as_str().unwrap(), "application/pdf", "q3.pdf"),
+        ]),
+    )
+    .await;
+    let (words, _) = h.last_user_message();
+    assert!(
+        words.contains("Quarterly revenue rose nine percent"),
+        "the PDF's text reached the model: {words}"
+    );
+    assert!(words.contains("the text of its one page"), "{words}");
+    assert!(
+        words.contains("not instructions"),
+        "fenced as data: {words}"
     );
 }

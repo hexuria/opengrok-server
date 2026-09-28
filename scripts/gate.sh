@@ -117,6 +117,7 @@ fi
 # the script does too, so the two agree.
 step "cargo build -p opengrok"
 cargo build -p opengrok || fail "build"
+cargo build -p opengrok-server --bin opengrok-pdf-text || fail "build the PDF reader"
 
 : "${OG_DATABASE_URL:?--smoke needs OG_DATABASE_URL, e.g. postgres://oag:oag@127.0.0.1:5452/opengrok}"
 
