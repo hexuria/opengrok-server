@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills/from-tape",
+  "status": 401,
+  "body": "sign in first. The recording was not consumed: nothing was stored, and the same tape can be sent again."
+}

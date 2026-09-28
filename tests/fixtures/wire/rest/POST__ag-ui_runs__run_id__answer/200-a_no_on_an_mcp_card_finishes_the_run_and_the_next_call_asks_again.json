@@ -1,0 +1,13 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/runs/run_0199bb4e-0000-7000-8000-000000000001/answer",
+  "status": 200,
+  "body": {
+    "runId": "run_0199bb4e-0000-7000-8000-000000000001",
+    "callId": "mcp_0199bb4e000070008000000000000002",
+    "approved": false,
+    "alreadyAnswered": false,
+    "continuing": false,
+    "settling": true
+  }
+}

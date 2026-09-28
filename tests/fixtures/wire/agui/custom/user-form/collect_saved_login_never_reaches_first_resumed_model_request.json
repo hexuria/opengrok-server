@@ -1,0 +1,86 @@
+{
+  "name": "user-form",
+  "type": "CUSTOM",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "value": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000002",
+    "kind": "send-message",
+    "callId": "collect-1",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "New tax profile",
+        "fields": [
+          {
+            "id": "email",
+            "type": "text",
+            "label": "Email",
+            "secret": false,
+            "required": false
+          },
+          {
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": false
+          }
+        ],
+        "collect": true,
+        "instruction": ""
+      }
+    },
+    "timestampMs": 1790000000000,
+    "formResolution": "submitted"
+  },
+  "callId": "collect-1",
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000002",
+  "message": {
+    "type": "user-form",
+    "formRequest": {
+      "title": "New tax profile",
+      "fields": [
+        {
+          "id": "email",
+          "type": "text",
+          "label": "Email",
+          "secret": false,
+          "required": false
+        },
+        {
+          "id": "password",
+          "type": "password",
+          "label": "Password",
+          "secret": false,
+          "required": false
+        }
+      ],
+      "collect": true,
+      "instruction": ""
+    }
+  },
+  "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000003",
+  "timestamp": 100,
+  "formRequest": {
+    "title": "New tax profile",
+    "fields": [
+      {
+        "id": "email",
+        "type": "text",
+        "label": "Email",
+        "secret": false,
+        "required": false
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": false
+      }
+    ],
+    "collect": true,
+    "instruction": ""
+  },
+  "formResolution": "submitted"
+}

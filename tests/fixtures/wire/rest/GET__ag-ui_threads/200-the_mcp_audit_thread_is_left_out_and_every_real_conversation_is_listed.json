@@ -1,0 +1,52 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads",
+  "status": 200,
+  "body": [
+    {
+      "threadId": "long",
+      "coworkerId": null,
+      "origin": "chat",
+      "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "lastRunId": "run_0199bb4e-0000-7000-8000-000000000001",
+      "lastStatus": "finished",
+      "updatedAtMs": 1790000000000
+    },
+    {
+      "threadId": "lines",
+      "coworkerId": null,
+      "origin": "chat",
+      "title": "Plan the offsite",
+      "lastRunId": "run_0199bb4e-0000-7000-8000-000000000002",
+      "lastStatus": "finished",
+      "updatedAtMs": 1790000001000
+    },
+    {
+      "threadId": "alone",
+      "coworkerId": null,
+      "origin": "chat",
+      "title": "no coworker",
+      "lastRunId": "run_0199bb4e-0000-7000-8000-000000000003",
+      "lastStatus": "finished",
+      "updatedAtMs": 1790000002000
+    },
+    {
+      "threadId": "never",
+      "coworkerId": null,
+      "origin": "chat",
+      "title": null,
+      "lastRunId": "run_0199bb4e-0000-7000-8000-000000000004",
+      "lastStatus": "running",
+      "updatedAtMs": 1790000003000
+    },
+    {
+      "threadId": "mcp-other",
+      "coworkerId": "cw_a",
+      "origin": "chat",
+      "title": "named like one",
+      "lastRunId": "run_0199bb4e-0000-7000-8000-000000000005",
+      "lastStatus": "finished",
+      "updatedAtMs": 1790000004000
+    }
+  ]
+}

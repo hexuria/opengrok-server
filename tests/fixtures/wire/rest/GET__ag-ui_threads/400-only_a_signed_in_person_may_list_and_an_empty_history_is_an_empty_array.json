@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads",
+  "status": 400,
+  "body": {
+    "error": "limit and before are numbers"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/auth/refresh",
+  "status": 200,
+  "body": {
+    "ok": true
+  }
+}

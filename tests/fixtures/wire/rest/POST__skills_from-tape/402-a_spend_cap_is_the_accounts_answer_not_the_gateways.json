@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills/from-tape",
+  "status": 402,
+  "body": "Ada has spent its $5.00 daily limit; raise it or wait for tomorrow. The recording was not consumed: nothing was stored, and the same tape can be sent again."
+}

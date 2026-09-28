@@ -1,0 +1,61 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/threads/th-pending-0199bb4e000070008000000000000001/pending",
+  "status": 200,
+  "body": {
+    "v": 1,
+    "threadId": "th-pending-0199bb4e000070008000000000000001",
+    "event": {
+      "type": "CUSTOM",
+      "timestamp": 100,
+      "name": "pending-user-message",
+      "value": {
+        "v": 1,
+        "op": "created",
+        "threadId": "th-pending-0199bb4e000070008000000000000001",
+        "message": {
+          "v": 1,
+          "id": "pum_0199bb4e-0000-7000-8000-000000000002",
+          "threadId": "th-pending-0199bb4e000070008000000000000001",
+          "content": "send this after the turn",
+          "replyTo": {
+            "preview": "hi",
+            "messageId": "m1"
+          },
+          "recipeId": "rec_demo",
+          "recipeValues": {
+            "q": "later"
+          },
+          "skillId": "skl_demo",
+          "clientMessageId": "msg_bubble_1",
+          "status": "pending",
+          "createdAtMs": 1790000000000,
+          "updatedAtMs": 1790000000000,
+          "drainedAtMs": null,
+          "drainedRunId": null
+        }
+      }
+    },
+    "pendingUserMessage": {
+      "v": 1,
+      "id": "pum_0199bb4e-0000-7000-8000-000000000002",
+      "threadId": "th-pending-0199bb4e000070008000000000000001",
+      "content": "send this after the turn",
+      "replyTo": {
+        "preview": "hi",
+        "messageId": "m1"
+      },
+      "recipeId": "rec_demo",
+      "recipeValues": {
+        "q": "later"
+      },
+      "skillId": "skl_demo",
+      "clientMessageId": "msg_bubble_1",
+      "status": "pending",
+      "createdAtMs": 1790000000000,
+      "updatedAtMs": 1790000000000,
+      "drainedAtMs": null,
+      "drainedRunId": null
+    }
+  }
+}

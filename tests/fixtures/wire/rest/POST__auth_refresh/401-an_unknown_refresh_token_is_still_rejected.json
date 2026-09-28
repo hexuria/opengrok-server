@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/auth/refresh",
+  "status": 401,
+  "body": "session expired"
+}

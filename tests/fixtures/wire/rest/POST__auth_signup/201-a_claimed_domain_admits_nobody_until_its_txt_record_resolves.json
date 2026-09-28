@@ -1,0 +1,10 @@
+{
+  "method": "POST",
+  "path": "/auth/signup",
+  "status": 201,
+  "body": {
+    "account_id": "acct_0199bb4e-0000-7000-8000-000000000001",
+    "verification_email_sent": false,
+    "verified": true
+  }
+}

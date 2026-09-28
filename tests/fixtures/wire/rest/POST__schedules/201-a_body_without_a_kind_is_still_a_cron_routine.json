@@ -1,0 +1,16 @@
+{
+  "method": "POST",
+  "path": "/schedules",
+  "status": 201,
+  "body": {
+    "id": "sched_0199bb4e-0000-7000-8000-000000000001",
+    "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+    "name": "Monday report",
+    "cron": "0 0 9 * * 1",
+    "prompt": "Monday report",
+    "kind": "cron",
+    "active": true,
+    "nextDueMs": 1790000000000,
+    "lastRun": null
+  }
+}

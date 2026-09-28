@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills/from-tape",
+  "status": 413,
+  "body": "the tape is over 5 MB; teach a shorter task. The recording was not consumed: nothing was stored, and the same tape can be sent again."
+}

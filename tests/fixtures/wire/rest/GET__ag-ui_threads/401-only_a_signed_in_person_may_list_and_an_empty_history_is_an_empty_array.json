@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads",
+  "status": 401,
+  "body": {
+    "error": "sign in first"
+  }
+}

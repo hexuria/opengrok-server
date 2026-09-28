@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/threads/th-never-heard-of/pending",
+  "status": 404,
+  "body": "no such thread"
+}

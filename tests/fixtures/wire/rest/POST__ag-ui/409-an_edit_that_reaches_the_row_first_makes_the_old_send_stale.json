@@ -1,0 +1,38 @@
+{
+  "method": "POST",
+  "path": "/ag-ui",
+  "status": 409,
+  "body": {
+    "v": 1,
+    "error": "stale-pending-message",
+    "id": "pum_0199bb4e-0000-7000-8000-000000000001",
+    "runId": null,
+    "message": "This queued message changed. Refresh it before sending again.",
+    "event": {
+      "type": "CUSTOM",
+      "timestamp": 100,
+      "name": "pending-user-message",
+      "value": {
+        "v": 1,
+        "op": "edited",
+        "threadId": "edit-first-0199bb4e000070008000000000000002",
+        "message": {
+          "v": 1,
+          "id": "pum_0199bb4e-0000-7000-8000-000000000001",
+          "threadId": "edit-first-0199bb4e000070008000000000000002",
+          "content": "edited",
+          "replyTo": null,
+          "recipeId": null,
+          "recipeValues": null,
+          "skillId": null,
+          "clientMessageId": "bubble",
+          "status": "pending",
+          "createdAtMs": 1790000000000,
+          "updatedAtMs": 1790000001000,
+          "drainedAtMs": null,
+          "drainedRunId": null
+        }
+      }
+    }
+  }
+}

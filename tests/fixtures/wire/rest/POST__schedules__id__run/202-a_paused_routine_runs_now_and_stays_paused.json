@@ -1,0 +1,9 @@
+{
+  "method": "POST",
+  "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001/run",
+  "status": 202,
+  "body": {
+    "accepted": true,
+    "runId": "run_0199bb4e-0000-7000-8000-000000000002"
+  }
+}

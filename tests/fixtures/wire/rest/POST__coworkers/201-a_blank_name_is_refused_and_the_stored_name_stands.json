@@ -1,0 +1,32 @@
+{
+  "method": "POST",
+  "path": "/coworkers",
+  "status": 201,
+  "body": {
+    "id": "cw_0199bb4e-0000-7000-8000-000000000001",
+    "name": "New Bot",
+    "model": "oag/cheap",
+    "role": null,
+    "title": null,
+    "avatarShape": null,
+    "avatarColor": null,
+    "visibility": "private",
+    "hiddenFromSidebar": false,
+    "updatedAtMs": 1790000000000,
+    "boxId": null,
+    "isGroup": false,
+    "memberIds": [],
+    "mine": true,
+    "canManage": true,
+    "owner": {
+      "id": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "name": "Test User"
+    },
+    "computerError": {
+      "code": "no_org_key",
+      "message": "no computer is configured for your organization — an admin must set up box.ascii.dev on the dashboard",
+      "updatedAtMs": 1790000000000
+    },
+    "templateNote": null
+  }
+}

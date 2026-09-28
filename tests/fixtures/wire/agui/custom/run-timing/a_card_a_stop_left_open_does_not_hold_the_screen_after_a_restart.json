@@ -1,0 +1,38 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-timing",
+  "threadId": "thr-a-0199bb4e-0000-7000-8000-000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "value": {
+    "model_ms": [
+      1790000000000
+    ],
+    "tools": [
+      {
+        "name": "request_user_form",
+        "ms": 0
+      }
+    ],
+    "tool_wait_ms": 1790000000000,
+    "auto_review_ms": 1790000000000,
+    "total_ms": 1790000001000,
+    "tool_rounds": 1,
+    "budget": {
+      "max_rounds": 8,
+      "max_computer_rounds": 24,
+      "max_wall_ms": 1790000002000,
+      "call_timeout_ms": 1790000003000,
+      "idle_ms": 1790000004000
+    },
+    "context": {
+      "limit": 128000,
+      "estimated": [
+        4328
+      ],
+      "left_out": 0
+    }
+  },
+  "total_ms": 1790000001000,
+  "tool_rounds": 1
+}

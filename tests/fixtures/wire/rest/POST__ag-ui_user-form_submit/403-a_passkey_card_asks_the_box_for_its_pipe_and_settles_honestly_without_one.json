@@ -1,0 +1,9 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/submit",
+  "status": 403,
+  "body": {
+    "error": "shared-computer",
+    "message": "This computer is shared with other bots or people, so a saved login is not used on it. Type the login by hand, or give this bot its own computer."
+  }
+}

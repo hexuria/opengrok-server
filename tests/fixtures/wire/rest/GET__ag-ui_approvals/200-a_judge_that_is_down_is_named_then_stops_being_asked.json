@@ -1,0 +1,20 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/approvals",
+  "status": 200,
+  "body": [
+    {
+      "runId": "0199bb4e-0000-7000-8000-000000000001",
+      "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000003",
+      "origin": "chat",
+      "callId": "ls-1",
+      "tool": "shell",
+      "arguments": {
+        "command": "ls"
+      },
+      "reason": "auto-review",
+      "why": "The reviewer did not answer (this coworker's spend limit was reached), so this is being asked rather than allowed."
+    }
+  ]
+}

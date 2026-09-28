@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/auth/signup",
+  "status": 403,
+  "body": {
+    "error": "this email's domain is not one this organization has registered"
+  }
+}

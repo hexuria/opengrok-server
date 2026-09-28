@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/ag-ui",
+  "status": 401,
+  "body": {
+    "error": "a turn needs a signed-in caller; sign in and send it again"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/recipes/rcp_0199bb4e-0000-7000-8000-000000000001/run",
+  "status": 422,
+  "body": "`rcp_0199bb4e-0000-7000-8000-000000000001` is a workflow, not a recipe: it is a decision tree that calls recipes, and it is run from the workflow route rather than played as a tape"
+}

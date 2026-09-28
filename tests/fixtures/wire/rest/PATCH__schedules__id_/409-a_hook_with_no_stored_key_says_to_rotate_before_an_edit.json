@@ -1,0 +1,8 @@
+{
+  "method": "PATCH",
+  "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001",
+  "status": 409,
+  "body": {
+    "error": "this webhook routine was made before its key was stored; rotate its key, then edit it"
+  }
+}

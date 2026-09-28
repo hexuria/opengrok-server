@@ -1,0 +1,20 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/runs/run_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "runId": "run_0199bb4e-0000-7000-8000-000000000001",
+    "threadId": "th-0199bb4e000070008000000000000002",
+    "status": "failed",
+    "startedAtMs": 1790000000000,
+    "failure": "the model gateway refused",
+    "pending": null,
+    "events": [
+      {
+        "type": "TEXT_MESSAGE_CONTENT",
+        "delta": "most of the way",
+        "messageId": "msg-1"
+      }
+    ]
+  }
+}

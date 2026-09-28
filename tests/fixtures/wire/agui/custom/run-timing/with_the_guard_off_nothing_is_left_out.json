@@ -1,0 +1,33 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-timing",
+  "threadId": "thr-off",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "value": {
+    "model_ms": [
+      1790000000000
+    ],
+    "tools": [],
+    "tool_wait_ms": 1790000001000,
+    "auto_review_ms": 1790000001000,
+    "total_ms": 1790000002000,
+    "tool_rounds": 0,
+    "budget": {
+      "max_rounds": 8,
+      "max_computer_rounds": 24,
+      "max_wall_ms": 1790000003000,
+      "call_timeout_ms": 1790000004000,
+      "idle_ms": 1790000005000
+    },
+    "context": {
+      "limit": null,
+      "estimated": [
+        3499
+      ],
+      "left_out": 0
+    }
+  },
+  "total_ms": 1790000002000,
+  "tool_rounds": 0
+}

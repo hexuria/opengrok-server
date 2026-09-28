@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/threads/th-v2-0199bb4e000070008000000000000001/pending",
+  "status": 400,
+  "body": "pending user messages are v:1; this client sent v:2"
+}

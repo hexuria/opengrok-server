@@ -1,0 +1,9 @@
+{
+  "method": "GET",
+  "path": "/auth/cursor_dev_session_token",
+  "status": 401,
+  "body": {
+    "error": "dev sign-in is loopback-only; use the browser login",
+    "shouldLogout": true
+  }
+}

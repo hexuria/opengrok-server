@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/recipes/rcp_0199bb4e-0000-7000-8000-000000000001/run",
+  "status": 502,
+  "body": "the box is unreachable: the stand-in box is down"
+}

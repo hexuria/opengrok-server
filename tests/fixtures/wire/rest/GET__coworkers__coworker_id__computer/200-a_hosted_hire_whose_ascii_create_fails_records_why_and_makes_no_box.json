@@ -1,0 +1,16 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/computer",
+  "status": 200,
+  "body": {
+    "agentId": "cw_0199bb4e-0000-7000-8000-000000000001",
+    "state": "absent",
+    "vncUrl": null,
+    "computerError": {
+      "code": "quota_exceeded",
+      "message": "the box refused: 429 {\"error\":\"box creation rate limit reached\"}",
+      "updatedAtMs": 1790000000000
+    },
+    "isEgressTunnelAvailable": false
+  }
+}

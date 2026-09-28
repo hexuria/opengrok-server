@@ -1,0 +1,26 @@
+{
+  "method": "POST",
+  "path": "/recipes/rcp_0199bb4e-0000-7000-8000-000000000001/run",
+  "status": 200,
+  "body": {
+    "recipe": "rcp_0199bb4e-0000-7000-8000-000000000001",
+    "version": 1,
+    "runId": "rrun_0199bb4e-0000-7000-8000-000000000002",
+    "ok": true,
+    "ran": 1,
+    "stoppedAt": null,
+    "error": null,
+    "image": null,
+    "artifacts": [
+      {
+        "id": "art_0199bb4e-0000-7000-8000-000000000003",
+        "kind": "screenshot",
+        "mime": "image/png",
+        "stepIndex": 0,
+        "sizeBytes": 8,
+        "meta": {}
+      }
+    ],
+    "artifactsMissed": []
+  }
+}

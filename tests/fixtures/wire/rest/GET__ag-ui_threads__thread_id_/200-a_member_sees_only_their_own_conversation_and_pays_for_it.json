@@ -1,0 +1,20 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads/gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+    "runs": [
+      {
+        "runId": "0199bb4e-0000-7000-8000-000000000002",
+        "status": "finished",
+        "startedAtMs": 1790000000000,
+        "updatedAtMs": 1790000001000,
+        "failure": null
+      }
+    ],
+    "hiddenRunIds": [],
+    "pendingUserMessages": [],
+    "pendingEvents": []
+  }
+}

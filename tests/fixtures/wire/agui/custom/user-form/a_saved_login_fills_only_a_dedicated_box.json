@@ -1,0 +1,98 @@
+{
+  "name": "user-form",
+  "type": "CUSTOM",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "value": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000002",
+    "kind": "send-message",
+    "callId": "mock-form-1",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "Google account",
+        "fields": [
+          {
+            "id": "email",
+            "type": "email",
+            "label": "Email",
+            "secret": false,
+            "required": true
+          },
+          {
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": true
+          }
+        ],
+        "liveHost": "accounts.google.com",
+        "instruction": "Enter the address and password."
+      }
+    },
+    "timestampMs": 1790000000000,
+    "formResolution": "submitted",
+    "formFieldOutcomes": [
+      {
+        "id": "email",
+        "filled": true,
+        "fillFailed": false
+      },
+      {
+        "id": "password",
+        "filled": false,
+        "fillFailed": false
+      }
+    ]
+  },
+  "callId": "mock-form-1",
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000002",
+  "message": {
+    "type": "user-form",
+    "formRequest": {
+      "title": "Google account",
+      "fields": [
+        {
+          "id": "email",
+          "type": "email",
+          "label": "Email",
+          "secret": false,
+          "required": true
+        },
+        {
+          "id": "password",
+          "type": "password",
+          "label": "Password",
+          "secret": false,
+          "required": true
+        }
+      ],
+      "liveHost": "accounts.google.com",
+      "instruction": "Enter the address and password."
+    }
+  },
+  "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000003",
+  "timestamp": 100,
+  "formRequest": {
+    "title": "Google account",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email",
+        "label": "Email",
+        "secret": false,
+        "required": true
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": true
+      }
+    ],
+    "liveHost": "accounts.google.com",
+    "instruction": "Enter the address and password."
+  },
+  "formResolution": "submitted"
+}

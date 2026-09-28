@@ -1,0 +1,19 @@
+{
+  "method": "DELETE",
+  "path": "/ag-ui/threads/th-requeue-0199bb4e000070008000000000000001/pending/pum_0199bb4e-0000-7000-8000-000000000002",
+  "status": 200,
+  "body": {
+    "v": 1,
+    "threadId": "th-requeue-0199bb4e000070008000000000000001",
+    "event": {
+      "type": "CUSTOM",
+      "timestamp": 100,
+      "name": "pending-user-message",
+      "value": {
+        "v": 1,
+        "op": "canceled",
+        "threadId": "th-requeue-0199bb4e000070008000000000000001"
+      }
+    }
+  }
+}

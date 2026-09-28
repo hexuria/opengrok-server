@@ -1,0 +1,11 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/runs/run_0199bb4e-0000-7000-8000-000000000001/stop",
+  "status": 202,
+  "body": {
+    "runId": "run_0199bb4e-0000-7000-8000-000000000001",
+    "status": "stopped",
+    "takesEffect": "next-step",
+    "note": "That run is stopped. A step already under way — a model call, or a recipe playing on the computer — finishes first; nothing after it will be started."
+  }
+}

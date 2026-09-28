@@ -1,0 +1,11 @@
+{
+  "method": "POST",
+  "path": "/skills/skl_0199bb4e-0000-7000-8000-000000000001/versions",
+  "status": 200,
+  "body": {
+    "version": 1,
+    "kind": "authored",
+    "createdAtMs": 1790000000000,
+    "note": ""
+  }
+}

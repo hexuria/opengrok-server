@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/recipes",
+  "status": 200,
+  "body": {
+    "recipes": []
+  }
+}

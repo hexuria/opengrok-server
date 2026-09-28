@@ -1,0 +1,20 @@
+{
+  "method": "POST",
+  "path": "/skills",
+  "status": 200,
+  "body": {
+    "id": "skl_0199bb4e-0000-7000-8000-000000000001",
+    "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+    "name": "short-enough-0199bb4e000070008000000000000003",
+    "description": "",
+    "source": "authored",
+    "updatedAtMs": 1790000000000,
+    "versionCount": 1,
+    "draft": false,
+    "enabled": true,
+    "approvedAtMs": 1790000000000,
+    "body": "fine",
+    "version": 1,
+    "files": []
+  }
+}
