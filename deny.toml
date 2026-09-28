@@ -22,6 +22,10 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0098" },
     { id = "RUSTSEC-2026-0104", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0098" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 1.0.4 is unmaintained with no upgrade; typesafe-sdk 0.1.2 pulls it through reqwest 0.11" },
+    # pdf-extract 0.12 (a person's PDF attachments, #229) reads fonts through lopdf 0.42, which
+    # requires ttf-parser. Unmaintained, with no known flaw and no upgrade; the parse runs in
+    # spawn_blocking under a 10-second limit, and a panic or a timeout is a sentence to the model.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1 is unmaintained with no upgrade; only lopdf 0.42 under pdf-extract reaches it, parsing PDF attachments off the request thread" },
     # jsonwebtoken 11 with `rust_crypto` links rsa whatever algorithm is used. Our tokens are HS256
     # only, and every Validation is built with Algorithm::HS256, which refuses an RS* token before
     # any RSA code runs (crates/opengrok-server/src/auth/token.rs). rsa has no fixed release.

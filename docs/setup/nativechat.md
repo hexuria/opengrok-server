@@ -182,7 +182,7 @@ Show them before a send, so a big file is not found out after it.
 | A picture the model sees | `image/png`, `image/jpeg`, `image/gif`, `image/webp`, up to 10 MiB (`IMAGE_MIMES`, `MAX_IMAGE_BYTES`) | Named to the model, not shown to it |
 | Pictures in one turn | 8 of them, and 20 MiB in all (`MAX_TURN_IMAGES`, `MAX_TURN_IMAGE_BYTES`) | The rest are named, saying the turn already carries as many as one request can |
 | A text file the model reads | Its first 20,000 characters (`MAX_TEXT_CHARS`) | The model is told where it was cut |
-| A PDF | Named to the model with a sentence that its text cannot be read yet | Text extraction is not built yet |
+| A PDF the model reads | The text of its first 100 pages (`MAX_PDF_PAGES`), then cut like a text file; read within 10 seconds (`PDF_TIMEOUT`) | A PDF that cannot be read, takes too long, or holds no text (a scan) is named, saying so |
 | A file from an earlier message | Named to the model, not sent again | |
 | An `art_` id the caller does not own, or a missing one | | The turn is refused before it starts: `404 {"error": "no such attachment: art_…"}` |
 

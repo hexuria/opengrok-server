@@ -17,6 +17,8 @@ jev = ["dep:typesafe-sdk"]
 record-wire = []
 
 [dev-dependencies]
+# Builds the PDFs the attachment tests read (#229): the parser `pdf-extract` reads them with.
+lopdf = "0.42"
 opengrok-server = { path = ".", default-features = false, features = ["record-wire"] }
 sqlx.workspace = true
 base64.workspace = true
@@ -65,3 +67,6 @@ uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 typesafe-sdk = { workspace = true, optional = true }
+# A PDF a person attaches reaches the model as its text (#229). Read in `spawn_blocking` under a
+# timeout: it parses an untrusted file, and panics on a malformed one as often as it errors.
+pdf-extract = "0.12"
