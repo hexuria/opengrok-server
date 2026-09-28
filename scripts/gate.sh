@@ -80,8 +80,23 @@ fi
 # test step spent. It does not run doctests, so those keep cargo test. Without nextest installed
 # the gate falls back to cargo test, which runs the same tests.
 if command -v cargo-nextest >/dev/null 2>&1; then
+  # THE SAME RUN RECORDS THE WIRE NATIVECHAT READS (#255), so checking tests/fixtures/wire/ costs
+  # no second pass. Only with a database: without one most of the frames' tests skip, and a
+  # short recording would call a current corpus stale.
+  wire=""
+  # Removed straight after the check, not by a trap: the smokes below set their own EXIT trap.
+  if [ -n "${OG_DATABASE_URL:-}" ]; then
+    wire=$(mktemp -d)
+  fi
   step "cargo nextest run --workspace"
-  cargo nextest run --workspace --no-fail-fast || fail "tests"
+  OG_RECORD_WIRE="$wire" cargo nextest run --workspace --no-fail-fast || { rm -rf "$wire"; fail "tests"; }
+  if [ -n "$wire" ]; then
+    step "scripts/record-wire.sh --check"
+    current=0
+    scripts/record-wire.sh --from "$wire" --check || current=$?
+    rm -rf "$wire"
+    [ "$current" = 0 ] || fail "the wire corpus is stale: run scripts/record-wire.sh and commit tests/fixtures/wire/"
+  fi
   step "cargo test --workspace --doc"
   cargo test --workspace --doc || fail "doctests"
 else

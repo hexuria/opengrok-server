@@ -175,6 +175,43 @@ pub struct Message {
     pub extra: Extra,
 }
 
+/// Every AG-UI `type` this server sends (#255). NativeChat's wire ledger is two-way: every word
+/// here must be one the app reads or excuses, so this is the list of what the server CAN send,
+/// not what a test happened to exercise. `the_wire_names_are_all_listed` (opengrok-server)
+/// scans the non-test source for `EventType::…` and `"type": "…"` and fails on one missing here.
+pub const SENT_TYPES: &[EventType] = &[
+    EventType::RunStarted,
+    EventType::RunFinished,
+    EventType::RunError,
+    EventType::TextMessageStart,
+    EventType::TextMessageContent,
+    EventType::TextMessageEnd,
+    EventType::ToolCallStart,
+    EventType::ToolCallArgs,
+    EventType::ToolCallEnd,
+    EventType::ToolCallResult,
+    EventType::ReasoningMessageStart,
+    EventType::ReasoningMessageContent,
+    EventType::ReasoningMessageEnd,
+    EventType::Custom,
+];
+
+/// Every CUSTOM `name` this server sends (#255), with the same two-way rule and the same scan
+/// as `SENT_TYPES`. Producers: `run-awaiting-approval`, `box-waking` and `run-stopped` in
+/// opengrok-harness `projection.rs` (and `run-stopped` again on the server's stop paths);
+/// `run-timing` in opengrok-harness `timing.rs`; `pending-user-message` in opengrok-server
+/// `agui/pending.rs`; `user-form` in opengrok-server `agui/user_form.rs`; and
+/// `credential.offer_save` in opengrok-tools `credential.rs`.
+pub const CUSTOM_NAMES: &[&str] = &[
+    "run-awaiting-approval",
+    "run-stopped",
+    "box-waking",
+    "run-timing",
+    "pending-user-message",
+    "user-form",
+    "credential.offer_save",
+];
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

@@ -269,6 +269,21 @@ impl MockDoor {
         }
     }
 
+    /// A door that reasons, asks to run a shell command, then answers: every frame a turn with
+    /// thinking and a tool can stream (#255). NativeChat reads reasoning and tool steps into its
+    /// feed, and the wire corpus is recorded from what the tests stream, so one turn must.
+    pub fn reasoning_then_a_tool() -> Self {
+        let mut script = vec![ModelDelta::Reasoning(
+            "the person wants to know what is on the box".to_string(),
+        )];
+        script.extend(Self::shell_script());
+        Self {
+            script,
+            once_then_answer: true,
+            ..Self::default()
+        }
+    }
+
     /// A door that raises an in-chat `user-form`, then stops until the person answers.
     pub fn asking_for_user_form() -> Self {
         Self {

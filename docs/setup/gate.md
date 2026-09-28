@@ -42,6 +42,33 @@ OG_PORT=1449 OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok_gate \
   by killing whatever is listening there. The default is 1447 — pointing it at your live
   server kills the live server.
 
+## The wire corpus NativeChat reads
+
+NativeChat transcribes this server's wire by hand, and nothing else checks that the two still
+agree (#255). `tests/fixtures/wire/` is the server's side of that check: every AG-UI frame and
+every REST body NativeChat reads, recorded from this repo's own tests. NativeChat copies it in,
+pinned by the `server_sha` in its `MANIFEST.json`, and parses every file.
+
+- `scripts/record-wire.sh` records it and writes `tests/fixtures/wire/`. Commit the result when
+  a change alters what a route answers or a turn streams.
+- The gate's own test run records it too (when `OG_DATABASE_URL` is set and nextest is
+  installed), then checks the committed copy. It fails on a frame type, a route and status, or a
+  field that the committed copy does not show NativeChat. A field that was not seen this time is
+  only noted: some tests read a routine while its run is still in flight, and whether a field
+  is `null` or an object depends on timing.
+- `MANIFEST.json`'s `emits` is every AG-UI type, CUSTOM name, approval reason and form resolution
+  the server CAN send. It comes from `opengrok_wire::agui::SENT_TYPES` and `CUSTOM_NAMES` and
+  from the enums, not from what the tests happened to reach. `the_wire_names_are_all_listed`
+  scans the source and fails when a producer sends a name those lists do not hold. A word with no
+  fixture is listed in `unrecorded`.
+- Ids and clocks are placeholders in the server's own formats. Secrets are `«redacted»`: keys
+  named like tokens, keys and passwords, `Bearer` values, gateway keys, and any JWT anywhere in
+  a string.
+
+The recorder (`crates/opengrok-server/src/wire_record.rs`) is compiled only with the
+`record-wire` feature, which only the tests turn on, and runs only while `OG_RECORD_WIRE` names a
+directory.
+
 ## CI suites
 
 `.github/workflows/ci.yml` runs only the suites a change needs; `scripts/ci-scope.sh` decides.

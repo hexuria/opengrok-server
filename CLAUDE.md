@@ -114,6 +114,7 @@ scripts/crate-size.sh            # fail if any crate's src/ is over its recorded
 scripts/check-architecture.sh    # fail on a crate edge scripts/architecture.txt does not allow
 scripts/formal.sh                # TLC + Lean on formal/ (install: scripts/install-tla.sh, install-lean.sh)
 scripts/install-ci-tools.sh      # pinned cargo-deny + cargo-nextest; gate.sh uses them when present
+scripts/record-wire.sh           # the wire corpus NativeChat vendors, tests/fixtures/wire/; docs/setup/gate.md
 ```
 
 **CI runs by branch prefix:** `doc-*` runs only the doc tests, `formal-*` only TLA+/Lean, `web-*`

@@ -20,6 +20,8 @@ pub mod hooks;
 pub mod host_state;
 #[cfg(feature = "jev")]
 pub mod jev;
+#[cfg(feature = "record-wire")]
+mod wire_record;
 #[cfg(not(feature = "jev"))]
 pub mod jev {
     /// AuthState holds `Option<SharedJev>`. Uninhabited so a door cannot be built when the SDK
@@ -79,6 +81,14 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
         .merge(computers::router(state.clone()))
         .nest("/mcp", mcp_door::router(host))
         .merge(connections::routes::router(state));
+    // The wire corpus (#255): test builds only, and only while `OG_RECORD_WIRE` is set. Added
+    // before the console is mounted, so it sees the API's routes and not the static files.
+    #[cfg(feature = "record-wire")]
+    let app = if wire_record::directory().is_some() {
+        app.layer(axum::middleware::from_fn(wire_record::record))
+    } else {
+        app
+    };
     let app = mount_web_console(app);
     // Request trace, ON by default (`OG_TRACE_REQUESTS=0` turns it off): one INFO line per
     // request with method, path, status, the request id, whether an Origin header was present,
