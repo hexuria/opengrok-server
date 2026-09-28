@@ -1,5 +1,5 @@
 {
-  "server_sha": "de8e6e3ac0251576c96be57b82b0339ae08fa6e1",
+  "server_sha": "7c5d02627123e4750a406f35e5883951f6559875",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -714,23 +714,31 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted.json",
-      "source": "GET /schedules, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
-    },
-    {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_retired_coworker_can_neither_take_nor_run_a_routine.json",
-      "source": "GET /schedules, recorded from the test a_retired_coworker_can_neither_take_nor_run_a_routine (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-3.json",
+      "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__schedules/200-a_retired_coworker_can_neither_take_nor_run_a_routine.json",
+      "source": "GET /schedules, recorded from the test a_retired_coworker_can_neither_take_nor_run_a_routine (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__schedules/200-an_edited_routine_runs_now_with_its_new_prompt.json",
+      "source": "GET /schedules, recorded from the test an_edited_routine_runs_now_with_its_new_prompt (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-2.json",
+      "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__schedules/200-an_edited_routine_runs_now_with_its_new_prompt-2.json",
       "source": "GET /schedules, recorded from the test an_edited_routine_runs_now_with_its_new_prompt (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
