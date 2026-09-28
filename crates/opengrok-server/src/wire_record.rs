@@ -54,13 +54,15 @@ pub(crate) async fn record(request: Request, next: Next) -> Response {
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("application/json") || value.starts_with("text/"));
-    let small = response
+    let length = response
         .headers()
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_none_or(|length| length <= BODY_LIMIT);
-    if !(streams || readable && small) {
+        .and_then(|value| value.parse::<usize>().ok());
+    let small = length.is_none_or(|length| length <= BODY_LIMIT);
+    // A reply with no body (`204`) has no type either, and its status is what a client reads.
+    let empty = status == 204 || length == Some(0);
+    if !(streams || empty || readable && small) {
         return response;
     }
     let (parts, body) = response.into_parts();
