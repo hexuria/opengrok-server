@@ -249,6 +249,13 @@ fn slug(test: &str) -> String {
 }
 
 fn build(record_dir: &Path, out: &Path, sha: &str) {
+    if !record_dir.join("raw").is_dir() {
+        eprintln!(
+            "nothing was recorded under {}: run the tests with OG_RECORD_WIRE set, against a database",
+            record_dir.display()
+        );
+        std::process::exit(1);
+    }
     let mut chosen: BTreeMap<(String, Option<u16>, String), Record> = BTreeMap::new();
     for record in records(record_dir) {
         let mut content = record.content.clone();
@@ -750,6 +757,14 @@ fn emits_of(dir: &Path) -> Value {
 /// an object by timing, and failing on that would fail the gate at random.
 fn check(built: &Path, committed: &Path) -> bool {
     let (fresh, kept) = (groups(built), groups(committed));
+    // AN EMPTY RECORDING PROVES NOTHING. With every group missing only noted, a run that recorded
+    // nothing (no database, no OG_RECORD_WIRE) would call any corpus current (review of #258).
+    if fresh.is_empty() {
+        eprintln!(
+            "the fresh recording has no fixtures, so it cannot vouch for the committed corpus"
+        );
+        return false;
+    }
     let mut fine = true;
     for (group, fields) in &fresh {
         let Some(known) = kept.get(group) else {

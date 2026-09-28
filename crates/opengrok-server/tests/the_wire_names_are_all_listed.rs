@@ -46,14 +46,43 @@ fn source() -> Vec<(PathBuf, String)> {
         .into_iter()
         .map(|path| {
             let text = std::fs::read_to_string(&path).expect("read");
-            let cut = text
-                .lines()
-                .take_while(|line| *line != "#[cfg(test)]")
-                .collect::<Vec<_>>()
-                .join("\n");
-            (path, cut)
+            (path, producing_code(&text))
         })
         .collect()
+}
+
+/// The code that can produce a frame: comment lines dropped (a doc may name `EventType::Raw`
+/// without anything sending it), the file cut at its test module rather than at any
+/// `#[cfg(test)]` (a test-only helper mid-file would hide the producers after it), and the
+/// `SENT_TYPES` initializer left out, which lists types rather than sends them (review of #258:
+/// scanning it let a listed type nothing sends pass).
+fn producing_code(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let test_module = lines.iter().enumerate().position(|(at, line)| {
+        *line == "#[cfg(test)]"
+            && lines[at + 1..]
+                .iter()
+                .find(|next| !next.starts_with("#["))
+                .is_some_and(|next| next.starts_with("mod ") || next.starts_with("pub mod "))
+    });
+    let mut kept = Vec::new();
+    let mut in_list = false;
+    for line in &lines[..test_module.unwrap_or(lines.len())] {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        if code.starts_with("pub const SENT_TYPES") {
+            in_list = true;
+        }
+        if !in_list {
+            kept.push(*line);
+        }
+        if in_list && code.starts_with("];") {
+            in_list = false;
+        }
+    }
+    kept.join("\n")
 }
 
 fn screaming(camel: &str) -> String {

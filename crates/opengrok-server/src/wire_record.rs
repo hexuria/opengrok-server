@@ -46,6 +46,23 @@ pub(crate) async fn record(request: Request, next: Next) -> Response {
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("text/event-stream"));
+    // ONLY WHAT NATIVECHAT READS AS WORDS IS BUFFERED. A body that is not JSON or text (a file's
+    // bytes), or that says it is larger than the limit, passes through untouched: reading it here
+    // and failing would hand the test an empty body in place of its own (review of #258).
+    let readable = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/json") || value.starts_with("text/"));
+    let small = response
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_none_or(|length| length <= BODY_LIMIT);
+    if !(streams || readable && small) {
+        return response;
+    }
     let (parts, body) = response.into_parts();
     if streams {
         // Teed frame by frame, so the stream still reaches the test as it is written.
@@ -113,6 +130,10 @@ fn test_binary() -> String {
     }
 }
 
+/// One writer at a time: tasks on a multi-threaded runtime share this process's file, and two
+/// appends interleaved mid-line would leave a record no builder can read.
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn write(mut record: Value) {
     let Some(directory) = directory() else {
         return;
@@ -126,11 +147,13 @@ fn write(mut record: Value) {
         return;
     }
     let file = raw.join(format!("{}.jsonl", std::process::id()));
+    let line = format!("{record}\n");
+    let _held = WRITING.lock();
     if let Ok(mut out) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(file)
     {
-        let _ = writeln!(out, "{record}");
+        let _ = out.write_all(line.as_bytes());
     }
 }
