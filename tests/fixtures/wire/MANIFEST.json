@@ -1,5 +1,5 @@
 {
-  "server_sha": "c7eab5cbfff4c1cfb57dd52e189d67531c09729d",
+  "server_sha": "e898e78adca3359a2a51d380b17d3510cc48b60a",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -454,6 +454,22 @@
       "source": "GET /ag-ui/threads/{thread_id}/pending, recorded from the test enqueue_edit_cancel_and_hydrate_are_per_account (crates/opengrok-server/tests/against_pending_user_messages.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__artifacts/200-another_accounts_file_refuses_the_turn_before_the_model_is_asked.json",
+      "source": "GET /artifacts, recorded from the test another_accounts_file_refuses_the_turn_before_the_model_is_asked (crates/opengrok-server/tests/against_an_attachment.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__artifacts/200-a_file_sent_on_another_thread_is_listed_there.json",
+      "source": "GET /artifacts, recorded from the test a_file_sent_on_another_thread_is_listed_there (crates/opengrok-server/tests/against_an_attachment.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__artifacts/200-a_message_of_files_keeps_its_parts_and_is_drawn_on_replay.json",
+      "source": "GET /artifacts, recorded from the test a_message_of_files_keeps_its_parts_and_is_drawn_on_replay (crates/opengrok-server/tests/against_an_attachment.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__artifacts/200-another_accounts_file_refuses_the_turn_before_the_model_is_asked-2.json",
+      "source": "GET /artifacts, recorded from the test another_accounts_file_refuses_the_turn_before_the_model_is_asked (crates/opengrok-server/tests/against_an_attachment.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__auth_cursor_dev_session_token/200-the_dev_sign_in_answers_only_a_local_caller_and_never_takes_over_a_real_account.json",
       "source": "GET /auth/cursor_dev_session_token, recorded from the test the_dev_sign_in_answers_only_a_local_caller_and_never_takes_over_a_real_account (crates/opengrok-server/tests/against_the_web_console.rs); ids and times are placeholders"
     },
@@ -698,8 +714,8 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
-      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted.json",
+      "source": "GET /schedules, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
@@ -878,6 +894,10 @@
       "source": "POST /ag-ui, recorded from the test a_private_coworker_and_an_orgless_owner_share_with_nobody (crates/opengrok-server/tests/against_visibility.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/POST__ag-ui/404-another_accounts_file_refuses_the_turn_before_the_model_is_asked.json",
+      "source": "POST /ag-ui, recorded from the test another_accounts_file_refuses_the_turn_before_the_model_is_asked (crates/opengrok-server/tests/against_an_attachment.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/POST__ag-ui/409-an_edit_that_reaches_the_row_first_makes_the_old_send_stale.json",
       "source": "POST /ag-ui, recorded from the test an_edit_that_reaches_the_row_first_makes_the_old_send_stale (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
@@ -1044,6 +1064,14 @@
     {
       "file": "rest/POST__ag-ui_user-form_submit/503-a_submit_that_cannot_read_the_run_log_leaves_the_card_open.json",
       "source": "POST /ag-ui/user-form/submit, recorded from the test a_submit_that_cannot_read_the_run_log_leaves_the_card_open (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__artifacts/200-a_file_cannot_write_outside_the_block_it_is_read_in.json",
+      "source": "POST /artifacts, recorded from the test a_file_cannot_write_outside_the_block_it_is_read_in (crates/opengrok-server/tests/against_an_attachment.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__artifacts/400-a_file_cannot_write_outside_the_block_it_is_read_in.json",
+      "source": "POST /artifacts, recorded from the test a_file_cannot_write_outside_the_block_it_is_read_in (crates/opengrok-server/tests/against_an_attachment.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__auth_login/200-a_browser_logs_in_by_cookie_and_reaches_its_account_with_no_bearer.json",

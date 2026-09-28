@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/artifacts",
+  "status": 400,
+  "body": "the filename must be one line with no quotes, and the type a plain type/subtype"
+}

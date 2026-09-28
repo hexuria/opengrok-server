@@ -1,0 +1,24 @@
+{
+  "method": "GET",
+  "path": "/artifacts",
+  "status": 200,
+  "body": [
+    {
+      "id": "art_0199bb4e-0000-7000-8000-000000000001",
+      "accountId": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "kind": "attachment",
+      "mime": "text/plain",
+      "filename": "moved.txt",
+      "sizeBytes": 5,
+      "recipeId": null,
+      "runId": null,
+      "stepIndex": null,
+      "threadId": "th-0199bb4e000070008000000000000003",
+      "meta": {
+        "messageId": "m-moved"
+      },
+      "createdAtMs": 1790000000000,
+      "deletedAtMs": null
+    }
+  ]
+}
