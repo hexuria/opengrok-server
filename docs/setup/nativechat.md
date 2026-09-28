@@ -166,6 +166,29 @@ and the events of that run itself (`run/{id}`) never wake it again; another moni
 event the run causes elsewhere (a computer assigned, say), can still match. Its history's `cause`
 is `event` (the log woke it) or `manual`.
 
+## Attachments: what the server accepts and what the model sees
+
+The shape is the one NativeChat chose in hexuria/nativechat#90 (#229): upload the file to
+`POST /artifacts` with `kind: "attachment"`, then name its `art_` id in an AG-UI 1.0 `image` or
+`document` part of the user message. The numbers below are the server's, from
+`crates/opengrok-server/src/artifacts.rs` and `crates/opengrok-server/src/agui/attachments.rs`.
+Show them before a send, so a big file is not found out after it.
+
+| What | Limit | Past it, or otherwise |
+|---|---|---|
+| Upload, any file | 25 MiB after base64 decoding (`MAX_ARTIFACT_BYTES`) | `413`, "artifacts must be under 25 MiB" |
+| Upload types | `image/*`, `video/*`, `application/pdf`, `text/*` | `400`, "only images, videos, PDFs and text files are accepted" |
+| A picture the model sees | `image/png`, `image/jpeg`, `image/gif`, `image/webp`, up to 10 MiB (`IMAGE_MIMES`, `MAX_IMAGE_BYTES`) | Named to the model, not shown to it |
+| A text file the model reads | Its first 20,000 characters (`MAX_TEXT_CHARS`) | The model is told where it was cut |
+| A PDF | Named to the model with a sentence that its text cannot be read yet | Text extraction is not built yet |
+| A file from an earlier message | Named to the model, not sent again | |
+| An `art_` id the caller does not own, or a missing one | | The turn is refused before it starts: `404 {"error": "no such attachment: art_…"}` |
+
+On replay, a message of files alone is `TEXT_MESSAGE_START` then `TEXT_MESSAGE_END` with the
+`messageId` the client sent. Its files are the `GET /artifacts?threadId=` rows whose
+`meta.messageId` is that id; each row carries `mime`, `filename` and `sizeBytes`. A row with no
+`meta.messageId` was uploaded and never sent.
+
 ## When it does not connect
 
 - `/health` from the NativeChat machine first: `curl http(s)://<address>:1447/health` answers
