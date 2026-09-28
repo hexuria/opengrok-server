@@ -310,6 +310,17 @@ fn build(record_dir: &Path, out: &Path, sha: &str) {
     )
     .expect("manifest");
     println!("{} fixtures, {} unrecorded", chosen.len(), unrecorded.len());
+    // A route NativeChat reads that no test drives over HTTP is not in `emits` (routes are not
+    // wire words), so it would be silently missing: say so, as the review of #258 found for
+    // `/local-exec`, whose behaviour was tested beside its handlers.
+    for prefix in REST_PREFIXES {
+        let covered = chosen
+            .values()
+            .any(|record| record.status.is_some() && record.route.starts_with(prefix));
+        if !covered {
+            println!("note: no fixture for any {prefix} route");
+        }
+    }
 }
 
 fn emits() -> Value {
@@ -423,13 +434,20 @@ fn walk(
                 *text = REDACTED.to_string();
             } else if lower.as_deref() == Some("base64") {
                 *text = "AAAA".to_string();
+            } else if is_iso_instant(text) {
+                *text = "2026-09-01T00:00:00Z".to_string();
+            } else if lower.as_deref().is_some_and(|key| key.ends_with("prefix")) {
+                // A key's first characters, shown so a person can tell keys apart: not the key.
+                *text = placeholder_ids(text, ids);
             } else {
-                *text = redact_inline(&placeholder_ids(text, ids));
+                *text = stable(&redact_query(&redact_inline(&placeholder_ids(text, ids))));
             }
         }
         Value::Number(number) => {
             let Some(key) = key else { return };
-            if key == "timestamp" {
+            if let Some(fixed) = measured(key) {
+                *value = json!(fixed);
+            } else if key == "timestamp" {
                 *value = json!(100);
             } else if is_instant(key) {
                 let next = 1_790_000_000_000 + clocks.len() as i64 * 1000;
@@ -439,6 +457,28 @@ fn walk(
         }
         _ => {}
     }
+}
+
+/// A duration a test measures rather than sets, fixed to a small one in its own unit so that
+/// recording the same code twice writes the same corpus: NativeChat pins it by `server_sha`, and
+/// a sha that names two corpora pins nothing. A limit (`max_wall_ms`) is configuration, and kept.
+fn measured(key: &str) -> Option<i64> {
+    match key {
+        "total_ms" | "model_ms" | "tool_wait_ms" | "auto_review_ms" | "ms" => Some(3),
+        "retryAfterSecs" => Some(60),
+        _ => None,
+    }
+}
+
+/// `2026-09-27T04:52:06Z` and the like: an instant written as a date.
+fn is_iso_instant(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
 }
 
 /// A point in time, not a duration, count or limit. Only instants get a clock placeholder:
@@ -471,6 +511,64 @@ fn redact_inline(text: &str) -> String {
         });
     }
     out.join(" ")
+}
+
+/// What a test mints at random and nothing reads for meaning: a loopback server's port and a
+/// taught skill's generated name. Fixed, so recording the same code twice differs only where a
+/// test's timing does.
+fn stable(text: &str) -> String {
+    let mut out = text.to_string();
+    for host in ["127.0.0.1:", "localhost:"] {
+        let mut from = 0;
+        while let Some(found) = out[from..].find(host) {
+            let port = from + found + host.len();
+            let end = out[port..]
+                .find(|ch: char| !ch.is_ascii_digit())
+                .map_or(out.len(), |offset| port + offset);
+            if end > port {
+                out.replace_range(port..end, "1447");
+            }
+            from = port;
+        }
+    }
+    if let Some(rest) = out.strip_prefix("taught-")
+        && !rest.is_empty()
+        && rest.chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        out = "taught-0199bb4e".to_string();
+    }
+    out
+}
+
+/// A secret-named query parameter's value in a URL: a screen URL carries the box's VNC password.
+fn redact_query(text: &str) -> String {
+    let mut out = text.to_string();
+    for name in [
+        "password",
+        "token",
+        "key",
+        "secret",
+        "ticket",
+        "access_token",
+    ] {
+        let mut from = 0;
+        let pattern = format!("{name}=");
+        while let Some(found) = out[from..].find(&pattern) {
+            let start = from + found;
+            let preceded = start == 0 || matches!(out.as_bytes()[start - 1], b'?' | b'&' | b'#');
+            let value = start + pattern.len();
+            if !preceded {
+                from = value;
+                continue;
+            }
+            let end = out[value..]
+                .find(['&', '#', '"', ' '])
+                .map_or(out.len(), |offset| value + offset);
+            out.replace_range(value..end, REDACTED);
+            from = value + REDACTED.len();
+        }
+    }
+    out
 }
 
 /// Every `eyJ…` run of base64url with two dots in it becomes `«redacted»`.
