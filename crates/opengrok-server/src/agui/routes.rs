@@ -2771,6 +2771,15 @@ pub async fn run(
         }
     }
 
+    // A FILE THE CALLER DOES NOT OWN REFUSES THE TURN before anything runs or any queued send is
+    // drained (#229): answered like a missing one, so an id tells nobody whose file it was.
+    if let Some(refusal) =
+        super::attachments::refuse_unowned(&state, account_id.as_ref(), &input).await
+    {
+        refund_unscoped(&state, unscoped_charge.as_deref());
+        return refusal;
+    }
+
     // Refuse stale sends before interrupting a parked turn or preparing any model work.
     if let Some(account) = &account_id {
         if let Err(refusal) =
@@ -3007,7 +3016,12 @@ async fn start_claimed_turn(
 
     // The thread's own log, with this turn's new messages at the end — or the client's copy, on
     // a thread the log cannot tell whole (`history`'s module note).
-    let asked = super::history::for_turn(&state, account_id.as_ref(), &input).await;
+    // This turn's files, read and marked as sent before the turn is asked (#229).
+    let attached = match &account_id {
+        Some(account) => super::attachments::resolve(&state, account, &input).await,
+        None => super::attachments::Attached::default(),
+    };
+    let asked = super::history::for_turn(&state, account_id.as_ref(), &input, &attached).await;
     let mut messages = asked.messages;
     // ONE system message. A client-supplied `system` in the AG-UI body would be a second claim
     // about the same coworker; drop it when we composed one.
@@ -4889,8 +4903,7 @@ async fn continue_stopped_turn(
 /// THE SERVER PICKS IT BACK UP. A run that only continues when the next request happens to arrive
 /// is a run that depends on a client being there — which is the thing this project exists to stop
 /// (CLAUDE.md #5). The answer is already durable when this starts, so a crash here leaves a run
-/// that is answered and unfinished, which `interrupted_runs` can find and this can be told to do
-/// again.
+/// that is answered and unfinished, which the recovery sweep carries on (#91).
 async fn continue_run(
     host: crate::host_state::HostState,
     account_id: opengrok_core::id::AccountId,
@@ -5342,9 +5355,9 @@ fn reply_quote(
         _ => return None,
     };
     let quoted = id.and_then(|id| sent.iter().find(|candidate| candidate.id == id));
-    let text = quoted
-        .and_then(|quoted| quoted.content.as_deref())
-        .or(preview)?;
+    let quoted_words =
+        quoted.and_then(|quoted| quoted.content.as_ref().map(|content| content.text()));
+    let text = quoted_words.as_deref().or(preview)?;
     // Whose words are being quoted, from the model's side of the conversation: the person's own
     // earlier message, or the coworker's.
     let from_person = quoted
@@ -5387,10 +5400,18 @@ pub(super) fn with_reply_context(
 /// that rejects an unknown role fails the whole turn, and AG-UI carries roles (`developer`) that
 /// have no place in a chat completion.
 pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
+    to_chat_messages_with(input, &super::attachments::Attached::default())
+}
+
+/// `to_chat_messages`, with the files this turn's messages carry already read (#229).
+pub(crate) fn to_chat_messages_with(
+    input: &RunAgentInput,
+    attached: &super::attachments::Attached,
+) -> Vec<ChatMessage> {
     input
         .messages
         .iter()
-        .filter_map(|message| chat_message(message, &input.messages))
+        .filter_map(|message| chat_message(message, &input.messages, attached))
         .collect()
 }
 
@@ -5404,8 +5425,9 @@ pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
 pub(crate) fn chat_message(
     message: &opengrok_wire::agui::Message,
     sent: &[opengrok_wire::agui::Message],
+    attached: &super::attachments::Attached,
 ) -> Option<ChatMessage> {
-    let content = message.content.clone().unwrap_or_default();
+    let content = message.text();
     match message.role.as_str() {
         "assistant" => {
             let calls: Vec<opengrok_harness::ToolCallRef> = message
@@ -5428,14 +5450,19 @@ pub(crate) fn chat_message(
         }
         // Only a person replies: the field on anything else is not a quote the model should be
         // read to.
-        "user" => message
-            .content
-            .as_ref()
-            .map(|words| ChatMessage::text("user", with_reply_context(words, message, sent))),
+        // The files a person attached ride with their words (#229): pictures as pictures, the
+        // rest as words the model is told it can or cannot read.
+        "user" => message.content.is_some().then(|| {
+            let (text, images) =
+                attached.render(message, with_reply_context(&content, message, sent));
+            let mut chat = ChatMessage::text("user", text);
+            chat.images = images;
+            chat
+        }),
         "system" => message
             .content
-            .as_ref()
-            .map(|words| ChatMessage::text("system", words.clone())),
+            .is_some()
+            .then(|| ChatMessage::text("system", content.clone())),
         // NativeChat continues a frontend tool by POSTing the result as a tool message.
         "tool" => Some(ChatMessage::tool_result(
             message

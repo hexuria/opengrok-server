@@ -1,6 +1,7 @@
 //! Unit tests for `agui::history`, kept out of the crate's source count.
 
 use super::*;
+use crate::agui::routes::to_chat_messages;
 use opengrok_core::run::{RunCommand, RunEvent};
 use serde_json::json;
 
