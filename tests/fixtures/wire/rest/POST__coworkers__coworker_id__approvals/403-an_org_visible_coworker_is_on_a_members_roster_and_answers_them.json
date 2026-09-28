@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/approvals",
+  "status": 403,
+  "body": "no grant lets acct_0199bb4e-0000-7000-8000-000000000002 use coworker cw_0199bb4e-0000-7000-8000-000000000001"
+}

@@ -1,0 +1,16 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads",
+  "status": 200,
+  "body": [
+    {
+      "threadId": "talk",
+      "coworkerId": null,
+      "origin": "chat",
+      "title": "first",
+      "lastRunId": "run_0199bb4e-0000-7000-8000-000000000001",
+      "lastStatus": "finished",
+      "updatedAtMs": 1790000000000
+    }
+  ]
+}

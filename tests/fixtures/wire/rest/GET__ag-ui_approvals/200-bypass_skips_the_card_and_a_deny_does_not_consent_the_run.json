@@ -1,0 +1,24 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/approvals",
+  "status": 200,
+  "body": [
+    {
+      "runId": "0199bb4e-0000-7000-8000-000000000001",
+      "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000003",
+      "origin": "chat",
+      "callId": "look-1",
+      "tool": "computer",
+      "arguments": {
+        "action": "click",
+        "coordinate": [
+          120,
+          40
+        ]
+      },
+      "reason": "auto-review",
+      "why": "This action would use your network through the egress tunnel. Review it before it runs."
+    }
+  ]
+}

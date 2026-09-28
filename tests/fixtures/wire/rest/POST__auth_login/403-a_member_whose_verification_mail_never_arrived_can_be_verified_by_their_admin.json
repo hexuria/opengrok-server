@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/auth/login",
+  "status": 403,
+  "body": {
+    "error": "Your email is not verified yet. Open the link we emailed you, ask for a new one (Resend verification email), or ask your administrator to verify it."
+  }
+}

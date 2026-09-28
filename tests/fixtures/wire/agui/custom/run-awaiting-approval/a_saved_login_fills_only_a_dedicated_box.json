@@ -1,0 +1,122 @@
+{
+  "why": "Waiting for you",
+  "name": "run-awaiting-approval",
+  "tool": "request_user_form",
+  "type": "CUSTOM",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "callId": "mock-form-1",
+  "reason": "user-form",
+  "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000002",
+  "arguments": {
+    "title": "Google account",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email",
+        "label": "Email",
+        "secret": false,
+        "required": true
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": true
+      }
+    ],
+    "liveHost": "accounts.google.com",
+    "instruction": "Enter the address and password."
+  },
+  "timestamp": 100,
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000003",
+  "message": {
+    "type": "user-form",
+    "formRequest": {
+      "title": "Google account",
+      "fields": [
+        {
+          "id": "email",
+          "type": "email",
+          "label": "Email",
+          "secret": false,
+          "required": true
+        },
+        {
+          "id": "password",
+          "type": "password",
+          "label": "Password",
+          "secret": false,
+          "required": true
+        }
+      ],
+      "liveHost": "accounts.google.com",
+      "instruction": "Enter the address and password."
+    }
+  },
+  "formRequest": {
+    "title": "Google account",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email",
+        "label": "Email",
+        "secret": false,
+        "required": true
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": true
+      }
+    ],
+    "liveHost": "accounts.google.com",
+    "instruction": "Enter the address and password."
+  },
+  "formResolution": "submitted",
+  "value": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000003",
+    "kind": "send-message",
+    "callId": "mock-form-1",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "Google account",
+        "fields": [
+          {
+            "id": "email",
+            "type": "email",
+            "label": "Email",
+            "secret": false,
+            "required": true
+          },
+          {
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": true
+          }
+        ],
+        "liveHost": "accounts.google.com",
+        "instruction": "Enter the address and password."
+      }
+    },
+    "timestampMs": 1790000000000,
+    "formResolution": "submitted",
+    "formFieldOutcomes": [
+      {
+        "id": "email",
+        "filled": true,
+        "fillFailed": false
+      },
+      {
+        "id": "password",
+        "filled": false,
+        "fillFailed": false
+      }
+    ]
+  }
+}

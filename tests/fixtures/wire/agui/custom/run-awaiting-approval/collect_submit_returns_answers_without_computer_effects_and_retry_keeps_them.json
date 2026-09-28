@@ -1,0 +1,113 @@
+{
+  "why": "Waiting for you",
+  "name": "run-awaiting-approval",
+  "tool": "request_user_form",
+  "type": "CUSTOM",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "callId": "collect-1",
+  "reason": "user-form",
+  "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000002",
+  "arguments": {
+    "title": "New tax profile",
+    "fields": [
+      {
+        "id": "email",
+        "type": "text",
+        "label": "Email",
+        "secret": false,
+        "required": false
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": false
+      }
+    ],
+    "collect": true,
+    "instruction": ""
+  },
+  "timestamp": 100,
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000003",
+  "message": {
+    "type": "user-form",
+    "formRequest": {
+      "title": "New tax profile",
+      "fields": [
+        {
+          "id": "email",
+          "type": "text",
+          "label": "Email",
+          "secret": false,
+          "required": false
+        },
+        {
+          "id": "password",
+          "type": "password",
+          "label": "Password",
+          "secret": false,
+          "required": false
+        }
+      ],
+      "collect": true,
+      "instruction": ""
+    }
+  },
+  "formRequest": {
+    "title": "New tax profile",
+    "fields": [
+      {
+        "id": "email",
+        "type": "text",
+        "label": "Email",
+        "secret": false,
+        "required": false
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": false
+      }
+    ],
+    "collect": true,
+    "instruction": ""
+  },
+  "formResolution": "submitted",
+  "value": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000003",
+    "kind": "send-message",
+    "callId": "collect-1",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "New tax profile",
+        "fields": [
+          {
+            "id": "email",
+            "type": "text",
+            "label": "Email",
+            "secret": false,
+            "required": false
+          },
+          {
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": false
+          }
+        ],
+        "collect": true,
+        "instruction": ""
+      }
+    },
+    "timestampMs": 1790000000000,
+    "sharedValues": {
+      "email": "ada@example.com"
+    },
+    "formResolution": "submitted"
+  }
+}

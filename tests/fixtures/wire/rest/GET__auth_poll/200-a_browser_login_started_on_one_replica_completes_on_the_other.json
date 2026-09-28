@@ -1,0 +1,9 @@
+{
+  "method": "GET",
+  "path": "/auth/poll",
+  "status": 200,
+  "body": {
+    "accessToken": "«redacted»",
+    "refreshToken": "«redacted»"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "method": "POST",
+  "path": "/ag-ui",
+  "status": 429,
+  "body": {
+    "error": "too many turns without a coworker this hour; hire or pick a coworker, whose turns are metered on its own key, or wait",
+    "retryAfterSecs": 60
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "method": "GET",
+  "path": "/skills/skl_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "id": "skl_0199bb4e-0000-7000-8000-000000000001",
+    "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+    "name": "release-notes-0199bb4e000070008000000000000003",
+    "description": "what to write when we ship",
+    "source": "uploaded",
+    "updatedAtMs": 1790000000000,
+    "versionCount": 1,
+    "draft": false,
+    "enabled": true,
+    "approvedAtMs": 1790000000000,
+    "body": "Open the changelog.",
+    "version": 1,
+    "files": [
+      {
+        "path": "reference/checklist.bin",
+        "bytes": "wygAGv9oaQ=="
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/ag-ui",
+  "status": 400,
+  "body": "a queued send needs a user message"
+}

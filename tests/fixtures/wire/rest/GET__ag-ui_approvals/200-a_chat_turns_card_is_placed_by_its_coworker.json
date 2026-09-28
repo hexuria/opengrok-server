@@ -1,0 +1,38 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/approvals",
+  "status": 200,
+  "body": [
+    {
+      "runId": "0199bb4e-0000-7000-8000-000000000001",
+      "threadId": "sched_0199bb4e-0000-7000-8000-000000000002",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000003",
+      "origin": "chat",
+      "callId": "mock-form-1",
+      "tool": "request_user_form",
+      "arguments": {
+        "title": "Google account",
+        "fields": [
+          {
+            "id": "email",
+            "type": "email",
+            "label": "Email",
+            "secret": false,
+            "required": true
+          },
+          {
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": true
+          }
+        ],
+        "liveHost": "accounts.google.com",
+        "instruction": "Enter the address and password."
+      },
+      "reason": "user-form",
+      "why": "The coworker is asking you to fill in “Google account”: Enter the address and password."
+    }
+  ]
+}

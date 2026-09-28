@@ -1,0 +1,16 @@
+{
+  "name": "credential.offer_save",
+  "type": "CUSTOM",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "value": {
+    "origin": "accounts.google.com",
+    "username": "ada@example.com",
+    "formEntryId": "e_0199bb4e-0000-7000-8000-000000000002"
+  },
+  "callId": "mock-form-1",
+  "origin": "accounts.google.com",
+  "threadId": "thr-0199bb4e-0000-7000-8000-000000000003",
+  "username": "ada@example.com",
+  "timestamp": 100,
+  "formEntryId": "e_0199bb4e-0000-7000-8000-000000000002"
+}

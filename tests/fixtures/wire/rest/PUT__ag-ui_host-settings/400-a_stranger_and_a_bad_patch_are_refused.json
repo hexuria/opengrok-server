@@ -1,0 +1,6 @@
+{
+  "method": "PUT",
+  "path": "/ag-ui/host-settings",
+  "status": 400,
+  "body": "a settings patch is a JSON object"
+}

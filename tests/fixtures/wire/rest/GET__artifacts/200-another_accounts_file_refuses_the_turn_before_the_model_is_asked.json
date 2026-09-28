@@ -1,0 +1,6 @@
+{
+  "method": "GET",
+  "path": "/artifacts",
+  "status": 200,
+  "body": []
+}

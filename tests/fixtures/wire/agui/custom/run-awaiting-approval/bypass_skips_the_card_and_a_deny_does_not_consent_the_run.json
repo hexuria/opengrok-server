@@ -1,0 +1,18 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-awaiting-approval",
+  "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "callId": "look-1",
+  "tool": "computer",
+  "arguments": {
+    "action": "click",
+    "coordinate": [
+      120,
+      40
+    ]
+  },
+  "reason": "auto-review",
+  "why": "This action would use your network through the egress tunnel. Review it before it runs."
+}

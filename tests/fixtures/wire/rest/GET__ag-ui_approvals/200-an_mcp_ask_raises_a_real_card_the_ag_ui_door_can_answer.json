@@ -1,0 +1,21 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/approvals",
+  "status": 200,
+  "body": [
+    {
+      "runId": "run_0199bb4e-0000-7000-8000-000000000001",
+      "threadId": "mcp-cw_0199bb4e-0000-7000-8000-000000000002",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+      "origin": "chat",
+      "callId": "mcp_0199bb4e000070008000000000000003",
+      "tool": "write_file",
+      "arguments": {
+        "path": "/tmp/from-mcp",
+        "content": "hi"
+      },
+      "reason": "auto-review",
+      "why": "Auto-review asked about this rather than allowing it. Write 2 bytes to /tmp/from-mcp on the agent's own box"
+    }
+  ]
+}

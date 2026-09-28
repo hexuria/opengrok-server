@@ -1,0 +1,24 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-timing",
+  "threadId": "thr-huge",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "value": {
+    "model_ms": [],
+    "tools": [],
+    "tool_wait_ms": 3,
+    "auto_review_ms": 3,
+    "total_ms": 3,
+    "tool_rounds": 0,
+    "budget": {
+      "max_rounds": 8,
+      "max_computer_rounds": 24,
+      "max_wall_ms": 900000,
+      "call_timeout_ms": 180000,
+      "idle_ms": 240000
+    }
+  },
+  "total_ms": 3,
+  "tool_rounds": 0
+}

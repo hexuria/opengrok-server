@@ -1,0 +1,55 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/threads/stale-options-0199bb4e000070008000000000000001/pending",
+  "status": 201,
+  "body": {
+    "v": 1,
+    "threadId": "stale-options-0199bb4e000070008000000000000001",
+    "event": {
+      "type": "CUSTOM",
+      "timestamp": 100,
+      "name": "pending-user-message",
+      "value": {
+        "v": 1,
+        "op": "created",
+        "threadId": "stale-options-0199bb4e000070008000000000000001",
+        "message": {
+          "v": 1,
+          "id": "pum_0199bb4e-0000-7000-8000-000000000002",
+          "threadId": "stale-options-0199bb4e000070008000000000000001",
+          "content": "current",
+          "replyTo": null,
+          "recipeId": "rec_current",
+          "recipeValues": {
+            "x": "new"
+          },
+          "skillId": "skl_current",
+          "clientMessageId": "bubble",
+          "status": "pending",
+          "createdAtMs": 1790000000000,
+          "updatedAtMs": 1790000000000,
+          "drainedAtMs": null,
+          "drainedRunId": null
+        }
+      }
+    },
+    "pendingUserMessage": {
+      "v": 1,
+      "id": "pum_0199bb4e-0000-7000-8000-000000000002",
+      "threadId": "stale-options-0199bb4e000070008000000000000001",
+      "content": "current",
+      "replyTo": null,
+      "recipeId": "rec_current",
+      "recipeValues": {
+        "x": "new"
+      },
+      "skillId": "skl_current",
+      "clientMessageId": "bubble",
+      "status": "pending",
+      "createdAtMs": 1790000000000,
+      "updatedAtMs": 1790000000000,
+      "drainedAtMs": null,
+      "drainedRunId": null
+    }
+  }
+}

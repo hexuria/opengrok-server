@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001/rotate-key",
+  "status": 409,
+  "body": {
+    "error": "that schedule is not a webhook"
+  }
+}

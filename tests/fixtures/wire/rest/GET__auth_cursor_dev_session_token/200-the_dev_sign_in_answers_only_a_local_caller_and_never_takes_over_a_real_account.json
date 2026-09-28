@@ -1,0 +1,9 @@
+{
+  "method": "GET",
+  "path": "/auth/cursor_dev_session_token",
+  "status": 200,
+  "body": {
+    "accessToken": "«redacted»",
+    "refreshToken": "«redacted»"
+  }
+}

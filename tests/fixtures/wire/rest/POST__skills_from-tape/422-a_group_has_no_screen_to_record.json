@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills/from-tape",
+  "status": 422,
+  "body": "a group has no screen of its own and takes no model call: send the recording against the coworker whose screen it was taped on. The recording was not consumed: nothing was stored, and the same tape can be sent again."
+}

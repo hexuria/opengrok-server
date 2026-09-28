@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills/from-tape",
+  "status": 502,
+  "body": "the model wrote more than a skill can hold: the skill body is 8001 characters, over the 8000 allowed — a skill shares one system message with the coworker's own role, and a longer one would replace it rather than add to it. The recording was not consumed: nothing was stored, and the same tape can be sent again."
+}

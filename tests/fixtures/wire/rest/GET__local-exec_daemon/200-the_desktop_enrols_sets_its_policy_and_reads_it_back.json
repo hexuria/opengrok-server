@@ -1,0 +1,16 @@
+{
+  "method": "GET",
+  "path": "/local-exec/daemon",
+  "status": 200,
+  "body": {
+    "machines": [
+      {
+        "machineId": "mac_0199bb4e000070008000000000000001",
+        "label": "Ada's Mac",
+        "enrolledAtMs": 1790000000000,
+        "revoked": false,
+        "connected": false
+      }
+    ]
+  }
+}

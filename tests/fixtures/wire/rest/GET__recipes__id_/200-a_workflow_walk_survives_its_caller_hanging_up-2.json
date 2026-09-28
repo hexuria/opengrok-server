@@ -1,0 +1,111 @@
+{
+  "method": "GET",
+  "path": "/recipes/rcp_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "recipe": {
+      "id": "rcp_0199bb4e-0000-7000-8000-000000000001",
+      "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "orgId": "org_two_hands_0199bb4e000070008000000000000003",
+      "name": "Month end",
+      "description": "",
+      "screen": {
+        "width": 1280,
+        "height": 800
+      },
+      "createdAtMs": 1790000000000,
+      "updatedAtMs": 1790000000000,
+      "deletedAtMs": null,
+      "latestVersion": 1,
+      "relation": "mine",
+      "shareState": null,
+      "kind": "workflow",
+      "parameters": []
+    },
+    "versions": [
+      {
+        "version": 1,
+        "kind": "workflow",
+        "note": "the tree as written",
+        "createdBy": "acct_0199bb4e-0000-7000-8000-000000000002",
+        "createdAtMs": 1790000000000,
+        "body": {
+          "start": "export",
+          "steps": {
+            "done": {
+              "do": "stop",
+              "say": "",
+              "outcome": "done"
+            },
+            "export": {
+              "do": "run",
+              "then": "done",
+              "recipe": "rcp_0199bb4e-0000-7000-8000-000000000004"
+            }
+          },
+          "budget": {
+            "steps": 40,
+            "seconds": 600
+          },
+          "workflow": 1,
+          "parameters": []
+        }
+      }
+    ],
+    "shares": [],
+    "grants": [],
+    "runs": [
+      {
+        "id": "rrun_0199bb4e-0000-7000-8000-000000000005",
+        "recipeId": "rcp_0199bb4e-0000-7000-8000-000000000001",
+        "version": 1,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000006",
+        "runId": "rrun_0199bb4e-0000-7000-8000-000000000005",
+        "ok": true,
+        "stoppedAt": null,
+        "receipt": {
+          "ms": 3,
+          "ok": true,
+          "jev": "off",
+          "say": "done",
+          "shape": 1,
+          "steps": 2,
+          "trail": [
+            {
+              "do": "run",
+              "ok": true,
+              "ran": 1,
+              "step": "export",
+              "went": "done",
+              "error": null,
+              "runId": "rrun_0199bb4e-0000-7000-8000-000000000007",
+              "recipe": "rcp_0199bb4e-0000-7000-8000-000000000004",
+              "observe": "input",
+              "version": 1,
+              "observed": 0,
+              "stoppedAt": null
+            },
+            {
+              "do": "stop",
+              "step": "done",
+              "outcome": "done"
+            }
+          ],
+          "ending": "stopped",
+          "outcome": "done",
+          "fallbacks": 0
+        },
+        "atMs": 1790000001000,
+        "leaseUntilMs": null,
+        "state": "finished",
+        "artifacts": []
+      }
+    ],
+    "myBots": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000006",
+        "name": "Ada"
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills/skl_0199bb4e-0000-7000-8000-000000000001/versions",
+  "status": 400,
+  "body": "`taught` is written by the server when a turn writes a skill down, not asked for"
+}

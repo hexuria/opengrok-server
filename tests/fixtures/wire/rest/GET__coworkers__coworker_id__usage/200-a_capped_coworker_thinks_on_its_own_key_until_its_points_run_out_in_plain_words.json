@@ -1,0 +1,35 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/usage",
+  "status": 200,
+  "body": {
+    "metered": true,
+    "note": null,
+    "seat": "api",
+    "keyPrefix": "oag_live_stand001",
+    "window": "month",
+    "models": [
+      {
+        "modelId": "oag/cheap",
+        "requests": 2,
+        "inputTokens": 20,
+        "outputTokens": 10,
+        "cacheReadTokens": 0,
+        "cacheWriteTokens": 0,
+        "costUsd": "2.000000",
+        "listUsd": "2.000000",
+        "points": 10000000
+      }
+    ],
+    "totals": {
+      "requests": 2,
+      "inputTokens": 20,
+      "outputTokens": 10,
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "costUsd": "2.000000",
+      "listUsd": "2.000000",
+      "points": 10000000
+    }
+  }
+}

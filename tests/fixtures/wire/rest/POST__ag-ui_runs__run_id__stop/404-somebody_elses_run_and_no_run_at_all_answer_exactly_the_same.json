@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/runs/run_0199bb4e-0000-7000-8000-000000000001/stop",
+  "status": 404,
+  "body": "no such run"
+}

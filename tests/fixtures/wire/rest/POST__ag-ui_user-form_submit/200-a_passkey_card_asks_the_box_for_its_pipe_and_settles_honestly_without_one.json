@@ -1,0 +1,23 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/submit",
+  "status": 200,
+  "body": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000001",
+    "kind": "send-message",
+    "callId": "pk-1",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "Sign in with your passkey",
+        "fields": [],
+        "liveHost": "webauthn.io",
+        "instruction": "",
+        "passkeyMode": "use",
+        "challengeKind": "passkey"
+      }
+    },
+    "timestampMs": 1790000000000,
+    "formResolution": "fill_failed"
+  }
+}

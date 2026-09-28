@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/submit",
+  "status": 404,
+  "body": {
+    "error": "form entry missing"
+  }
+}

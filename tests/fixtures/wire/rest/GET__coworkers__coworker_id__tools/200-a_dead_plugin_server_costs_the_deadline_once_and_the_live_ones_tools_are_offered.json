@@ -1,0 +1,34 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/tools",
+  "status": 200,
+  "body": {
+    "tools": [
+      {
+        "name": "shell",
+        "description": "Run a shell command on THIS BOT'S OWN computer — a sandboxed box on the server, not the user's own machine — and return its stdout, stderr and exit code.",
+        "kind": "builtin"
+      },
+      {
+        "name": "read_file",
+        "description": "Read a file from THIS BOT'S OWN computer (the sandboxed box on the server, not the user's machine) and return its contents.",
+        "kind": "builtin"
+      },
+      {
+        "name": "write_file",
+        "description": "Create or overwrite a file on THIS BOT'S OWN computer (the sandboxed box on the server, not the user's machine).",
+        "kind": "builtin"
+      },
+      {
+        "name": "request_user_form",
+        "description": "Ask the person to fill a form in chat. Two uses. A collect form (collect true) is how you ask for fields you do not have yet: a new profile, a missing name, a TIN they must confirm. Put what they already told you on each field as value, so the card is prefilled, and leave value off the fields that are still missing. Mark those required. Wait. The answers come back as Shared fields and nothing is typed into a page. Do not invent a shell command for the form. A sign-in is the other use: an OTP or a field they must type into a page. NativeChat offers the person their saved logins for that site on the card; they confirm with Touch ID, and the values are typed into the page out of your view. Do NOT type passwords, one-time codes, or other secrets with `computer`: that attaches a screenshot of what was typed. Raise this instead and wait. The person fills in chat; the server clicks each field at the position you give (`at`, in your screenshot's pixels) and types there, never showing you the secret. Give `at` for every field you can see. After it settles, screenshot and confirm what the page shows — filling is not login. When the page shows the email and password fields TOGETHER (Facebook, most sites), raise ONE card with both fields and `samePage: true` — do not split them. Only a page that asks for the email alone (Google) gets an email-only card: raise it, observe, and if a password page comes next call this again with a password-only form (new entryId, challengeKind \"password\"). If another in-sandbox challenge appears (an authenticator code, phone verification on the same page), call this again with otp fields, challengeKind \"otp\", the page host as liveHost and the field's `at`; NativeChat offers the person's saved authenticator code for that site on the card. Never re-raise a form that already settled. A passkey prompt: call this with challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site offers to add one and the person asked), no fields, liveHost set; when the result says it is loaded, click the site's passkey button. A captcha, or a page outside this box, is not another password form: the person finishes on the computer (Open the screen). If they dismiss or decline, continue without those credentials and do not loop.",
+        "kind": "builtin"
+      },
+      {
+        "name": "live_api_send",
+        "description": "Send a message",
+        "kind": "plugin"
+      }
+    ]
+  }
+}

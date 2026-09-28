@@ -1,0 +1,37 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/dismiss",
+  "status": 200,
+  "body": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000001",
+    "kind": "send-message",
+    "callId": "mock-form-1",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "Google account",
+        "fields": [
+          {
+            "id": "email",
+            "type": "email",
+            "label": "Email",
+            "secret": false,
+            "required": true
+          },
+          {
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": true
+          }
+        ],
+        "liveHost": "accounts.google.com",
+        "instruction": "Enter the address and password."
+      }
+    },
+    "timestampMs": 1790000000000,
+    "formResolution": "escalated",
+    "widgetDismissed": true
+  }
+}

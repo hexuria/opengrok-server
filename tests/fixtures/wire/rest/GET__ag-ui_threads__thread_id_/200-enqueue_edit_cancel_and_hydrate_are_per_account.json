@@ -1,0 +1,75 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads/th-pending-0199bb4e000070008000000000000001",
+  "status": 200,
+  "body": {
+    "threadId": "th-pending-0199bb4e000070008000000000000001",
+    "runs": [
+      {
+        "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+        "status": "finished",
+        "startedAtMs": 1790000000000,
+        "updatedAtMs": 1790000000000,
+        "failure": null,
+        "events": []
+      }
+    ],
+    "hiddenRunIds": [],
+    "pendingUserMessages": [
+      {
+        "v": 1,
+        "id": "pum_0199bb4e-0000-7000-8000-000000000003",
+        "threadId": "th-pending-0199bb4e000070008000000000000001",
+        "content": "send this instead",
+        "replyTo": {
+          "preview": "hi",
+          "messageId": "m1"
+        },
+        "recipeId": "rec_demo",
+        "recipeValues": {
+          "q": "later"
+        },
+        "skillId": "skl_demo",
+        "clientMessageId": "msg_bubble_1",
+        "status": "pending",
+        "createdAtMs": 1790000001000,
+        "updatedAtMs": 1790000002000,
+        "drainedAtMs": null,
+        "drainedRunId": null
+      }
+    ],
+    "pendingEvents": [
+      {
+        "type": "CUSTOM",
+        "timestamp": 100,
+        "name": "pending-user-message",
+        "value": {
+          "v": 1,
+          "op": "snapshot",
+          "threadId": "th-pending-0199bb4e000070008000000000000001",
+          "message": {
+            "v": 1,
+            "id": "pum_0199bb4e-0000-7000-8000-000000000003",
+            "threadId": "th-pending-0199bb4e000070008000000000000001",
+            "content": "send this instead",
+            "replyTo": {
+              "preview": "hi",
+              "messageId": "m1"
+            },
+            "recipeId": "rec_demo",
+            "recipeValues": {
+              "q": "later"
+            },
+            "skillId": "skl_demo",
+            "clientMessageId": "msg_bubble_1",
+            "status": "pending",
+            "createdAtMs": 1790000001000,
+            "updatedAtMs": 1790000002000,
+            "drainedAtMs": null,
+            "drainedRunId": null
+          }
+        }
+      }
+    ]
+  }
+}

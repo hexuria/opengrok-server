@@ -1,0 +1,18 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/box-handoff/resolve",
+  "status": 200,
+  "body": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000001",
+    "kind": "send-message",
+    "message": {
+      "alt": "Handed to the computer",
+      "url": "sand://box",
+      "type": "attachment"
+    },
+    "timestampMs": 1790000000000,
+    "boxRequestId": "req_0199bb4e000070008000000000000002",
+    "boxInstruction": "Google account: Enter the address and password.",
+    "boxResolution": "handed_back"
+  }
+}

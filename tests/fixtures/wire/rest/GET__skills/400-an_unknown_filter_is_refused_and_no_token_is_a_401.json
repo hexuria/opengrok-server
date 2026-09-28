@@ -1,0 +1,6 @@
+{
+  "method": "GET",
+  "path": "/skills",
+  "status": 400,
+  "body": "\"everything\" is not a filter; it is one of mine, shared, org, all, or leave it off for everything"
+}

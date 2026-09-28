@@ -1,0 +1,6 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads/th-nobody",
+  "status": 404,
+  "body": "no such thread"
+}

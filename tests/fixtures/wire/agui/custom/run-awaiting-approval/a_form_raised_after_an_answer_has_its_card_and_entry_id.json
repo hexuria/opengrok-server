@@ -1,0 +1,144 @@
+{
+  "why": "Waiting for you",
+  "name": "run-awaiting-approval",
+  "tool": "request_user_form",
+  "type": "CUSTOM",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "callId": "form-1",
+  "reason": "user-form",
+  "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
+  "arguments": {
+    "title": "Log in to The Internet",
+    "fields": [
+      {
+        "at": {
+          "x": 285,
+          "y": 348
+        },
+        "id": "username",
+        "type": "text",
+        "label": "Username",
+        "secret": false,
+        "required": true
+      },
+      {
+        "at": {
+          "x": 285,
+          "y": 410
+        },
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": true
+      }
+    ],
+    "submit": true,
+    "samePage": true,
+    "instruction": ""
+  },
+  "timestamp": 100,
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000003",
+  "message": {
+    "type": "user-form",
+    "formRequest": {
+      "title": "Log in to The Internet",
+      "fields": [
+        {
+          "at": {
+            "x": 285,
+            "y": 348
+          },
+          "id": "username",
+          "type": "text",
+          "label": "Username",
+          "secret": false,
+          "required": true
+        },
+        {
+          "at": {
+            "x": 285,
+            "y": 410
+          },
+          "id": "password",
+          "type": "password",
+          "label": "Password",
+          "secret": false,
+          "required": true
+        }
+      ],
+      "submit": true,
+      "samePage": true,
+      "instruction": ""
+    }
+  },
+  "formRequest": {
+    "title": "Log in to The Internet",
+    "fields": [
+      {
+        "at": {
+          "x": 285,
+          "y": 348
+        },
+        "id": "username",
+        "type": "text",
+        "label": "Username",
+        "secret": false,
+        "required": true
+      },
+      {
+        "at": {
+          "x": 285,
+          "y": 410
+        },
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": true
+      }
+    ],
+    "submit": true,
+    "samePage": true,
+    "instruction": ""
+  },
+  "value": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000003",
+    "kind": "send-message",
+    "callId": "form-1",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "Log in to The Internet",
+        "fields": [
+          {
+            "at": {
+              "x": 285,
+              "y": 348
+            },
+            "id": "username",
+            "type": "text",
+            "label": "Username",
+            "secret": false,
+            "required": true
+          },
+          {
+            "at": {
+              "x": 285,
+              "y": 410
+            },
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": true
+          }
+        ],
+        "submit": true,
+        "samePage": true,
+        "instruction": ""
+      }
+    },
+    "timestampMs": 1790000000000
+  }
+}

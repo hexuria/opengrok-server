@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/coworkers",
+  "status": 404,
+  "body": "no such template"
+}

@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/local-exec/policy/rule",
+  "status": 422,
+  "body": "an allow rule must be one plain command: no ; && || | & or newline, no $( ) or backticks, no redirection to a path, no VAR= in front, and not a program that runs another (sh, eval, env, sudo, xargs…)"
+}

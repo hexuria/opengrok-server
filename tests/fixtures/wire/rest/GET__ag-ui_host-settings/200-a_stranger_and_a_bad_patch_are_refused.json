@@ -1,0 +1,27 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/host-settings",
+  "status": 200,
+  "body": {
+    "notifications": {
+      "isEnabled": false,
+      "allowedApps": [],
+      "minIntervalMs": 5000,
+      "maxPerWindow": 10,
+      "windowMs": 300000
+    },
+    "mcpCustomInstructions": {},
+    "mcpCustomInstructionsByServerId": {},
+    "mcpDisabledToolsByServerId": {},
+    "mcpBoxServers": [],
+    "autoReviewInstructions": null,
+    "localToolPermission": null,
+    "webauthnProxyEnabled": false,
+    "inferenceProvider": "cursor",
+    "inferenceRouterUsage": null,
+    "sidebarSections": [],
+    "hasSeenOnboarding": true,
+    "egressTunnelEnabled": false,
+    "egressTunnelAvailable": false
+  }
+}

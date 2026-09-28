@@ -1,0 +1,16 @@
+{
+  "method": "POST",
+  "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001/rotate-key",
+  "status": 200,
+  "body": {
+    "id": "sched_0199bb4e-0000-7000-8000-000000000001",
+    "name": "Inbox",
+    "kind": "webhook",
+    "webhook": {
+      "type": "webhook",
+      "url": "http://opengrok.lan:1447/hooks/hook_0199bb4e-0000-7000-8000-000000000002",
+      "key": "«redacted»",
+      "header": "Authorization: Bearer «redacted»"
+    }
+  }
+}

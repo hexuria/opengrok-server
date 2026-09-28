@@ -1,0 +1,42 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/spend",
+  "status": 200,
+  "body": {
+    "metered": false,
+    "note": "this coworker has no key of its own yet, so it is not metered",
+    "keyPrefix": null,
+    "limits": {
+      "fiveHourUsd": null,
+      "sevenDayUsd": null,
+      "monthUsd": null
+    },
+    "windows": [
+      {
+        "window": "5h",
+        "usedUsd": null,
+        "limitUsd": null,
+        "freesAt": null,
+        "requests": null,
+        "counterfactualUsd": null
+      },
+      {
+        "window": "7d",
+        "usedUsd": null,
+        "limitUsd": null,
+        "freesAt": null,
+        "requests": null,
+        "counterfactualUsd": null
+      },
+      {
+        "window": "month",
+        "usedUsd": null,
+        "limitUsd": null,
+        "freesAt": null,
+        "requests": null,
+        "counterfactualUsd": null
+      }
+    ],
+    "seat": null
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/usage",
+  "status": 400,
+  "body": {
+    "error": "'1d' is not a window; one of 5h, 24h, 7d, month"
+  }
+}

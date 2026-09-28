@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills/from-tape",
+  "status": 429,
+  "body": "a recording of yours is already being read; wait for it to finish. The recording was not consumed: nothing was stored, and the same tape can be sent again."
+}

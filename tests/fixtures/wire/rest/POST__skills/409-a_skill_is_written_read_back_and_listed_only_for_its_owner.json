@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills",
+  "status": 409,
+  "body": "you already have a skill called \"inbox-triage-0199bb4e000070008000000000000001\"; `/inbox-triage-0199bb4e000070008000000000000001` has to mean one thing"
+}

@@ -1,0 +1,18 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/mcp-calls",
+  "status": 200,
+  "body": [
+    {
+      "callId": "mcp_0199bb4e000070008000000000000002",
+      "tool": "write_file",
+      "arguments": {
+        "path": "/tmp/from-mcp",
+        "content": "hi"
+      },
+      "outcome": "awaiting",
+      "requestId": "0199bb4e-0000-7000-8000-000000000003",
+      "atMs": 1790000000000
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads/th-0199bb4e000070008000000000000001",
+  "status": 200,
+  "body": {
+    "threadId": "th-0199bb4e000070008000000000000001",
+    "runs": [
+      {
+        "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+        "status": "finished",
+        "startedAtMs": 1790000000000,
+        "updatedAtMs": 1790000000000,
+        "failure": null,
+        "events": [
+          {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "delta": "the second answer",
+            "messageId": "msg-1"
+          }
+        ]
+      }
+    ],
+    "hiddenRunIds": [
+      "run_0199bb4e-0000-7000-8000-000000000003"
+    ],
+    "pendingUserMessages": [],
+    "pendingEvents": []
+  }
+}

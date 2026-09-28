@@ -1,0 +1,24 @@
+{
+  "method": "GET",
+  "path": "/schedules",
+  "status": 200,
+  "body": [
+    {
+      "id": "sched_0199bb4e-0000-7000-8000-000000000001",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+      "name": "Inbox",
+      "cron": null,
+      "prompt": "a webhook arrived; report in",
+      "kind": "webhook",
+      "active": true,
+      "nextDueMs": null,
+      "lastRun": null,
+      "webhook": {
+        "type": "webhook",
+        "url": "http://opengrok.lan:1447/hooks/hook_0199bb4e-0000-7000-8000-000000000003",
+        "key": "«redacted»",
+        "header": "Authorization: Bearer «redacted»"
+      }
+    }
+  ]
+}

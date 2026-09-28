@@ -1,0 +1,42 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/spend",
+  "status": 200,
+  "body": {
+    "metered": false,
+    "note": "this coworker's key cannot serve: the gateway refuses it although it still knows it, so it may have been revoked or disabled there; an admin re-enables it on the gateway, or retires and re-hires the coworker",
+    "keyPrefix": "oag_live_stand001",
+    "limits": {
+      "fiveHourUsd": null,
+      "sevenDayUsd": null,
+      "monthUsd": null
+    },
+    "windows": [
+      {
+        "window": "5h",
+        "usedUsd": null,
+        "limitUsd": null,
+        "freesAt": null,
+        "requests": null,
+        "counterfactualUsd": null
+      },
+      {
+        "window": "7d",
+        "usedUsd": null,
+        "limitUsd": null,
+        "freesAt": null,
+        "requests": null,
+        "counterfactualUsd": null
+      },
+      {
+        "window": "month",
+        "usedUsd": null,
+        "limitUsd": null,
+        "freesAt": null,
+        "requests": null,
+        "counterfactualUsd": null
+      }
+    ],
+    "seat": null
+  }
+}

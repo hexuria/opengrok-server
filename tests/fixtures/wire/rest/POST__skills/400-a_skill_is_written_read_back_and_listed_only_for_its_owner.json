@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/skills",
+  "status": 400,
+  "body": "\"Not A Slash Name\" cannot be a skill name: it is typed after a slash, so it is lowercase letters, digits, dots and dashes, starting and ending with a letter or digit, up to 64 characters"
+}

@@ -1,0 +1,24 @@
+{
+  "method": "PUT",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/limit",
+  "status": 200,
+  "body": {
+    "metered": true,
+    "note": null,
+    "cap": null,
+    "effectiveCap": 12000000,
+    "usedPoints": 10000000,
+    "dayCap": null,
+    "usedToday": 10000000,
+    "dayFreesAt": "2026-09-01T00:00:00Z",
+    "pool": {
+      "max": 12000000,
+      "used": 10000000,
+      "resetsAt": "2026-09-01T00:00:00Z",
+      "setBy": "acct_0199bb4e-0000-7000-8000-000000000002"
+    },
+    "reference": {
+      "usdPerMtok": "0.200000"
+    }
+  }
+}

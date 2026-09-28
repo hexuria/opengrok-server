@@ -1,0 +1,55 @@
+{
+  "method": "PATCH",
+  "path": "/ag-ui/threads/th-null-0199bb4e000070008000000000000001/pending/pum_0199bb4e-0000-7000-8000-000000000002",
+  "status": 200,
+  "body": {
+    "v": 1,
+    "threadId": "th-null-0199bb4e000070008000000000000001",
+    "event": {
+      "type": "CUSTOM",
+      "timestamp": 100,
+      "name": "pending-user-message",
+      "value": {
+        "v": 1,
+        "op": "edited",
+        "threadId": "th-null-0199bb4e000070008000000000000001",
+        "message": {
+          "v": 1,
+          "id": "pum_0199bb4e-0000-7000-8000-000000000002",
+          "threadId": "th-null-0199bb4e000070008000000000000001",
+          "content": "later",
+          "replyTo": "m1",
+          "recipeId": "rec_1",
+          "recipeValues": {
+            "q": "old"
+          },
+          "skillId": "skl_1",
+          "clientMessageId": null,
+          "status": "pending",
+          "createdAtMs": 1790000000000,
+          "updatedAtMs": 1790000001000,
+          "drainedAtMs": null,
+          "drainedRunId": null
+        }
+      }
+    },
+    "pendingUserMessage": {
+      "v": 1,
+      "id": "pum_0199bb4e-0000-7000-8000-000000000002",
+      "threadId": "th-null-0199bb4e000070008000000000000001",
+      "content": "later",
+      "replyTo": "m1",
+      "recipeId": "rec_1",
+      "recipeValues": {
+        "q": "old"
+      },
+      "skillId": "skl_1",
+      "clientMessageId": null,
+      "status": "pending",
+      "createdAtMs": 1790000000000,
+      "updatedAtMs": 1790000001000,
+      "drainedAtMs": null,
+      "drainedRunId": null
+    }
+  }
+}

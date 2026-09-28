@@ -1,0 +1,54 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-awaiting-approval",
+  "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "callId": "collect-1",
+  "tool": "request_user_form",
+  "arguments": {
+    "title": "New tax profile",
+    "instruction": "",
+    "fields": [
+      {
+        "id": "email",
+        "label": "Email",
+        "type": "text",
+        "required": false,
+        "secret": false
+      },
+      {
+        "id": "password",
+        "label": "Password",
+        "type": "password",
+        "required": false,
+        "secret": false
+      }
+    ],
+    "collect": true
+  },
+  "reason": "user-form",
+  "why": "Waiting for you",
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000003",
+  "formRequest": {
+    "title": "New tax profile",
+    "instruction": "",
+    "fields": [
+      {
+        "id": "email",
+        "label": "Email",
+        "type": "text",
+        "required": false,
+        "secret": false
+      },
+      {
+        "id": "password",
+        "label": "Password",
+        "type": "password",
+        "required": false,
+        "secret": false
+      }
+    ],
+    "collect": true
+  }
+}

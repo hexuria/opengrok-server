@@ -2055,6 +2055,7 @@ dependencies = [
  "opengrok-plugins",
  "opengrok-policy",
  "opengrok-recipes",
+ "opengrok-server",
  "opengrok-store",
  "opengrok-tools",
  "opengrok-wire",

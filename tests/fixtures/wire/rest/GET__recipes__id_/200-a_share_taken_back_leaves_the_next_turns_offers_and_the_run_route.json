@@ -1,0 +1,63 @@
+{
+  "method": "GET",
+  "path": "/recipes/rcp_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "recipe": {
+      "id": "rcp_0199bb4e-0000-7000-8000-000000000001",
+      "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "orgId": "org_two_hands_0199bb4e000070008000000000000003",
+      "name": "Pay the rent",
+      "description": "",
+      "screen": {
+        "width": 1280,
+        "height": 800
+      },
+      "createdAtMs": 1790000000000,
+      "updatedAtMs": 1790000001000,
+      "deletedAtMs": null,
+      "latestVersion": 1,
+      "relation": "shared",
+      "shareState": null,
+      "kind": "recipe",
+      "parameters": []
+    },
+    "versions": [
+      {
+        "version": 1,
+        "kind": "filtered",
+        "note": "filtered",
+        "createdBy": "acct_0199bb4e-0000-7000-8000-000000000002",
+        "createdAtMs": 1790000001000,
+        "body": {
+          "steps": [
+            {
+              "x": 10,
+              "y": 10,
+              "op": "click",
+              "button": 1
+            }
+          ],
+          "screenshot": "end",
+          "stop_on_error": true
+        }
+      }
+    ],
+    "shares": [],
+    "grants": [
+      {
+        "recipeId": "rcp_0199bb4e-0000-7000-8000-000000000001",
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000004",
+        "grantedBy": "acct_0199bb4e-0000-7000-8000-000000000005",
+        "grantedAtMs": 1790000002000
+      }
+    ],
+    "runs": [],
+    "myBots": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000004",
+        "name": "Ada"
+      }
+    ]
+  }
+}

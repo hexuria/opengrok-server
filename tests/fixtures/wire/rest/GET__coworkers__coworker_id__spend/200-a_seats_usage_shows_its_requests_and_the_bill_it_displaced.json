@@ -1,0 +1,42 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/spend",
+  "status": 200,
+  "body": {
+    "metered": true,
+    "note": null,
+    "keyPrefix": "oag_live_stand001",
+    "limits": {
+      "fiveHourUsd": null,
+      "sevenDayUsd": null,
+      "monthUsd": null
+    },
+    "windows": [
+      {
+        "window": "5h",
+        "usedUsd": "0.000000",
+        "limitUsd": null,
+        "freesAt": "2026-09-01T00:00:00Z",
+        "requests": null,
+        "counterfactualUsd": null
+      },
+      {
+        "window": "7d",
+        "usedUsd": "0.000000",
+        "limitUsd": null,
+        "freesAt": "2026-09-01T00:00:00Z",
+        "requests": null,
+        "counterfactualUsd": null
+      },
+      {
+        "window": "month",
+        "usedUsd": "0.000000",
+        "limitUsd": null,
+        "freesAt": "2026-09-01T00:00:00Z",
+        "requests": 2,
+        "counterfactualUsd": null
+      }
+    ],
+    "seat": null
+  }
+}

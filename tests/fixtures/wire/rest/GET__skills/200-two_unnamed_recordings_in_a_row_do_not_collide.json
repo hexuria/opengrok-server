@@ -1,0 +1,31 @@
+{
+  "method": "GET",
+  "path": "/skills",
+  "status": 200,
+  "body": [
+    {
+      "id": "skl_0199bb4e-0000-7000-8000-000000000001",
+      "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "name": "taught-0199bb4e",
+      "description": "written from a screen recording; read it before you use it",
+      "source": "taught",
+      "updatedAtMs": 1790000000000,
+      "versionCount": 1,
+      "draft": false,
+      "enabled": false,
+      "approvedAtMs": null
+    },
+    {
+      "id": "skl_0199bb4e-0000-7000-8000-000000000003",
+      "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "name": "taught-0199bb4e",
+      "description": "written from a screen recording; read it before you use it",
+      "source": "taught",
+      "updatedAtMs": 1790000001000,
+      "versionCount": 1,
+      "draft": false,
+      "enabled": false,
+      "approvedAtMs": null
+    }
+  ]
+}

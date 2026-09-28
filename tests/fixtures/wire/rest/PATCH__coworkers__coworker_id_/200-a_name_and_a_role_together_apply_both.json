@@ -1,0 +1,26 @@
+{
+  "method": "PATCH",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "id": "cw_0199bb4e-0000-7000-8000-000000000001",
+    "name": "Greendale",
+    "model": "oag/cheap",
+    "role": "Keep the changelog honest.",
+    "title": "the study group's own dean",
+    "avatarShape": null,
+    "avatarColor": null,
+    "visibility": "private",
+    "hiddenFromSidebar": false,
+    "updatedAtMs": 1790000000000,
+    "boxId": null,
+    "isGroup": false,
+    "memberIds": [],
+    "mine": true,
+    "canManage": true,
+    "owner": {
+      "id": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "name": "Test User"
+    }
+  }
+}

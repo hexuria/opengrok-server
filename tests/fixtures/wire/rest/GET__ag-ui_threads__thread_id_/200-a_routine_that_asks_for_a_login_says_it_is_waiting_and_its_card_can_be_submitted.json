@@ -1,0 +1,224 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads/sched_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+    "runs": [
+      {
+        "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+        "status": "awaiting-approval",
+        "startedAtMs": 1790000000000,
+        "updatedAtMs": 1790000001000,
+        "failure": null,
+        "events": [
+          {
+            "type": "RUN_STARTED",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_START",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "role": "user",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "delta": "sign in\n\n<webhook_event>\n{}\n</webhook_event>",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_END",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "timestamp": 100
+          },
+          {
+            "type": "TOOL_CALL_START",
+            "timestamp": 100,
+            "toolCallId": "mock-form-1",
+            "toolCallName": "request_user_form",
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000003"
+          },
+          {
+            "type": "TOOL_CALL_ARGS",
+            "delta": "{\"title\":\"Google account\",\"instruction\":\"Enter the address and password.\",\"fields\":[{\"id\":\"email\",\"label\":\"Email\",\"type\":\"email\",\"required\":true},{\"id\":\"password\",\"label\":\"Password\",\"type\":\"password\",\"required\":true}],\"liveHost\":\"accounts.google.com\",\"values\":{}}",
+            "timestamp": 100,
+            "toolCallId": "mock-form-1",
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000003"
+          },
+          {
+            "type": "TOOL_CALL_END",
+            "timestamp": 100,
+            "toolCallId": "mock-form-1",
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000003"
+          },
+          {
+            "ok": false,
+            "type": "TOOL_CALL_RESULT",
+            "content": "waiting for approval: Waiting for you",
+            "timestamp": 100,
+            "toolCallId": "mock-form-1"
+          },
+          {
+            "why": "Waiting for you",
+            "name": "run-awaiting-approval",
+            "tool": "request_user_form",
+            "type": "CUSTOM",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "callId": "mock-form-1",
+            "reason": "user-form",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "arguments": {
+              "title": "Google account",
+              "fields": [
+                {
+                  "id": "email",
+                  "type": "email",
+                  "label": "Email",
+                  "secret": false,
+                  "required": true
+                },
+                {
+                  "id": "password",
+                  "type": "password",
+                  "label": "Password",
+                  "secret": false,
+                  "required": true
+                }
+              ],
+              "liveHost": "accounts.google.com",
+              "instruction": "Enter the address and password."
+            },
+            "timestamp": 100,
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000003",
+            "message": {
+              "type": "user-form",
+              "formRequest": {
+                "title": "Google account",
+                "fields": [
+                  {
+                    "id": "email",
+                    "type": "email",
+                    "label": "Email",
+                    "secret": false,
+                    "required": true
+                  },
+                  {
+                    "id": "password",
+                    "type": "password",
+                    "label": "Password",
+                    "secret": false,
+                    "required": true
+                  }
+                ],
+                "liveHost": "accounts.google.com",
+                "instruction": "Enter the address and password."
+              }
+            },
+            "formRequest": {
+              "title": "Google account",
+              "fields": [
+                {
+                  "id": "email",
+                  "type": "email",
+                  "label": "Email",
+                  "secret": false,
+                  "required": true
+                },
+                {
+                  "id": "password",
+                  "type": "password",
+                  "label": "Password",
+                  "secret": false,
+                  "required": true
+                }
+              ],
+              "liveHost": "accounts.google.com",
+              "instruction": "Enter the address and password."
+            },
+            "value": {
+              "id": "e_0199bb4e-0000-7000-8000-000000000003",
+              "kind": "send-message",
+              "callId": "mock-form-1",
+              "message": {
+                "type": "user-form",
+                "formRequest": {
+                  "title": "Google account",
+                  "fields": [
+                    {
+                      "id": "email",
+                      "type": "email",
+                      "label": "Email",
+                      "secret": false,
+                      "required": true
+                    },
+                    {
+                      "id": "password",
+                      "type": "password",
+                      "label": "Password",
+                      "secret": false,
+                      "required": true
+                    }
+                  ],
+                  "liveHost": "accounts.google.com",
+                  "instruction": "Enter the address and password."
+                }
+              },
+              "timestampMs": 1790000002000
+            }
+          },
+          {
+            "name": "run-timing",
+            "type": "CUSTOM",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "value": {
+              "tools": [
+                {
+                  "ms": 3,
+                  "name": "request_user_form"
+                }
+              ],
+              "budget": {
+                "idle_ms": 240000,
+                "max_rounds": 8,
+                "max_wall_ms": 900000,
+                "call_timeout_ms": 180000,
+                "max_computer_rounds": 24
+              },
+              "context": {
+                "limit": 128000,
+                "left_out": 0,
+                "estimated": [
+                  2558
+                ]
+              },
+              "model_ms": [
+                3
+              ],
+              "total_ms": 3,
+              "tool_rounds": 1,
+              "tool_wait_ms": 3,
+              "auto_review_ms": 3
+            },
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "total_ms": 3,
+            "timestamp": 100,
+            "tool_rounds": 1
+          },
+          {
+            "type": "RUN_FINISHED",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "timestamp": 100
+          }
+        ]
+      }
+    ],
+    "hiddenRunIds": [],
+    "pendingUserMessages": [],
+    "pendingEvents": []
+  }
+}

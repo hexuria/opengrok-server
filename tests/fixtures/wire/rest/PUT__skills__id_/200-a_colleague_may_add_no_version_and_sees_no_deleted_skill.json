@@ -1,0 +1,20 @@
+{
+  "method": "PUT",
+  "path": "/skills/skl_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "id": "skl_0199bb4e-0000-7000-8000-000000000001",
+    "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+    "name": "shared-style-0199bb4e000070008000000000000003",
+    "description": "",
+    "source": "authored",
+    "updatedAtMs": 1790000000000,
+    "versionCount": 1,
+    "draft": false,
+    "enabled": false,
+    "approvedAtMs": 1790000001000,
+    "body": "ours",
+    "version": 1,
+    "files": []
+  }
+}

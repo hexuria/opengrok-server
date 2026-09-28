@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/ag-ui",
+  "status": 403,
+  "body": "the grant for coworker cw_0199bb4e-0000-7000-8000-000000000001 was revoked"
+}

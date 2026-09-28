@@ -1,0 +1,217 @@
+{
+  "method": "GET",
+  "path": "/recipes/rcp_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "recipe": {
+      "id": "rcp_0199bb4e-0000-7000-8000-000000000001",
+      "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "orgId": null,
+      "name": "Search once",
+      "description": "",
+      "screen": {
+        "width": 1280,
+        "height": 800
+      },
+      "createdAtMs": 1790000000000,
+      "updatedAtMs": 1790000000000,
+      "deletedAtMs": null,
+      "latestVersion": 1,
+      "relation": "mine",
+      "shareState": null,
+      "kind": "workflow",
+      "parameters": [
+        {
+          "name": "term",
+          "description": "what to search for",
+          "required": true,
+          "kind": "text",
+          "default": null,
+          "values": null
+        }
+      ]
+    },
+    "versions": [
+      {
+        "version": 1,
+        "kind": "workflow",
+        "note": "the tree as written",
+        "createdBy": "acct_0199bb4e-0000-7000-8000-000000000002",
+        "createdAtMs": 1790000000000,
+        "body": {
+          "start": "look",
+          "steps": {
+            "done": {
+              "do": "stop",
+              "say": "searched once",
+              "outcome": "done"
+            },
+            "look": {
+              "as": "field",
+              "do": "observe",
+              "then": "already-there",
+              "shell": "xdotool getactivewindow getwindowname"
+            },
+            "clear": {
+              "do": "run",
+              "then": "search",
+              "recipe": "rcp_0199bb4e-0000-7000-8000-000000000003",
+              "otherwise": "gave-up"
+            },
+            "search": {
+              "do": "run",
+              "then": "done",
+              "recipe": "rcp_0199bb4e-0000-7000-8000-000000000004",
+              "values": {
+                "q": "{{term}}"
+              }
+            },
+            "already": {
+              "do": "stop",
+              "say": "it was already searched",
+              "outcome": "already"
+            },
+            "gave-up": {
+              "do": "stop",
+              "say": "",
+              "outcome": "gave-up"
+            },
+            "is-it-ready": {
+              "do": "ask",
+              "no": "clear",
+              "yes": "search",
+              "name": "ready",
+              "question": {
+                "kind": "noul",
+                "instructions": "Is the search field ready for {{term}}?"
+              }
+            },
+            "already-there": {
+              "do": "when",
+              "no": "is-it-ready",
+              "yes": "already",
+              "fact": "field",
+              "test": {
+                "contains": "{{term}}"
+              }
+            }
+          },
+          "budget": {
+            "steps": 10,
+            "seconds": 60
+          },
+          "workflow": 1,
+          "parameters": [
+            {
+              "kind": "text",
+              "name": "term",
+              "values": null,
+              "default": null,
+              "required": true,
+              "description": "what to search for"
+            }
+          ]
+        }
+      }
+    ],
+    "shares": [],
+    "grants": [],
+    "runs": [
+      {
+        "id": "rrun_0199bb4e-0000-7000-8000-000000000005",
+        "recipeId": "rcp_0199bb4e-0000-7000-8000-000000000001",
+        "version": 1,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000006",
+        "runId": "rrun_0199bb4e-0000-7000-8000-000000000005",
+        "ok": true,
+        "stoppedAt": null,
+        "receipt": {
+          "ms": 3,
+          "ok": true,
+          "jev": "off",
+          "say": "searched once",
+          "shape": 1,
+          "steps": 6,
+          "trail": [
+            {
+              "as": "field",
+              "do": "observe",
+              "exit": 0,
+              "step": "look",
+              "went": "already-there",
+              "chars": 23,
+              "shell": "xdotool getactivewindow getwindowname"
+            },
+            {
+              "do": "when",
+              "fact": "field",
+              "held": false,
+              "step": "already-there",
+              "test": "contains",
+              "went": "is-it-ready"
+            },
+            {
+              "do": "ask",
+              "kind": "noul",
+              "step": "is-it-ready",
+              "went": "clear",
+              "answer": "no",
+              "fallback": {
+                "rule": "the branch that skips",
+                "because": "Jev was switched off for this run"
+              },
+              "question": "ready",
+              "confidence": null
+            },
+            {
+              "do": "run",
+              "ok": true,
+              "ran": 2,
+              "step": "clear",
+              "went": "search",
+              "error": null,
+              "runId": "rrun_0199bb4e-0000-7000-8000-000000000007",
+              "recipe": "rcp_0199bb4e-0000-7000-8000-000000000003",
+              "observe": "input",
+              "version": 1,
+              "observed": 0,
+              "stoppedAt": null
+            },
+            {
+              "do": "run",
+              "ok": true,
+              "ran": 2,
+              "step": "search",
+              "went": "done",
+              "error": null,
+              "runId": "rrun_0199bb4e-0000-7000-8000-000000000008",
+              "recipe": "rcp_0199bb4e-0000-7000-8000-000000000004",
+              "observe": "input",
+              "version": 1,
+              "observed": 0,
+              "stoppedAt": null
+            },
+            {
+              "do": "stop",
+              "step": "done",
+              "outcome": "done"
+            }
+          ],
+          "ending": "stopped",
+          "outcome": "done",
+          "fallbacks": 1
+        },
+        "atMs": 1790000001000,
+        "leaseUntilMs": null,
+        "state": "finished",
+        "artifacts": []
+      }
+    ],
+    "myBots": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000006",
+        "name": "Ada"
+      }
+    ]
+  }
+}
