@@ -14,10 +14,10 @@
       "nextDueMs": 1790000000000,
       "lastRun": {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "running",
+        "status": "finished",
         "startedAtMs": 1790000001000,
-        "finishedAtMs": null,
-        "summary": "Routine Standup is running."
+        "finishedAtMs": 1790000002000,
+        "summary": "Routine Standup ran: You said: summarise the standup notes. This is the mock door standing in for oag/cheap — no model was called."
       }
     }
   ]
