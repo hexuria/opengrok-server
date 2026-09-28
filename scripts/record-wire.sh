@@ -36,8 +36,16 @@ if [ -z "$from" ]; then
   OG_RECORD_WIRE="$from" cargo nextest run --workspace --no-fail-fast
 fi
 
+# server_sha names the code that produced the corpus, which NativeChat pins what it vendors by:
+# the last commit that changed the server, the recorder or the corpus builder. Not HEAD: the
+# commit that only adds the corpus would otherwise stamp a sha, and a builder fix would leave two
+# different corpora under one.
+sha=$(git log -1 --format=%H -- crates Cargo.lock scripts/record-wire.sh)
+if ! git diff --quiet HEAD -- crates Cargo.lock scripts/record-wire.sh; then
+  echo "note: the code has uncommitted changes, so server_sha $sha does not name exactly what was recorded" >&2
+fi
 cargo run -q -p opengrok-server --example wire_corpus -- \
-  build "$from" "$scratch/corpus" "$(git rev-parse HEAD)"
+  build "$from" "$scratch/corpus" "$sha"
 
 if [ "$check" = 1 ]; then
   cargo run -q -p opengrok-server --example wire_corpus -- check "$scratch/corpus" tests/fixtures/wire
