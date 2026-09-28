@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/local-exec/audit",
+  "status": 200,
+  "body": {
+    "entries": []
+  }
+}

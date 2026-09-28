@@ -71,15 +71,15 @@
             ]
           },
           "model_ms": [
-            0
+            3
           ],
-          "total_ms": 57,
+          "total_ms": 3,
           "tool_rounds": 0,
-          "tool_wait_ms": 0,
-          "auto_review_ms": 0
+          "tool_wait_ms": 3,
+          "auto_review_ms": 3
         },
         "threadId": "thr-second-device-0199bb4e000070008000000000000002",
-        "total_ms": 57,
+        "total_ms": 3,
         "timestamp": 100,
         "tool_rounds": 0
       },

@@ -6,12 +6,12 @@
   "runId": "0199bb4e-0000-7000-8000-000000000002",
   "value": {
     "model_ms": [
-      12
+      3
     ],
     "tools": [],
-    "tool_wait_ms": 0,
-    "auto_review_ms": 0,
-    "total_ms": 40,
+    "tool_wait_ms": 3,
+    "auto_review_ms": 3,
+    "total_ms": 3,
     "tool_rounds": 0,
     "budget": {
       "max_rounds": 8,
@@ -28,6 +28,6 @@
       "left_out": 0
     }
   },
-  "total_ms": 40,
+  "total_ms": 3,
   "tool_rounds": 0
 }

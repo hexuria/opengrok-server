@@ -5,7 +5,7 @@
   "body": {
     "metered": true,
     "note": null,
-    "keyPrefix": "«redacted»",
+    "keyPrefix": "oag_live_stand001",
     "limits": {
       "fiveHourUsd": null,
       "sevenDayUsd": null,
@@ -16,7 +16,7 @@
         "window": "5h",
         "usedUsd": "0.000000",
         "limitUsd": null,
-        "freesAt": "2026-09-28T07:54:08Z",
+        "freesAt": "2026-09-01T00:00:00Z",
         "requests": null,
         "counterfactualUsd": null
       },
@@ -24,7 +24,7 @@
         "window": "7d",
         "usedUsd": "0.000000",
         "limitUsd": null,
-        "freesAt": "2026-10-05T02:54:08Z",
+        "freesAt": "2026-09-01T00:00:00Z",
         "requests": null,
         "counterfactualUsd": null
       },
@@ -32,7 +32,7 @@
         "window": "month",
         "usedUsd": "0.000000",
         "limitUsd": null,
-        "freesAt": "2026-10-01T00:00:00Z",
+        "freesAt": "2026-09-01T00:00:00Z",
         "requests": 2,
         "counterfactualUsd": null
       }

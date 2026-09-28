@@ -1,0 +1,6 @@
+{
+  "method": "DELETE",
+  "path": "/local-exec/policy/rule",
+  "status": 204,
+  "body": ""
+}

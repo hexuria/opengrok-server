@@ -1,0 +1,6 @@
+{
+  "method": "PUT",
+  "path": "/local-exec/policy",
+  "status": 204,
+  "body": ""
+}

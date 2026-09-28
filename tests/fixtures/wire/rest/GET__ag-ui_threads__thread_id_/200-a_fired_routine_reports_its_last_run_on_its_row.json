@@ -193,15 +193,15 @@
                 ]
               },
               "model_ms": [
-                0
+                3
               ],
-              "total_ms": 12,
+              "total_ms": 3,
               "tool_rounds": 0,
-              "tool_wait_ms": 0,
-              "auto_review_ms": 0
+              "tool_wait_ms": 3,
+              "auto_review_ms": 3
             },
             "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
-            "total_ms": 12,
+            "total_ms": 3,
             "timestamp": 100,
             "tool_rounds": 0
           },

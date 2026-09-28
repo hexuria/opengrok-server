@@ -1,5 +1,5 @@
 {
-  "server_sha": "12cf8b7cd8044a79976ba62ced6681996401c20c",
+  "server_sha": "c7eab5cbfff4c1cfb57dd52e189d67531c09729d",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -272,6 +272,10 @@
     {
       "file": "rest/DELETE__coworkers__coworker_id__keys__jti_/404-an_org_visible_coworker_is_on_a_members_roster_and_answers_them.json",
       "source": "DELETE /coworkers/{coworker_id}/keys/{jti}, recorded from the test an_org_visible_coworker_is_on_a_members_roster_and_answers_them (crates/opengrok-server/tests/against_visibility.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/DELETE__local-exec_policy_rule/204-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
+      "source": "DELETE /local-exec/policy/rule, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
     },
     {
       "file": "rest/DELETE__recipes__id__share__scope___scope_id_/200-a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route.json",
@@ -612,6 +616,18 @@
     {
       "file": "rest/GET__coworkers__coworker_id__usage/404-a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words.json",
       "source": "GET /coworkers/{coworker_id}/usage, recorded from the test a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words (crates/opengrok-server/tests/against_spend_caps.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__local-exec_audit/200-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
+      "source": "GET /local-exec/audit, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__local-exec_daemon/200-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
+      "source": "GET /local-exec/daemon, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__local-exec_policy/200-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
+      "source": "GET /local-exec/policy, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__recipes/200-a_recipe_whose_tape_cannot_be_stored_is_not_a_200.json",
@@ -1118,6 +1134,18 @@
       "source": "POST /coworkers/{coworker_id}/keys, recorded from the test an_org_visible_coworker_is_on_a_members_roster_and_answers_them (crates/opengrok-server/tests/against_visibility.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/POST__local-exec_daemon/200-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
+      "source": "POST /local-exec/daemon, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__local-exec_policy_rule/204-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
+      "source": "POST /local-exec/policy/rule, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__local-exec_policy_rule/422-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
+      "source": "POST /local-exec/policy/rule, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/POST__recipes/503-a_recipe_whose_tape_cannot_be_stored_is_not_a_200.json",
       "source": "POST /recipes, recorded from the test a_recipe_whose_tape_cannot_be_stored_is_not_a_200 (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
@@ -1364,6 +1392,10 @@
     {
       "file": "rest/PUT__coworkers__coworker_id__limit/400-a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words.json",
       "source": "PUT /coworkers/{coworker_id}/limit, recorded from the test a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words (crates/opengrok-server/tests/against_spend_caps.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/PUT__local-exec_policy/204-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
+      "source": "PUT /local-exec/policy, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
     },
     {
       "file": "rest/PUT__skills__id_/200-the_person_approves_before_a_turn_can_have_it.json",

@@ -4,6 +4,6 @@
   "status": 429,
   "body": {
     "error": "Too many verification-email requests. Try again in 60 minutes.",
-    "retryAfterSecs": 3600
+    "retryAfterSecs": 60
   }
 }

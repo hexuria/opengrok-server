@@ -10,11 +10,11 @@
     "usedPoints": 15000000,
     "dayCap": 16000000,
     "usedToday": 15000000,
-    "dayFreesAt": "2026-09-29T02:54:06Z",
+    "dayFreesAt": "2026-09-01T00:00:00Z",
     "pool": {
       "max": 100000000,
       "used": 15000000,
-      "resetsAt": "2026-10-01T00:00:00Z",
+      "resetsAt": "2026-09-01T00:00:00Z",
       "setBy": "acct_0199bb4e-0000-7000-8000-000000000002"
     },
     "reference": {
