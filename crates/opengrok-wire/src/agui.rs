@@ -168,11 +168,93 @@ pub struct Message {
     pub id: String,
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Content>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(flatten)]
     pub extra: Extra,
+}
+
+impl Message {
+    /// The words, whichever way `content` was sent: empty when there are none.
+    pub fn text(&self) -> String {
+        self.content.as_ref().map(Content::text).unwrap_or_default()
+    }
+}
+
+/// A message's `content`: words, or an array of input parts (#229).
+///
+/// Transcribed from AG-UI 1.0 `UserMessageSchema` / `ContentPartSchema` / `ImagePartSchema` /
+/// `DocumentPartSchema` / `FileSourceSchema` (`ag-ui-protocol/ag-ui`
+/// `sdks/typescript/packages/core/src/generated/schemas.ts` at `b8ebd02c84`), as NativeChat
+/// sends them (hexuria/nativechat#90): `{type: "text", text}`, and `{type: "image" | "document",
+/// source: {type: "file", value: "art_…", provider: "opengrok", mimeType}, metadata: {filename,
+/// sizeBytes}}` for a file the person uploaded to `POST /artifacts` first. A message with no
+/// attachment still sends a plain string.
+///
+/// PARTS ARE KEPT AS SENT (non-negotiable #2): a part type this server does not read is carried
+/// through the journal and back out on replay untouched, never dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Content {
+    Text(String),
+    Parts(Vec<Value>),
+}
+
+/// A file a part names: an artifact this server issued, by its `art_` id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePart {
+    /// `image` or `document`: what the part said it is.
+    pub kind: String,
+    pub artifact_id: String,
+    /// `metadata.filename`, when the part carries it.
+    pub filename: Option<String>,
+}
+
+impl Content {
+    /// The words: the string, or every `text` part joined by a blank line.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        }
+    }
+
+    /// The files it names from this server (`source.type: "file"`, `provider: "opengrok"`). A
+    /// file from any other provider is not ours to resolve and is left to round-trip.
+    pub fn files(&self) -> Vec<FilePart> {
+        let Self::Parts(parts) = self else {
+            return Vec::new();
+        };
+        parts
+            .iter()
+            .filter_map(|part| {
+                let kind = part.get("type")?.as_str()?;
+                if kind != "image" && kind != "document" {
+                    return None;
+                }
+                let source = part.get("source")?;
+                if source.get("type")?.as_str()? != "file"
+                    || source.get("provider").and_then(Value::as_str) != Some("opengrok")
+                {
+                    return None;
+                }
+                Some(FilePart {
+                    kind: kind.to_string(),
+                    artifact_id: source.get("value")?.as_str()?.to_string(),
+                    filename: part
+                        .pointer("/metadata/filename")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                })
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]

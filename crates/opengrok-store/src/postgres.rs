@@ -496,32 +496,6 @@ impl PgStore {
         rows.into_iter().map(thread_run_from_row).collect()
     }
 
-    /// How many of this thread's runs have not ended.
-    ///
-    /// The webhook door caps firings on this: whoever holds a hook's key can press it as fast as
-    /// they like, and every press would otherwise open a run that is billed and holds a recovery
-    /// lease. Counted in the database rather than from `runs_for_thread`, because that reader is
-    /// bounded by a limit and orders by when a run last MOVED — a run waiting days on a card
-    /// would fall off the end of the page and out of the count.
-    ///
-    /// The terminal words come from `RunStatus` rather than being spelled here, so a sixth status
-    /// cannot be invented in one place and forgotten in this query.
-    pub async fn unfinished_runs_in_thread(&self, thread_id: &str) -> StoreResult<i64> {
-        let ended: Vec<&str> = [RunStatus::Finished, RunStatus::Failed, RunStatus::Stopped]
-            .iter()
-            .map(RunStatus::as_str)
-            .collect();
-        let row = sqlx::query(
-            "select count(*) as unfinished from run_view
-             where thread_id = $1 and not (status = any($2))",
-        )
-        .bind(thread_id)
-        .bind(&ended)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(row.try_get("unfinished")?)
-    }
-
     /// Hide a run from every client of the account that owns it.
     ///
     /// Nothing is destroyed: the run, its frames and the coworker's memory of the turn are
@@ -837,19 +811,6 @@ impl PgStore {
         .fetch_all(&self.pool)
         .await?;
 
-        rows.into_iter()
-            .map(|row| Ok(RunId::from_stored(row.try_get::<String, _>("id")?)))
-            .collect()
-    }
-
-    /// Runs left `running`, whether or not their lease has expired. For diagnosis.
-    pub async fn interrupted_runs(&self, limit: i64) -> StoreResult<Vec<RunId>> {
-        let rows = sqlx::query(
-            "select id from run_view where status = 'running' order by updated_at_ms limit $1",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
         rows.into_iter()
             .map(|row| Ok(RunId::from_stored(row.try_get::<String, _>("id")?)))
             .collect()
@@ -3796,6 +3757,31 @@ impl PgStore {
         .await?;
 
         rows.iter().map(artifact_row).collect()
+    }
+
+    /// Mark a person's upload as sent in `message_id` on `thread_id` (#229): the conversation's
+    /// replay draws it in that bubble (`GET /artifacts?threadId=` and `meta.messageId`). Only the
+    /// owner's row moves, and a thread given at upload is kept.
+    pub async fn attach_artifact(
+        &self,
+        id: &str,
+        account_id: &str,
+        thread_id: &str,
+        message_id: &str,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update artifact
+                set thread_id = coalesce(thread_id, $3),
+                    meta = jsonb_set(coalesce(meta, '{}'::jsonb), '{messageId}', to_jsonb($4::text))
+              where id = $1 and account_id = $2 and deleted_at_ms is null",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(thread_id)
+        .bind(message_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Soft-delete an artifact by setting deleted_at_ms. Idempotent.

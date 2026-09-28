@@ -1,4 +1,5 @@
-//! Artifacts: images and videos attached to messages, and screenshots and recordings from recipe runs.
+//! Artifacts: a person's attachments (images, PDFs, text files: #229), and screenshots and
+//! recordings from recipe runs.
 //! The store holds both plaintext in Postgres bytea columns and metadata in jsonb, with no
 //! encryption. The vault exists for credentials that open other systems; every message is already
 //! plaintext in events, so sealing a screenshot while the conversation beside it is in the clear
@@ -31,7 +32,9 @@ pub fn router(state: AgUiState) -> Router {
             // allowance is base64, which is about four bytes for every three, plus room for the
             // rest of the object. Raised on this ONE route: nothing else here takes a big body,
             // and a server-wide limit would be a server-wide invitation.
-            post(create).layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+            post(create)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES))
+                .get(list_for_thread),
         )
         .route("/artifacts/{id}", get(detail).delete(remove))
         .route("/artifacts/{id}/bytes", get(read_bytes))
@@ -75,11 +78,16 @@ async fn create(
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
 
-    // Validate mime type: image or video only.
-    if !request.mime.starts_with("image/") && !request.mime.starts_with("video/") {
+    // Images and videos, and what a person attaches to a message (#229, nativechat#90): a PDF
+    // or a text file, which reach the model as words rather than pixels.
+    let accepted = ["image/", "video/", "text/"]
+        .iter()
+        .any(|prefix| request.mime.starts_with(prefix))
+        || request.mime == "application/pdf";
+    if !accepted {
         return (
             StatusCode::BAD_REQUEST,
-            "only images and videos are accepted",
+            "only images, videos, PDFs and text files are accepted",
         )
             .into_response();
     }
@@ -125,6 +133,34 @@ async fn create(
     }
 
     Json(row).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadQuery {
+    thread_id: String,
+}
+
+/// `GET /artifacts?threadId=` — the caller's artifacts on one conversation, without bytes (#229).
+/// A replay draws a sent attachment in its bubble from `meta.messageId`, which the turn stamps;
+/// a row with none was uploaded and not sent, and a client leaves it out.
+async fn list_for_thread(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<ThreadQuery>,
+) -> Response {
+    let Some(account) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    match state
+        .auth
+        .store
+        .artifacts_for_thread(account.as_str(), &query.thread_id)
+        .await
+    {
+        Ok(rows) => Json(rows).into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
 
 /// `GET /artifacts/{id}` — the artifact row (without bytes), owned by the caller.

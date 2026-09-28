@@ -223,7 +223,7 @@ fn message(role: &str, content: Option<&str>) -> Message {
     Message {
         id: "m1".to_string(),
         role: role.to_string(),
-        content: content.map(str::to_string),
+        content: content.map(|text| opengrok_wire::agui::Content::Text(text.to_string())),
         name: None,
         extra: Default::default(),
     }
