@@ -81,7 +81,11 @@ async fn create(
     // ONE LINE EACH, AND A PLAIN TYPE. The name and the type are written into what the model
     // reads (#229) and into `Content-Disposition`: a line break in either would be text outside
     // the fence a file is read inside, and a quote would end the header's filename.
-    let plain = |text: &str| !text.chars().any(|ch| ch.is_control() || ch == '"');
+    let plain = |text: &str| {
+        !text
+            .chars()
+            .any(|ch| crate::agui::attachments::breaks_line(ch) || ch == '"')
+    };
     let one_type = request.mime.split_once('/').is_some_and(|(kind, sub)| {
         let token = |part: &str| {
             !part.is_empty()

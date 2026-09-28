@@ -115,12 +115,21 @@ pub(crate) async fn resolve(
     let (mut images, mut image_bytes) = (0usize, 0usize);
     for message in sent_now(input) {
         for file in message.content.iter().flat_map(|content| content.files()) {
-            let found = store
-                .artifact_bytes(&file.artifact_id)
-                .await
-                .ok()
-                .flatten()
-                .filter(|(row, _)| row.account_id == account.as_str());
+            let found = match store.artifact_bytes(&file.artifact_id).await {
+                Ok(found) => found.filter(|(row, _)| row.account_id == account.as_str()),
+                // A file that could not be read is not one attached earlier: say so, by name.
+                Err(error) => {
+                    tracing::warn!(%error, artifact = %file.artifact_id, "could not read an attachment");
+                    let name = one_line(file.filename.as_deref().unwrap_or(&file.artifact_id));
+                    attached.0.insert(
+                        file.artifact_id.clone(),
+                        Resolved::Words(format!(
+                            "[The person attached {name}, but it could not be read just now.]"
+                        )),
+                    );
+                    continue;
+                }
+            };
             let Some((row, bytes)) = found else {
                 // Checked before the turn began: gone since is the one way here.
                 continue;
@@ -144,10 +153,17 @@ pub(crate) async fn resolve(
     attached
 }
 
-/// A name or type as the model reads it: one line, whatever an older row stored. The upload
-/// refuses both with a line break, so this only guards rows written before it did.
+/// Whether `ch` ends a line for a reader: every control character (CR, LF, NEL), and the two
+/// Unicode separators `is_control` does not cover (U+2028, U+2029). A name the model reads must
+/// hold none: a line break in it is words outside the fence (review of #259, twice).
+pub(crate) fn breaks_line(ch: char) -> bool {
+    ch.is_control() || ch == '\u{2028}' || ch == '\u{2029}'
+}
+
+/// A name or type as the model reads it: one line, whatever it came from. The upload refuses a
+/// line break, but a part's `metadata.filename` never passed the upload, and older rows predate it.
 fn one_line(text: &str) -> String {
-    text.chars().filter(|ch| !ch.is_control()).collect()
+    text.chars().filter(|ch| !breaks_line(*ch)).collect()
 }
 
 /// A fence the text cannot close: one backtick longer than the longest run of them inside it.

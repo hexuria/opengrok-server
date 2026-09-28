@@ -178,7 +178,9 @@ Show them before a send, so a big file is not found out after it.
 |---|---|---|
 | Upload, any file | 25 MiB after base64 decoding (`MAX_ARTIFACT_BYTES`) | `413`, "artifacts must be under 25 MiB" |
 | Upload types | `image/*`, `video/*`, `application/pdf`, `text/*` | `400`, "only images, videos, PDFs and text files are accepted" |
+| Upload name and type | One line (no control character, U+2028 or U+2029), no `"`; the type a plain `type/subtype` | `400`, "the filename must be one line with no quotes, and the type a plain type/subtype" |
 | A picture the model sees | `image/png`, `image/jpeg`, `image/gif`, `image/webp`, up to 10 MiB (`IMAGE_MIMES`, `MAX_IMAGE_BYTES`) | Named to the model, not shown to it |
+| Pictures in one turn | 8 of them, and 20 MiB in all (`MAX_TURN_IMAGES`, `MAX_TURN_IMAGE_BYTES`) | The rest are named, saying the turn already carries as many as one request can |
 | A text file the model reads | Its first 20,000 characters (`MAX_TEXT_CHARS`) | The model is told where it was cut |
 | A PDF | Named to the model with a sentence that its text cannot be read yet | Text extraction is not built yet |
 | A file from an earlier message | Named to the model, not sent again | |
