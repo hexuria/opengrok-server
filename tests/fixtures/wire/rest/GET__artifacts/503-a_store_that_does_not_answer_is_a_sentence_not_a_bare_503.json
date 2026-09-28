@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/artifacts",
+  "status": 503,
+  "body": {
+    "error": "the database refused: pool timed out while waiting for an open connection"
+  }
+}
