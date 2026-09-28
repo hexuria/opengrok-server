@@ -732,6 +732,28 @@ async fn a_tape_that_cannot_be_stored_is_refused_as_the_tape() {
     );
 }
 
+/// The six characters `\u0000` typed into a tape are text, not a NUL (review of #262): only the
+/// character itself is refused.
+#[tokio::test]
+async fn a_tape_that_spells_out_a_nul_is_kept() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let owner = h.person().await;
+    let name = format!("Spelled {}", uuid::Uuid::now_v7().simple());
+    let (status, body) = h
+        .call(
+            &owner,
+            "POST",
+            "/recipes",
+            Some(json!({ "name": name, "raw": [
+                { "kind": "down", "x": 5, "y": 5, "at": 0, "code": "\\u0000" },
+                { "kind": "up", "x": 5, "y": 5, "at": 80 }
+            ]})),
+        )
+        .await;
+    assert_eq!(status, 200, "text that spells a NUL is not one: {body}");
+}
+
 /// Run a recipe on one of this person's bots and wait for it; the run's id.
 async fn run_on(h: &Harness, who: &Person, bot: &str, id: &str) -> String {
     let (status, ran) = h
