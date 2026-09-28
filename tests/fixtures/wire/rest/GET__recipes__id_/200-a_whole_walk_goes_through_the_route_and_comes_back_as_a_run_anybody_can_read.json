@@ -126,7 +126,7 @@
         "ok": true,
         "stoppedAt": null,
         "receipt": {
-          "ms": 57,
+          "ms": 23,
           "ok": true,
           "jev": "off",
           "say": "searched once",

@@ -1,5 +1,5 @@
 {
-  "server_sha": "25c1e5fdce37ec03c717b1ee93e5e2908f498844",
+  "server_sha": "12cf8b7cd8044a79976ba62ced6681996401c20c",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -682,8 +682,8 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted.json",
-      "source": "GET /schedules, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
+      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",

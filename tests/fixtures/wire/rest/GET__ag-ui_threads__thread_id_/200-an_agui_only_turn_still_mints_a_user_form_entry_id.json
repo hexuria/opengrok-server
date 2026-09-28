@@ -199,10 +199,10 @@
                 }
               ],
               "budget": {
-                "idle_ms": 1790000003000,
+                "idle_ms": 240000,
                 "max_rounds": 8,
-                "max_wall_ms": 1790000004000,
-                "call_timeout_ms": 1790000005000,
+                "max_wall_ms": 900000,
+                "call_timeout_ms": 180000,
                 "max_computer_rounds": 24
               },
               "context": {
@@ -213,15 +213,15 @@
                 ]
               },
               "model_ms": [
-                1790000006000
+                0
               ],
-              "total_ms": 1790000007000,
+              "total_ms": 23,
               "tool_rounds": 1,
-              "tool_wait_ms": 1790000006000,
-              "auto_review_ms": 1790000006000
+              "tool_wait_ms": 0,
+              "auto_review_ms": 0
             },
             "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
-            "total_ms": 1790000007000,
+            "total_ms": 23,
             "timestamp": 100,
             "tool_rounds": 1
           },

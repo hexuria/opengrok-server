@@ -6,9 +6,9 @@
     "notifications": {
       "isEnabled": false,
       "allowedApps": [],
-      "minIntervalMs": 1790000000000,
+      "minIntervalMs": 5000,
       "maxPerWindow": 10,
-      "windowMs": 1790000001000
+      "windowMs": 300000
     },
     "mcpCustomInstructions": {},
     "mcpCustomInstructionsByServerId": {},

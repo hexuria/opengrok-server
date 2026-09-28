@@ -16,7 +16,7 @@
         "window": "5h",
         "usedUsd": "2.000000",
         "limitUsd": null,
-        "freesAt": "2026-09-28T07:37:40Z",
+        "freesAt": "2026-09-28T07:54:06Z",
         "requests": 2,
         "counterfactualUsd": "2.000000"
       },
@@ -24,7 +24,7 @@
         "window": "7d",
         "usedUsd": "2.000000",
         "limitUsd": null,
-        "freesAt": "2026-10-05T02:37:40Z",
+        "freesAt": "2026-10-05T02:54:06Z",
         "requests": 2,
         "counterfactualUsd": "2.000000"
       },

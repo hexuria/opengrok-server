@@ -117,10 +117,10 @@
             }
           ],
           "budget": {
-            "idle_ms": 1790000001000,
+            "idle_ms": 240000,
             "max_rounds": 8,
-            "max_wall_ms": 1790000002000,
-            "call_timeout_ms": 1790000003000,
+            "max_wall_ms": 900000,
+            "call_timeout_ms": 180000,
             "max_computer_rounds": 24
           },
           "context": {
@@ -131,15 +131,15 @@
             ]
           },
           "model_ms": [
-            1790000004000
+            0
           ],
-          "total_ms": 1790000005000,
+          "total_ms": 58,
           "tool_rounds": 1,
-          "tool_wait_ms": 1790000006000,
-          "auto_review_ms": 1790000004000
+          "tool_wait_ms": 0,
+          "auto_review_ms": 0
         },
         "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
-        "total_ms": 1790000005000,
+        "total_ms": 58,
         "timestamp": 100,
         "tool_rounds": 1
       },
@@ -324,7 +324,7 @@
               "instruction": ""
             }
           },
-          "timestampMs": 1790000007000
+          "timestampMs": 1790000001000
         }
       },
       {
@@ -339,10 +339,10 @@
             }
           ],
           "budget": {
-            "idle_ms": 1790000001000,
+            "idle_ms": 240000,
             "max_rounds": 8,
-            "max_wall_ms": 1790000002000,
-            "call_timeout_ms": 1790000003000,
+            "max_wall_ms": 900000,
+            "call_timeout_ms": 180000,
             "max_computer_rounds": 24
           },
           "context": {
@@ -353,15 +353,15 @@
             ]
           },
           "model_ms": [
-            1790000004000
+            0
           ],
-          "total_ms": 1790000008000,
+          "total_ms": 10,
           "tool_rounds": 1,
-          "tool_wait_ms": 1790000004000,
-          "auto_review_ms": 1790000004000
+          "tool_wait_ms": 0,
+          "auto_review_ms": 0
         },
         "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
-        "total_ms": 1790000008000,
+        "total_ms": 10,
         "timestamp": 100,
         "tool_rounds": 1
       },

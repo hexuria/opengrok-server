@@ -57,10 +57,10 @@
         "value": {
           "tools": [],
           "budget": {
-            "idle_ms": 1790000001000,
+            "idle_ms": 240000,
             "max_rounds": 8,
-            "max_wall_ms": 1790000002000,
-            "call_timeout_ms": 1790000003000,
+            "max_wall_ms": 900000,
+            "call_timeout_ms": 180000,
             "max_computer_rounds": 24
           },
           "context": {
@@ -71,15 +71,15 @@
             ]
           },
           "model_ms": [
-            1790000004000
+            0
           ],
-          "total_ms": 1790000005000,
+          "total_ms": 57,
           "tool_rounds": 0,
-          "tool_wait_ms": 1790000004000,
-          "auto_review_ms": 1790000004000
+          "tool_wait_ms": 0,
+          "auto_review_ms": 0
         },
         "threadId": "thr-second-device-0199bb4e000070008000000000000002",
-        "total_ms": 1790000005000,
+        "total_ms": 57,
         "timestamp": 100,
         "tool_rounds": 0
       },

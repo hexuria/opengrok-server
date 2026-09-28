@@ -431,7 +431,7 @@ fn walk(
             let Some(key) = key else { return };
             if key == "timestamp" {
                 *value = json!(100);
-            } else if key.ends_with("Ms") || key.ends_with("_ms") || key.ends_with("At") {
+            } else if is_instant(key) {
                 let next = 1_790_000_000_000 + clocks.len() as i64 * 1000;
                 let fixed = *clocks.entry(number.to_string()).or_insert(next);
                 *value = json!(fixed);
@@ -439,6 +439,21 @@ fn walk(
         }
         _ => {}
     }
+}
+
+/// A point in time, not a duration, count or limit. Only instants get a clock placeholder:
+/// `model_ms`, `total_ms` and a budget's `max_wall_ms` are durations, and an epoch-sized one is a
+/// 57-year turn that NativeChat's `TurnTiming` rightly refuses to parse.
+fn is_instant(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower == "timestampms"
+        || lower.ends_with("atms")
+        || lower.ends_with("at_ms")
+        || lower.ends_with("at")
+        || lower.ends_with("untilms")
+        || lower.ends_with("until_ms")
+        || lower.ends_with("duems")
+        || lower.ends_with("due_ms")
 }
 
 /// `Bearer <secret>`, gateway keys, and a JWT anywhere in a string: a screen ticket rides
