@@ -715,8 +715,9 @@ every record that sharing would otherwise break carry whose it is.
   chose in hexuria/nativechat#90): upload to `POST /artifacts` (images, videos, PDFs, `text/*`),
   then name the `art_` id in an AG-UI 1.0 `image`/`document` file part. A picture goes to the
   door as a picture, a text file as its words (fenced as data, cut at 20,000 characters with the
-  cut stated), a PDF as its text (the first 100 pages, read off the request thread under a
-  10-second limit; one that cannot be read, or a scan, is named saying so). Another account's
+  cut stated), a PDF as its text (the first 100 pages, read by the `opengrok-pdf-text` process,
+  never the server's own: killed at 10 seconds, memory-capped on Linux; one that cannot be read,
+  or a scan, is named saying so). Another account's
   id refuses the turn with a 404 before anything runs. Parts are journaled as sent, a message of
   files alone is still a bubble on replay, and `GET /artifacts?threadId=` lists the thread's files
   with `meta.messageId` for the message each was sent in.

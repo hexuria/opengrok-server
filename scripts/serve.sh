@@ -69,8 +69,9 @@ export OG_MOCK_MIN_TURN_MS="${OG_MOCK_MIN_TURN_MS:-600}"
 export OG_MOCK_MAX_TURN_MS="${OG_MOCK_MAX_TURN_MS:-3000}"
 echo "=== mock doors: ${OG_MOCK_DELTA_MS}ms/delta, floor ${OG_MOCK_MIN_TURN_MS}ms/call, pacing capped at ${OG_MOCK_MAX_TURN_MS}ms/call (floor is extra)"
 
-echo "=== cargo build -p opengrok"
+echo "=== cargo build -p opengrok (and the PDF reader beside it, #229)"
 cargo build -p opengrok
+cargo build -p opengrok-server --bin opengrok-pdf-text
 
 # -x, never -f: -f matches this script's own command line.
 if pids=$(pgrep -x opengrok); then
