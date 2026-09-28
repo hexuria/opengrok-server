@@ -38,11 +38,13 @@ const REST_PREFIXES: &[&str] = &[
     "/recipes",
     "/schedules",
     "/skills",
+    // A person's attachments (#229): the upload and the thread's list a replay draws them from.
+    "/artifacts",
 ];
 
 /// Routes under those prefixes that are not JSON NativeChat reads: the screen proxy serves noVNC's
-/// own pages and a websocket.
-const REST_LEFT_OUT: &[&str] = &["/computer/vnc/"];
+/// own pages and a websocket, and an artifact's `/bytes` is the file itself.
+const REST_LEFT_OUT: &[&str] = &["/computer/vnc/", "/bytes"];
 
 const REDACTED: &str = "«redacted»";
 
