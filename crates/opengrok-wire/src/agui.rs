@@ -192,8 +192,10 @@ impl Message {
 /// sizeBytes}}` for a file the person uploaded to `POST /artifacts` first. A message with no
 /// attachment still sends a plain string.
 ///
-/// PARTS ARE KEPT AS SENT (non-negotiable #2): a part type this server does not read is carried
-/// through the journal and back out on replay untouched, never dropped.
+/// PARTS ARE KEPT AS SENT (non-negotiable #2): a part type this server does not read is kept in
+/// the journal untouched, never dropped, and its message is still a bubble on replay. No frame
+/// carries the parts back: NativeChat reads a sent file from `GET /artifacts?threadId=`
+/// (option a, hexuria/nativechat#90).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Content {

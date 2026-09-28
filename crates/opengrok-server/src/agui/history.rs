@@ -500,10 +500,13 @@ pub(crate) fn with_prompt_frames(run: &Run, mut events: Vec<Value>) -> Vec<Value
         .filter_map(|message| {
             let content = message.content?;
             let words = content.text();
-            // A MESSAGE OF FILES ALONE IS STILL A BUBBLE (#229, nativechat#90): its attachments are
-            // drawn from `GET /artifacts?threadId=` rows stamped with this id, so it opens and
-            // closes with no words rather than vanishing from the replay.
-            if words.is_empty() && content.files().is_empty() {
+            // A MESSAGE OF PARTS IS STILL A BUBBLE (#229, nativechat#90), even with no words and
+            // none this server reads: its files are drawn from `GET /artifacts?threadId=` rows
+            // stamped with this id, so it opens and closes with no words rather than vanishing.
+            // The parts themselves stay in the journal; no frame carries them (option a).
+            let parts =
+                matches!(&content, opengrok_wire::agui::Content::Parts(parts) if !parts.is_empty());
+            if words.is_empty() && !parts {
                 return None;
             }
             let id = message.id;

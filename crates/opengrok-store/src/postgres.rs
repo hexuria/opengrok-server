@@ -3761,7 +3761,7 @@ impl PgStore {
 
     /// Mark a person's upload as sent in `message_id` on `thread_id` (#229): the conversation's
     /// replay draws it in that bubble (`GET /artifacts?threadId=` and `meta.messageId`). Only the
-    /// owner's row moves, and a thread given at upload is kept.
+    /// owner's row moves; the thread it was sent on wins, as the replay that must find it.
     pub async fn attach_artifact(
         &self,
         id: &str,
@@ -3771,7 +3771,7 @@ impl PgStore {
     ) -> StoreResult<()> {
         sqlx::query(
             "update artifact
-                set thread_id = coalesce(thread_id, $3),
+                set thread_id = $3,
                     meta = jsonb_set(coalesce(meta, '{}'::jsonb), '{messageId}', to_jsonb($4::text))
               where id = $1 and account_id = $2 and deleted_at_ms is null",
         )

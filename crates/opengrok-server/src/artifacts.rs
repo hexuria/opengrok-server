@@ -78,6 +78,27 @@ async fn create(
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
     };
 
+    // ONE LINE EACH, AND A PLAIN TYPE. The name and the type are written into what the model
+    // reads (#229) and into `Content-Disposition`: a line break in either would be text outside
+    // the fence a file is read inside, and a quote would end the header's filename.
+    let plain = |text: &str| !text.chars().any(|ch| ch.is_control() || ch == '"');
+    let one_type = request.mime.split_once('/').is_some_and(|(kind, sub)| {
+        let token = |part: &str| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "!#$&^_.+-".contains(ch))
+        };
+        token(kind) && token(sub)
+    });
+    if !plain(&request.filename) || !one_type {
+        return (
+            StatusCode::BAD_REQUEST,
+            "the filename must be one line with no quotes, and the type a plain type/subtype",
+        )
+            .into_response();
+    }
+
     // Images and videos, and what a person attaches to a message (#229, nativechat#90): a PDF
     // or a text file, which reach the model as words rather than pixels.
     let accepted = ["image/", "video/", "text/"]
