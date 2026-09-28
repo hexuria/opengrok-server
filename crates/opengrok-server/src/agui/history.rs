@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use super::routes::{
     AgUiState, STEER_CONTINUATION, STEER_TOOL_CAP, STEER_TOOL_CHARS, chat_message, clip_chars,
-    prior_turn_can_continue, to_chat_messages,
+    prior_turn_can_continue, to_chat_messages_with,
 };
 
 /// How many of a thread's runs a turn's history reaches back over — the same twenty a thread's
@@ -49,6 +49,7 @@ pub(crate) async fn for_turn(
     state: &AgUiState,
     account: Option<&AccountId>,
     input: &RunAgentInput,
+    attached: &super::attachments::Attached,
 ) -> Asked {
     let prior = match account {
         Some(account) => thread_runs(state, account, &input.thread_id, &input.run_id).await,
@@ -81,7 +82,7 @@ pub(crate) async fn for_turn(
         .is_some_and(|runs| runs.iter().all(|run| run.prompt.is_some()));
     if !whole {
         return Asked {
-            messages: to_chat_messages(input),
+            messages: to_chat_messages_with(input, attached),
             prompt,
             from_client: true,
         };
@@ -92,12 +93,12 @@ pub(crate) async fn for_turn(
         .messages
         .iter()
         .filter(|message| message.role == "system")
-        .filter_map(|message| chat_message(message, &input.messages))
+        .filter_map(|message| chat_message(message, &input.messages, attached))
         .collect();
     messages.extend(thread_messages(runs));
     messages.extend(
         new.iter()
-            .filter_map(|message| chat_message(message, &input.messages)),
+            .filter_map(|message| chat_message(message, &input.messages, attached)),
     );
     Asked {
         messages,
@@ -359,7 +360,9 @@ fn earlier_run(run: &Run) -> Vec<ChatMessage> {
     let sent = prompt_of(run);
     let mut messages: Vec<ChatMessage> = sent
         .iter()
-        .filter_map(|message| chat_message(message, &sent))
+        .filter_map(|message| {
+            chat_message(message, &sent, &super::attachments::Attached::default())
+        })
         .collect();
     messages.extend(conversation_of(&said_in(&run.emitted), true));
     messages
@@ -404,10 +407,9 @@ pub(crate) async fn for_interrupted(
         _ => Vec::new(),
     };
     let sent = prompt_of(run);
-    messages.extend(
-        sent.iter()
-            .filter_map(|message| chat_message(message, &sent)),
-    );
+    messages.extend(sent.iter().filter_map(|message| {
+        chat_message(message, &sent, &super::attachments::Attached::default())
+    }));
     messages.extend(conversation_of(&said_in(&run.emitted), false));
     messages
 }
@@ -425,7 +427,9 @@ pub(crate) fn conversation_from(run: &Run, answered: &PendingApproval) -> Vec<Ch
     let sent = prompt_of(run);
     let mut messages: Vec<ChatMessage> = sent
         .iter()
-        .filter_map(|message| chat_message(message, &sent))
+        .filter_map(|message| {
+            chat_message(message, &sent, &super::attachments::Attached::default())
+        })
         .collect();
     let said: Vec<Said> = said_in(&run.emitted)
         .into_iter()
@@ -494,13 +498,28 @@ pub(crate) fn with_prompt_frames(run: &Run, mut events: Vec<Value>) -> Vec<Value
         .into_iter()
         .filter(|message| message.role == "user")
         .filter_map(|message| {
-            let words = message.content.filter(|words| !words.is_empty())?;
+            let content = message.content?;
+            let words = content.text();
+            // A MESSAGE OF PARTS IS STILL A BUBBLE (#229, nativechat#90), even with no words and
+            // none this server reads: its files are drawn from `GET /artifacts?threadId=` rows
+            // stamped with this id, so it opens and closes with no words rather than vanishing.
+            // The parts themselves stay in the journal; no frame carries them (option a).
+            let parts =
+                matches!(&content, opengrok_wire::agui::Content::Parts(parts) if !parts.is_empty());
+            if words.is_empty() && !parts {
+                return None;
+            }
             let id = message.id;
-            Some([
-                frame(json!({"type": "TEXT_MESSAGE_START", "messageId": id, "role": "user"})),
-                frame(json!({"type": "TEXT_MESSAGE_CONTENT", "messageId": id, "delta": words})),
-                frame(json!({"type": "TEXT_MESSAGE_END", "messageId": id})),
-            ])
+            let mut frames = vec![frame(
+                json!({"type": "TEXT_MESSAGE_START", "messageId": id, "role": "user"}),
+            )];
+            if !words.is_empty() {
+                frames.push(frame(
+                    json!({"type": "TEXT_MESSAGE_CONTENT", "messageId": id, "delta": words}),
+                ));
+            }
+            frames.push(frame(json!({"type": "TEXT_MESSAGE_END", "messageId": id})));
+            Some(frames)
         })
         .flatten()
         .collect();
@@ -517,7 +536,8 @@ pub(crate) fn title_of(prompt: &[Value]) -> Option<String> {
         .filter_map(|value| serde_json::from_value::<Message>(value.clone()).ok())
         .filter(|message| message.role == "user")
         .find_map(|message| {
-            let line = message.content?.trim().lines().next()?.trim().to_string();
+            let words = message.content?.text();
+            let line = words.trim().lines().next()?.trim().to_string();
             (!line.is_empty()).then(|| line.chars().take(TITLE_MAX_CHARS).collect())
         })
 }

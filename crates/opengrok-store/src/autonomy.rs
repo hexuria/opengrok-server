@@ -635,7 +635,7 @@ impl PgStore {
     /// How many of this monitor's firings are still working: a run it fired that has not ended,
     /// or a firing recorded since `pending_since_ms` whose run has not journaled its first frame.
     ///
-    /// THE SECOND HALF IS WHY THIS IS NOT `unfinished_runs_in_thread`. A firing is recorded, then
+    /// THE SECOND HALF IS WHY THIS IS NOT A COUNT OF `run_view` ALONE. A firing is recorded, then
     /// spawned, and the run only reaches `run_view` once the coworker's computer has woken and the
     /// first frame is written — seconds, or a minute and a half. A burst of matches in one span
     /// would all read zero in between and all fire. Bounded by `pending_since_ms` because a firing
