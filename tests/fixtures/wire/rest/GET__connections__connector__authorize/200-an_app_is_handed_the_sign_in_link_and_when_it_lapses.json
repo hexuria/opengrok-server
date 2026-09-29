@@ -1,0 +1,9 @@
+{
+  "method": "GET",
+  "path": "/connections/gmail/authorize",
+  "status": 200,
+  "body": {
+    "url": "http://127.0.0.1:1447/authorize?client_id=client-id&redirect_uri=http%3A%2F%2F127.0.0.1%2Fcallback&response_type=code&scope=gmail.send&state=«redacted»&access_type=offline",
+    "expiresAtMs": 1790000000000
+  }
+}

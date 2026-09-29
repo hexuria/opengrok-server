@@ -19,7 +19,7 @@ fn claims() -> StateClaims {
 #[test]
 fn a_state_we_signed_reads_back() {
     let now = chrono::Utc::now().timestamp();
-    let state = sign_state(&minter(), &claims(), now).unwrap();
+    let (state, _) = sign_state(&minter(), &claims(), now).unwrap();
     let read = verify_state(&minter(), &state).unwrap();
     assert_eq!(read.sub, "acct_1");
     assert_eq!(read.connector, "gmail");
@@ -32,7 +32,7 @@ fn a_state_we_signed_reads_back() {
 fn a_state_signed_with_another_key_is_refused() {
     let now = chrono::Utc::now().timestamp();
     let theirs = TokenMinter::new(b"an-attackers-entirely-different-key");
-    let state = sign_state(&theirs, &claims(), now).unwrap();
+    let (state, _) = sign_state(&theirs, &claims(), now).unwrap();
     assert!(matches!(
         verify_state(&minter(), &state),
         Err(FlowError::BadState)
@@ -42,7 +42,7 @@ fn a_state_signed_with_another_key_is_refused() {
 #[test]
 fn a_tampered_state_is_refused() {
     let now = chrono::Utc::now().timestamp();
-    let mut state = sign_state(&minter(), &claims(), now).unwrap();
+    let (mut state, _) = sign_state(&minter(), &claims(), now).unwrap();
     state.push('x');
     assert!(verify_state(&minter(), &state).is_err());
 }
@@ -55,7 +55,7 @@ fn a_tampered_state_is_refused() {
 #[test]
 fn an_expired_state_is_refused() {
     let long_ago = chrono::Utc::now().timestamp() - STATE_TTL_SECONDS - 3_600;
-    let state = sign_state(&minter(), &claims(), long_ago).unwrap();
+    let (state, _) = sign_state(&minter(), &claims(), long_ago).unwrap();
     assert!(verify_state(&minter(), &state).is_err());
 }
 

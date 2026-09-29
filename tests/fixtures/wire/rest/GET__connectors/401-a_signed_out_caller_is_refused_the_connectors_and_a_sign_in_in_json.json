@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/connectors",
+  "status": 401,
+  "body": {
+    "error": "sign in first"
+  }
+}

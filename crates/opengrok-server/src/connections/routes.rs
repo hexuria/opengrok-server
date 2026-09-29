@@ -50,6 +50,7 @@ impl std::fmt::Debug for Connectors {
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()
+        .route("/connectors", get(list_connectors))
         .route("/connections", get(list_connections))
         .route("/connections/{connector}/authorize", get(authorize))
         .route("/connections/callback", get(callback))
@@ -59,15 +60,56 @@ pub fn router(state: AgUiState) -> Router {
         .with_state(state)
 }
 
+/// What this server can connect, for an app to start a sign-in from (#269): one row per
+/// configured provider, in the map's order, which is by name. An ARRAY, always: a deployment
+/// that configures none offers nothing, and that is an answer, not an error.
+pub async fn list_connectors(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
+    if account_from_bearer(&state, &headers).is_none() {
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
+    }
+    let names = state.connectors.providers.keys();
+    let rows: Vec<serde_json::Value> = names
+        .map(|name| serde_json::json!({ "name": name, "label": label_of(name) }))
+        .collect();
+    Json(rows).into_response()
+}
+
+/// What a person reads for a connector. Its name is lowercase and sometimes clipped (`gdrive`),
+/// and an app has nowhere else to learn "Google Drive"; a name the table lacks reads as itself
+/// with a capital.
+fn label_of(name: &str) -> String {
+    let label = match name {
+        "gmail" => "Gmail",
+        "gdrive" => "Google Drive",
+        "gcal" => "Google Calendar",
+        "gdocs" => "Google Docs",
+        "gsheets" => "Google Sheets",
+        "github" => "GitHub",
+        "gitlab" => "GitLab",
+        "onedrive" => "OneDrive",
+        _ => {
+            let mut chars = name.chars();
+            let first = chars.next().map(|first| first.to_uppercase());
+            return first.into_iter().flatten().chain(chars).collect();
+        }
+    };
+    label.to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
     /// Give the connection to a coworker rather than to the person signing in. Used when a
     /// coworker must act as itself.
     #[serde(default)]
     pub coworker_id: Option<String>,
+    /// `json` answers `{url, expiresAtMs}` in place of the redirect (#269): a native app opens
+    /// the link in the person's browser itself, and cannot read where a redirect was going.
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
-/// Send a person to the provider.
+/// Send a person to the provider, or with `format=json` hand an app the link to send them to.
+/// Refusals are JSON either way: an app is what reads them, and a browser shows JSON fine.
 pub async fn authorize(
     State(state): State<AgUiState>,
     headers: HeaderMap,
@@ -78,11 +120,8 @@ pub async fn authorize(
         return refused(StatusCode::UNAUTHORIZED, "sign in first");
     };
     let Some(config) = state.connectors.providers.get(&connector) else {
-        return (
-            StatusCode::NOT_FOUND,
-            FlowError::UnknownConnector(connector).to_string(),
-        )
-            .into_response();
+        let sentence = format!("no connector named {connector}");
+        return refused(StatusCode::NOT_FOUND, &sentence);
     };
 
     // A coworker-scoped connection may only be started by somebody who may already use that
@@ -103,7 +142,7 @@ pub async fn authorize(
             &policy,
         );
         if let Some(reason) = decision.reason() {
-            return (StatusCode::FORBIDDEN, reason.to_string()).into_response();
+            return refused(StatusCode::FORBIDDEN, reason);
         }
     }
 
@@ -122,20 +161,21 @@ pub async fn authorize(
         exp: 0,
     };
 
-    let state_token = match sign_state(&state.auth.minter, &claims, now_ms() / 1_000) {
-        Ok(token) => token,
-        Err(error) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
-        }
+    let (token, expires_at) = match sign_state(&state.auth.minter, &claims, now_ms() / 1_000) {
+        Ok(signed) => signed,
+        Err(error) => return refused(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
     };
 
-    Redirect::temporary(&authorize_url(
-        config,
-        &state.connectors.redirect_uri,
-        &state_token,
-        None,
-    ))
-    .into_response()
+    // One link and one state however it is handed over, so an app's sign-in lands on the callback
+    // a redirected browser's does. `expiresAtMs` is the state's own `exp`, after which the callback
+    // may refuse it: an app can say so before a person walks a consent screen for nothing.
+    let url = authorize_url(config, &state.connectors.redirect_uri, &token, None);
+    if query.format.as_deref() == Some("json") {
+        let expires_at_ms = expires_at * 1_000;
+        return Json(serde_json::json!({ "url": url, "expiresAtMs": expires_at_ms }))
+            .into_response();
+    }
+    Redirect::temporary(&url).into_response()
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/connections/gmail/authorize",
+  "status": 403,
+  "body": {
+    "error": "no grant lets acct_0199bb4e-0000-7000-8000-000000000001 use coworker cw_0199bb4e-0000-7000-8000-000000000002"
+  }
+}

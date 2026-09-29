@@ -233,7 +233,7 @@ async fn a_person_authorises_and_we_get_a_usable_token() {
     let redirect_uri = format!("{base}/landing");
 
     let now = chrono::Utc::now().timestamp();
-    let state = sign_state(&minter(), &claims(), now).expect("sign the state");
+    let (state, _) = sign_state(&minter(), &claims(), now).expect("sign the state");
     let url = authorize_url(&config, &redirect_uri, &state, None);
 
     // Follow it the way a browser would, without following the final redirect.
@@ -372,7 +372,7 @@ async fn a_refresh_returns_a_new_access_token() {
 #[tokio::test]
 async fn a_state_from_somebody_else_is_refused_at_the_callback() {
     let theirs = TokenMinter::new(b"an-attackers-entirely-different-key");
-    let forged = sign_state(&theirs, &claims(), chrono::Utc::now().timestamp()).expect("sign");
+    let (forged, _) = sign_state(&theirs, &claims(), chrono::Utc::now().timestamp()).expect("sign");
     assert!(verify_state(&minter(), &forged).is_err());
 }
 

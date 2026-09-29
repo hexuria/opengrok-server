@@ -1,5 +1,5 @@
 {
-  "server_sha": "6c0e58fe2be4665bc3f52729b7aee63386a6c895",
+  "server_sha": "af983ad097636283cd3a69ebceadf1fac145f4ed",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -594,6 +594,34 @@
       "source": "GET /connections, recorded from the test a_disconnected_connection_can_be_connected_again (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__connections__connector__authorize/200-an_app_is_handed_the_sign_in_link_and_when_it_lapses.json",
+      "source": "GET /connections/{connector}/authorize, recorded from the test an_app_is_handed_the_sign_in_link_and_when_it_lapses (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connections__connector__authorize/401-a_signed_out_caller_is_refused_the_connectors_and_a_sign_in_in_json.json",
+      "source": "GET /connections/{connector}/authorize, recorded from the test a_signed_out_caller_is_refused_the_connectors_and_a_sign_in_in_json (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connections__connector__authorize/403-a_sign_in_for_a_coworker_the_caller_may_not_use_is_refused_in_json.json",
+      "source": "GET /connections/{connector}/authorize, recorded from the test a_sign_in_for_a_coworker_the_caller_may_not_use_is_refused_in_json (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connections__connector__authorize/404-an_unknown_connector_is_refused_in_json_with_or_without_format_json.json",
+      "source": "GET /connections/{connector}/authorize, recorded from the test an_unknown_connector_is_refused_in_json_with_or_without_format_json (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connectors/200-a_server_with_no_connector_configured_lists_none.json",
+      "source": "GET /connectors, recorded from the test a_server_with_no_connector_configured_lists_none (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connectors/200-the_connectors_a_server_offers_are_listed_by_name_with_their_labels.json",
+      "source": "GET /connectors, recorded from the test the_connectors_a_server_offers_are_listed_by_name_with_their_labels (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connectors/401-a_signed_out_caller_is_refused_the_connectors_and_a_sign_in_in_json.json",
+      "source": "GET /connectors, recorded from the test a_signed_out_caller_is_refused_the_connectors_and_a_sign_in_in_json (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__coworkers/200-a_private_coworker_and_an_orgless_owner_share_with_nobody.json",
       "source": "GET /coworkers, recorded from the test a_private_coworker_and_an_orgless_owner_share_with_nobody (crates/opengrok-server/tests/against_visibility.rs); ids and times are placeholders"
     },
@@ -838,8 +866,8 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
-      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted.json",
+      "source": "GET /schedules, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",

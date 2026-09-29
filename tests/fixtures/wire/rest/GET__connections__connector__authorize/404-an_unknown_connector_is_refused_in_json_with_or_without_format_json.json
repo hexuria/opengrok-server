@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/connections/dropbox/authorize",
+  "status": 404,
+  "body": {
+    "error": "no connector named dropbox"
+  }
+}
