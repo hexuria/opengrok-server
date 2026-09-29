@@ -4,7 +4,7 @@
   "status": 200,
   "body": {
     "runId": "0199bb4e-0000-7000-8000-000000000001",
-    "callId": "mock-call-1",
+    "callId": "call_1",
     "approved": true,
     "alreadyAnswered": false,
     "continuing": true
