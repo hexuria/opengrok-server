@@ -137,12 +137,14 @@ impl PgStore {
                 _ => None,
             });
             let hook_id = (!state.hook_id.is_empty()).then_some(state.hook_id.as_str());
+            let run_limits = serde_json::to_value(state.run_limits)
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
             sqlx::query(
                 "insert into schedule_view
                    (id, account_id, coworker_id, cron, prompt, name, active, next_due_ms,
                     updated_at_ms, created_at_ms, last_fired_ms, kind, hook_id, secret_hash,
-                    webhook_key)
-                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, $13, $14)
+                    webhook_key, run_limits)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, $13, $14, $15)
                  on conflict (id) do update set
                    coworker_id = excluded.coworker_id,
                    cron = excluded.cron,
@@ -160,7 +162,8 @@ impl PgStore {
                    kind = excluded.kind,
                    hook_id = excluded.hook_id,
                    secret_hash = excluded.secret_hash,
-                   webhook_key = excluded.webhook_key",
+                   webhook_key = excluded.webhook_key,
+                   run_limits = excluded.run_limits",
             )
             .bind(id.as_str())
             .bind(account_id.as_str())
@@ -179,6 +182,7 @@ impl PgStore {
             // a projection the log has already moved past.
             .bind(&state.secret_hash)
             .bind(&state.webhook_key)
+            .bind(run_limits)
             .execute(&mut *tx)
             .await?;
         }
@@ -190,7 +194,8 @@ impl PgStore {
     pub async fn schedules_for(&self, account_id: &AccountId) -> StoreResult<Vec<ScheduleView>> {
         let rows = sqlx::query(
             "select id, coworker_id, cron, prompt, name, active, next_due_ms, updated_at_ms,
-                    created_at_ms, last_fired_ms, kind, hook_id, secret_hash, webhook_key
+                    created_at_ms, last_fired_ms, kind, hook_id, secret_hash, webhook_key,
+                    run_limits
              from schedule_view where account_id = $1 order by updated_at_ms desc",
         )
         .bind(account_id.as_str())
@@ -227,6 +232,8 @@ impl PgStore {
                     webhook_key: row
                         .try_get::<Option<String>, _>("webhook_key")?
                         .unwrap_or_default(),
+                    run_limits: serde_json::from_value(row.try_get("run_limits")?)
+                        .map_err(|error| StoreError::Corrupt(error.to_string()))?,
                 })
             })
             .collect()

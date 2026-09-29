@@ -304,6 +304,7 @@ async fn seed_run_for(
             "role": "user",
             "content": "summarise the inbox",
         })]),
+        limits: Default::default(),
         at_ms: quiet_since,
     };
     for command in std::iter::once(start).chain(commands) {

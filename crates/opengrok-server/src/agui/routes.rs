@@ -23,9 +23,11 @@ use super::provision;
 use crate::auth::AuthState;
 use opengrok_core::coworker::{CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
+use opengrok_core::limits::RunLimits;
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
 use opengrok_harness::{
-    ChatMessage, EventSink, ModelDoor, ModelRequest, ToolRunner, run_conversation_streaming,
+    ChatMessage, EventSink, ModelDoor, ModelRequest, RunBudget, RunContext, ToolRunner,
+    run_conversation_within,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -422,6 +424,24 @@ fn coworker_id_from(input: &RunAgentInput) -> Option<CoworkerId> {
         .get("coworkerId")
         .and_then(|value| value.as_str())
         .map(|id| CoworkerId::from_stored(id.to_string()))
+}
+
+/// What a run of `coworker` for `account` may spend, as the limits it captures: the server's
+/// budget, under the ceiling of every org the two are in, under `narrower` (a routine's own
+/// limits, or those a resumed run captured at its start). Read on every start and every resume,
+/// so no run falls back to the server's budget while its org sets less: `None` when the ceiling
+/// cannot be read, logged here once, and every caller refuses rather than run without it.
+pub(crate) async fn run_limits(
+    state: &AgUiState,
+    account: &AccountId,
+    coworker: Option<&CoworkerId>,
+    narrower: RunLimits,
+) -> Option<RunLimits> {
+    let read = state.auth.store.org_run_ceiling(account, coworker).await;
+    let ceiling = read
+        .inspect_err(|error| tracing::error!(%error, "an org's run ceiling could not be read"))
+        .ok()?;
+    Some(RunBudget::default().limits().and(ceiling).and(narrower))
 }
 
 /// Build the tools for this run, bound to this coworker's own computer and this principal's grant.
@@ -2770,6 +2790,15 @@ pub async fn run(
             coworker_role = coworker.role;
         }
     }
+    // Before any queued send is drained, as the policy is: a ceiling that cannot be read refuses
+    // the turn rather than hand it the server's whole budget.
+    let limits = run_limits(&state, &caller, run_coworker.as_ref(), RunLimits::default());
+    let Some(limits) = limits.await else {
+        refund_unscoped(&state, unscoped_charge.as_deref());
+        let why = "the organization's run limits could not be read right now, so nothing ran; send \
+                   it again in a moment";
+        return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
+    };
 
     // A FILE THE CALLER DOES NOT OWN REFUSES THE TURN before anything runs or any queued send is
     // drained (#229): answered like a missing one, so an id tells nobody whose file it was.
@@ -2805,6 +2834,7 @@ pub async fn run(
         coworker_name,
         coworker_role,
         unscoped_charge,
+        limits,
     ));
     match turn.await {
         Ok(response) => response,
@@ -2852,6 +2882,7 @@ async fn start_claimed_turn(
     coworker_name: String,
     coworker_role: Option<String>,
     unscoped_charge: Option<String>,
+    limits: RunLimits,
 ) -> Response {
     let state = gateway.agui.clone();
     // A RUN ID THAT ALREADY HAS A RUN IS NOT A NEW TURN. A client retrying its POST — its stream
@@ -3073,6 +3104,7 @@ async fn start_claimed_turn(
         system,
         skill_id: recorded_skill,
         prompt: Some(asked.prompt),
+        limits,
         generation: 0,
     };
 
@@ -3116,15 +3148,14 @@ async fn start_claimed_turn(
             account_id: journal.account_id.clone(),
             form_hold: Mutex::new(crate::agui::user_form::UserFormSseHold::default()),
         };
-        let _ = run_conversation_streaming(
+        let _ = run_conversation_within(
             door.as_ref(),
             tools.as_ref(),
             &journal,
             request,
-            &thread_id,
-            &run_id,
-            at_ms,
-            &sink,
+            RunContext::new(thread_id, run_id, at_ms),
+            RunBudget::held_to(&limits),
+            Some(&sink),
         )
         .await;
     });
@@ -3161,6 +3192,9 @@ pub struct StoreJournal {
     /// What the person asked this turn (`RunEvent::Started::prompt`). Only a turn that starts the
     /// run writes it; a resume finds the run already started and passes `None`.
     pub prompt: Option<Vec<serde_json::Value>>,
+    /// What this run may spend (`RunEvent::Started::limits`), written by the write that starts it.
+    /// A resume finds the run started, and is held to what it captured instead.
+    pub limits: RunLimits,
     /// The run's generation when this loop began (#91): 0 for a new turn, the run's own for a
     /// continuation. THE FENCE: a write is refused once the run has moved on — resumed by the
     /// sweep while this loop was still alive after a lapsed lease — so the replaced loop can
@@ -3321,6 +3355,7 @@ impl StoreJournal {
             system: self.system.as_deref(),
             skill_id: self.skill_id.as_deref(),
             prompt: self.prompt.as_deref(),
+            limits: self.limits,
             generation: self.generation,
         }
     }
@@ -3381,6 +3416,7 @@ fn start_command(start: &RunStart<'_>, at_ms: i64) -> RunCommand {
             .filter(|id| !id.is_empty())
             .map(str::to_string),
         prompt: start.prompt.map(<[serde_json::Value]>::to_vec),
+        limits: start.limits,
         at_ms,
     }
 }
@@ -3440,6 +3476,7 @@ struct RunStart<'a> {
     system: Option<&'a str>,
     skill_id: Option<&'a str>,
     prompt: Option<&'a [serde_json::Value]>,
+    limits: RunLimits,
     generation: u32,
 }
 
@@ -4963,6 +5000,11 @@ async fn continue_run(
     let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await else {
         return;
     };
+    // What the run captured, under its org's ceiling as it stands now. Left for the sweep when
+    // the ceiling cannot be read, as every other early return here is.
+    let Some(limits) = run_limits(&state, &account_id, Some(&coworker_id), run.limits).await else {
+        return;
+    };
 
     // The answered call, and only it — carried on the SAME runner every other path builds
     // (plugins, the user's machine, auto-review). This path once built a bare executor of its
@@ -5027,6 +5069,7 @@ async fn continue_run(
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
+        limits: run.limits,
         generation,
     };
 
@@ -5065,6 +5108,7 @@ async fn continue_run(
             outcome,
             // The recipes the run played before the card (#256); see `Spent::recipes_of`.
             spent: opengrok_harness::Spent::recipes_of(&run),
+            budget: RunBudget::held_to(&limits),
         },
     )
     .await;

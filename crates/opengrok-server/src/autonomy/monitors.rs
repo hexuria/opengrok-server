@@ -453,6 +453,7 @@ async fn run_monitor_now(
         run_id,
         prompt,
         format!("monitor {id} (run now)"),
+        opengrok_core::limits::RunLimits::default(),
     )
 }
 

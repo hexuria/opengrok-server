@@ -23,6 +23,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use opengrok_core::id::{AccountId, CoworkerId, RunId, ScheduleId};
+use opengrok_core::limits::RunLimits;
 use opengrok_core::schedule::{
     FireCause, Schedule, ScheduleCommand, ScheduleError, Wake, WakeKind,
 };
@@ -73,6 +74,10 @@ struct CreateSchedule {
     kind: Option<String>,
     /// The expression, required for a cron wake. Ignored for a webhook, which has no clock.
     cron: Option<String>,
+    /// The routine's own limits on each run it starts, `{maxRounds, maxComputerRounds,
+    /// maxWallMs}`, under its org's ceiling (`routine_limits`). Absent or `null` sets none.
+    #[serde(default)]
+    run_limits: serde_json::Value,
 }
 
 /// Can this coworker take a routine's work at all: hired, not retired, not a group? A retired
@@ -118,6 +123,32 @@ pub(super) async fn may_use(
     Ok(())
 }
 
+/// What a routine may set as its limits, or the 422 that says why not: not three whole numbers
+/// within the server's budget, or one above the org's ceiling as it stands now, named. A
+/// ceiling lowered later binds at run time instead (`autonomy::fire`).
+async fn routine_limits(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: Option<&CoworkerId>,
+    sent: &serde_json::Value,
+) -> Result<RunLimits, Response> {
+    let most = opengrok_harness::RunBudget::default().limits();
+    let limits = RunLimits::from_json(sent, &most).map_err(|why| unprocessable(&why))?;
+    let ceiling = state
+        .auth
+        .store
+        .org_run_ceiling(account_id, coworker_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "could not read an org's run ceiling");
+            (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response()
+        })?;
+    match limits.over_ceiling(&ceiling) {
+        Some(why) => Err(unprocessable(&why)),
+        None => Ok(limits),
+    }
+}
+
 /// Every reply on this door that carries a webhook key. A bearer must not sit in a proxy, a
 /// browser cache or a `curl` on somebody's disk — the same rule the OAuth door applies to the
 /// tokens it mints (`auth/oauth_mcp.rs`). It is set on the cron replies too: a header that is
@@ -141,6 +172,7 @@ struct RoutineRow<'a> {
     webhook_key: &'a str,
     active: bool,
     next_due_ms: Option<i64>,
+    run_limits: RunLimits,
     /// `autonomy::last_run`: what the newest run came to. `None` on create, and for a routine
     /// that has never run — `null` on the wire, never an empty object a client would read as a
     /// run with no status.
@@ -167,6 +199,7 @@ impl RoutineRow<'_> {
             "kind": self.kind.as_str(),
             "active": self.active,
             "nextDueMs": self.next_due_ms,
+            "runLimits": self.run_limits.to_json(),
             "lastRun": self.last_run,
         });
         if self.kind == WakeKind::Webhook {
@@ -239,6 +272,17 @@ async fn create_schedule(
         Ok(wake) => wake,
         Err(refusal) => return refusal.into_response(),
     };
+    let run_limits = match routine_limits(
+        &state.agui,
+        &account_id,
+        Some(&coworker_id),
+        &body.run_limits,
+    )
+    .await
+    {
+        Ok(run_limits) => run_limits,
+        Err(refusal) => return refusal,
+    };
 
     let at_ms = now_ms();
     let events = match Schedule::default().decide(ScheduleCommand::Create {
@@ -246,6 +290,7 @@ async fn create_schedule(
         name: name_or_first_words(body.name.as_deref(), &body.prompt),
         prompt: body.prompt,
         wake,
+        run_limits,
         at_ms,
     }) {
         Ok(events) => events,
@@ -282,6 +327,7 @@ async fn create_schedule(
                 webhook_key: &state_after.webhook_key,
                 active: true,
                 next_due_ms: opengrok_core::schedule::next_fire_ms(&state_after.cron, at_ms),
+                run_limits: state_after.run_limits,
                 last_run: None,
             }
             .json(&state),
@@ -361,6 +407,7 @@ async fn list_schedules(
                 webhook_key: &key,
                 active: view.active,
                 next_due_ms: view.next_due_ms,
+                run_limits: view.run_limits,
                 last_run,
             }
             .json(&state),
@@ -501,6 +548,9 @@ struct EditSchedule {
     /// different promises to whatever is wired to them; switching one into the other would move
     /// the hook's address and key out from under it — or leave a clock nothing ever reads.
     kind: Option<String>,
+    /// The routine's limits, replaced whole: a limit the object leaves out is unset, and `{}`
+    /// clears them all. Absent, or `null`, keeps what the routine has.
+    run_limits: Option<serde_json::Value>,
 }
 
 /// Edit a routine in place: same id, same thread, same history.
@@ -535,8 +585,11 @@ async fn edit_schedule(
         && body.prompt.is_none()
         && body.cron.is_none()
         && body.coworker_id.is_none()
+        && body.run_limits.is_none()
     {
-        return unprocessable("nothing to change: send name, prompt, cron or coworkerId");
+        return unprocessable(
+            "nothing to change: send name, prompt, cron, coworkerId or runLimits",
+        );
     }
     if loaded.kind == WakeKind::Webhook && loaded.webhook_key.is_empty() {
         return (
@@ -558,6 +611,17 @@ async fn edit_schedule(
     {
         return refusal;
     }
+    // Against the ceiling over the coworker the routine will have once this edit lands.
+    let run_limits = match &body.run_limits {
+        Some(sent) => {
+            let coworker = coworker_id.as_ref().or(loaded.coworker_id.as_ref());
+            match routine_limits(&state.agui, &account_id, coworker, sent).await {
+                Ok(run_limits) => Some(run_limits),
+                Err(refusal) => return refusal,
+            }
+        }
+        None => None,
+    };
     let at_ms = now_ms();
     let after = match mutate_schedule(&state, &account_id, &id, at_ms, |loaded| {
         let prompt = body.prompt.clone().unwrap_or_else(|| loaded.prompt.clone());
@@ -581,6 +645,7 @@ async fn edit_schedule(
                 prompt,
                 wake,
                 coworker_id: coworker_id.clone(),
+                run_limits,
                 at_ms,
             })
             .map_err(|reason| {
@@ -641,6 +706,7 @@ async fn edit_schedule(
                 webhook_key: &after.webhook_key,
                 active: view.active,
                 next_due_ms: view.next_due_ms,
+                run_limits: view.run_limits,
                 last_run,
             }
             .json(&state),
@@ -730,6 +796,7 @@ async fn run_schedule_now(
         run_id,
         prompt,
         format!("schedule {id} (run now)"),
+        after.run_limits,
     )
 }
 

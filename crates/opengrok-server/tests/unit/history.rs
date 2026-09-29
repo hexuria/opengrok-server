@@ -23,6 +23,7 @@ fn run_with(prompt: Option<Vec<Value>>, emitted: Vec<Value>) -> Run {
             system: None,
             skill_id: None,
             prompt,
+            limits: Default::default(),
             at_ms: 1,
         })
         .unwrap();

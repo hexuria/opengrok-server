@@ -364,6 +364,7 @@ async fn seed_running_run(store: &PgStore, account: &AccountId, thread: &str) ->
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             at_ms,
         })
         .expect("start");
@@ -1508,6 +1509,7 @@ async fn an_edit_written_with_a_stale_clock_does_not_fire_the_slot_twice() {
                 cron: loaded.cron.clone(),
             },
             coworker_id: None,
+            run_limits: None,
             at_ms: stale,
         })
         .expect("update");
@@ -1635,6 +1637,7 @@ async fn a_hook_with_no_stored_key_says_to_rotate_before_an_edit() {
         hook_id: format!("hook_{}", uuid::Uuid::now_v7()),
         secret_hash: "a-hash-from-before".to_string(),
         webhook_key: String::new(),
+        run_limits: Default::default(),
         at_ms: now_ms(),
     }];
     let state = Schedule::replay(&events);
@@ -1754,6 +1757,7 @@ async fn an_edit_after_the_last_slot_was_claimed_does_not_fire_it_again() {
                 cron: loaded.cron.clone(),
             },
             coworker_id: None,
+            run_limits: None,
             at_ms: stale,
         })
         .expect("update");

@@ -11,6 +11,7 @@ fn run_with(events: Vec<serde_json::Value>) -> Run {
         system: None,
         skill_id: None,
         prompt: None,
+        limits: Default::default(),
         at_ms: 1,
     }];
     for (index, payload) in events.into_iter().enumerate() {

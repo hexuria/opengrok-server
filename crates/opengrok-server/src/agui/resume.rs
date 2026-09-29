@@ -646,6 +646,14 @@ async fn resume_suspended_run(
         .await;
         return;
     };
+    // What the run captured, under its org's ceiling as it stands now (`continue_run`'s rule).
+    let limits =
+        crate::agui::routes::run_limits(&state.agui, &account_id, Some(&coworker_id), run.limits);
+    let Some(limits) = limits.await else {
+        let why = cannot("its organization's run limits could not be read");
+        crate::recovery::fail_continuation(&state.agui, &run_id, &why).await;
+        return;
+    };
     // The runner carries the answered call id — as a GATE approval (the machine owner's or the
     // policy's card) or a REVIEW approval, by the suspension's reason. A review yes skips the
     // judge and releases nothing else; a gate yes is what makes user_machine_shell dispatch.
@@ -703,6 +711,7 @@ async fn resume_suspended_run(
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
+        limits: run.limits,
         generation,
     };
     let pin = run.pin_for_resume(&coworker.model);
@@ -745,6 +754,7 @@ async fn resume_suspended_run(
             outcome,
             // The recipes the run played before the card (#256); see `Spent::recipes_of`.
             spent: opengrok_harness::Spent::recipes_of(&run),
+            budget: opengrok_harness::RunBudget::held_to(&limits),
         },
     )
     .await;
@@ -812,6 +822,13 @@ pub(crate) async fn resume_interrupted_run(
             .await;
         return;
     };
+    let limits =
+        crate::agui::routes::run_limits(&state.agui, &account_id, Some(&coworker_id), run.limits);
+    let Some(limits) = limits.await else {
+        let why = "its organization's run limits could not be read";
+        crate::recovery::fail_interrupted(&state.agui, &run_id, why).await;
+        return;
+    };
     // None is a coworker with no tools to offer (no computer, no plugin): it carries on talking,
     // exactly as a routine's run of it does.
     let runner = crate::agui::routes::tools_for_coworker(
@@ -841,6 +858,7 @@ pub(crate) async fn resume_interrupted_run(
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
+        limits: run.limits,
         generation,
     };
     let pin = run.pin_for_resume(&coworker.model);
@@ -863,6 +881,7 @@ pub(crate) async fn resume_interrupted_run(
         opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
         run.emitted.len() as u32,
         opengrok_harness::Spent::of(&run),
+        opengrok_harness::RunBudget::held_to(&limits),
     )
     .await;
     // It may park on a card, as any turn may. ONLY A FORM GETS A TRANSCRIPT CARD, as on the live

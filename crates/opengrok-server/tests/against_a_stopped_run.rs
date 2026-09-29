@@ -123,6 +123,7 @@ async fn seed_run(
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             at_ms,
         })
         .expect("start");
@@ -747,6 +748,7 @@ async fn a_round_journaled_while_a_stop_lands_keeps_its_frames() {
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             generation: 0,
         });
 
@@ -825,6 +827,7 @@ async fn a_park_written_after_the_run_ended_is_refused_whole() {
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             generation: 0,
         };
         let round = [
@@ -876,6 +879,7 @@ async fn a_tools_start_is_on_record_until_its_result_and_refused_once_the_run_ha
         system: None,
         skill_id: None,
         prompt: None,
+        limits: Default::default(),
         generation: 0,
     };
 
@@ -1005,6 +1009,7 @@ async fn a_loop_from_before_a_resume_can_write_nothing() {
         system: None,
         skill_id: None,
         prompt: None,
+        limits: Default::default(),
         generation,
     };
     let round = [Event::new(EventType::TextMessageContent, now_ms())

@@ -7,6 +7,7 @@ pub mod account;
 pub mod connection;
 pub mod coworker;
 pub mod id;
+pub mod limits;
 pub mod monitor;
 pub mod org;
 pub mod run;
@@ -26,6 +27,7 @@ pub use id::{
     AccountId, BoxId, CoworkerId, HookId, MonitorId, OrgId, PendingUserMessageId, PrincipalId,
     RunId, ScheduleId, SessionId, TranscriptEntryId,
 };
+pub use limits::RunLimits;
 pub use monitor::{Monitor, MonitorCommand, MonitorError, MonitorEvent, MonitorView};
 pub use org::{Org, OrgCommand, OrgError, OrgEvent, OrgView, email_domain, normalize_domain};
 pub use run::{Run, RunCommand, RunError, RunEvent, RunStatus, RunView};
