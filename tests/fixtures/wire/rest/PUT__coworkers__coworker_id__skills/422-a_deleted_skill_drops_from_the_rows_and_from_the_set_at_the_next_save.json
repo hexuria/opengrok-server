@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/skills",
+  "status": 422,
+  "body": {
+    "error": "no skill skl_0199bb4e-0000-7000-8000-000000000002"
+  }
+}
