@@ -4264,14 +4264,14 @@ async fn a_hand_back_that_cannot_read_the_run_log_settles_nothing() {
     assert_eq!(stored["boxResolution"], "handed_back", "{stored}");
 }
 
-/// #143, the backfill. A form handed back before its end was stamped on it reads that end from its
-/// run's own answer, when that answer is exactly the server's hand-back sentence. Any other answer
-/// is not a handoff's end, and the form stays as it was: live.
-#[tokio::test]
-async fn an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_answer() {
-    let database_url = database_or_skip!();
-    let email = format!("handoff-old-{}@og.local", uuid::Uuid::now_v7().simple());
-    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+/// A form handed back and its run finished, then unstamped: the form as a server before #143
+/// left it. Returns the harness, a token, the coworker, the form's id and the run's replay path.
+async fn a_form_handed_back_before_the_stamp(
+    database_url: &str,
+    tag: &str,
+) -> (Harness, String, String, String, String) {
+    let email = format!("{tag}-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(database_url, &email, Arc::new(HoldDoor)).await;
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Ada").await;
     let coworker = opengrok_core::id::CoworkerId::from_stored(agent.clone());
@@ -4302,6 +4302,18 @@ async fn an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_ans
         .expect("unstamp the form");
 
     let path = format!("/ag-ui/runs/{}", run.as_str());
+    (h, token, agent, form_id, path)
+}
+
+/// #143, the backfill. A form handed back before its end was stamped on it reads that end from its
+/// run's own answer, when that answer is exactly the server's hand-back sentence. Its own test, so
+/// the corpus records this replay rather than the refusal below (a recording keeps one reply per
+/// test and route, and NativeChat reads this one as "an old conversation, settled").
+#[tokio::test]
+async fn an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_answer() {
+    let database_url = database_or_skip!();
+    let (h, token, agent, form_id, path) =
+        a_form_handed_back_before_the_stamp(&database_url, "handoff-old").await;
     let replayed = get_json(&h, &token, &path).await;
     assert_frames_say(&replayed["events"], &form_id, Some("handed_back"), true);
     assert!(
@@ -4311,11 +4323,22 @@ async fn an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_ans
             .is_none(),
         "the replay reads the end back; it writes nothing"
     );
+}
 
+/// Any other answer is not a handoff's end, and the form stays as it was: live. Nothing is guessed
+/// from a sentence that only resembles the server's.
+#[tokio::test]
+async fn an_escalated_form_whose_answer_is_other_words_stays_live() {
+    let database_url = database_or_skip!();
+    let (h, token, _, form_id, path) =
+        a_form_handed_back_before_the_stamp(&database_url, "handoff-other").await;
+    let run_id = path.trim_start_matches("/ag-ui/runs/").to_string();
     sqlx::query(
         "update events set payload = replace(payload::text, $2, $3)::jsonb where stream_id = $1",
     )
-    .bind(opengrok_store::run_stream(&run))
+    .bind(opengrok_store::run_stream(
+        &opengrok_core::id::RunId::from_stored(run_id),
+    ))
     .bind(opengrok_tools::user_form::HAND_BACK_TOOL_RESULT)
     .bind("Person finished on computer.")
     .execute(h.store.pool())
