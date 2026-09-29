@@ -1,0 +1,23 @@
+{
+  "method": "GET",
+  "path": "/connectors",
+  "status": 200,
+  "body": [
+    {
+      "name": "acme",
+      "label": "Acme"
+    },
+    {
+      "name": "gdrive",
+      "label": "Google Drive"
+    },
+    {
+      "name": "github",
+      "label": "GitHub"
+    },
+    {
+      "name": "gmail",
+      "label": "Gmail"
+    }
+  ]
+}
