@@ -893,7 +893,14 @@ async fn connect_plugins(
     }
 
     let mut endpoints = Vec::new();
-    for plugin in state.plugins.values() {
+    // A plugin whose own name has a dot is never dialled. Its tools' names would read as another
+    // plugin's server — a call is routed by the first segment (`split_qualified`) — and a ceiling's
+    // `"<plugin>.*"` would admit them in that other plugin's name (#268).
+    for plugin in state
+        .plugins
+        .values()
+        .filter(|p| !p.manifest.name.contains('.'))
+    {
         let (reachable, problems) = opengrok_tools::mcp::endpoints_for(plugin, &values);
         for problem in problems {
             tracing::debug!(%problem, plugin = plugin.manifest.name, "a plugin server is unavailable");

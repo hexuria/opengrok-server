@@ -767,6 +767,12 @@ mod tests {
         assert!(!gmail.allows_all_of("gmailx"));
         // Its tools named one by one are not the plugin: it may bring another tomorrow.
         assert!(!ToolSet::only(["gmail.api.send"]).allows_all_of("gmail"));
+        // PINNED: by name, a tool is its first segment's, where a call is routed too
+        // (`split_qualified`), so `gmail.*` admits `gmail.api.x.send` and anything under
+        // `gmail.api`. A plugin whose own name has a dot is never dialled (server
+        // `connect_plugins`), so no tool of a plugin called `gmail.api` is ever offered this way.
+        assert!(gmail.allows("gmail.api.x.send"));
+        assert!(gmail.allows_all_of("gmail.api"));
         assert!(ToolSet::All.allows_all_of("gmail"));
         assert!(!ToolSet::None.allows_all_of("gmail"));
     }

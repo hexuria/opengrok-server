@@ -228,6 +228,8 @@ async fn harness(database_url: &str) -> Harness {
     let owner = seed_account(&store, &email).await;
     // `gmail` needs a connector nobody has connected, so it is never dialled; `notes` is a live
     // server with nothing to connect, so its tool is offered the moment the ceiling admits it.
+    // `notes.extra` is a live server too, under a name the spec allows and this server cannot
+    // route: its tool would be `notes.extra.api.jot`, which `notes.*` admits by name.
     let plugins = BTreeMap::from([
         (
             "gmail".to_string(),
@@ -241,6 +243,15 @@ async fn harness(database_url: &str) -> Harness {
         (
             "notes".to_string(),
             plugin("notes", "Keep notes.", &start_notes_server().await, &[]),
+        ),
+        (
+            "notes.extra".to_string(),
+            plugin(
+                "notes.extra",
+                "Not notes.",
+                &start_notes_server().await,
+                &[],
+            ),
         ),
     ]);
     let door = Arc::new(RecordingDoor::default());
@@ -551,6 +562,12 @@ async fn switching_shell_off_takes_it_from_the_next_turn_and_a_plugin_on_offers_
     assert!(!listed.contains(&"shell".to_string()), "{listed:?}");
     assert!(listed.contains(&"read_file".to_string()), "{listed:?}");
     assert!(listed.contains(&"notes_api_jot".to_string()), "{listed:?}");
+    // `notes.*` admits `notes.extra.api.jot` by name, but `notes.extra` is not `notes`: a plugin
+    // with a dot in its name is never dialled, so nothing is offered in another plugin's name.
+    assert!(
+        !listed.iter().any(|name| name.starts_with("notes_extra")),
+        "{listed:?}"
+    );
     let offered = h.offered_on_a_turn(&agent).await;
     assert!(!offered.contains(&"shell".to_string()), "{offered:?}");
     assert!(
@@ -599,9 +616,11 @@ async fn a_name_no_row_shows_is_refused_and_nothing_changes() {
         .await;
     assert_eq!(status, 422, "{refused}");
     assert_eq!(refused, json!({ "error": "no tool or plugin named gmial" }));
-    // A plugin's tool is not a row: only the plugin is.
-    let (status, refused) = h.put(&agent, json!({ "enabled": ["notes.api.jot"] })).await;
-    assert_eq!(status, 422, "{refused}");
+    // A plugin's tool is not a row: only the plugin is. Nor is a plugin whose name has a dot.
+    for name in ["notes.api.jot", "notes.extra"] {
+        let (status, refused) = h.put(&agent, json!({ "enabled": [name] })).await;
+        assert_eq!(status, 422, "{name}: {refused}");
+    }
 
     for malformed in [
         json!({}),
@@ -948,6 +967,15 @@ async fn a_chosen_ceiling_equal_to_an_older_builtin_set_is_not_widened_at_boot()
         chosen,
         "the boot left the choice alone"
     );
+    // And the owner's profile, set equal to it, is not widened past it either.
+    let coworker = CoworkerId::from_stored(agent.clone());
+    let policy = h
+        .store
+        .policy_for(&h.owner, &coworker)
+        .await
+        .expect("policy");
+    let profile = policy.grant.map(|grant| grant.profile);
+    assert_eq!(profile, Some(ToolSet::only(older)), "nor its profile");
 }
 
 /// THE RACE THIS PINS: `POST /coworkers/{id}/approvals` read the grant and the ceiling, then wrote

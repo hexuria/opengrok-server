@@ -1,7 +1,11 @@
 //! #268: a coworker's ceiling now decides whether it may reach its person's machine, and every
-//! ceiling written before that allowed the machine in effect — so the schema adds it, ONCE. After
-//! that pass a ceiling without it is one its owner switched off, and a later replay of the schema
-//! (any change to it replays it whole) must not switch it back on.
+//! ceiling written before that allowed the machine in effect — so the upgrade boot adds it, ONCE.
+//! After that pass a ceiling without it is one its owner switched off, and no later boot or replay
+//! of the schema (any change to it replays it whole) may switch it back on.
+//!
+//! AND ONLY AFTER THE BUILT-IN WIDENINGS. Those look for an exact older built-in list, which never
+//! names the machine: a pass that ran first left a ceiling still on an older list narrow for good,
+//! while its profile widened beside it (review of #282).
 //!
 //! Its own test binary, so its own database: it makes the schema replay, which takes the table
 //! locks a replay takes, and nothing else may be running beside it.
@@ -84,16 +88,20 @@ async fn every_ceiling_from_before_gains_the_machine_once_and_one_switched_off_s
     let suffix = uuid::Uuid::now_v7().simple().to_string();
     let account = AccountId::from_stored(format!("acct_machine_{suffix}"));
     let coworker = |name: &str| CoworkerId::from_stored(format!("cw_{name}_{suffix}"));
-    let (hired, chosen, everything, nothing) = (
+    let (hired, chosen, everything, nothing, older) = (
         coworker("hired"),
         coworker("chosen"),
         coworker("all"),
         coworker("none"),
+        coworker("older"),
     );
     grant(&store, &account, &hired, &ToolSet::only(BEFORE)).await;
     grant(&store, &account, &chosen, &ToolSet::only(["shell"])).await;
     grant(&store, &account, &everything, &ToolSet::All).await;
     grant(&store, &account, &nothing, &ToolSet::None).await;
+    // Still on the first built-in set: the screen tools, recipes and the form came after it.
+    let first = ["read_file", "shell", "write_file"];
+    grant(&store, &account, &older, &ToolSet::only(first)).await;
 
     replay(&store, true).await;
 
@@ -101,6 +109,20 @@ async fn every_ceiling_from_before_gains_the_machine_once_and_one_switched_off_s
     // in order, as the store writes a set, so a later statement matching an exact list still can.
     assert_eq!(stored(&store, &hired).await, with_the_machine(&BEFORE));
     assert_eq!(stored(&store, &chosen).await, with_the_machine(&["shell"]));
+    // The older list is brought up to today's built-ins first, then gains the machine; its profile
+    // follows the same built-ins.
+    assert_eq!(stored(&store, &older).await, with_the_machine(&BEFORE));
+    let profile = store.policy_for(&account, &older).await.expect("policy");
+    let profile = profile.grant.map(|grant| grant.profile);
+    assert_eq!(profile, Some(ToolSet::only(BEFORE)));
+    // And the next boot, with the pass recorded, changes nothing.
+    let (_, version) = store.ceiling_at(&older).await.expect("the version");
+    opengrok_store::migrations::run(store.pool())
+        .await
+        .expect("the next boot");
+    assert_eq!(stored(&store, &older).await, with_the_machine(&BEFORE));
+    let (_, again) = store.ceiling_at(&older).await.expect("the version again");
+    assert_eq!(again, version, "a second boot is not a change");
     // `All` admits it already, and a coworker made to admit nothing is not handed a machine.
     let all = serde_json::to_value(ToolSet::All).expect("all");
     assert_eq!(stored(&store, &everything).await, all);

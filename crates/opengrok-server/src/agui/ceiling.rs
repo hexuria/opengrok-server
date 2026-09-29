@@ -41,8 +41,11 @@ async fn rows(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet) -> Vec<Va
         })
         .collect();
     // A plugin named like a built-in cannot be told apart from it here, so the built-in keeps the
-    // name: one name must never switch two things.
-    let free = |name: &str| !Executor::every_builtin().any(|builtin| builtin == name);
+    // name: one name must never switch two things. Nor a plugin with a dot in its name, which is
+    // never dialled (`connect_plugins`): a switch for it would say on while no turn offered it.
+    let free = |name: &str| {
+        !name.contains('.') && !Executor::every_builtin().any(|builtin| builtin == name)
+    };
     for plugin in state.plugins.values().filter(|p| free(&p.manifest.name)) {
         let name = &plugin.manifest.name;
         // Agent Plugins 1.0.0 has no label; `name` is its human-readable name.

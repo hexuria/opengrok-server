@@ -191,3 +191,8 @@ person's machine gains `user_machine_shell`, once. A second pass would switch th
 on for an owner who had switched it off (`crates/opengrok-store/tests/the_machine_joins_the_ceiling.rs`).
 A row an older replica writes after the pass misses it, and that coworker starts with the machine
 off.
+
+**Where a run-once transform goes is decided by what it must come after.** This one runs last in
+`EVERY_BOOT`, not in `SCHEMA`. The built-in widenings look for an exact older list, which never
+names the machine. Run first, the pass left a ceiling on an older list narrow for good while its
+profile widened (review of #282). Its row makes it match nothing on every later boot.
