@@ -4213,8 +4213,20 @@ async fn a_form_escalated_after_its_run_stopped_replays_its_hand_back_on_its_par
 #[tokio::test]
 async fn a_hand_back_that_cannot_read_the_run_log_settles_nothing() {
     let database_url = database_or_skip!();
-    let email = format!("handoff-unread-{}@og.local", uuid::Uuid::now_v7().simple());
-    let h = harness_with_door(&database_url, &email, Arc::new(HoldDoor)).await;
+    hand_back_with_an_unreadable_log(&database_url, "handoff-unread", false).await;
+}
+
+/// The same, posted with the escalated form's own id, which names its call: the log is read
+/// before anything settles on that path too (review of #277).
+#[tokio::test]
+async fn a_hand_back_by_the_forms_id_that_cannot_read_the_run_log_settles_nothing() {
+    let database_url = database_or_skip!();
+    hand_back_with_an_unreadable_log(&database_url, "handoff-unread-form", true).await;
+}
+
+async fn hand_back_with_an_unreadable_log(database_url: &str, tag: &str, by_form: bool) {
+    let email = format!("{tag}-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(database_url, &email, Arc::new(HoldDoor)).await;
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Ada").await;
 
@@ -4240,7 +4252,8 @@ async fn a_hand_back_that_cannot_read_the_run_log_settles_nothing() {
         .await
         .expect("break the log");
 
-    let hand_back = json!({ "entryId": handoff_id, "agentId": agent, "resolution": "handed_back" });
+    let posted = if by_form { &form_id } else { &handoff_id };
+    let hand_back = json!({ "entryId": posted, "agentId": agent, "resolution": "handed_back" });
     let (status, body) = h
         .agui(&token, "/ag-ui/box-handoff/resolve", hand_back.clone())
         .await;

@@ -431,14 +431,17 @@ pub async fn resolve_box_handoff(
     // A LOG THAT CANNOT BE READ SETTLES NOTHING. Settled anyway, the handoff read as over while
     // the run it answers stayed parked, holding the screen and its approvals row, with nothing
     // in the server left that would answer it.
+    // Read first on EVERY path, the escalated form's own id included: a form names its call, but
+    // the resume that answers it still has to read the log, and settling before it could left the
+    // form replaying as settled over a run still parked (review of #277).
     let store = &state.agui.auth.store;
+    let Some(waiting) = waiting_calls(state, account_id, &coworker_id).await else {
+        return (503, json!({ "error": "run log unavailable; try again" }));
+    };
     let answers = match call_id_of(&entry) {
         Some(call) => Some(Some(call.to_string())),
         None => {
-            let (Some(waiting), Ok(entries)) = (
-                waiting_calls(state, account_id, &coworker_id).await,
-                store.gateway_transcript(&coworker_id, account_id).await,
-            ) else {
+            let Ok(entries) = store.gateway_transcript(&coworker_id, account_id).await else {
                 return (503, json!({ "error": "run log unavailable; try again" }));
             };
             handoff_call(&entries, &waiting)
