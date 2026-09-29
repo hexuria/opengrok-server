@@ -3,7 +3,7 @@
   "path": "/ag-ui",
   "status": 409,
   "body": {
-    "error": "run-exists",
-    "message": "this run id already has a run; a new turn needs a new run id"
+    "error": "this run id already has a run; a new turn needs a new run id",
+    "code": "run-exists"
   }
 }

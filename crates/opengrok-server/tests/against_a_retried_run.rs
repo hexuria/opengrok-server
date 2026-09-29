@@ -324,6 +324,28 @@ async fn another_account_cannot_take_a_run_by_its_id() {
 
     let (status, _) = h.post(Some(&stranger), &thread, &run).await;
     assert_eq!(status, 409, "a run id somebody else holds is refused");
+    // The sentence is `error`, as on every refusal a client shows; the word it branches on is
+    // `code` (NativeChat, reading the wire corpus).
+    let refusal: Value = h
+        .client
+        .post(format!("{}/ag-ui", h.base))
+        .header("Authorization", format!("Bearer {stranger}"))
+        .json(&json!({
+            "threadId": thread,
+            "runId": run,
+            "messages": [{"id": "m1", "role": "user", "content": "ping"}],
+        }))
+        .send()
+        .await
+        .expect("post again")
+        .json()
+        .await
+        .expect("a JSON refusal");
+    assert_eq!(refusal["code"], "run-exists", "{refusal}");
+    assert_eq!(
+        refusal["error"], "this run id already has a run; a new turn needs a new run id",
+        "{refusal}"
+    );
 
     assert_eq!(
         h.logged(&run, "TEXT_MESSAGE_CONTENT").await,

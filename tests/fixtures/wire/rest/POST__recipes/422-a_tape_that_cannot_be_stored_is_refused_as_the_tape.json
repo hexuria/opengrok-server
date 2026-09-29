@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/recipes",
+  "status": 422,
+  "body": "the tape holds a NUL character (U+0000), which cannot be stored; teach it again"
+}

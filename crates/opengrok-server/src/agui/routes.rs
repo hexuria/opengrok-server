@@ -3662,9 +3662,11 @@ fn not_attached(owned: Result<bool, opengrok_store::StoreError>) -> Response {
 fn run_taken() -> Response {
     (
         StatusCode::CONFLICT,
+        // `error` IS THE SENTENCE, as on every other refusal a client shows; the word a client
+        // branches on is `code` (NativeChat, reading the wire corpus, showed "run-exists").
         Json(serde_json::json!({
-            "error": "run-exists",
-            "message": "this run id already has a run; a new turn needs a new run id",
+            "error": "this run id already has a run; a new turn needs a new run id",
+            "code": "run-exists",
         })),
     )
         .into_response()

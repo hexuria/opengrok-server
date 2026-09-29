@@ -46,6 +46,14 @@ const REST_PREFIXES: &[&str] = &[
 /// own pages and a websocket, and an artifact's `/bytes` is the file itself.
 const REST_LEFT_OUT: &[&str] = &["/computer/vnc/", "/bytes"];
 
+/// Recordings kept whatever their shape, by test and route: a sequence NativeChat checks that a
+/// shape alone cannot tell apart from one already kept. The replay of a message sent with files
+/// and no words is START then END for the person's message (#229, nativechat#135).
+const ALSO_KEEP: &[(&str, &str)] = &[(
+    "a_message_of_files_keeps_its_parts_and_is_drawn_on_replay",
+    "/ag-ui/threads/{thread_id}",
+)];
+
 const REDACTED: &str = "«redacted»";
 
 /// Keys whose value is a secret, whole.
@@ -223,9 +231,15 @@ fn shape(value: &Value) -> String {
             format!("[{}]", kinds.into_iter().collect::<Vec<_>>().join("|"))
         }
         Value::Object(object) => {
+            // `role` is kept as its value: a person's `TEXT_MESSAGE_START` and the coworker's have
+            // the same keys, and NativeChat reads the two differently (a person's files-only
+            // message is START then END, with no words).
             let fields: BTreeMap<&String, String> = object
                 .iter()
-                .map(|(key, child)| (key, shape(child)))
+                .map(|(key, child)| match (key.as_str(), child.as_str()) {
+                    ("role", Some(role)) => (key, format!("role={role}")),
+                    _ => (key, shape(child)),
+                })
                 .collect();
             let inner: Vec<String> = fields
                 .into_iter()
@@ -260,7 +274,19 @@ fn build(record_dir: &Path, out: &Path, sha: &str) {
     for record in records(record_dir) {
         let mut content = record.content.clone();
         normalise(&mut content);
-        let key = (record.dir.clone(), record.status, shape(&content));
+        let pinned = record.status.is_some()
+            && ALSO_KEEP
+                .iter()
+                .any(|(test, route)| record.test == *test && record.route == *route);
+        let key = if pinned {
+            (
+                record.dir.clone(),
+                record.status,
+                format!("kept:{}", record.test),
+            )
+        } else {
+            (record.dir.clone(), record.status, shape(&content))
+        };
         let keep = chosen
             .get(&key)
             .is_none_or(|kept| (&record.test, &record.binary) < (&kept.test, &kept.binary));
