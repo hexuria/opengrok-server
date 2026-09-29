@@ -1,5 +1,5 @@
 {
-  "server_sha": "45580c271d835e4b2b7ef2a8c3b22f86fe3c825c",
+  "server_sha": "ccac6e0e2d0f99268c1fd7483cf074c48d75f856",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -119,6 +119,10 @@
     },
     {
       "file": "agui/TOOL_CALL_START/a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/TOOL_CALL_START/a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart-2.json",
       "source": "streamed or replayed by /ag-ui, recorded from the test a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
@@ -886,8 +890,8 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted.json",
-      "source": "GET /schedules, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
+      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
