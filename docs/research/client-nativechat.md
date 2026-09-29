@@ -107,6 +107,7 @@ Skills, recipes, connectors and the tools a coworker is offered.
 | `/connections/{id}` | DELETE | `connections/routes.rs:58` | see the mount | *unverified* |
 | `/connections/{id}/lend` | POST | `connections/routes.rs:56` | see the mount | *unverified* |
 | `/connections/{id}/revoke` | POST | `connections/routes.rs:57` | see the mount | *unverified* |
+| `/coworkers/{coworker_id}/ceiling` | GET PUT | `agui/routes.rs:990` | `{tools: [{name, kind, description, enabled, available?, label?, connector?}], version}`: one row per built-in (`user_machine_shell` carries `available`), per loaded plugin, and per plugin still switched on that the server no longer loads (`available: false`). PUT `{enabled: [names], version?}` replaces the ceiling with exactly those rows and answers the same body; `[]` switches everything off. A stale `version` is 409 `{error, code: "ceiling-changed"}` with nothing changed; without one the write is unconditional. 404 `{error: "no such coworker"}` unless you own it; 403 `{error}` for a withdrawn grant; 422 `{error}` for a name no row shows or a malformed body, with nothing changed; 503 `{error}` | the wire NativeChat agreed on #268. NativeChat file: *unverified* |
 | `/coworkers/{coworker_id}/tools` | GET | `agui/routes.rs:934` | see the mount | *unverified* |
 | `/recipes` | GET POST | `recipes.rs:71` | see the mount | *unverified* |
 | `/recipes/{id}` | GET PUT DELETE | `recipes.rs:77` | PUT: 400 "a recipe needs a name" for a blank one; otherwise see the mount | *unverified* |

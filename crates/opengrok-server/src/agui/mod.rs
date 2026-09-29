@@ -4,6 +4,7 @@
 //! client through this stream.
 
 pub(crate) mod attachments;
+pub(crate) mod ceiling;
 pub mod chat_ui;
 pub mod credential;
 pub(crate) mod history;

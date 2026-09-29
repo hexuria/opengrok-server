@@ -643,7 +643,8 @@ pub(crate) async fn tools_for_coworker(
         .with_egress_policy_unconfirmed(egress_unconfirmed);
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
-    // machine, and to this coworker for the audit origin.
+    // machine, and to this coworker for the audit origin. The executor offers it only where the
+    // coworker's ceiling allows (#268).
     if let Some((machine_id, _label)) =
         crate::local_exec::enabled_machine(&state.auth.store, account_id.as_str()).await
     {
@@ -886,7 +887,7 @@ async fn connect_plugins(
                 continue;
             };
             if let Some(token) = live_token(state, vault, chosen).await {
-                values.insert(format!("{}_TOKEN", connector.to_uppercase()), token);
+                values.insert(opengrok_plugins::token_key(&connector), token);
             }
         }
     }
@@ -985,6 +986,11 @@ pub fn router(state: AgUiState) -> Router {
             get(super::screen_proxy::serve),
         )
         .route("/coworkers/{coworker_id}/tools", get(list_tools))
+        // The same tools as switches its owner sets (#268, `ceiling.rs`).
+        .route(
+            "/coworkers/{coworker_id}/ceiling",
+            get(super::ceiling::get_ceiling).put(super::ceiling::put_ceiling),
+        )
         .route(
             "/coworkers/{coworker_id}/computer/update",
             post(computer_update),
@@ -1092,17 +1098,10 @@ pub async fn probe_model(
     }
 }
 
-/// `PATCH /coworkers/{id}` — a partial update. A field absent is left alone; `role: null` or a
-/// blank string clears it. Taking the body as a `Value` rather than a struct of `Option`s is what
-/// makes "absent" and "null" different, which a nullable field needs.
-#[derive(Debug, Deserialize)]
-pub struct RepinRequest {
-    /// A route through the gateway, never a key.
-    pub model: String,
-}
-
 /// `PATCH /coworkers/{id}` — change this coworker's name, its route, its standing role, its
-/// decoration, or several at once.
+/// decoration, or several at once. A field absent is left alone; `role: null` or a blank string
+/// clears it. Taking the body as a `Value` rather than a struct of `Option`s is what makes
+/// "absent" and "null" different, which a nullable field needs.
 ///
 /// EVERY FIELD THE CLIENT SENDS IS READ HERE. The app's Save button puts the whole card in one
 /// body — name, title and role together — so a field this route quietly skipped was an edit the
@@ -1690,14 +1689,12 @@ pub async fn hire(
     // ownership: "the owner may do anything" is the rule that has no seam to narrow later, and
     // coworker-to-coworker delegation will need one.
     //
-    // The ceiling starts at the tools this server actually implements, not `All`: a coworker's
-    // limits should be a list somebody can read, and `All` would silently include whatever is
-    // added next.
-    // The ceiling starts at the tools this server implements without any plugin. A plugin granted
-    // to this coworker later must widen it — policy correctly refuses a tool nobody permitted, so
-    // "install a plugin" and "let this coworker use it" stay two decisions rather than one.
-    let tools =
-        opengrok_policy::ToolSet::only(opengrok_tools::Executor::builtin_tool_names().to_vec());
+    // The ceiling starts at the tools this server implements without any plugin, not `All`: a
+    // coworker's limits should be a list somebody can read, and `All` would silently include
+    // whatever is added next. The person's machine is among them, as every coworker could reach it
+    // before its ceiling governed it (#268). A plugin must widen it later, so "install a plugin"
+    // and "let this coworker use it" stay two decisions rather than one.
+    let tools = opengrok_policy::ToolSet::only(opengrok_tools::Executor::every_builtin());
     let mut template_note: Option<String> = None;
     let granted = match template.as_ref() {
         // Hired from a template: the template's ceiling, approval set and limits, copied. A
@@ -2226,9 +2223,7 @@ async fn list_tools(
             let name = function.get("name")?.as_str()?.to_string();
             // OpenAI-safe plugin names have no dots (`gmail_api_send`). Kind is
             // "not a builtin", not "contains a dot".
-            let kind = if opengrok_tools::Executor::builtin_tool_names().contains(&name.as_str())
-                || name == opengrok_tools::USER_MACHINE_SHELL
-            {
+            let kind = if opengrok_tools::Executor::every_builtin().any(|builtin| builtin == name) {
                 "builtin"
             } else {
                 "plugin"

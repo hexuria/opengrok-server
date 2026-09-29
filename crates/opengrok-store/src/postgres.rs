@@ -1224,6 +1224,7 @@ impl PgStore {
              values ($1, $2, $3)
              on conflict (coworker_id) do update set
                tools = excluded.tools,
+               version = ceiling_view.version + (ceiling_view.tools <> excluded.tools)::int,
                updated_at_ms = excluded.updated_at_ms",
         )
         .bind(coworker.as_str())
@@ -1234,6 +1235,72 @@ impl PgStore {
 
         tx.commit().await?;
         Ok(())
+    }
+
+    /// A coworker's ceiling and the `version` a write against it names, read together so the
+    /// number is the tools' own. No row is `None` at version 0: it admits nothing.
+    pub async fn ceiling_at(
+        &self,
+        coworker: &CoworkerId,
+    ) -> StoreResult<(opengrok_policy::ToolSet, i64)> {
+        let row = sqlx::query("select tools, version from ceiling_view where coworker_id = $1")
+            .bind(coworker.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok((opengrok_policy::ToolSet::None, 0));
+        };
+        let tools: serde_json::Value = row.try_get("tools")?;
+        let tools = serde_json::from_value(tools).unwrap_or(opengrok_policy::ToolSet::None);
+        Ok((tools, row.try_get("version")?))
+    }
+
+    /// Set a coworker's ceiling as its owner chose it, and the owner's profile equal to it as hire
+    /// writes them, only while the ceiling is still at `expected` (whatever it is, for `None`).
+    /// `Ok(None)` when it has moved on, and nothing is written. ONE CONDITIONAL WRITE, not a read
+    /// then a write: the version is compared on the locked row, so two writes made from the same
+    /// read cannot both land. The grant goes first, the order `grant_access` locks them in.
+    pub async fn set_ceiling(
+        &self,
+        owner: &AccountId,
+        coworker: &CoworkerId,
+        tools: &opengrok_policy::ToolSet,
+        expected: Option<i64>,
+        at_ms: i64,
+    ) -> StoreResult<Option<i64>> {
+        let tools =
+            serde_json::to_value(tools).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "update grant_view set profile = $3, updated_at_ms = $4
+             where principal_id = $1 and coworker_id = $2",
+        )
+        .bind(owner.as_str())
+        .bind(coworker.as_str())
+        .bind(&tools)
+        .bind(at_ms)
+        .execute(&mut *tx)
+        .await?;
+        let version: Option<i64> = sqlx::query_scalar(
+            "insert into ceiling_view (coworker_id, tools, updated_at_ms, version, chosen)
+             values ($1, $2, $3, 1, true)
+             on conflict (coworker_id) do update set
+               tools = excluded.tools, updated_at_ms = excluded.updated_at_ms, chosen = true,
+               version = ceiling_view.version + (ceiling_view.tools <> excluded.tools)::int
+             where $4::bigint is null or ceiling_view.version = $4
+             returning version",
+        )
+        .bind(coworker.as_str())
+        .bind(&tools)
+        .bind(at_ms)
+        .bind(expected)
+        .fetch_optional(&mut *tx)
+        .await?;
+        // Dropped without a commit, the profile write above is rolled back with it.
+        if version.is_some() {
+            tx.commit().await?;
+        }
+        Ok(version)
     }
 
     /// Withdraw a grant. The row stays, so the log still says a grant existed and when it stopped.

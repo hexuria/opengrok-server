@@ -215,6 +215,33 @@ impl Plugin {
             .map(|(name, _)| name)
             .collect()
     }
+
+    /// The connector this plugin's headers ask a token from — `${GMAIL_TOKEN}` asks `gmail` —
+    /// read back through [`token_key`], so a person can be told what to connect before it runs.
+    pub fn connector(&self) -> Option<String> {
+        self.servers().find_map(|(_, server)| match server {
+            McpServer::StreamableHttp { headers, .. } | McpServer::Sse { headers, .. } => {
+                headers.values().find_map(|value| {
+                    let start = value.find("${")? + 2;
+                    let key = &value[start..start + value[start..].find('}')?];
+                    let connector = key
+                        .strip_suffix(TOKEN_SUFFIX)
+                        .filter(|name| !name.is_empty());
+                    connector.map(str::to_lowercase)
+                })
+            }
+            McpServer::Stdio { .. } => None,
+        })
+    }
+}
+
+const TOKEN_SUFFIX: &str = "_TOKEN";
+
+/// The placeholder a connector's token fills in a plugin's headers: `GMAIL_TOKEN` for `gmail`.
+/// ONE CONVENTION, READ BOTH WAYS: the server fills the placeholder by this name at connect time,
+/// and [`Plugin::connector`] reads it back; two spellings of it would drift apart silently.
+pub fn token_key(connector: &str) -> String {
+    format!("{}{TOKEN_SUFFIX}", connector.to_uppercase())
 }
 
 /// The spec's own name pattern, transcribed: lowercase alphanumerics, dots and dashes, starting and
@@ -662,5 +689,25 @@ mod tests {
             .unwrap()
             .with_trust(Trust::Verified);
         assert!(plugin.tools_needing_approval().is_empty());
+    }
+
+    /// #268: the connector a plugin's headers ask a token from, read back through the one
+    /// `<CONNECTOR>_TOKEN` convention the server fills them by.
+    #[test]
+    fn a_plugin_names_the_connector_its_headers_ask_a_token_from() {
+        let dir = a_plugin();
+        let plugin = Plugin::load(dir.path()).unwrap();
+        // `${TOKEN}` names no connector, and a stdio server's env is not a header anybody sends.
+        assert_eq!(plugin.connector(), None);
+        let mut asking = plugin.clone();
+        let header = format!("Bearer ${{{}}}", token_key("google-drive"));
+        asking.mcp.servers.insert(
+            "api".to_string(),
+            McpServer::Sse {
+                url: "https://mcp.example.com/sse".to_string(),
+                headers: BTreeMap::from([("authorization".to_string(), header)]),
+            },
+        );
+        assert_eq!(asking.connector().as_deref(), Some("google-drive"));
     }
 }

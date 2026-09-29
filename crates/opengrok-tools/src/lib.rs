@@ -251,6 +251,9 @@ impl ToolResult {
 
 /// The name of the reverse-exec tool: a shell command on the USER'S OWN machine, not the bot's box.
 pub const USER_MACHINE_SHELL: &str = "user_machine_shell";
+/// Why a call to it is refused when the coworker's ceiling has the machine switched off (#268).
+const MACHINE_SWITCHED_OFF: &str =
+    "this coworker's tool ceiling does not let it use your machine; its owner can switch that on";
 
 /// What the reverse-exec sink hands back for one command. The gate + machine selection + audit all
 /// live behind the sink (the server); the tool only forwards a command and renders the reply.
@@ -698,8 +701,8 @@ pub struct Executor {
     /// Plugin servers that should have been reached this request and were not, with the reason.
     unavailable_plugins: BTreeMap<String, String>,
     /// The reverse-exec bridge, present ONLY when this account has an enrolled, enabled machine.
-    /// Its presence is what advertises `user_machine_shell` — the tool exists iff a machine can
-    /// actually be reached.
+    /// Its presence, with a ceiling that allows it, is what advertises `user_machine_shell` — the
+    /// tool exists iff a machine can actually be reached.
     user_machine: Option<Arc<dyn UserMachineSink>>,
     /// Auto-review, when the run's effective policy is on: the instruction texts (resolved once
     /// per run by the server) and the judge that reads them. `None` is the cheapest short-circuit.
@@ -751,6 +754,10 @@ const SCREEN_TOOLS: &[&str] = &["open_url", "computer"];
 const BROWSER_TOOLS: &[&str] = &["open_url", "computer", RUN_RECIPE, REQUEST_USER_FORM];
 /// The recipe tool's name; offered next to the screen tools, gated the same way.
 pub const RUN_RECIPE: &str = "run_recipe";
+/// What `run_recipe` does; its schema lists the recipes this bot may run after these words.
+const RUN_RECIPE_DESCRIPTION: &str = "Run a task a person taught on THIS BOT'S OWN computer, \
+     as one step, instead of looking and clicking your way through it. Use one when the request \
+     matches its description, and say which you used.";
 
 /// The auto-review pair a run carries.
 struct AutoReview {
@@ -1174,7 +1181,7 @@ impl Executor {
     }
 
     /// Attach the reverse-exec bridge — the server does this only when the account has an enrolled,
-    /// enabled machine, which is precisely when `user_machine_shell` should be offered.
+    /// enabled machine; `user_machine_shell` is then offered where the coworker's ceiling allows.
     #[must_use]
     pub fn with_user_machine(mut self, sink: Arc<dyn UserMachineSink>) -> Self {
         self.user_machine = Some(sink);
@@ -1310,8 +1317,7 @@ impl Executor {
             .map(str::to_string)
             .chain(self.has_recipes().then(|| RUN_RECIPE.to_string()))
             .chain(
-                self.user_machine
-                    .is_some()
+                self.reaches_the_machine()
                     .then(|| USER_MACHINE_SHELL.to_string()),
             )
             .chain(
@@ -1322,11 +1328,27 @@ impl Executor {
             .collect()
     }
 
-    fn reserved_openai_names() -> impl Iterator<Item = &'static str> {
+    /// A machine attached, and a CEILING that lets this coworker reach it — its owner's switch
+    /// (#268). Not the grant's profile: each command is the local-exec policy's to allow.
+    fn reaches_the_machine(&self) -> bool {
+        let ceiling = self.policy.ceiling.as_ref().map(|ceiling| &ceiling.tools);
+        self.user_machine.is_some() && ceiling.is_some_and(|tools| tools.allows(USER_MACHINE_SHELL))
+    }
+
+    /// Every built-in, the person's machine too: names no plugin may take, a ceiling's rows (#268).
+    pub fn every_builtin() -> impl Iterator<Item = &'static str> {
         Self::builtin_tool_names()
             .iter()
             .copied()
             .chain(std::iter::once(USER_MACHINE_SHELL))
+    }
+
+    /// A built-in's words as `tool_schemas` offers them, less what a turn adds (a recipe list).
+    pub fn builtin_description(name: &str) -> Option<&'static str> {
+        if name == RUN_RECIPE {
+            return Some(RUN_RECIPE_DESCRIPTION);
+        }
+        builtin_tool_spec(name).map(|(description, _)| description)
     }
 
     /// Internal dotted `qualified_name` ↔ OpenAI-safe wire name for this coworker's plugins.
@@ -1339,7 +1361,7 @@ impl Executor {
             .map(|tool| tool.qualified_name.as_str())
             .collect();
         qualified.sort_unstable();
-        crate::mcp::openai_unique_tool_names(Self::reserved_openai_names(), qualified)
+        crate::mcp::openai_unique_tool_names(Self::every_builtin(), qualified)
     }
 
     /// Accept the model's OpenAI-safe name or a legacy dotted qualify. Policy, sessions and
@@ -1495,11 +1517,7 @@ impl Executor {
                 "type": "function",
                 "function": {
                     "name": crate::mcp::openai_safe_tool_name(RUN_RECIPE),
-                    "description": format!(
-                        "Run a task a person taught on THIS BOT'S OWN computer, as one step, instead of \
-                         looking and clicking your way through it. Use one when the request matches its \
-                         description, and say which you used. Recipes you may run:\n{listing}"
-                    ),
+                    "description": format!("{RUN_RECIPE_DESCRIPTION} Recipes you may run:\n{listing}"),
                     "parameters": {
                         "type": "object",
                         "properties": properties,
@@ -1508,12 +1526,12 @@ impl Executor {
                 },
             }));
         }
-        // The reverse-exec tool is NOT gated by the per-coworker tool grant: its authorization is
-        // the account's local-exec policy (enrolled machine + never/ask/bypass) and the machine's
-        // own consent, applied per command inside the sink. Gating it behind the grant would deny
-        // every existing coworker (whose grant lists only the box tools) a capability the account
-        // explicitly enabled. Offered whenever a machine is attached.
-        if self.user_machine.is_some()
+        // The reverse-exec tool is NOT gated by the grant's profile: each command is authorized by
+        // the account's local-exec policy (never/ask/bypass) and the machine's own consent, inside
+        // the sink, and a profile written before the machine existed would deny every coworker a
+        // capability the account enabled. Whether this coworker may reach the machine at all is
+        // its ceiling's switch (#268), so it is offered when a machine is attached AND that allows.
+        if self.reaches_the_machine()
             && let Some((description, parameters)) = builtin_tool_spec(USER_MACHINE_SHELL)
         {
             schemas.push(serde_json::json!({
@@ -1574,9 +1592,9 @@ impl Executor {
         let review_approved = gate_approved || self.review_approved_calls.contains(&call.id);
 
         // The reverse-exec tool is authorized by the LOCAL-EXEC policy (its sink judges the
-        // command against never/ask/bypass + the standing rules), NOT the per-coworker tool grant —
-        // which would Deny it for any coworker whose grant lists only the box tools. It runs on
-        // the USER'S machine, so it needs no box.
+        // command against never/ask/bypass + the standing rules), NOT the grant's profile — which
+        // would Deny it for any coworker whose profile lists only the box tools — once its ceiling
+        // lets it reach the machine at all. It runs on the USER'S machine, so it needs no box.
         let user_machine_command = if tool_name == USER_MACHINE_SHELL {
             match serde_json::from_value::<ShellArgs>(arguments.clone()) {
                 Ok(args) => Some(args.command),
@@ -1601,6 +1619,9 @@ impl Executor {
                     "no machine of yours is connected, so nothing can run there",
                 );
             };
+            if !self.reaches_the_machine() {
+                return ToolResult::refused(&call.id, MACHINE_SWITCHED_OFF);
+            }
             match sink.decide(&context.account_id, command).await {
                 UserMachineVerdict::Allow => Gate::Allow,
                 UserMachineVerdict::Ask => Gate::Ask(

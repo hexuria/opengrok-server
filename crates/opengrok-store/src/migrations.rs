@@ -1182,6 +1182,39 @@ end $do$;
 
 -- The deny rule that refused a command (#224): the person reads it here, the model is not told it.
 alter table local_exec_audit add column if not exists rule text;
+
+-- #268: a ceiling its owner sets. `version` counts every change to `tools`, so a write made against
+-- one it has not seen is refused (`set_ceiling`); `chosen` marks a ceiling its owner set, which the
+-- built-in widenings in `EVERY_BOOT` must never touch. Guarded like the columns above.
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'ceiling_view'
+           and column_name = 'version'
+    ) then
+        alter table ceiling_view add column version bigint not null default 0;
+        alter table ceiling_view add column chosen boolean not null default false;
+    end if;
+end $do$;
+
+-- Transforms that must run exactly once, by name: a row means it ran (docs/setup/postgres.md,
+-- "Data-transforming migrations"). An existing deployment is the baseline.
+create table if not exists schema_migrations (
+    name       text        primary key,
+    applied_at timestamptz not null default now()
+);
+-- #268: a coworker's ceiling now decides whether it may reach its person's machine, and every
+-- ceiling written before that allowed the machine in effect, so each gains it ONCE. After that a
+-- ceiling without it is one its owner switched off, which a second pass would switch back on. A
+-- row an older replica writes mid-deploy misses the pass and starts with the machine off.
+update ceiling_view
+   set version = version + 1,
+       tools = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
+         from jsonb_array_elements_text((tools->'only') || '["user_machine_shell"]'::jsonb) tool))
+ where tools ? 'only' and not (tools->'only' ? 'user_machine_shell')
+   and not exists (select 1 from schema_migrations where name = 'the-machine-joins-the-ceiling');
+insert into schema_migrations (name) values ('the-machine-joins-the-ceiling') on conflict do nothing;
 "#;
 
 /// Run on EVERY boot, after `SCHEMA`, whether or not the schema itself was replayed.
@@ -1190,7 +1223,10 @@ alter table local_exec_audit add column if not exists rule text;
 /// deploy an older replica can still write the older set after a newer one has migrated, and the
 /// next boot is what brings that row along (`old_grants_follow_the_builtins.rs`). These are
 /// UPDATEs over rows that match, so they take row locks only, never the table locks that made
-/// replaying `SCHEMA` on every boot deadlock against live reads.
+/// replaying `SCHEMA` on every boot deadlock against live reads. A CEILING ITS OWNER CHOSE
+/// (`chosen`, #268) IS NEVER WIDENED: a choice that equals an older set is a choice, and widening
+/// it at the next boot would switch back on what its owner switched off. Every change bumps
+/// `version`, so a write made against the old one is refused rather than undoing this.
 const EVERY_BOOT: &str = r#"
 -- The screen tools (open_url, computer) joined the built-ins. A grant or ceiling written as
 -- EXACTLY the previous built-in set was "everything this server implements" when it was written,
@@ -1200,32 +1236,32 @@ update grant_view
    set profile = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
  where profile = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
 update ceiling_view
-   set tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb
- where tools = '{"only": ["read_file", "shell", "write_file"]}'::jsonb;
+   set tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb, version = version + 1
+ where tools = '{"only": ["read_file", "shell", "write_file"]}'::jsonb and not chosen;
 -- `run_recipe` joined the built-ins the same way: a row that is exactly the five-tool set
 -- follows; the two statements chain, so a three-tool row widens twice in one boot.
 update grant_view
    set profile = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb
  where profile = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb;
 update ceiling_view
-   set tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb
- where tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb;
+   set tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb, version = version + 1
+ where tools = '{"only": ["computer", "open_url", "read_file", "shell", "write_file"]}'::jsonb and not chosen;
 -- `request_user_form` joined the built-ins the same way: a row that is exactly today's
 -- previous set follows; a narrower list was chosen on purpose and is left alone.
 update grant_view
    set profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
  where profile = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
 update ceiling_view
-   set tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
- where tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb;
+   set tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb, version = version + 1
+ where tools = '{"only": ["computer", "open_url", "read_file", "run_recipe", "shell", "write_file"]}'::jsonb and not chosen;
 -- `credential.request` joined the built-ins the same way. Site passwords are NOT stored;
 -- this tool only asks the client to fill a saved login.
 update grant_view
    set profile = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
  where profile = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
 update ceiling_view
-   set tools = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb
- where tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb;
+   set tools = '{"only": ["computer", "credential.request", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb, version = version + 1
+ where tools = '{"only": ["computer", "open_url", "read_file", "request_user_form", "run_recipe", "shell", "write_file"]}'::jsonb and not chosen;
 -- `credential.request` left with the broker (Sep 2026): the saved login is offered on the
 -- ordinary form card. The widening just above still matches today's default grant, so it
 -- would put the dead name on every fresh bot at every boot; this takes it out again.
@@ -1233,7 +1269,7 @@ update grant_view
    set profile = jsonb_set(profile, '{only}', (profile->'only') - 'credential.request')
  where profile->'only' ? 'credential.request';
 update ceiling_view
-   set tools = jsonb_set(tools, '{only}', (tools->'only') - 'credential.request')
+   set tools = jsonb_set(tools, '{only}', (tools->'only') - 'credential.request'), version = version + 1
  where tools->'only' ? 'credential.request';
 "#;
 
