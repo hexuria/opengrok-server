@@ -30,12 +30,55 @@ use serde::{Deserialize, Serialize};
 /// `All` is not sugar for listing every tool: a coworker whose ceiling is `All` should still be
 /// narrowed by a profile that names three tools, and a list could not express "whatever exists
 /// tomorrow" without being edited every time a tool is added.
+///
+/// A PLUGIN IS ADMITTED WHOLE BY `"<plugin>.*"` (#268). Its tools are `<plugin>.<server>.<tool>`,
+/// and not one of those names is known until its server has been dialled — which this set gates
+/// ([`may_run_any_under`]) — so a list of exact names could never let a plugin in. The entry
+/// admits every name under `<plugin>.` and nothing else: not `<plugin>` itself, not a plugin whose
+/// name merely starts the same way. Any other `*` is part of an ordinary name no tool has, so a
+/// malformed entry only ever narrows — and a replica that predates this reads the entry the same
+/// way, as a name nothing matches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolSet {
     All,
     Only(BTreeSet<String>),
     None,
+}
+
+/// The plugin a `"<plugin>.*"` entry admits whole; `None` for an ordinary tool name.
+pub fn plugin_of(entry: &str) -> Option<&str> {
+    entry
+        .strip_suffix(".*")
+        .filter(|plugin| !plugin.is_empty() && !plugin.contains('*'))
+}
+
+/// The entry that admits every tool `plugin` brings, today's and tomorrow's.
+pub fn every_tool_of(plugin: &str) -> String {
+    format!("{plugin}.*")
+}
+
+/// Whether `tool` is named under `plugin`: `<plugin>.` and at least one more character.
+fn under(tool: &str, plugin: &str) -> bool {
+    tool.strip_prefix(plugin)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .is_some_and(|rest| !rest.is_empty())
+}
+
+/// The entries of `names` that `other` admits in full: a name it allows, or a whole plugin it
+/// admits whole. A plugin one side admits whole and the other only name by name comes out as
+/// those names, never as the plugin — the other side said nothing about its tools to come.
+fn kept_by<'a>(
+    names: &'a BTreeSet<String>,
+    other: &'a ToolSet,
+) -> impl Iterator<Item = String> + 'a {
+    names
+        .iter()
+        .filter(move |name| match plugin_of(name) {
+            Some(plugin) => other.allows_all_of(plugin),
+            None => other.allows(name),
+        })
+        .cloned()
 }
 
 impl ToolSet {
@@ -55,9 +98,34 @@ impl ToolSet {
     pub fn allows(&self, tool: &str) -> bool {
         match self {
             Self::All => true,
-            Self::Only(names) => names.contains(tool),
+            Self::Only(names) => {
+                names.contains(tool) || self.whole_plugins().any(|plugin| under(tool, plugin))
+            }
             Self::None => false,
         }
+    }
+
+    /// The plugins this set admits whole, by name. `All` names none: it admits every plugin
+    /// without naming one.
+    pub fn whole_plugins(&self) -> impl Iterator<Item = &str> {
+        let names = match self {
+            Self::Only(names) => Some(names),
+            Self::All | Self::None => None,
+        };
+        names
+            .into_iter()
+            .flatten()
+            .filter_map(|name| plugin_of(name))
+    }
+
+    /// Whether every tool `plugin` brings is admitted, whatever it brings next: `All`, or an entry
+    /// that admits it whole (or admits a plugin its name sits under). Its tools listed by name never
+    /// are — it may bring another tomorrow.
+    pub fn allows_all_of(&self, plugin: &str) -> bool {
+        matches!(self, Self::All)
+            || self
+                .whole_plugins()
+                .any(|held| held == plugin || under(plugin, held))
     }
 
     /// INTERSECTION, NEVER UNION. The result can only be as permissive as the narrower side.
@@ -67,7 +135,8 @@ impl ToolSet {
             (Self::None, _) | (_, Self::None) => Self::None,
             (Self::All, other) | (other, Self::All) => other.clone(),
             (Self::Only(left), Self::Only(right)) => {
-                let both: BTreeSet<String> = left.intersection(right).cloned().collect();
+                let both: BTreeSet<String> =
+                    kept_by(left, other).chain(kept_by(right, self)).collect();
                 if both.is_empty() {
                     Self::None
                 } else {
@@ -251,7 +320,15 @@ pub fn may_run_any_under(
     }
     match ceiling.tools.intersect(&grant.profile) {
         ToolSet::All => true,
-        ToolSet::Only(names) => names.iter().any(|name| name.starts_with(prefix)),
+        ToolSet::Only(names) => names.iter().any(|name| match plugin_of(name) {
+            // A whole plugin reaches every server under it; an entry narrower than the server
+            // still reaches that server, for the tools it names.
+            Some(plugin) => {
+                let whole = format!("{plugin}.");
+                whole.starts_with(prefix) || prefix.starts_with(&whole)
+            }
+            None => name.starts_with(prefix),
+        }),
         ToolSet::None => false,
     }
 }
@@ -670,6 +747,113 @@ mod tests {
             &coworker(),
             "gmail.api.",
             &everything
+        ));
+    }
+
+    /// #268: a plugin is switched on whole, before anybody knows its tools' names — and the entry
+    /// admits exactly the tools under that plugin.
+    #[test]
+    fn a_whole_plugin_admits_its_own_tools_and_nothing_else() {
+        let gmail = ToolSet::only([every_tool_of("gmail")]);
+        assert!(gmail.allows("gmail.api.send"));
+        assert!(gmail.allows("gmail.other.read"));
+        // A plugin whose name only starts the same way is a different plugin.
+        assert!(!gmail.allows("gmailx.a.b"));
+        // The plugin's own name is not one of its tools, and neither is the bare prefix.
+        assert!(!gmail.allows("gmail"));
+        assert!(!gmail.allows("gmail."));
+        assert!(!gmail.allows("shell"));
+        assert!(gmail.allows_all_of("gmail"));
+        assert!(!gmail.allows_all_of("gmailx"));
+        // Its tools named one by one are not the plugin: it may bring another tomorrow.
+        assert!(!ToolSet::only(["gmail.api.send"]).allows_all_of("gmail"));
+        assert!(ToolSet::All.allows_all_of("gmail"));
+        assert!(!ToolSet::None.allows_all_of("gmail"));
+    }
+
+    /// A typo may only ever narrow: an entry that is not `<plugin>.*` is a name no tool has.
+    #[test]
+    fn a_malformed_whole_plugin_entry_admits_nothing() {
+        for entry in ["*", ".*", "gmail*", "gmail.**", "*.*"] {
+            let set = ToolSet::only([entry]);
+            for tool in ["gmail.api.send", "shell", "gmail", "x.y.z"] {
+                assert!(!set.allows(tool), "{entry} must not admit {tool}");
+            }
+            assert!(!set.allows_all_of("gmail"), "{entry}");
+            assert_eq!(plugin_of(entry), None, "{entry}");
+        }
+    }
+
+    /// INTERSECTION, NEVER UNION, with whole plugins in it: a side that names one tool of a plugin
+    /// narrows the other side's whole plugin to that tool, and `All`/`None` behave as they did.
+    #[test]
+    fn a_whole_plugin_intersects_down_to_what_both_sides_admit() {
+        let gmail = ToolSet::only([every_tool_of("gmail")]);
+        let send = ToolSet::only(["gmail.api.send"]);
+        assert_eq!(gmail.intersect(&send), send);
+        assert_eq!(send.intersect(&gmail), send);
+        assert_eq!(gmail.intersect(&gmail), gmail);
+        assert_eq!(gmail.intersect(&ToolSet::All), gmail);
+        assert_eq!(ToolSet::All.intersect(&gmail), gmail);
+        assert_eq!(gmail.intersect(&ToolSet::None), ToolSet::None);
+        assert_eq!(ToolSet::None.intersect(&gmail), ToolSet::None);
+        assert_eq!(
+            gmail.intersect(&ToolSet::only([every_tool_of("gmailx")])),
+            ToolSet::None
+        );
+        assert_eq!(
+            gmail.intersect(&ToolSet::only(["shell"])),
+            ToolSet::None,
+            "a whole plugin and a built-in share nothing"
+        );
+        // A plugin under another's name is narrower, so it is what survives.
+        let nested = ToolSet::only([every_tool_of("gmail.api")]);
+        assert_eq!(gmail.intersect(&nested), nested);
+        assert_eq!(nested.intersect(&gmail), nested);
+        let mixed = ToolSet::only(["shell".to_string(), every_tool_of("gmail")]);
+        assert_eq!(
+            mixed.intersect(&ToolSet::only(["shell", "gmail.api.send", "read_file"])),
+            ToolSet::only(["shell", "gmail.api.send"])
+        );
+    }
+
+    /// The ceiling gate a turn runs: a plugin switched on in the ceiling runs only where the
+    /// profile admits it too, and its server is worth reaching only then.
+    #[test]
+    fn a_whole_plugin_runs_only_where_both_layers_admit_it() {
+        let gmail = || ToolSet::only(["shell".to_string(), every_tool_of("gmail")]);
+        let both = granted(gmail(), gmail());
+        let send = Action::RunTool("gmail.api.send");
+        assert!(decide(&principal(), &coworker(), send.clone(), &both).is_allowed());
+        assert!(may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.api.",
+            &both
+        ));
+        assert!(!may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmailx.api.",
+            &both
+        ));
+        assert!(
+            !decide(
+                &principal(),
+                &coworker(),
+                Action::RunTool("gmailx.a.b"),
+                &both
+            )
+            .is_allowed()
+        );
+
+        let profile_without = granted(ToolSet::only(["shell"]), gmail());
+        assert!(!decide(&principal(), &coworker(), send, &profile_without).is_allowed());
+        assert!(!may_run_any_under(
+            &principal(),
+            &coworker(),
+            "gmail.api.",
+            &profile_without
         ));
     }
 }
