@@ -99,6 +99,7 @@
         "runId": "0199bb4e-0000-7000-8000-000000000001",
         "callId": "shell-1",
         "reason": "policy-approval",
+        "summary": "Command on the agent's own box: echo hi",
         "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
         "arguments": {
           "command": "echo hi"

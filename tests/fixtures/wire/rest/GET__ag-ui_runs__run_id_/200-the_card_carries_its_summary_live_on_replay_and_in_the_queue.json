@@ -1,0 +1,128 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/runs/0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "runId": "0199bb4e-0000-7000-8000-000000000001",
+    "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
+    "status": "awaiting-approval",
+    "startedAtMs": 1790000000000,
+    "failure": null,
+    "pending": {
+      "call_id": "mock-call-1",
+      "tool": "shell",
+      "arguments": {
+        "command": "echo opengrok-tool-ran > /tmp/opengrok-tool-ran"
+      },
+      "reason": "policy-approval"
+    },
+    "events": [
+      {
+        "type": "RUN_STARTED",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
+        "timestamp": 100
+      },
+      {
+        "type": "TEXT_MESSAGE_START",
+        "messageId": "m1",
+        "role": "user",
+        "timestamp": 100
+      },
+      {
+        "type": "TEXT_MESSAGE_CONTENT",
+        "messageId": "m1",
+        "delta": "run a command",
+        "timestamp": 100
+      },
+      {
+        "type": "TEXT_MESSAGE_END",
+        "messageId": "m1",
+        "timestamp": 100
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "timestamp": 100,
+        "toolCallId": "mock-call-1",
+        "toolCallName": "shell"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "delta": "{\"command\":\"echo opengrok-tool-ran > /tmp/opengrok-tool-ran\"}",
+        "timestamp": 100,
+        "toolCallId": "mock-call-1"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "timestamp": 100,
+        "toolCallId": "mock-call-1"
+      },
+      {
+        "ok": false,
+        "type": "TOOL_CALL_RESULT",
+        "content": "waiting for approval: running shell on coworker cw_0199bb4e-0000-7000-8000-000000000003 needs a human yes",
+        "timestamp": 100,
+        "toolCallId": "mock-call-1"
+      },
+      {
+        "why": "running shell on coworker cw_0199bb4e-0000-7000-8000-000000000003 needs a human yes",
+        "name": "run-awaiting-approval",
+        "tool": "shell",
+        "type": "CUSTOM",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "callId": "mock-call-1",
+        "reason": "policy-approval",
+        "summary": "Command on the agent's own box: echo opengrok-tool-ran > /tmp/opengrok-tool-ran",
+        "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
+        "arguments": {
+          "command": "echo opengrok-tool-ran > /tmp/opengrok-tool-ran"
+        },
+        "timestamp": 100
+      },
+      {
+        "name": "run-timing",
+        "type": "CUSTOM",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "value": {
+          "tools": [
+            {
+              "ms": 3,
+              "name": "shell"
+            }
+          ],
+          "budget": {
+            "idle_ms": 240000,
+            "max_rounds": 8,
+            "max_wall_ms": 900000,
+            "call_timeout_ms": 180000,
+            "max_computer_rounds": 24
+          },
+          "context": {
+            "limit": 128000,
+            "left_out": 0,
+            "estimated": [
+              3395
+            ]
+          },
+          "model_ms": [
+            3
+          ],
+          "total_ms": 3,
+          "tool_rounds": 1,
+          "tool_wait_ms": 3,
+          "auto_review_ms": 3
+        },
+        "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
+        "total_ms": 3,
+        "timestamp": 100,
+        "tool_rounds": 1
+      },
+      {
+        "type": "RUN_FINISHED",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
+        "timestamp": 100
+      }
+    ]
+  }
+}

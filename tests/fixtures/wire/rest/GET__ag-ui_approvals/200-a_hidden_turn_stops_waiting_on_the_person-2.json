@@ -14,7 +14,8 @@
         "command": "ls"
       },
       "reason": "exec-consent",
-      "why": "This would run on your own computer, so it needs your consent. Command on the agent's own box: ls"
+      "why": "This would run on your own computer, so it needs your consent. Command on the agent's own box: ls",
+      "summary": "Command on the agent's own box: ls"
     }
   ]
 }
