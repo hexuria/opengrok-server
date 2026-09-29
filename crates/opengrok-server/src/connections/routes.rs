@@ -233,21 +233,35 @@ pub async fn callback(
 
     let at_ms = now_ms();
     let mut connection = existing;
-    let events = if connection.connected {
-        connection
-            .decide(ConnectionCommand::Refresh { at_ms })
-            .unwrap_or_default()
+    // A disconnected connection is connected afresh, never refreshed: `connected` stays true after
+    // a disconnect and `Refresh` refuses one. Deciding on `connected` alone, with that refusal
+    // swallowed into no events, told a person who reconnected Gmail it was connected while the
+    // row stayed disconnected.
+    let command = if connection.connected && !connection.disconnected {
+        ConnectionCommand::Refresh { at_ms }
     } else {
-        connection
-            .decide(ConnectionCommand::Connect {
-                connector: claims.connector.clone(),
-                owner: owner.clone(),
-                // The label is what a person sees; a real deployment fetches the provider's own
-                // profile here. The connector name is honest until that exists.
-                label: claims.connector.clone(),
-                at_ms,
-            })
-            .unwrap_or_default()
+        ConnectionCommand::Connect {
+            connector: claims.connector.clone(),
+            owner,
+            // The label is what a person sees; a real deployment fetches the provider's own
+            // profile here. The connector name is honest until that exists.
+            label: claims.connector.clone(),
+            at_ms,
+        }
+    };
+    let events = match connection.decide(command) {
+        Ok(events) => events,
+        Err(error) => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "{} was not connected: {error}. Nothing was saved; connect it again from the \
+                     app.",
+                    claims.connector
+                ),
+            )
+                .into_response();
+        }
     };
     for event in &events {
         connection.apply(event);
@@ -327,22 +341,24 @@ pub async fn lend(
     Path(id): Path<String>,
     Json(request): Json<LendRequest>,
 ) -> Response {
-    mutate(state, headers, id, |connection, at_ms| {
+    let coworker = CoworkerId::from_stored(request.coworker_id);
+    mutate(state, headers, id, Some(&coworker), |connection, at_ms| {
         connection.decide(ConnectionCommand::Lend {
-            coworker: CoworkerId::from_stored(request.coworker_id.clone()),
+            coworker: coworker.clone(),
             at_ms,
         })
     })
     .await
 }
 
+/// Checks nothing about the coworker: taking a loan back only ever narrows who holds the key.
 pub async fn revoke(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(request): Json<LendRequest>,
 ) -> Response {
-    mutate(state, headers, id, |connection, at_ms| {
+    mutate(state, headers, id, None, |connection, at_ms| {
         connection.decide(ConnectionCommand::Revoke {
             coworker: CoworkerId::from_stored(request.coworker_id.clone()),
             at_ms,
@@ -356,7 +372,7 @@ pub async fn disconnect(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    mutate(state, headers, id, |connection, at_ms| {
+    mutate(state, headers, id, None, |connection, at_ms| {
         connection.decide(ConnectionCommand::Disconnect { at_ms })
     })
     .await
@@ -369,11 +385,18 @@ fn refused(status: StatusCode, sentence: &str) -> Response {
     (status, Json(serde_json::json!({ "error": sentence }))).into_response()
 }
 
-/// Load, decide, append — with the ownership check every one of these needs.
+/// Load, decide, append — with the ownership check every one of these needs, and for a lend the
+/// check that the caller may use the coworker in `lend_to`.
 ///
 /// Shared because forgetting the ownership check on one endpoint is exactly the bug this shape
 /// prevents: a connection id would otherwise be enough to lend somebody else's Gmail to your bot.
-async fn mutate<F>(state: AgUiState, headers: HeaderMap, id: String, decide: F) -> Response
+async fn mutate<F>(
+    state: AgUiState,
+    headers: HeaderMap,
+    id: String,
+    lend_to: Option<&CoworkerId>,
+    decide: F,
+) -> Response
 where
     F: FnOnce(
         &Connection,
@@ -396,6 +419,29 @@ where
     let owned = matches!(&connection.owner, Some(Owner::User(owner)) if owner == &account_id);
     if !connection.connected || !owned {
         return refused(StatusCode::NOT_FOUND, "no such connection");
+    }
+
+    // Without this anybody could lend their Gmail to a stranger's coworker. The chat turn's own
+    // check, `policy_to_use`: an org-mate on a shared coworker holds no grant row of their own,
+    // and a loan to it serves only their turns. A store error is a 503 rather than an empty
+    // policy, which would call a coworker that is fine "no such coworker".
+    if let Some(coworker) = lend_to {
+        let policy = match state.auth.store.policy_to_use(&account_id, coworker).await {
+            Ok(policy) => policy,
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        };
+        let decision = opengrok_policy::decide(
+            &account_id,
+            coworker,
+            opengrok_policy::Action::UseCoworker,
+            &policy,
+        );
+        // The same 404 for "none" and "not yours to use", so an id reveals nothing.
+        if decision.reason().is_some() {
+            return refused(StatusCode::NOT_FOUND, "no such coworker");
+        }
     }
 
     let at_ms = now_ms();
