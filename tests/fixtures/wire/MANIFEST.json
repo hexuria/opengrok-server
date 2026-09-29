@@ -1,5 +1,5 @@
 {
-  "server_sha": "6f82fdac125107b12ed58e2000b95bf3433e6e3b",
+  "server_sha": "f760cb0fceb17d9b0e7121b030c37422b9b37acd",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -1120,6 +1120,10 @@
     {
       "file": "rest/POST__ag-ui_user-form_dismiss/200-a_second_escalate_does_not_resume_while_the_handoff_is_live.json",
       "source": "POST /ag-ui/user-form/dismiss, recorded from the test a_second_escalate_does_not_resume_while_the_handoff_is_live (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_dismiss/503-a_skip_that_cannot_read_the_run_log_settles_nothing.json",
+      "source": "POST /ag-ui/user-form/dismiss, recorded from the test a_skip_that_cannot_read_the_run_log_settles_nothing (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__ag-ui_user-form_submit/200-collect_submit_returns_answers_without_computer_effects_and_retry_keeps_them.json",

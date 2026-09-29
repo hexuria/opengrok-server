@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/dismiss",
+  "status": 503,
+  "body": {
+    "error": "run log unavailable; try again"
+  }
+}
