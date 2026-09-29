@@ -75,7 +75,7 @@ pub async fn authorize(
     Query(query): Query<AuthorizeQuery>,
 ) -> Response {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
     };
     let Some(config) = state.connectors.providers.get(&connector) else {
         return (
@@ -306,7 +306,7 @@ pub async fn callback(
 /// What a person has connected, and who they have lent it to.
 pub async fn list_connections(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
     };
     match state.auth.store.connections_owned_by(&account_id).await {
         // An ARRAY, always: nothing connected is a valid answer.
@@ -362,6 +362,13 @@ pub async fn disconnect(
     .await
 }
 
+/// A refusal as `{"error": sentence}`: an app reads a bare-text body as coming from a proxy in
+/// front of the server, and the person loses the sentence (#262, asked again by NativeChat for
+/// these routes in #267).
+fn refused(status: StatusCode, sentence: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": sentence }))).into_response()
+}
+
 /// Load, decide, append — with the ownership check every one of these needs.
 ///
 /// Shared because forgetting the ownership check on one endpoint is exactly the bug this shape
@@ -377,7 +384,7 @@ where
     >,
 {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
     };
 
     let (mut connection, seq) = match state.auth.store.load_connection(&id).await {
@@ -388,13 +395,13 @@ where
     // 404 for both "no such connection" and "not yours", so an id reveals nothing.
     let owned = matches!(&connection.owner, Some(Owner::User(owner)) if owner == &account_id);
     if !connection.connected || !owned {
-        return (StatusCode::NOT_FOUND, "no such connection").into_response();
+        return refused(StatusCode::NOT_FOUND, "no such connection");
     }
 
     let at_ms = now_ms();
     let events = match decide(&connection, at_ms) {
         Ok(events) => events,
-        Err(error) => return (StatusCode::CONFLICT, error.to_string()).into_response(),
+        Err(error) => return refused(StatusCode::CONFLICT, &error.to_string()),
     };
     for event in &events {
         connection.apply(event);

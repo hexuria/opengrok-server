@@ -250,6 +250,17 @@ async fn a_persons_connection_is_kept_listed_lent_and_taken_back() {
         .await
         .expect("revoke json");
     assert_eq!(revoked["loans"], json!([]), "{revoked}");
+
+    // Disconnecting leaves nothing to show: a 204, and the list no longer names it.
+    let gone = h
+        .client
+        .delete(format!("{}/connections/{id}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("disconnect");
+    assert_eq!(gone.status().as_u16(), 204);
+    assert_eq!(h.list(&token).await, json!([]));
 }
 
 /// Somebody else's connection id lends nothing and says nothing: the same 404 as no connection.
@@ -272,6 +283,8 @@ async fn another_accounts_connection_cannot_be_lent() {
         )
         .await;
     assert_eq!(refused.status().as_u16(), 404);
+    let body: Value = refused.json().await.expect("a JSON refusal");
+    assert_eq!(body, json!({ "error": "no such connection" }));
     let listed = h.list(&token).await;
     assert_eq!(
         listed,
