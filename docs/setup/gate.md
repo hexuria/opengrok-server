@@ -65,7 +65,7 @@ pinned by the `server_sha` in its `MANIFEST.json`, and parses every file.
   named like tokens, keys and passwords, `Bearer` values, gateway keys, and any JWT anywhere in
   a string.
 
-The recorder (`crates/opengrok-server/src/wire_record.rs`) is compiled only with the
+The recorder (`crates/opengrok-server/tests/support/wire_record.rs`) is compiled only with the
 `record-wire` feature, which only the tests turn on, and runs only while `OG_RECORD_WIRE` names a
 directory.
 

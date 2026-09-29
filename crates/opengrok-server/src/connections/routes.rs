@@ -75,7 +75,7 @@ pub async fn authorize(
     Query(query): Query<AuthorizeQuery>,
 ) -> Response {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
     };
     let Some(config) = state.connectors.providers.get(&connector) else {
         return (
@@ -233,21 +233,35 @@ pub async fn callback(
 
     let at_ms = now_ms();
     let mut connection = existing;
-    let events = if connection.connected {
-        connection
-            .decide(ConnectionCommand::Refresh { at_ms })
-            .unwrap_or_default()
+    // A disconnected connection is connected afresh, never refreshed: `connected` stays true after
+    // a disconnect and `Refresh` refuses one. Deciding on `connected` alone, with that refusal
+    // swallowed into no events, told a person who reconnected Gmail it was connected while the
+    // row stayed disconnected.
+    let command = if connection.connected && !connection.disconnected {
+        ConnectionCommand::Refresh { at_ms }
     } else {
-        connection
-            .decide(ConnectionCommand::Connect {
-                connector: claims.connector.clone(),
-                owner: owner.clone(),
-                // The label is what a person sees; a real deployment fetches the provider's own
-                // profile here. The connector name is honest until that exists.
-                label: claims.connector.clone(),
-                at_ms,
-            })
-            .unwrap_or_default()
+        ConnectionCommand::Connect {
+            connector: claims.connector.clone(),
+            owner,
+            // The label is what a person sees; a real deployment fetches the provider's own
+            // profile here. The connector name is honest until that exists.
+            label: claims.connector.clone(),
+            at_ms,
+        }
+    };
+    let events = match connection.decide(command) {
+        Ok(events) => events,
+        Err(error) => {
+            return (
+                StatusCode::CONFLICT,
+                format!(
+                    "{} was not connected: {error}. Nothing was saved; connect it again from the \
+                     app.",
+                    claims.connector
+                ),
+            )
+                .into_response();
+        }
     };
     for event in &events {
         connection.apply(event);
@@ -306,7 +320,7 @@ pub async fn callback(
 /// What a person has connected, and who they have lent it to.
 pub async fn list_connections(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
     };
     match state.auth.store.connections_owned_by(&account_id).await {
         // An ARRAY, always: nothing connected is a valid answer.
@@ -327,22 +341,24 @@ pub async fn lend(
     Path(id): Path<String>,
     Json(request): Json<LendRequest>,
 ) -> Response {
-    mutate(state, headers, id, |connection, at_ms| {
+    let coworker = CoworkerId::from_stored(request.coworker_id);
+    mutate(state, headers, id, Some(&coworker), |connection, at_ms| {
         connection.decide(ConnectionCommand::Lend {
-            coworker: CoworkerId::from_stored(request.coworker_id.clone()),
+            coworker: coworker.clone(),
             at_ms,
         })
     })
     .await
 }
 
+/// Checks nothing about the coworker: taking a loan back only ever narrows who holds the key.
 pub async fn revoke(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(request): Json<LendRequest>,
 ) -> Response {
-    mutate(state, headers, id, |connection, at_ms| {
+    mutate(state, headers, id, None, |connection, at_ms| {
         connection.decide(ConnectionCommand::Revoke {
             coworker: CoworkerId::from_stored(request.coworker_id.clone()),
             at_ms,
@@ -356,17 +372,31 @@ pub async fn disconnect(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    mutate(state, headers, id, |connection, at_ms| {
+    mutate(state, headers, id, None, |connection, at_ms| {
         connection.decide(ConnectionCommand::Disconnect { at_ms })
     })
     .await
 }
 
-/// Load, decide, append — with the ownership check every one of these needs.
+/// A refusal as `{"error": sentence}`: an app reads a bare-text body as coming from a proxy in
+/// front of the server, and the person loses the sentence (#262, asked again by NativeChat for
+/// these routes in #267).
+fn refused(status: StatusCode, sentence: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": sentence }))).into_response()
+}
+
+/// Load, decide, append — with the ownership check every one of these needs, and for a lend the
+/// check that the caller may use the coworker in `lend_to`.
 ///
 /// Shared because forgetting the ownership check on one endpoint is exactly the bug this shape
 /// prevents: a connection id would otherwise be enough to lend somebody else's Gmail to your bot.
-async fn mutate<F>(state: AgUiState, headers: HeaderMap, id: String, decide: F) -> Response
+async fn mutate<F>(
+    state: AgUiState,
+    headers: HeaderMap,
+    id: String,
+    lend_to: Option<&CoworkerId>,
+    decide: F,
+) -> Response
 where
     F: FnOnce(
         &Connection,
@@ -377,7 +407,7 @@ where
     >,
 {
     let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
     };
 
     let (mut connection, seq) = match state.auth.store.load_connection(&id).await {
@@ -388,13 +418,36 @@ where
     // 404 for both "no such connection" and "not yours", so an id reveals nothing.
     let owned = matches!(&connection.owner, Some(Owner::User(owner)) if owner == &account_id);
     if !connection.connected || !owned {
-        return (StatusCode::NOT_FOUND, "no such connection").into_response();
+        return refused(StatusCode::NOT_FOUND, "no such connection");
+    }
+
+    // Without this anybody could lend their Gmail to a stranger's coworker. The chat turn's own
+    // check, `policy_to_use`: an org-mate on a shared coworker holds no grant row of their own,
+    // and a loan to it serves only their turns. A store error is a 503 rather than an empty
+    // policy, which would call a coworker that is fine "no such coworker".
+    if let Some(coworker) = lend_to {
+        let policy = match state.auth.store.policy_to_use(&account_id, coworker).await {
+            Ok(policy) => policy,
+            Err(error) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        };
+        let decision = opengrok_policy::decide(
+            &account_id,
+            coworker,
+            opengrok_policy::Action::UseCoworker,
+            &policy,
+        );
+        // The same 404 for "none" and "not yours to use", so an id reveals nothing.
+        if decision.reason().is_some() {
+            return refused(StatusCode::NOT_FOUND, "no such coworker");
+        }
     }
 
     let at_ms = now_ms();
     let events = match decide(&connection, at_ms) {
         Ok(events) => events,
-        Err(error) => return (StatusCode::CONFLICT, error.to_string()).into_response(),
+        Err(error) => return refused(StatusCode::CONFLICT, &error.to_string()),
     };
     for event in &events {
         connection.apply(event);
@@ -417,11 +470,13 @@ where
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
 
-    Json(serde_json::json!({
-        "id": id,
-        "connector": connection.connector,
-        "lentTo": connection.loans.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-        "disconnected": connection.disconnected,
-    }))
-    .into_response()
+    // The connection as `GET /connections` lists it, so one client type reads both (#267). A
+    // disconnected one is no longer listed, and nothing is left to show.
+    match state.auth.store.connections_owned_by(&account_id).await {
+        Ok(views) => match views.into_iter().find(|view| view.id == id) {
+            Some(view) => Json(view).into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }

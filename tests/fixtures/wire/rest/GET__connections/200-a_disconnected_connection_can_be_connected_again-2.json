@@ -1,0 +1,19 @@
+{
+  "method": "GET",
+  "path": "/connections",
+  "status": 200,
+  "body": [
+    {
+      "id": "conn_gmail_acct_0199bb4e-0000-7000-8000-000000000001",
+      "connector": "gmail",
+      "owner": {
+        "scope": "user",
+        "id": "acct_0199bb4e-0000-7000-8000-000000000001"
+      },
+      "label": "gmail",
+      "loans": [],
+      "updatedAtMs": 1790000000000,
+      "expiresAtMs": 1790000001000
+    }
+  ]
+}
