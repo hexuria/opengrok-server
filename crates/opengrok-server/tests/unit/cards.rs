@@ -87,6 +87,25 @@ fn computer_and_open_url_summaries_name_the_action() {
     assert!(summary_for("computer", &group).contains("shared"));
 }
 
+/// #270: a card about `use_skill` names the skill it reads, clipped like every other argument a
+/// card quotes, rather than reading as a plugin tool with raw JSON.
+#[test]
+fn a_use_skill_card_names_the_skill() {
+    let tool = opengrok_tools::skill::USE_SKILL;
+    let triage = json!({ "name": "triage" });
+    assert_eq!(summary_for(tool, &triage), "Read the skill \"triage\"");
+    let long = json!({ "name": "x".repeat(200) });
+    assert_eq!(
+        summary_for(tool, &long),
+        format!("Read the skill \"{}…\"", "x".repeat(80))
+    );
+    assert_eq!(
+        summary_for(tool, &json!({})),
+        "Read the skill \"(unnamed)\""
+    );
+    assert!(!boilerplate(&summary_for(tool, &triage)));
+}
+
 /// #222: the card is journalled and shown to whoever holds the thread, so a key the model is
 /// about to type must not be written into it. And `left_click_drag` is a drag `into_action`
 /// performs; it read as an unknown screen action.

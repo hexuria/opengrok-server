@@ -353,6 +353,11 @@ impl PgStore {
             &coworkers
         );
         delete!(
+            "coworker_skill_set",
+            "delete from coworker_skill_set where coworker_id = any($1)",
+            &coworkers
+        );
+        delete!(
             "grant_view",
             "delete from grant_view where coworker_id = any($1) or principal_id = any($2)",
             &coworkers,

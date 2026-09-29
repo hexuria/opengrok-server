@@ -1,9 +1,10 @@
 //! Skills: a named, versioned bundle of instructions a person invokes for one turn by typing
 //! `/name`. A `SKILL.md` body, plus whatever small files sit beside it, owned by an account.
 //!
-//! CRUD, plus the one read a turn makes. `for_turn` is how a chosen skill reaches the model, and
-//! it goes through the same `may()` table as every route here rather than re-deciding who may use
-//! what — the checks drift, the table cannot.
+//! CRUD, plus what a turn reads. `for_turn` is how a chosen skill reaches the model, and it goes
+//! through the same `may()` table as every route here rather than re-deciding who may use what —
+//! the checks drift, the table cannot. So does `offered`, the skills a coworker's owner attached
+//! (#270): each is a line of every turn's system message, and `use_skill` reads it (`onto`).
 //!
 //! `from_tape` is the one route that asks a model for something rather than serving what a person
 //! wrote: a recording becomes a lesson (`crate::tape_lesson`) and that lesson becomes the first
@@ -21,9 +22,10 @@
 //! single system message as the standing role, which `persona::MAX_ROLE_CHARS` holds to 1000; an
 //! unbounded skill body would not be an instruction in that message, it would BE that message.
 
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{BTreeSet, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -31,13 +33,16 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
 use opengrok_core::id::{AccountId, CoworkerId};
+use opengrok_harness::ToolRunner;
 use opengrok_recipes::{Screen, TapeEvent};
-use opengrok_store::{NewSkill, NewSkillVersion, PgStore, SkillFileRow, SkillRow};
+use opengrok_store::{NewSkill, NewSkillVersion, PgStore, SkillFileRow, SkillRow, StoreError};
+use opengrok_tools::skill::{SkillOffer, SkillRead, SkillSource};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
 use crate::agui::routes::{account_from_bearer, owned_coworker};
+use crate::health::refusal;
 use crate::recipes::{MAX_TAPE_UPLOAD_BYTES, org_of, tape_into_steps};
 
 /// The most a skill body may be. See the module note: the body shares one system message with the
@@ -67,6 +72,11 @@ pub const MAX_BUNDLE_FILES: usize = 32;
 /// listing. Uncapped, it was the way around the body cap: 8000 characters of "body" plus as many
 /// again of "description". A line or two, which is what it is for.
 pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 300;
+
+/// The most skills one coworker may have attached (#270). Each is a line of every one of its
+/// turns' system message, and twenty of them, at up to 300 characters of description apiece, is
+/// already several times the standing role beside them (`persona::MAX_ROLE_CHARS`).
+pub const MAX_ATTACHED: usize = 20;
 
 /// The most a whole request to a writing route may weigh: the bundle once base64 has grown it by
 /// a third, plus room for the body, the paths and the field names around them.
@@ -117,6 +127,8 @@ pub fn router(state: AgUiState) -> Router {
                 )),
         )
         .route("/skills/{id}", get(detail).put(update).delete(remove))
+        // Beside the rest of `/coworkers/{id}`, and here because what it answers is skills (#270).
+        .route("/coworkers/{coworker_id}/skills", get(attached).put(attach))
         .route(
             "/skills/{id}/versions",
             post(add_version).layer(axum::extract::DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
@@ -393,7 +405,7 @@ pub(crate) async fn for_turn(
 pub(crate) async fn files_line_for_turn(
     state: &AgUiState,
     skill: &SkillForTurn,
-    runner: Option<&opengrok_harness::ToolRunner>,
+    target: Option<(Arc<dyn opengrok_box::Computer>, String)>,
 ) -> Option<String> {
     let unavailable = crate::persona::skill_files_unavailable_line;
     let files = match state.auth.store.skill_files(&skill.id, skill.version).await {
@@ -404,7 +416,7 @@ pub(crate) async fn files_line_for_turn(
             return Some(unavailable("they could not be read"));
         }
     };
-    let Some((computer, box_id)) = runner.and_then(|runner| runner.fill_target()) else {
+    let Some((computer, box_id)) = target else {
         return Some(unavailable("this coworker has no computer"));
     };
     if !matches!(computer.state(&box_id).await.as_deref(), Ok("running")) {
@@ -435,6 +447,110 @@ pub(crate) async fn files_line_for_turn(
             tracing::warn!(skill = %skill.id, %error, "a chosen skill's files could not be copied");
             Some(unavailable("they could not be copied onto it"))
         }
+    }
+}
+
+/// The attached skills a turn of `coworker` offers `account`, the person it is for (#270):
+/// switched on, written, and theirs to invoke by the `may()` table `/skills` and `for_turn`
+/// answer by, so a member of the owner's org gets the owner's org skills and never the rest. Of
+/// two called the same, their own, as `/name` resolves one (`summary`); of two colleagues',
+/// neither. By name, so the system message keeps its order. None when the store does not answer:
+/// the turn goes on without them.
+pub(crate) async fn offered(
+    state: &AgUiState,
+    account: &AccountId,
+    coworker: &CoworkerId,
+) -> Vec<SkillRow> {
+    let attached = match state.auth.store.coworker_skills(coworker).await {
+        Ok((attached, _)) if attached.is_empty() => return attached,
+        Ok((attached, _)) => attached,
+        Err(error) => {
+            tracing::warn!(%error, %coworker, "a coworker's attached skills could not be read");
+            return Vec::new();
+        }
+    };
+    let org = org_of(state, account).await;
+    let usable: Vec<SkillRow> = attached
+        .into_iter()
+        .filter(|skill| {
+            let relation = relation_to(account, org.as_deref(), skill);
+            may(relation, Action::Invoke).is_ok()
+                && skill.enabled
+                && skill.version_count > 0
+                && skill.deleted_at_ms.is_none()
+        })
+        .collect();
+    let named = |name: &str| usable.iter().filter(|skill| skill.name == name).count();
+    let mut offered: Vec<SkillRow> = usable
+        .iter()
+        .filter(|skill| skill.owner_id == account.as_str() || named(&skill.name) == 1)
+        .cloned()
+        .collect();
+    offered.sort_by(|a, b| a.name.cmp(&b.name));
+    offered
+}
+
+/// `runner`, offering `use_skill` for what `offered` gives this turn (#270). A skill is read as
+/// `account` — the turn's person, never anybody a call names (CLAUDE.md #7) — through `for_turn`,
+/// so one switched off or taken away since the turn began is refused at the call, and its files
+/// go onto the box this runner holds, as `/name` places them.
+pub(crate) async fn onto(
+    state: &AgUiState,
+    account: &AccountId,
+    coworker: &CoworkerId,
+    runner: ToolRunner,
+) -> ToolRunner {
+    let offers = offered(state, account, coworker).await.into_iter();
+    let offers = offers.map(|skill| SkillOffer {
+        id: skill.id,
+        name: skill.name,
+        description: skill.description,
+    });
+    let reader = Reader {
+        state: state.clone(),
+        account: account.clone(),
+        target: runner.fill_target(),
+    };
+    runner.with_skills(offers.collect(), Arc::new(reader))
+}
+
+/// `onto` for a turn that may have no runner: it gets one only when there is a skill to offer.
+pub(crate) async fn onto_any(
+    state: &AgUiState,
+    account: &AccountId,
+    coworker: &CoworkerId,
+    runner: Option<ToolRunner>,
+) -> Option<ToolRunner> {
+    if let Some(runner) = runner {
+        return Some(onto(state, account, coworker, runner).await);
+    }
+    let runner = onto(state, account, coworker, ToolRunner::local_only()).await;
+    (!runner.tool_schemas().is_empty()).then_some(runner)
+}
+
+/// Where `use_skill` reads the skills one turn offers.
+struct Reader {
+    state: AgUiState,
+    account: AccountId,
+    target: Option<(Arc<dyn opengrok_box::Computer>, String)>,
+}
+
+#[async_trait::async_trait]
+impl SkillSource for Reader {
+    async fn read(&self, offer: &SkillOffer) -> Option<SkillRead> {
+        let skill = match for_turn(&self.state, &self.account, &offer.id).await {
+            Ok(skill) => skill,
+            Err(why) => {
+                tracing::warn!(skill = %offer.id, why = ?why, "use_skill was not given a skill");
+                return None;
+            }
+        };
+        let files = files_line_for_turn(&self.state, &skill, self.target.clone()).await;
+        Some(SkillRead {
+            instructions: skill.body,
+            author: skill.author,
+            files,
+        })
     }
 }
 
@@ -756,6 +872,128 @@ async fn list(
         }
     }
     Json(out).into_response()
+}
+
+/// `GET /coworkers/{id}/skills` (#270): every skill the owner may attach, and which are.
+///
+/// Owner only, by the check the ceiling's verbs share: anybody else reads "no such coworker", and
+/// a withdrawn grant is refused in words on both verbs.
+async fn attached(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    match crate::agui::ceiling::owner(&state, &headers, id).await {
+        Ok((owner, coworker)) => attached_reply(&state, &owner, &coworker).await,
+        Err(refused) => refused,
+    }
+}
+
+async fn attached_reply(state: &AgUiState, owner: &AccountId, coworker: &CoworkerId) -> Response {
+    match attached_rows(state, owner, coworker).await {
+        Ok((rows, version)) => Json(json!({ "skills": rows, "version": version })).into_response(),
+        Err(error) => attached_unavailable(&error),
+    }
+}
+
+/// Every skill the owner may use — their own, on or off, and their org's that are on, as
+/// `/skills` lists them — then each attached one they no longer may (switched off by its author,
+/// or no longer in their org): kept by the name the store has, switched off and saying nothing
+/// more, so it stays attached, and offered to no turn, until a save leaves it out. It can never be
+/// newly attached. A deleted skill is no row, so the next save drops it. Theirs first, by name.
+async fn attached_rows(
+    state: &AgUiState,
+    owner: &AccountId,
+    coworker: &CoworkerId,
+) -> Result<(Vec<Value>, i64), StoreError> {
+    let store = &state.auth.store;
+    let (attached, version) = store.coworker_skills(coworker).await?;
+    let mut usable = store.skills_owned_by(owner.as_str()).await?;
+    if let Some(org) = org_of(state, owner).await {
+        usable.extend(store.skills_in_org(&org, owner.as_str()).await?);
+    }
+    let usable_ids: HashSet<&str> = usable.iter().map(|s| s.id.as_str()).collect();
+    let gone = attached
+        .iter()
+        .filter(|a| a.deleted_at_ms.is_none() && !usable_ids.contains(a.id.as_str()));
+    let mut rows: Vec<(&SkillRow, bool)> = usable.iter().map(|s| (s, true)).collect();
+    rows.extend(gone.map(|skill| (skill, false)));
+    let theirs = |skill: &SkillRow| skill.owner_id == owner.as_str();
+    rows.sort_by_key(|(skill, _)| (!theirs(skill), skill.name.clone(), skill.id.clone()));
+    let rows = rows.into_iter().map(|(skill, usable)| {
+        json!({ "id": skill.id, "name": skill.name,
+            "description": if usable { skill.description.as_str() } else { "" },
+            "scope": if theirs(skill) { "mine" } else { "org" },
+            "attached": attached.iter().any(|a| a.id == skill.id),
+            "enabled": usable && skill.enabled })
+    });
+    Ok((rows.collect(), version))
+}
+
+/// `attached` is required: a body without it is a client's mistake, and reading that as none
+/// would detach every skill. `version` is the one a GET answered; without it the save is
+/// unconditional.
+#[derive(Debug, Deserialize)]
+struct Attach {
+    attached: Vec<String>,
+    version: Option<i64>,
+}
+
+/// `PUT /coworkers/{id}/skills`: the set is exactly the ids named, each one of the rows a GET
+/// shows, and the answer is what a GET then reads. Nothing changes on any refusal.
+async fn attach(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<Attach>, JsonRejection>,
+) -> Response {
+    let (owner, coworker) = match crate::agui::ceiling::owner(&state, &headers, id).await {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let Attach { attached, version } = match body {
+        Ok(Json(body)) => body,
+        Err(rejection) => {
+            let why = rejection.body_text();
+            return refusal(422, &format!("send {{\"attached\": [skill ids]}}: {why}"));
+        }
+    };
+    let ids: BTreeSet<String> = attached.into_iter().collect();
+    if ids.len() > MAX_ATTACHED {
+        let many = ids.len();
+        let why = format!("a coworker takes at most {MAX_ATTACHED} skills, and this is {many}");
+        return refusal(422, &why);
+    }
+    let rows = match attached_rows(&state, &owner, &coworker).await {
+        Ok((rows, _)) => rows,
+        Err(error) => return attached_unavailable(&error),
+    };
+    if let Some(id) = ids
+        .iter()
+        .find(|id| !rows.iter().any(|row| row["id"] == id.as_str()))
+    {
+        // Ends with the id, as agreed with NativeChat on #270.
+        return refusal(422, &format!("no skill {id}"));
+    }
+    let ids: Vec<String> = ids.into_iter().collect();
+    let store = &state.auth.store;
+    match store
+        .set_coworker_skills(&coworker, &ids, version, now_ms())
+        .await
+    {
+        Ok(Some(_)) => attached_reply(&state, &owner, &coworker).await,
+        Ok(None) => {
+            let changed = "the skills changed since you looked";
+            let body = json!({ "error": changed, "code": "skills-changed" });
+            (StatusCode::CONFLICT, Json(body)).into_response()
+        }
+        Err(error) => attached_unavailable(&error),
+    }
+}
+
+fn attached_unavailable(error: &dyn std::fmt::Display) -> Response {
+    tracing::error!(%error, "a coworker's attached skills could not be read or saved");
+    refusal(503, "this coworker's skills could not be read or saved now")
 }
 
 #[derive(Debug, Deserialize)]

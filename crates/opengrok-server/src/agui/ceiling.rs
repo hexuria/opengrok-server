@@ -72,7 +72,7 @@ async fn rows(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet) -> Vec<Va
 /// The owner, or the refusal: another account's coworker reads as "no such coworker", never as a
 /// refused one. An owner whose own grant is withdrawn is told so on both verbs, in words: that
 /// coworker is not theirs to use, nor to widen again through its own ceiling.
-async fn owner(
+pub(crate) async fn owner(
     state: &AgUiState,
     headers: &HeaderMap,
     id: String,

@@ -270,6 +270,10 @@ pub fn summary_for(tool: &str, arguments: &Value) -> String {
             "Play the recipe \"{}\" on the agent's own computer",
             clip(string_arg(arguments, "recipe").unwrap_or("(unnamed)"), 80)
         ),
+        opengrok_tools::skill::USE_SKILL => format!(
+            "Read the skill \"{}\"",
+            clip(string_arg(arguments, "name").unwrap_or("(unnamed)"), 80)
+        ),
         other => format!(
             "{other} — a plugin tool this agent wants to call, with {}",
             clip(&opengrok_tools::redact_arguments(arguments), 160)

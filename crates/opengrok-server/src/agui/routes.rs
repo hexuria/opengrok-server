@@ -317,8 +317,9 @@ async fn skill_segment(
             crate::persona::chosen_skill_line(&skill.name, &skill.body, &marker, skill.author)
         })
         .filter(|segment| !segment.is_empty());
+    let target = tools.and_then(ToolRunner::fill_target);
     match quoted {
-        Some(segment) => match crate::skills::files_line_for_turn(state, &skill, tools).await {
+        Some(segment) => match crate::skills::files_line_for_turn(state, &skill, target).await {
             // Before the closing line, so our restatement of the rules stays the last word.
             Some(files) => {
                 let close = crate::persona::SKILL_CLOSING_LINE;
@@ -2195,8 +2196,9 @@ async fn list_tools(
         Err(refusal) => return refusal,
     }
     // No approvals are pending on a listing, so the two gates are empty; the patience is short
-    // because nobody is waiting on a turn — a sleeping box should not hold a menu open.
-    let Some(runner) = tools_for_coworker(
+    // because nobody is waiting on a turn — a sleeping box should not hold a menu open. No
+    // computer is no box tools, and still `use_skill` when a turn would offer it (#270).
+    let runner = tools_for_coworker(
         &state,
         &account_id,
         &coworker_id,
@@ -2204,10 +2206,9 @@ async fn list_tools(
         &[],
         std::time::Duration::from_secs(5),
     )
-    .await
-    else {
-        return Json(serde_json::json!({ "tools": [] })).into_response();
-    };
+    .await;
+    let runner = runner.unwrap_or_else(ToolRunner::local_only);
+    let runner = crate::skills::onto(&state, &account_id, &coworker_id, runner).await;
     let tools: Vec<serde_json::Value> = runner
         .tool_schemas()
         .into_iter()
@@ -2216,7 +2217,9 @@ async fn list_tools(
             let name = function.get("name")?.as_str()?.to_string();
             // OpenAI-safe plugin names have no dots (`gmail_api_send`). Kind is
             // "not a builtin", not "contains a dot".
-            let kind = if opengrok_tools::Executor::every_builtin().any(|builtin| builtin == name) {
+            let kind = if opengrok_tools::Executor::every_builtin().any(|builtin| builtin == name)
+                || name == opengrok_tools::skill::USE_SKILL
+            {
                 "builtin"
             } else {
                 "plugin"
@@ -2919,8 +2922,15 @@ async fn start_claimed_turn(
     };
     // bar_chart / form are painted by the client from TOOL_CALL frames. Offer them on
     // every AG-UI turn, including coworkers with no computer, so a chart request is a
-    // tool call rather than streamed markdown.
-    let tools = Some(super::chat_ui::attach(tools));
+    // tool call rather than streamed markdown. And `use_skill`, for the skills its owner attached
+    // that this person may use (#270): the system message lists them from this same runner.
+    let tools = super::chat_ui::attach(tools);
+    let tools = Some(match (&account_id, &run_coworker) {
+        (Some(account), Some(coworker)) => {
+            crate::skills::onto(&state, account, coworker, tools).await
+        }
+        _ => tools,
+    });
 
     // Who this coworker is, plus whose computer its tools touch. Desktop `sendPrompt` already
     // composes this; AG-UI used to send `system: None`, so a Description saved as the standing
@@ -2987,7 +2997,7 @@ async fn start_claimed_turn(
                 &coworker_name,
                 &persona,
                 Some(&format!(
-                    "{speaker}\n\n{}{}{}{}{}{}",
+                    "{speaker}\n\n{}{}{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -3001,6 +3011,12 @@ async fn start_claimed_turn(
                         .map(ToolRunner::unavailable_plugins_line)
                         .unwrap_or_default(),
                     crate::persona::preferred_tools_line(&preferred),
+                    // After what it may do, as the author's words they are, and before this
+                    // message's own choices: a skill it may reach for on any turn.
+                    tools
+                        .as_ref()
+                        .map(ToolRunner::skills_line)
+                        .unwrap_or_default(),
                     chosen_line,
                     // LAST, AFTER EVERY SEGMENT THAT SAYS WHAT THIS COWORKER MAY DO. A skill body
                     // is prose a person wrote; it must not be able to read as granting itself
@@ -5036,6 +5052,8 @@ async fn continue_run(
         )
         // Every judge failure parks the run, so only its journal can count them in a row (#201).
         .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
+    // Its skills as the turn offered them, read as they stand now (#270).
+    let runner = crate::skills::onto(&state, &account_id, &coworker_id, runner).await;
 
     // The system message this turn OPENED with, not a fresh composition: a role edited while the
     // person was answering the card must not change the coworker halfway through. A run journalled

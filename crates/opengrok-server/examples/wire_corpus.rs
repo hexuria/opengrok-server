@@ -59,7 +59,13 @@ const REST_LEFT_OUT: &[&str] = &["/computer/vnc/", "/bytes", "/connections/callb
 /// and no words is START then END for the person's message (#229, nativechat#135). An escalated
 /// form's replay after its run stopped waiting, and one read back from its run's answer, have the
 /// shape of a declined one but are cases NativeChat's ledger checks by name (#143, review of #277).
+/// A turn that reads an attached skill with `use_skill` has a tool call's shapes, and NativeChat
+/// asked for one recorded (#270).
 const ALSO_KEEP: &[(&str, &str)] = &[
+    (
+        "a_turn_reads_an_attached_skill_with_use_skill_and_gets_its_body",
+        "/ag-ui/runs/{run_id}",
+    ),
     (
         "a_message_of_files_keeps_its_parts_and_is_drawn_on_replay",
         "/ag-ui/threads/{thread_id}",

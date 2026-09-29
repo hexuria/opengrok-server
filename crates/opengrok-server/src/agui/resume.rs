@@ -691,6 +691,8 @@ async fn resume_suspended_run(
                 && opengrok_tools::needs_egress_consent(&pending.tool, &pending.arguments),
         )
         .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
+    // Its skills as the turn offered them, read as they stand now (#270).
+    let runner = crate::skills::onto(&state.agui, &account_id, &coworker_id, runner).await;
     // The system message this turn OPENED with, not a fresh composition: a role or title edited
     // while the person was answering the card must not change the coworker halfway through the
     // turn. A run journalled before this was captured has none and composes one, as before.
@@ -844,6 +846,7 @@ pub(crate) async fn resume_interrupted_run(
     )
     .await
     .map(|runner| runner.with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted)));
+    let runner = crate::skills::onto_any(&state.agui, &account_id, &coworker_id, runner).await;
     let system = match run.system_for_resume() {
         Some(captured) => captured,
         None => crate::persona::system_message(

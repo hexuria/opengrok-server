@@ -8,6 +8,7 @@
 //! close. Acting on a fragment would mean running a command whose arguments are half-written, so
 //! nothing runs until the closing fragment arrives.
 
+use opengrok_tools::skill::{SkillOffer, SkillSource, USE_SKILL};
 use opengrok_tools::{Executor, ToolCall, ToolContext, ToolResult};
 use opengrok_wire::agui::{Event, EventType};
 
@@ -22,6 +23,8 @@ pub struct ToolRunner {
     /// speaking to the room): every other call is refused in words, never run elsewhere.
     executor: Option<(Executor, ToolContext)>,
     local: Vec<(serde_json::Value, LocalTool)>,
+    /// The skills `use_skill` reads this turn, and where from (#270). `None` offers no tool.
+    skills: Option<(Vec<SkillOffer>, std::sync::Arc<dyn SkillSource>)>,
 }
 
 impl ToolRunner {
@@ -29,6 +32,7 @@ impl ToolRunner {
         Self {
             executor: Some((executor, context)),
             local: Vec::new(),
+            skills: None,
         }
     }
 
@@ -37,6 +41,7 @@ impl ToolRunner {
         Self {
             executor: None,
             local: Vec::new(),
+            skills: None,
         }
     }
 
@@ -46,6 +51,24 @@ impl ToolRunner {
     pub fn with_local(mut self, schema: serde_json::Value, handler: LocalTool) -> Self {
         self.local.push((schema, handler));
         self
+    }
+
+    /// Offer `use_skill` for `offers`, read through `source` — and nothing for none, so the tool
+    /// is on offer exactly when `skills_line` lists a skill (`opengrok_tools::skill`).
+    #[must_use]
+    pub fn with_skills(
+        mut self,
+        offers: Vec<SkillOffer>,
+        source: std::sync::Arc<dyn SkillSource>,
+    ) -> Self {
+        self.skills = (!offers.is_empty()).then_some((offers, source));
+        self
+    }
+
+    /// The system message's list of the skills this runner offers, or nothing.
+    pub fn skills_line(&self) -> String {
+        let offers = self.skills.as_ref().map(|(offers, _)| offers.as_slice());
+        opengrok_tools::skill::offered_line(offers.unwrap_or_default())
     }
 
     /// Give this turn the room's shared computer as well: `machine: "group"` on the box tools.
@@ -204,6 +227,11 @@ impl ToolRunner {
             })
             .unwrap_or_default();
         schemas.extend(self.local.iter().map(|(schema, _)| schema.clone()));
+        schemas.extend(
+            self.skills
+                .as_ref()
+                .map(|(offers, _)| opengrok_tools::skill::schema(offers)),
+        );
         schemas
     }
 
@@ -213,6 +241,9 @@ impl ToolRunner {
     pub async fn run_one(&self, call: &ToolCall) -> ToolResult {
         if let Some(handler) = self.local_for(&call.name) {
             return handler(call);
+        }
+        if let Some((offers, source)) = self.skills.as_ref().filter(|_| call.name == USE_SKILL) {
+            return opengrok_tools::skill::answer(call, offers, source.as_ref()).await;
         }
         match self.executor.as_ref() {
             Some((executor, context)) => executor.execute(context, call).await,

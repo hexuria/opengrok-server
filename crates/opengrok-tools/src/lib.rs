@@ -30,6 +30,7 @@ pub mod mcp;
 pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
 pub mod observe;
 pub use observe::{Observe, Seen};
+pub mod skill;
 pub mod workflow;
 pub use workflow::Workflow;
 

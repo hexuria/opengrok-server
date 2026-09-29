@@ -109,7 +109,8 @@ Skills, recipes, connectors and the tools a coworker is offered.
 | `/connections/{id}/revoke` | POST | `connections/routes.rs:58` | see the mount | *unverified* |
 | `/connectors` | GET | `connections/routes.rs:53` | JSON array, one `{name, label}` per configured provider, by name; `[]` when none is configured; 401 `{error}` | the shape agreed with NativeChat in #269. NativeChat file: *unverified* |
 | `/coworkers/{coworker_id}/ceiling` | GET PUT | `agui/routes.rs:997` | `{tools: [{name, kind, description, enabled, available?, label?, connector?}], version}`: one row per built-in (`user_machine_shell` carries `available`), per loaded plugin, and per plugin still switched on that the server no longer loads (`available: false`). PUT `{enabled: [names], version?}` replaces the ceiling with exactly those rows and answers the same body; `[]` switches everything off. A stale `version` is 409 `{error, code: "ceiling-changed"}` with nothing changed; without one the write is unconditional. 404 `{error: "no such coworker"}` unless you own it; 403 `{error}` for a withdrawn grant; 422 `{error}` for a name no row shows or a malformed body, with nothing changed; 503 `{error}` | the wire NativeChat agreed on #268. NativeChat file: *unverified* |
-| `/coworkers/{coworker_id}/tools` | GET | `agui/routes.rs:934` | see the mount | *unverified* |
+| `/coworkers/{coworker_id}/skills` | GET PUT | `skills.rs:131` | `{skills: [{id, name, description, scope: "mine" or "org", attached, enabled}], version}`: every skill the owner may use (their own in any state, their org's that are switched on), then each attached one they no longer may (switched off by its author, or no longer in their org) with `enabled: false` and an empty description, kept attached until a PUT leaves it out; a deleted skill is no row. PUT `{attached: [ids], version?}` replaces the set with exactly those ids, at most 20, and answers the same body; a PUT that changes nothing keeps the version. A stale `version` is 409 `{error, code: "skills-changed"}` with nothing changed; without one the write is unconditional. 404 `{error: "no such coworker"}` unless you own it; 403 `{error}` for a withdrawn grant; 422 `{error}` for an id no row shows (`no skill <id>`, the id last), more than 20, or a malformed body, with nothing changed; 503 `{error}`. Every turn of the coworker lists, in its system message, each attached skill that is switched on and its person may use, and offers `use_skill` to read one | the wire NativeChat agreed on #270. NativeChat file: *unverified* |
+| `/coworkers/{coworker_id}/tools` | GET | `agui/routes.rs:996` | `{tools: [{name, description, kind}]}`: what a turn would be offered now, `use_skill` (`kind: "builtin"`) among them whenever an attached skill is | *unverified* |
 | `/recipes` | GET POST | `recipes.rs:71` | see the mount | *unverified* |
 | `/recipes/{id}` | GET PUT DELETE | `recipes.rs:77` | PUT: 400 "a recipe needs a name" for a blank one; otherwise see the mount | *unverified* |
 | `/recipes/{id}/accept` | POST | `recipes.rs:82` | see the mount | *unverified* |
@@ -121,10 +122,10 @@ Skills, recipes, connectors and the tools a coworker is offered.
 | `/recipes/{id}/share/{scope}/{scope_id}` | DELETE | `recipes.rs:81` | see the mount | *unverified* |
 | `/recipes/{id}/versions` | POST | `recipes.rs:78` | see the mount | *unverified* |
 | `/recipes/{id}/versions/{version}` | DELETE | `recipes.rs:79` | 404 "no such version"; otherwise see the mount | *unverified* |
-| `/skills` | GET POST | `skills.rs:91` | see the mount | *unverified* |
-| `/skills/from-tape` | POST | `skills.rs:110` | see the mount | *unverified* |
-| `/skills/{id}` | GET PUT DELETE | `skills.rs:119` | see the mount | *unverified* |
-| `/skills/{id}/versions` | POST | `skills.rs:120` | see the mount | *unverified* |
+| `/skills` | GET POST | `skills.rs:101` | see the mount | *unverified* |
+| `/skills/from-tape` | POST | `skills.rs:120` | see the mount | *unverified* |
+| `/skills/{id}` | GET PUT DELETE | `skills.rs:129` | see the mount | *unverified* |
+| `/skills/{id}/versions` | POST | `skills.rs:132` | see the mount | *unverified* |
 
 ## Automations
 

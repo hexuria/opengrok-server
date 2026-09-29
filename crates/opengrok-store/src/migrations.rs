@@ -1200,6 +1200,16 @@ do $do$ begin
     end if;
 end $do$;
 
+-- #270: the account skills a coworker's owner attached, one row per coworker. `skill_ids` is the
+-- set, sorted, so the same set saved in another order is no change; `version` counts every change,
+-- so a save made against one it has not seen is refused (`set_coworker_skills`), as a ceiling's is.
+create table if not exists coworker_skill_set (
+    coworker_id   text     primary key,
+    skill_ids     text[]   not null,
+    version       bigint   not null,
+    updated_at_ms bigint   not null
+);
+
 -- Transforms that must run exactly once, by name: a row means it ran (docs/setup/postgres.md,
 -- "Data-transforming migrations"). An existing deployment is the baseline. The first,
 -- `the-machine-joins-the-ceiling`, runs last in `EVERY_BOOT`, after the widenings it must follow.
