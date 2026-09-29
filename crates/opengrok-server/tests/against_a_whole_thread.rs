@@ -123,6 +123,7 @@ async fn seed_run(
             thread_id: thread.to_string(),
             coworker_id: None,
             model: None,
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt: None,

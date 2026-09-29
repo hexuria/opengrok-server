@@ -21,7 +21,7 @@ use opengrok_wire::agui::{Event, RunAgentInput};
 
 use super::provision;
 use crate::auth::AuthState;
-use opengrok_core::coworker::{CoworkerCommand, CoworkerView};
+use opengrok_core::coworker::{CoworkerCommand, CoworkerView, Effort};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::limits::RunLimits;
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
@@ -1105,10 +1105,11 @@ pub async fn probe_model(
     }
 }
 
-/// `PATCH /coworkers/{id}` — change this coworker's name, its route, its standing role, its
-/// decoration, or several at once. A field absent is left alone; `role: null` or a blank string
-/// clears it. Taking the body as a `Value` rather than a struct of `Option`s is what makes
-/// "absent" and "null" different, which a nullable field needs.
+/// `PATCH /coworkers/{id}` — change this coworker's name, its route, how hard it thinks, its
+/// standing role, its decoration, or several at once. A field absent is left alone; `role: null`
+/// or a blank string clears it, and `effort: null` is `inherit`. Taking the body as a `Value`
+/// rather than a struct of `Option`s is what makes "absent" and "null" different, which a
+/// nullable field needs.
 ///
 /// EVERY FIELD THE CLIENT SENDS IS READ HERE. The app's Save button puts the whole card in one
 /// body — name, title and role together — so a field this route quietly skipped was an edit the
@@ -1197,6 +1198,19 @@ pub async fn repin_coworker(
         }
         Some(_) => return refuse("visibility: expected \"private\" or \"org\"".to_string()),
     };
+    // One of the words agreed with the client (#271); null is inherit. Anything else refuses the
+    // WHOLE body here, before a field of it is written: a name beside "loud" is not renamed.
+    let effort = match body.get("effort") {
+        None => None,
+        Some(serde_json::Value::Null) => Some(Effort::Inherit),
+        Some(word) => match word.as_str().and_then(Effort::parse) {
+            Some(effort) => Some(effort),
+            None => {
+                let words = Effort::ALL.map(Effort::as_str).join(", ");
+                return refuse(format!("effort must be one of {words}"));
+            }
+        },
+    };
     let hidden = match body.get("hiddenFromSidebar") {
         None => None,
         Some(serde_json::Value::Null) => None,
@@ -1228,13 +1242,14 @@ pub async fn repin_coworker(
     // is a 400 rather than a silent no-op, and the sentence lists what it could have named.
     let manages = name.is_some()
         || model.is_some()
+        || effort.is_some()
         || role.is_some()
         || visibility.is_some()
         || !decoration.is_empty();
     if !manages && hidden.is_none() {
         return refuse(
             "nothing to change: send a name, a model, a role, a title, an avatar shape or \
-             colour, a visibility, hiddenFromSidebar, or several"
+             colour, a visibility, an effort, hiddenFromSidebar, or several"
                 .to_string(),
         );
     }
@@ -1293,6 +1308,12 @@ pub async fn repin_coworker(
             Err(error) => return refuse(error.to_string()),
         }
     }
+    if let Some(effort) = effort {
+        match loaded.decide(CoworkerCommand::SetEffort { effort, at_ms }) {
+            Ok(more) => events.extend(more),
+            Err(error) => return refuse(error.to_string()),
+        }
+    }
     if let Some(role) = role {
         match loaded.decide(CoworkerCommand::SetRole { role, at_ms }) {
             Ok(more) => events.extend(more),
@@ -1323,24 +1344,15 @@ pub async fn repin_coworker(
     for event in &events {
         after.apply(event);
     }
-    let view = opengrok_core::coworker::CoworkerView {
-        id: coworker_id.clone(),
-        name: after.name.clone(),
-        model: after.model.clone(),
-        box_id: after.box_id.clone(),
-        retired: after.retired,
-        members: after.members.clone(),
-        // The stored stamp when nothing is appended (a decoration- or hide-only PATCH): the
-        // projection is only rewritten with events, and a reply stamped `now` over an unchanged
-        // row would move the coworker in the sidebar until the next roster read moved it back.
-        updated_at_ms: if events.is_empty() {
-            listed.updated_at_ms
-        } else {
-            at_ms
-        },
-        role: after.role.clone(),
-        visibility: after.visibility,
+    // The stored stamp when nothing is appended (a decoration- or hide-only PATCH): the
+    // projection is only rewritten with events, and a reply stamped `now` over an unchanged
+    // row would move the coworker in the sidebar until the next roster read moved it back.
+    let stamp = if events.is_empty() {
+        listed.updated_at_ms
+    } else {
+        at_ms
     };
+    let view = CoworkerView::of(coworker_id.clone(), &after, stamp);
     if !events.is_empty()
         && state
             .auth
@@ -1482,6 +1494,7 @@ pub(crate) fn coworker_row(
         "id": view.id.as_str(),
         "name": view.name,
         "model": view.model,
+        "effort": view.effort.as_str(),
         "role": view.role,
         "title": decorated("title"),
         "avatarShape": decorated("avatarShape"),
@@ -1537,17 +1550,7 @@ pub async fn delete_coworker(
     for event in &events {
         after.apply(event);
     }
-    let view = CoworkerView {
-        id: coworker_id.clone(),
-        name: after.name.clone(),
-        model: after.model.clone(),
-        box_id: after.box_id.clone(),
-        retired: after.retired,
-        members: after.members.clone(),
-        updated_at_ms: at_ms,
-        role: after.role.clone(),
-        visibility: after.visibility,
-    };
+    let view = CoworkerView::of(coworker_id.clone(), &after, at_ms);
     if state
         .auth
         .store
@@ -1671,17 +1674,7 @@ pub async fn hire(
     let _key =
         crate::spend::ensure_key_for(&state, &account_id, &coworker_id, &coworker.name).await;
 
-    let view = CoworkerView {
-        id: coworker_id.clone(),
-        name: coworker.name.clone(),
-        model: coworker.model.clone(),
-        box_id: coworker.computer().cloned(),
-        retired: coworker.retired,
-        members: coworker.members.clone(),
-        updated_at_ms: at_ms,
-        role: coworker.role.clone(),
-        visibility: coworker.visibility,
-    };
+    let view = CoworkerView::of(coworker_id.clone(), &coworker, at_ms);
 
     if let Err(error) = state
         .auth
@@ -2349,17 +2342,7 @@ async fn ensure_computer(
         for event in &provisioned.events {
             coworker.apply(event);
         }
-        let view = CoworkerView {
-            id: coworker_id.clone(),
-            name: coworker.name.clone(),
-            model: coworker.model.clone(),
-            box_id: coworker.computer().cloned(),
-            retired: coworker.retired,
-            members: coworker.members.clone(),
-            updated_at_ms: at_ms,
-            role: coworker.role.clone(),
-            visibility: coworker.visibility,
-        };
+        let view = CoworkerView::of(coworker_id.clone(), &coworker, at_ms);
         if let Err(error) = state
             .auth
             .store
@@ -2734,6 +2717,7 @@ pub async fn run(
 
     // The deployment's model is the default, not the answer: a named coworker overrides it below.
     let mut model = state.model.clone();
+    let mut effort = Effort::Inherit;
     let mut coworker_name = String::new();
     let mut coworker_role: Option<String> = None;
 
@@ -2781,6 +2765,7 @@ pub async fn run(
         // is how the turn is answered, not whether it is allowed, and that question was just asked.
         if let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await {
             model = coworker.model.clone();
+            effort = coworker.effort;
             coworker_name = coworker.name;
             coworker_role = coworker.role;
         }
@@ -2826,6 +2811,7 @@ pub async fn run(
         account_id,
         run_coworker,
         model,
+        effort,
         coworker_name,
         coworker_role,
         unscoped_charge,
@@ -2874,6 +2860,7 @@ async fn start_claimed_turn(
     account_id: Option<opengrok_core::id::AccountId>,
     run_coworker: Option<CoworkerId>,
     model: String,
+    effort: Effort,
     coworker_name: String,
     coworker_role: Option<String>,
     unscoped_charge: Option<String>,
@@ -3082,6 +3069,7 @@ async fn start_claimed_turn(
         spend_actor: account_id.as_ref().map(|a| a.as_str().to_string()),
         context_tokens: state.context_for(&model).await,
         model,
+        effort,
         system: system.clone(),
         messages,
         tools: Vec::new(),
@@ -3096,6 +3084,7 @@ async fn start_claimed_turn(
         account_id: account_id.clone(),
         coworker_id: run_coworker,
         model: Some(request.model.clone()),
+        effort,
         system,
         skill_id: recorded_skill,
         prompt: Some(asked.prompt),
@@ -3177,6 +3166,8 @@ pub struct StoreJournal {
     /// The pin this turn captured. Written on `RunCommand::Start` so a resume does not reload
     /// a coworker that was repinned while we were waiting.
     pub model: Option<String>,
+    /// How hard this turn thinks, captured with the pin and for the same reason.
+    pub effort: Effort,
     /// The composed system message this turn opened with, captured for the same reason as the
     /// pin: a role edited while a person answered an approval card must not change the coworker
     /// halfway through the turn.
@@ -3347,6 +3338,7 @@ impl StoreJournal {
             account_id: self.account_id.as_ref(),
             coworker_id: self.coworker_id.as_ref(),
             model: self.model.as_deref(),
+            effort: self.effort,
             system: self.system.as_deref(),
             skill_id: self.skill_id.as_deref(),
             prompt: self.prompt.as_deref(),
@@ -3401,6 +3393,7 @@ fn start_command(start: &RunStart<'_>, at_ms: i64) -> RunCommand {
             .map(str::trim)
             .filter(|pin| !pin.is_empty())
             .map(str::to_string),
+        effort: start.effort,
         system: start
             .system
             .map(str::to_string)
@@ -3468,6 +3461,7 @@ struct RunStart<'a> {
     account_id: Option<&'a opengrok_core::id::AccountId>,
     coworker_id: Option<&'a CoworkerId>,
     model: Option<&'a str>,
+    effort: Effort,
     system: Option<&'a str>,
     skill_id: Option<&'a str>,
     prompt: Option<&'a [serde_json::Value]>,
@@ -5061,6 +5055,7 @@ async fn continue_run(
         account_id: Some(account_id.clone()),
         coworker_id: run.coworker_id.clone(),
         model: run.model.clone(),
+        effort: run.effort,
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
@@ -5070,7 +5065,8 @@ async fn continue_run(
 
     // The pin the turn started on, not the coworker's current one. A coworker that was
     // repinned while this run waited on a card must not change what the continuation thinks
-    // with. Logs written before the pin was stored fall back to the current pin.
+    // with. Logs written before the pin was stored fall back to the current pin. The effort
+    // is the start's too, with no fallback: a log from before it was stored sent none.
     let pin = run.pin_for_resume(&coworker.model);
     let request = ModelRequest {
         gateway_key: crate::spend::key_for_opt(&state, run.coworker_id.as_ref(), Some(&account_id))
@@ -5080,6 +5076,7 @@ async fn continue_run(
         spend_actor: Some(account_id.as_str().to_string()),
         context_tokens: state.context_for(&pin).await,
         model: pin,
+        effort: run.effort,
         system: Some(system),
         messages: super::history::for_resume(&state, &account_id, &run_id, &run, &answered).await,
         tools: Vec::new(),

@@ -124,6 +124,7 @@ async fn hire_agent(state: &AgUiState, account: &AccountId, name: &str) -> (Cowo
         updated_at_ms: 2,
         role: None,
         visibility: Default::default(),
+        effort: Default::default(),
     };
     state
         .auth
@@ -153,6 +154,7 @@ async fn retire(state: &AgUiState, account: &AccountId, id: &CoworkerId) {
         updated_at_ms: 9,
         role: None,
         visibility: Default::default(),
+        effort: Default::default(),
     };
     state
         .auth

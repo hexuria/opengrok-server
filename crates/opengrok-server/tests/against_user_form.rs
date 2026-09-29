@@ -219,6 +219,7 @@ async fn mark_org_visible(store: &PgStore, owner: &AccountId, id: &str) {
         updated_at_ms: at_ms,
         role: after.role.clone(),
         visibility: after.visibility,
+        effort: after.effort,
     };
     store
         .append_coworker(&coworker_id, owner, seq, &events, &view)
@@ -3216,6 +3217,7 @@ async fn submit_resumes_the_run_parked_on_its_own_call_not_the_oldest() {
             thread_id: thread("decoy"),
             coworker_id: Some(opengrok_core::id::CoworkerId::from_stored(agent.clone())),
             model: None,
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt: None,

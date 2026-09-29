@@ -708,6 +708,7 @@ async fn resume_suspended_run(
         account_id: Some(account_id.clone()),
         coworker_id: Some(coworker_id.clone()),
         model: run.model.clone(),
+        effort: run.effort,
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
@@ -722,6 +723,8 @@ async fn resume_suspended_run(
         spend_actor: Some(account_id.as_str().to_string()),
         context_tokens: state.agui.context_for(&pin).await,
         model: pin,
+        // As hard as the turn it continues thought, whatever the coworker says by now.
+        effort: run.effort,
         // A resumed run carries the SAME system message as the turn it continues. It used to
         // carry none at all, so a coworker lost both its identity and the whose-computer
         // discipline at the moment a person had just intervened — the worst possible moment to
@@ -855,6 +858,7 @@ pub(crate) async fn resume_interrupted_run(
         account_id: Some(account_id.clone()),
         coworker_id: Some(coworker_id.clone()),
         model: run.model.clone(),
+        effort: run.effort,
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         prompt: None,
@@ -868,6 +872,7 @@ pub(crate) async fn resume_interrupted_run(
         spend_actor: Some(account_id.as_str().to_string()),
         context_tokens: state.agui.context_for(&pin).await,
         model: pin,
+        effort: run.effort,
         system: Some(system),
         messages: crate::agui::history::for_interrupted(&state.agui, &account_id, &run_id, &run)
             .await,

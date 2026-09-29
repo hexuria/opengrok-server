@@ -361,6 +361,7 @@ async fn seed_running_run(store: &PgStore, account: &AccountId, thread: &str) ->
             thread_id: thread.to_string(),
             coworker_id: Some(CoworkerId::from_stored("cw_in_flight")),
             model: Some("oag/cheap".to_string()),
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt: None,

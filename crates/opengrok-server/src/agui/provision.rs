@@ -1259,8 +1259,6 @@ pub async fn reprovision_coworker(
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) -> Result<(), (String, String)> {
-    use opengrok_core::coworker::CoworkerView;
-
     let Ok((mut coworker, seq)) = state.auth.store.load_coworker(coworker_id).await else {
         return Err(("unknown".into(), "could not load the coworker".into()));
     };
@@ -1273,18 +1271,8 @@ pub async fn reprovision_coworker(
     if provisioned.events.is_empty() {
         return Ok(());
     }
-    let view = CoworkerView {
-        id: coworker_id.clone(),
-        name: coworker.name.clone(),
-        model: coworker.model.clone(),
-        box_id: coworker.computer().cloned(),
-        retired: false,
-        // Carried, not blanked: a group reprovisioned after hire keeps its members.
-        members: coworker.members.clone(),
-        updated_at_ms: at_ms,
-        role: coworker.role.clone(),
-        visibility: coworker.visibility,
-    };
+    // Every field carried, not blanked: a group reprovisioned after hire keeps its members.
+    let view = opengrok_core::coworker::CoworkerView::of(coworker_id.clone(), &coworker, at_ms);
     let _ = state
         .auth
         .store

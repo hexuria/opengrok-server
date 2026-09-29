@@ -103,6 +103,9 @@ impl std::fmt::Debug for GatewayKey {
 pub struct ModelRequest {
     /// A catalogue id the gateway understands (`xai/grok-4.6`, `oag/cheap`). A *route*, not a key.
     pub model: String,
+    /// How hard the model thinks: the coworker's, captured when its run started. `Inherit` sends
+    /// no `reasoning_effort`, so the route's own default applies.
+    pub effort: opengrok_core::coworker::Effort,
     pub messages: Vec<ChatMessage>,
     pub system: Option<String>,
     /// The tools the model is OFFERED this turn, as OpenAI function-calling defs (`{type, function}`).

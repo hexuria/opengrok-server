@@ -256,6 +256,8 @@ pub(crate) async fn lesson_from_tape(
         spend_actor: Some(account.as_str().to_string()),
         context_tokens: None,
         model: model.to_string(),
+        // Not a turn of the coworker's, so not its effort: one bounded read, at the route's own.
+        effort: Default::default(),
         system: Some(system_for(&lesson_marker)),
         // Deliberately empty: the door then sends no tool fields at all, so this call is a plain
         // completion that cannot reach a coworker's computer, its shell or anything else while

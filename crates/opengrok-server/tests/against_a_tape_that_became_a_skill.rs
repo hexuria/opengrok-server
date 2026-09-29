@@ -337,6 +337,7 @@ impl Harness {
             members: state.members.clone(),
             role: None,
             visibility: state.visibility,
+            effort: state.effort,
         };
         self.store
             .append_coworker(&id, account, 0, &events, &view)
