@@ -1,0 +1,113 @@
+{
+  "why": "Waiting for you",
+  "name": "run-awaiting-approval",
+  "tool": "request_user_form",
+  "type": "CUSTOM",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "callId": "form-0199bb4e000070008000000000000002",
+  "reason": "user-form",
+  "threadId": "thr-a-0199bb4e-0000-7000-8000-000000000003",
+  "arguments": {
+    "title": "Google account",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email",
+        "label": "Email",
+        "secret": false,
+        "required": true
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": true
+      }
+    ],
+    "liveHost": "accounts.google.com",
+    "instruction": ""
+  },
+  "timestamp": 100,
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000004",
+  "message": {
+    "type": "user-form",
+    "formRequest": {
+      "title": "Google account",
+      "fields": [
+        {
+          "id": "email",
+          "type": "email",
+          "label": "Email",
+          "secret": false,
+          "required": true
+        },
+        {
+          "id": "password",
+          "type": "password",
+          "label": "Password",
+          "secret": false,
+          "required": true
+        }
+      ],
+      "liveHost": "accounts.google.com",
+      "instruction": ""
+    }
+  },
+  "formRequest": {
+    "title": "Google account",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email",
+        "label": "Email",
+        "secret": false,
+        "required": true
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": true
+      }
+    ],
+    "liveHost": "accounts.google.com",
+    "instruction": ""
+  },
+  "formResolution": "escalated",
+  "boxResolution": "declined",
+  "value": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000004",
+    "kind": "send-message",
+    "callId": "form-0199bb4e000070008000000000000002",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "Google account",
+        "fields": [
+          {
+            "id": "email",
+            "type": "email",
+            "label": "Email",
+            "secret": false,
+            "required": true
+          },
+          {
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": true
+          }
+        ],
+        "liveHost": "accounts.google.com",
+        "instruction": ""
+      }
+    },
+    "timestampMs": 1790000000000,
+    "boxResolution": "declined",
+    "formResolution": "escalated",
+    "widgetDismissed": true
+  }
+}

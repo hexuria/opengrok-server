@@ -638,13 +638,6 @@ impl GuardedDoor {
         }
     }
 
-    /// How long a refusal of a key the gateway still knows is reused. Zero ⇒ every 401 asks.
-    #[must_use]
-    pub fn with_still_known_ms(mut self, still_known_ms: i64) -> Self {
-        self.still_known_ms = still_known_ms;
-        self
-    }
-
     /// Keyed on (coworker, PAYER), not on the coworker: the cap is the coworker's but the pool
     /// is the payer's, so two members talking to one shared coworker have different answers and
     /// a coworker-keyed entry would serve one of them the other's for a freshness window.

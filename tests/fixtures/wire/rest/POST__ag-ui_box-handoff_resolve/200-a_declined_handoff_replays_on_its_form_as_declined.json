@@ -12,7 +12,7 @@
     },
     "timestampMs": 1790000000000,
     "boxRequestId": "req_0199bb4e000070008000000000000002",
-    "boxInstruction": "Google account: Enter the address and password.",
-    "boxResolution": "handed_back"
+    "boxInstruction": "Finish Google account on the computer.",
+    "boxResolution": "declined"
   }
 }

@@ -34,6 +34,9 @@
 //! calls exactly as it meters the rest, with nothing here to change.
 
 pub mod client;
+// Test support, kept beside the tests like `tests/unit/*`: every caller is a test, and a scripted
+// Jev is not product code. Still `pub`, because the integration tests reach it by this path.
+#[path = "../../tests/support/mock_jev.rs"]
 pub mod mock;
 pub mod reviewer;
 pub mod routes;

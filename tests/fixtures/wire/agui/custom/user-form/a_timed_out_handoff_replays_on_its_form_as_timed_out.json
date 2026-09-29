@@ -1,0 +1,91 @@
+{
+  "name": "user-form",
+  "type": "CUSTOM",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "value": {
+    "id": "e_0199bb4e-0000-7000-8000-000000000002",
+    "kind": "send-message",
+    "callId": "form-0199bb4e000070008000000000000003",
+    "message": {
+      "type": "user-form",
+      "formRequest": {
+        "title": "Google account",
+        "fields": [
+          {
+            "id": "email",
+            "type": "email",
+            "label": "Email",
+            "secret": false,
+            "required": true
+          },
+          {
+            "id": "password",
+            "type": "password",
+            "label": "Password",
+            "secret": false,
+            "required": true
+          }
+        ],
+        "liveHost": "accounts.google.com",
+        "instruction": ""
+      }
+    },
+    "timedOut": true,
+    "timestampMs": 1790000000000,
+    "boxResolution": "timed_out",
+    "formResolution": "escalated",
+    "widgetDismissed": true
+  },
+  "callId": "form-0199bb4e000070008000000000000003",
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000002",
+  "message": {
+    "type": "user-form",
+    "formRequest": {
+      "title": "Google account",
+      "fields": [
+        {
+          "id": "email",
+          "type": "email",
+          "label": "Email",
+          "secret": false,
+          "required": true
+        },
+        {
+          "id": "password",
+          "type": "password",
+          "label": "Password",
+          "secret": false,
+          "required": true
+        }
+      ],
+      "liveHost": "accounts.google.com",
+      "instruction": ""
+    }
+  },
+  "threadId": "thr-a-0199bb4e-0000-7000-8000-000000000004",
+  "timestamp": 100,
+  "formRequest": {
+    "title": "Google account",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email",
+        "label": "Email",
+        "secret": false,
+        "required": true
+      },
+      {
+        "id": "password",
+        "type": "password",
+        "label": "Password",
+        "secret": false,
+        "required": true
+      }
+    ],
+    "liveHost": "accounts.google.com",
+    "instruction": ""
+  },
+  "formResolution": "escalated",
+  "boxResolution": "timed_out",
+  "timedOut": true
+}
