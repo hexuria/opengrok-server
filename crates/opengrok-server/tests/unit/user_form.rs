@@ -399,3 +399,90 @@ fn a_run_parked_again_no_longer_waits_on_a_twin_from_before_its_answer() {
         BTreeSet::from(["z".to_string()])
     );
 }
+
+/// An escalated form, parked on `c1`, with the `user-form` frame its escalation journalled.
+fn escalated_run(form: &Value) -> Vec<Value> {
+    vec![
+        park("c1"),
+        json!({
+            "type": "CUSTOM", "name": "user-form", "entryId": form["id"], "callId": "c1",
+            "formResolution": "escalated", "value": {"id": form["id"]}
+        }),
+    ]
+}
+
+/// #143. How the handoff ended rides beside `formResolution` on BOTH frames that paint the form,
+/// the park included, and in `value`; an escalated form whose handoff is still live has neither.
+#[test]
+fn hydrate_puts_a_handoffs_end_on_the_park_and_the_user_form_frame() {
+    let mut form = escalated("e_form", Some("c1"));
+    let out = hydrate_agui_events(escalated_run(&form), std::slice::from_ref(&form), 0, 100);
+    assert!(
+        out.iter().all(|frame| frame.get("boxResolution").is_none()),
+        "absent while the handoff is live: {out:?}"
+    );
+
+    form["boxResolution"] = json!("timed_out");
+    form["timedOut"] = json!(true);
+    let out = hydrate_agui_events(escalated_run(&form), std::slice::from_ref(&form), 0, 100);
+    assert_eq!(out.len(), 2, "{out:?}");
+    for frame in &out {
+        assert_eq!(frame["entryId"], "e_form", "{frame}");
+        assert_eq!(frame["formResolution"], "escalated", "{frame}");
+        assert_eq!(frame["boxResolution"], "timed_out", "{frame}");
+        assert_eq!(frame["timedOut"], true, "{frame}");
+        assert_eq!(frame["value"]["boxResolution"], "timed_out", "{frame}");
+    }
+}
+
+/// #143, the backfill. A form escalated before the stamp existed reads its handoff's end from its
+/// run's answer to its call — and only from the server's own sentences, exactly as written. Any
+/// other answer, an answer to another call, a form that was never escalated, and a form that
+/// already says how its handoff ended all stay as they are.
+#[test]
+fn an_old_escalated_form_reads_its_end_only_from_the_servers_own_sentences() {
+    let answered = |call: &str, content: &str| {
+        vec![
+            park("c1"),
+            json!({"type": "TOOL_CALL_RESULT", "toolCallId": call, "content": content}),
+        ]
+    };
+    let ended = |form: &Value, events: Vec<Value>| {
+        let out = hydrate_agui_events(events, std::slice::from_ref(form), 0, 100);
+        (
+            out[0].get("boxResolution").cloned(),
+            out[0].get("timedOut").cloned(),
+        )
+    };
+    let form = escalated("e_form", Some("c1"));
+    for (word, sentence) in HANDOFF_ENDINGS {
+        let timed_out = (word == "timed_out").then_some(json!(true));
+        assert_eq!(
+            ended(&form, answered("c1", sentence)),
+            (Some(json!(word)), timed_out),
+            "{word}"
+        );
+    }
+    let near_miss = HAND_BACK_TOOL_RESULT.trim_end_matches('.');
+    assert_eq!(ended(&form, answered("c1", near_miss)), (None, None));
+    assert_eq!(ended(&form, answered("c1", "done")), (None, None));
+    assert_eq!(
+        ended(&form, answered("c2", HAND_BACK_TOOL_RESULT)),
+        (None, None),
+        "another call's answer is not this form's"
+    );
+
+    let mut dismissed = email_form("e_form", Some("dismissed"), 10);
+    dismissed["callId"] = json!("c1");
+    assert_eq!(
+        ended(&dismissed, answered("c1", HAND_BACK_TOOL_RESULT)),
+        (None, None)
+    );
+    let mut stamped = form.clone();
+    stamped["boxResolution"] = json!("declined");
+    assert_eq!(
+        ended(&stamped, answered("c1", HAND_BACK_TOOL_RESULT)),
+        (Some(json!("declined")), None),
+        "a stamped end is the truth"
+    );
+}

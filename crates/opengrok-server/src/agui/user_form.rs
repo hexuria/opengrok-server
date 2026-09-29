@@ -376,11 +376,20 @@ pub async fn dismiss_user_form(
     (200, settled)
 }
 
+/// How a handoff ends: the word stamped on the box and on its escalated form, and the sentence
+/// the model is answered with. One table both ways, so the replay reads an old answer back into
+/// exactly the word this verb wrote it for.
+static HANDOFF_ENDINGS: [(&str, &str); 3] = [
+    ("handed_back", HAND_BACK_TOOL_RESULT),
+    ("declined", HANDOFF_DECLINED_TOOL_RESULT),
+    ("timed_out", HOLD_TIMED_OUT_TOOL_RESULT),
+];
+
 /// `resolveBoxHandoff {entryId, agentId, resolution: handed_back|declined|timed_out}`.
-/// Stamps `boxResolution` on every live `sand://box` sibling and resumes the waiting
-/// user-form run. Accepts the handoff entry id **or** the escalated form entry id
-/// (NativeChat KeepAlive falls back to the form when `handoffEntryId` is missing).
-/// Does **not** stop the box (`handBackForeverBox` is a lifecycle verb).
+/// Stamps `boxResolution` on every live `sand://box` sibling and on the escalated form it
+/// answers, and resumes the waiting user-form run. Accepts the handoff entry id **or** the
+/// escalated form entry id (NativeChat KeepAlive falls back to the form when `handoffEntryId`
+/// is missing). Does **not** stop the box (`handBackForeverBox` is a lifecycle verb).
 pub async fn resolve_box_handoff(
     state: &HostState,
     args: &Value,
@@ -389,21 +398,17 @@ pub async fn resolve_box_handoff(
     let Some((entry_id, coworker_id)) = named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
-    let word = args
-        .get("resolution")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let (content, timed_out) = match word {
-        "handed_back" => (HAND_BACK_TOOL_RESULT.to_string(), false),
-        "declined" => (HANDOFF_DECLINED_TOOL_RESULT.to_string(), false),
-        "timed_out" => (HOLD_TIMED_OUT_TOOL_RESULT.to_string(), true),
-        _ => {
-            return (
-                400,
-                json!({ "error": "resolution must be handed_back, declined, or timed_out" }),
-            );
-        }
+    let asked = args.get("resolution").and_then(Value::as_str);
+    let Some(&(word, content)) = HANDOFF_ENDINGS
+        .iter()
+        .find(|(known, _)| Some(*known) == asked)
+    else {
+        return (
+            400,
+            json!({ "error": "resolution must be handed_back, declined, or timed_out" }),
+        );
     };
+    let timed_out = word == "timed_out";
     let (_seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
         Ok(row) => row,
         Err(reply) => return reply,
@@ -422,24 +427,28 @@ pub async fn resolve_box_handoff(
     // call happens to be parked, which for stacked forms is the sibling's -- the
     // twin then gets this form's tool result. A posted handoff carries no call, so its
     // escalated form's is used; without one a hand-back resumed another conversation's run.
+    //
+    // A LOG THAT CANNOT BE READ SETTLES NOTHING. Settled anyway, the handoff read as over while
+    // the run it answers stayed parked, holding the screen and its approvals row, with nothing
+    // in the server left that would answer it.
+    let store = &state.agui.auth.store;
     let answers = match call_id_of(&entry) {
         Some(call) => Some(Some(call.to_string())),
-        None => match waiting_calls(state, account_id, &coworker_id).await {
-            Some(waiting) => state
-                .agui
-                .auth
-                .store
-                .gateway_transcript(&coworker_id, account_id)
-                .await
-                .ok()
-                .and_then(|entries| handoff_call(&entries, &waiting)),
-            None => None,
-        },
+        None => {
+            let (Some(waiting), Ok(entries)) = (
+                waiting_calls(state, account_id, &coworker_id).await,
+                store.gateway_transcript(&coworker_id, account_id).await,
+            ) else {
+                return (503, json!({ "error": "run log unavailable; try again" }));
+            };
+            handoff_call(&entries, &waiting)
+        }
     };
+    let call = answers.as_ref().and_then(Option::as_deref);
     let settled_siblings =
-        settle_live_handoffs(state, account_id, &coworker_id, word, timed_out).await;
-    if let Some(call_id) = answers {
-        resume_user_form(state, account_id, &coworker_id, content, call_id.as_deref()).await;
+        settle_live_handoffs(state, account_id, &coworker_id, word, timed_out, call).await;
+    if answers.is_some() {
+        resume_user_form(state, account_id, &coworker_id, content.to_string(), call).await;
     }
 
     if posted_live {
@@ -705,7 +714,7 @@ pub async fn settle_holds_seen(
     if let Some(first) = live.first() {
         if handoff_call(entries, waiting).is_none() {
             let settled =
-                settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
+                settle_live_handoffs(state, account_id, coworker_id, "declined", false, None).await;
             written &= settled.len() >= live.len();
         } else if live.iter().any(|handoff| expired(handoff)) {
             let args = json!({
@@ -1010,37 +1019,48 @@ fn is_escalated_form(entry: &Value) -> bool {
         && entry.get("formResolution").and_then(Value::as_str) == Some("escalated")
 }
 
+/// An escalated form whose handoff's end is not on it yet.
+fn awaits_its_handoff(entry: &Value) -> bool {
+    is_escalated_form(entry)
+        && entry
+            .get("boxResolution")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+}
+
 /// Stamp `boxResolution` on every still-live sand://box sibling. One Skip must not
 /// leave another unanswered handoff holding "Waiting for you".
+///
+/// AND ON THE ESCALATED FORM IT WAS OPENED FOR, in the box's words (agreed with nativechat for
+/// #143). NativeChat paints the form from its run's frames, which never carry the handoff, so a
+/// form left only `escalated` replayed as a live "Action needed" for good. With a call being
+/// answered, that call's form and no other: several escalated forms can be unsettled at once,
+/// and one whose run still waits belongs to its own conversation. With none — the run was stopped
+/// or moved on before the handoff ended — each settled handoff's own form, the last escalated one
+/// before it: no form can be raised while another is open or a handoff is live.
 async fn settle_live_handoffs(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
     resolution: &str,
     timed_out: bool,
+    answers: Option<&str>,
 ) -> Vec<Value> {
-    let Ok(entries) = state
-        .agui
-        .auth
-        .store
-        .gateway_transcript(coworker_id, account_id)
-        .await
-    else {
+    let store = &state.agui.auth.store;
+    let Ok(entries) = store.gateway_transcript(coworker_id, account_id).await else {
         return Vec::new();
     };
     let mut settled = Vec::new();
-    for entry in entries {
-        if !is_live_handoff(&entry) {
+    let mut forms: Vec<&Value> = Vec::new();
+    for (at, entry) in entries.iter().enumerate() {
+        if !is_live_handoff(entry) {
             continue;
         }
-        let Some(entry_id) = entry.get("id").and_then(Value::as_str).map(str::to_string) else {
+        let Some(entry_id) = entry.get("id").and_then(Value::as_str) else {
             continue;
         };
-        let Ok(Some((seq, current))) = state
-            .agui
-            .auth
-            .store
-            .find_gateway_entry(coworker_id, account_id, &entry_id)
+        let Ok(Some((seq, current))) = store
+            .find_gateway_entry(coworker_id, account_id, entry_id)
             .await
         else {
             continue;
@@ -1049,10 +1069,7 @@ async fn settle_live_handoffs(
             continue;
         }
         let card = settle_handoff(current, resolution, timed_out);
-        if let Err(error) = state
-            .agui
-            .auth
-            .store
+        if let Err(error) = store
             .update_gateway_entry(coworker_id, account_id, seq, &card)
             .await
         {
@@ -1060,6 +1077,41 @@ async fn settle_live_handoffs(
             continue;
         }
         settled.push(card);
+        if answers.is_none()
+            && let Some(form) = entries[..at]
+                .iter()
+                .rev()
+                .find(|form| awaits_its_handoff(form) && !forms.contains(form))
+        {
+            forms.push(form);
+        }
+    }
+    if let Some(call) = answers.filter(|_| !settled.is_empty()) {
+        forms.extend(
+            entries
+                .iter()
+                .rev()
+                .find(|form| awaits_its_handoff(form) && call_id_of(form) == Some(call)),
+        );
+    }
+    for form in forms {
+        let Some(id) = form.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let Ok(Some((seq, current))) = store.find_gateway_entry(coworker_id, account_id, id).await
+        else {
+            continue;
+        };
+        if !awaits_its_handoff(&current) {
+            continue;
+        }
+        let stamped = settle_handoff(current, resolution, timed_out);
+        if let Err(error) = store
+            .update_gateway_entry(coworker_id, account_id, seq, &stamped)
+            .await
+        {
+            tracing::error!(%error, "could not stamp a handoff's end on its escalated form");
+        }
     }
     settled
 }
@@ -1073,7 +1125,8 @@ async fn abandon_escalated_form(
     coworker_id: &CoworkerId,
     entry: Value,
 ) -> (u16, Value) {
-    settle_live_handoffs(state, account_id, coworker_id, "declined", false).await;
+    let call = call_id_of(&entry);
+    settle_live_handoffs(state, account_id, coworker_id, "declined", false, call).await;
     // Name the call this Skip answers; with `None` a stacked sibling's parked
     // call would take the declined result instead.
     resume_user_form(
@@ -1081,7 +1134,7 @@ async fn abandon_escalated_form(
         account_id,
         coworker_id,
         HANDOFF_DECLINED_TOOL_RESULT.to_string(),
-        call_id_of(&entry),
+        call,
     )
     .await;
     (200, entry)
@@ -1476,7 +1529,41 @@ fn overlay_form(event: &mut Value, form: &Value) {
     if let Some(resolution) = form.get("formResolution") {
         map.insert("formResolution".to_string(), resolution.clone());
     }
+    // HOW ITS HANDOFF ENDED, beside `formResolution` (agreed with nativechat for #143): until it
+    // is there an escalated form is live. On a park as much as on a `user-form` frame — a form
+    // settled after its run stopped waiting has no `user-form` frame, only its park.
+    if let Some(ended) = form.get("boxResolution") {
+        map.insert("boxResolution".to_string(), ended.clone());
+        if let Some(timed_out) = form.get("timedOut") {
+            map.insert("timedOut".to_string(), timed_out.clone());
+        }
+    }
     map.insert("value".to_string(), form.clone());
+}
+
+/// A form escalated before its handoff's end was stamped on it (#143), with that end read back
+/// from its run's answer to its call. ONLY THE SERVER'S OWN SENTENCES COUNT: any other result is
+/// not a handoff's ending, and a word read into it would be invented. None found leaves the form
+/// as it was, which reads as still live.
+fn with_backfilled_handoff(form: &Value, events: &[Value]) -> Value {
+    let ended = call_id_of(form)
+        .filter(|_| awaits_its_handoff(form))
+        .and_then(|call| {
+            events.iter().find_map(|event| {
+                let answer = (event.get("type").and_then(Value::as_str)
+                    == Some("TOOL_CALL_RESULT")
+                    && event.get("toolCallId").and_then(Value::as_str) == Some(call))
+                .then(|| event.get("content").and_then(Value::as_str))
+                .flatten()?;
+                HANDOFF_ENDINGS
+                    .iter()
+                    .find(|(_, sentence)| *sentence == answer)
+            })
+        });
+    match ended {
+        Some((word, _)) => settle_handoff(form.clone(), word, *word == "timed_out"),
+        None => form.clone(),
+    }
 }
 
 fn user_form_event_id(event: &Value) -> Option<&str> {
@@ -1657,9 +1744,10 @@ pub(crate) fn hydrate_agui_events(
     started_at_ms: i64,
     updated_at_ms: i64,
 ) -> Vec<Value> {
-    let forms: Vec<&Value> = forms
+    let forms: Vec<Value> = forms
         .iter()
         .filter(|entry| is_user_form_entry(entry))
+        .map(|entry| with_backfilled_handoff(entry, &events))
         .collect();
     if forms.is_empty() {
         return events;
@@ -1720,7 +1808,7 @@ pub(crate) fn hydrate_agui_events(
         .map(str::to_string)
         .collect();
     const SLACK_MS: i64 = 5_000;
-    for form in forms {
+    for form in &forms {
         let Some(id) = form.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -1736,7 +1824,10 @@ pub(crate) fn hydrate_agui_events(
         {
             continue;
         }
-        events.push(agui_user_form_frame(form));
+        // Overlaid like a matched frame, so it carries how its handoff ended too.
+        let mut frame = agui_user_form_frame(form);
+        overlay_form(&mut frame, form);
+        events.push(frame);
         used.insert(id.to_string());
     }
     stamp_tool_calls(&mut events);
