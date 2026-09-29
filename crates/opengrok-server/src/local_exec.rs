@@ -52,8 +52,10 @@ pub struct LocalExecPolicy {
 pub enum LocalExecDecision {
     /// Run it automatically (an allowlist rule, or `Bypass`).
     Allow,
-    /// Refuse it, with a human-readable reason. Never runs.
-    Deny(String),
+    /// Refuse it. Never runs. `why` is what the model and the person are told; `rule` is the deny
+    /// rule that matched, for the audit row only (#224) — `None` when no rule did (mode `never`,
+    /// a line too long to read).
+    Deny { why: String, rule: Option<String> },
     /// Suspend — a person decides for THIS command. Never treated as a yes.
     Ask,
 }
@@ -121,6 +123,10 @@ pub fn standing_rule_refusal(kind: &str, pattern: &str) -> Option<&'static str> 
 /// asked about: on the user's own path an Ask runs it with no deny rule read.
 pub const MAX_JUDGED_BYTES: usize = 64 * 1024;
 
+/// What the model is told when a deny rule refuses a command. See `decide`.
+pub const DENIED_BY_A_RULE: &str = "a deny rule on this computer refused this command, so it did \
+    not run. Do not reword it to get past the rule; tell the person what you needed it for.";
+
 /// THE GATE. The one place a command on the user's own machine is judged. Everything that would run
 /// a reverse-exec command MUST pass through here first, on the server, before anything is queued.
 ///
@@ -132,18 +138,22 @@ pub const MAX_JUDGED_BYTES: usize = 64 * 1024;
 ///   See `shell` for how the line is read.
 pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
     match policy.mode {
-        LocalExecMode::Never => LocalExecDecision::Deny(
-            "this machine's reverse-exec channel is off (mode: never) — turn it on to run commands here".to_string(),
-        ),
+        LocalExecMode::Never => LocalExecDecision::Deny {
+            why: "this machine's reverse-exec channel is off (mode: never) — turn it on to run commands here".to_string(),
+            rule: None,
+        },
         LocalExecMode::Bypass => LocalExecDecision::Allow,
         LocalExecMode::Ask => {
             if command.len() > MAX_JUDGED_BYTES {
-                return LocalExecDecision::Deny(format!(
-                    "this command is {} bytes; the gate reads at most {MAX_JUDGED_BYTES} before \
-                     it decides, and refuses a longer one rather than run it unread — split it \
-                     into shorter commands",
-                    command.len()
-                ));
+                return LocalExecDecision::Deny {
+                    why: format!(
+                        "this command is {} bytes; the gate reads at most {MAX_JUDGED_BYTES} \
+                         before it decides, and refuses a longer one rather than run it unread — \
+                         split it into shorter commands",
+                        command.len()
+                    ),
+                    rule: None,
+                };
             }
             let line = shell::read(command);
             let denied = if policy.deny.is_empty() {
@@ -162,11 +172,15 @@ pub fn decide(policy: &LocalExecPolicy, command: &str) -> LocalExecDecision {
                     .any(|pattern| shell::allows(pattern, words)),
                 None => false,
             };
+            // THE MODEL IS NOT TOLD WHICH RULE (#224). Naming it handed the model the exact words
+            // to rephrase around, and a deny rule is a string match, not a sandbox. The refusal
+            // still reaches it as a result it can reason about (non-negotiable 8): what happened,
+            // and what to do instead. The rule goes on the audit row, where the person reads it.
             if let Some(pattern) = denied {
-                LocalExecDecision::Deny(format!(
-                    "a deny rule matched this command: `{}`",
-                    pattern.trim()
-                ))
+                LocalExecDecision::Deny {
+                    why: DENIED_BY_A_RULE.to_string(),
+                    rule: Some(pattern.trim().to_string()),
+                }
             } else if allowed() {
                 LocalExecDecision::Allow
             } else {
@@ -662,7 +676,7 @@ pub async fn enqueue_and_wait(
     // The gate's verdict, mapped to what actually happens for THIS origin: a user's own command
     // skips `Ask` (their enqueue is the approval); a bot's `Ask` suspends the run.
     let user_skipped_ask = origin.is_user() && matches!(decision, LocalExecDecision::Ask);
-    let audit = |decision_word: &str| {
+    let audit = |decision_word: &str, rule: Option<String>| {
         let store = state.store.clone();
         let (id, acct, mach, org, cmd) = (
             request_id.clone(),
@@ -674,21 +688,30 @@ pub async fn enqueue_and_wait(
         let decision_word = decision_word.to_string();
         async move {
             let _ = store
-                .audit_local_exec(&id, &acct, &mach, &org, &cmd, &decision_word, now_ms())
+                .audit_local_exec(
+                    &id,
+                    &acct,
+                    &mach,
+                    &org,
+                    &cmd,
+                    &decision_word,
+                    rule.as_deref(),
+                    now_ms(),
+                )
                 .await;
         }
     };
 
     match decision {
-        LocalExecDecision::Deny(reason) => {
-            audit("deny").await;
-            EnqueueResult::Refused(reason)
+        LocalExecDecision::Deny { why, rule } => {
+            audit("deny", rule).await;
+            EnqueueResult::Refused(why)
         }
         // A bot's Ask: suspend for the card — UNLESS the card already approved it (pre_approved on
         // resume), in which case dispatch with the approvalId the card recorded the machine-side
         // consent under.
         LocalExecDecision::Ask if !origin.is_user() && !pre_approved => {
-            audit("ask").await;
+            audit("ask", None).await;
             EnqueueResult::NeedsApproval
         }
         // Allow, Bypass, a user's own Ask-skipped command, or a bot's Ask that the card approved.
@@ -700,7 +723,7 @@ pub async fn enqueue_and_wait(
             } else {
                 "allow"
             };
-            audit(word).await;
+            audit(word, None).await;
             run_on_machine(state, machine_id, &request_id, approval_id, command).await
         }
     }
@@ -1034,7 +1057,7 @@ impl opengrok_tools::UserMachineSink for ReverseExecSink {
         match decide(&policy, command) {
             LocalExecDecision::Allow => opengrok_tools::UserMachineVerdict::Allow,
             LocalExecDecision::Ask => opengrok_tools::UserMachineVerdict::Ask,
-            LocalExecDecision::Deny(why) => {
+            LocalExecDecision::Deny { why, rule } => {
                 let _ = self
                     .auth
                     .store
@@ -1045,6 +1068,7 @@ impl opengrok_tools::UserMachineSink for ReverseExecSink {
                         &Origin::Bot(self.coworker_id.clone()).label(),
                         command,
                         "deny",
+                        rule.as_deref(),
                         now_ms(),
                     )
                     .await;

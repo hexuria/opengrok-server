@@ -25,7 +25,7 @@ fn session(allow: &[&str]) -> LocalExecPolicy {
 }
 
 fn is_deny(decision: &LocalExecDecision) -> bool {
-    matches!(decision, LocalExecDecision::Deny(_))
+    matches!(decision, LocalExecDecision::Deny { .. })
 }
 
 /// #204: an allow rule never covers a line with a control operator, a substitution, a
@@ -309,11 +309,15 @@ fn a_deny_matches_any_simple_command_after_normalising() {
     // A deny written as a path still names the program.
     let p = policy(&[], &["/bin/rm"]);
     assert!(is_deny(&decide(&p, "rm -rf x")));
-    // The reason names the rule, so the model can tell which one it hit.
+    // The rule that matched is kept for the audit row; the model is told only that one did
+    // (#224), or it learns exactly which words to reword around.
     let p = policy(&[], &["rm"]);
     assert_eq!(
         decide(&p, "true; rm x"),
-        LocalExecDecision::Deny("a deny rule matched this command: `rm`".to_string())
+        LocalExecDecision::Deny {
+            why: opengrok_server::local_exec::DENIED_BY_A_RULE.to_string(),
+            rule: Some("rm".to_string()),
+        }
     );
 }
 
@@ -327,7 +331,7 @@ fn a_long_line_is_refused_or_read_in_linear_time() {
     let huge = format!("sh{}", " a".repeat(512 * 1024));
     let decision = decide(&p, &huge);
     assert!(is_deny(&decision), "{decision:?}");
-    if let LocalExecDecision::Deny(why) = decision {
+    if let LocalExecDecision::Deny { why, .. } = decision {
         assert!(why.contains("65536"), "{why}");
     }
     // Just under the cap, with every word a possible program and options a matcher could chase.

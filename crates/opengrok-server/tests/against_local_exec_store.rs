@@ -2,7 +2,7 @@
 //! `LocalExecPolicy` and `decide` gives the right verdict — closed by default. Needs Postgres;
 //! skips loudly without it.
 
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use opengrok_server::local_exec::{self, LocalExecDecision, LocalExecMode};
 use opengrok_store::PgStore;
@@ -44,7 +44,7 @@ async fn a_stored_policy_loads_and_the_gate_judges_it() {
     assert_eq!(policy.mode, LocalExecMode::Never);
     assert!(matches!(
         local_exec::decide(&policy, "echo hi"),
-        LocalExecDecision::Deny(_)
+        LocalExecDecision::Deny { .. }
     ));
 
     // Turn it to ask, allow `git status`, deny `rm`.
@@ -71,7 +71,7 @@ async fn a_stored_policy_loads_and_the_gate_judges_it() {
     );
     assert!(matches!(
         local_exec::decide(&policy, "rm -rf /"),
-        LocalExecDecision::Deny(_)
+        LocalExecDecision::Deny { .. }
     ));
     assert_eq!(
         local_exec::decide(&policy, "curl example.com"),
@@ -131,7 +131,7 @@ async fn daemon_enrolment_and_audit_round_trip() {
     let audit_id = format!("ax_{}", uuid::Uuid::now_v7().simple());
     store
         .audit_local_exec(
-            &audit_id, &account, &machine, "bot cw_x", "uptime", "allow", 10,
+            &audit_id, &account, &machine, "bot cw_x", "uptime", "allow", None, 10,
         )
         .await
         .expect("audit");
@@ -336,13 +336,19 @@ async fn a_denylisted_command_is_refused_for_the_user_too() {
         false,
     )
     .await;
-    assert!(matches!(result, EnqueueResult::Refused(_)));
+    // The model is told a rule refused it, not which (#224); the person's audit row says which.
+    let EnqueueResult::Refused(why) = result else {
+        panic!("a denied command is refused");
+    };
+    assert_eq!(why, opengrok_server::local_exec::DENIED_BY_A_RULE);
+    assert!(!why.contains("rm"), "{why}");
     let log = state
         .store
         .local_exec_audit_log(&account, 10)
         .await
         .expect("log");
     assert_eq!(log[0]["decision"], "deny");
+    assert_eq!(log[0]["rule"], "rm");
 }
 
 #[tokio::test]
@@ -430,7 +436,7 @@ async fn a_chained_command_after_a_denied_word_is_refused_for_the_user_too() {
     )
     .await;
     assert!(
-        matches!(&result, EnqueueResult::Refused(reason) if reason.contains("deny rule")),
+        matches!(&result, EnqueueResult::Refused(reason) if reason.contains("deny rule") && !reason.contains("`rm`")),
         "a chained rm must meet the deny rule"
     );
     let log = state
@@ -439,6 +445,7 @@ async fn a_chained_command_after_a_denied_word_is_refused_for_the_user_too() {
         .await
         .expect("log");
     assert_eq!(log[0]["decision"], "deny");
+    assert_eq!(log[0]["rule"], "rm");
     assert_eq!(log[0]["command"], "true; rm -rf x");
 }
 
