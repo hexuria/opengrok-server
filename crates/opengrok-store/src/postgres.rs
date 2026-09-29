@@ -1259,7 +1259,9 @@ impl PgStore {
     /// writes them, only while the ceiling is still at `expected` (whatever it is, for `None`).
     /// `Ok(None)` when it has moved on, and nothing is written. ONE CONDITIONAL WRITE, not a read
     /// then a write: the version is compared on the locked row, so two writes made from the same
-    /// read cannot both land. The grant goes first, the order `grant_access` locks them in.
+    /// read cannot both land. The grant goes first, the order `grant_access` locks them in. Only
+    /// a save that changes the tools marks the ceiling `chosen`: one that changes nothing leaves
+    /// it following the built-ins as before.
     pub async fn set_ceiling(
         &self,
         owner: &AccountId,
@@ -1285,7 +1287,8 @@ impl PgStore {
             "insert into ceiling_view (coworker_id, tools, updated_at_ms, version, chosen)
              values ($1, $2, $3, 1, true)
              on conflict (coworker_id) do update set
-               tools = excluded.tools, updated_at_ms = excluded.updated_at_ms, chosen = true,
+               tools = excluded.tools, updated_at_ms = excluded.updated_at_ms,
+               chosen = ceiling_view.chosen or ceiling_view.tools <> excluded.tools,
                version = ceiling_view.version + (ceiling_view.tools <> excluded.tools)::int
              where $4::bigint is null or ceiling_view.version = $4
              returning version",
@@ -1301,6 +1304,32 @@ impl PgStore {
             tx.commit().await?;
         }
         Ok(version)
+    }
+
+    /// Change only what needs a human yes, on this principal's own live grant as it is NOW.
+    /// Nothing else of the grant and nothing of the ceiling is written: a write built from what a
+    /// request read puts back whatever changed since it read, and that undid an owner's ceiling
+    /// save (#268). `false` when there is no live grant to change.
+    pub async fn set_needs_approval(
+        &self,
+        principal: &AccountId,
+        coworker: &CoworkerId,
+        needs_approval: &opengrok_policy::ToolSet,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let needs_approval = serde_json::to_value(needs_approval)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let written = sqlx::query(
+            "update grant_view set needs_approval = $3, updated_at_ms = $4
+             where principal_id = $1 and coworker_id = $2 and not revoked",
+        )
+        .bind(principal.as_str())
+        .bind(coworker.as_str())
+        .bind(needs_approval)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(written.rows_affected() == 1)
     }
 
     /// Withdraw a grant. The row stays, so the log still says a grant existed and when it stopped.

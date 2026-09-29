@@ -1796,30 +1796,23 @@ pub async fn set_approvals(
         return refuse_use(&state, &account_id, &coworker_id, reason).await;
     }
 
-    let (Some(grant), Some(ceiling)) = (policy.grant, policy.ceiling) else {
-        return (StatusCode::FORBIDDEN, "no grant to change").into_response();
-    };
-
     let needs_approval = if request.tools.is_empty() {
         opengrok_policy::ToolSet::None
     } else {
         opengrok_policy::ToolSet::only(request.tools.clone())
     };
 
-    if let Err(error) = state
-        .auth
-        .store
-        .grant_access(
-            &account_id,
-            &coworker_id,
-            &grant.profile,
-            &ceiling.tools,
-            &needs_approval,
-            now_ms(),
-        )
+    // ONLY what needs a yes is written, on the grant as it is now. This used to write back the
+    // profile and the ceiling it had just read, and a ceiling save that landed in between was
+    // undone: a tool its owner switched off came back on (#268).
+    let store = &state.auth.store;
+    match store
+        .set_needs_approval(&account_id, &coworker_id, &needs_approval, now_ms())
         .await
     {
-        return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::FORBIDDEN, "no grant to change").into_response(),
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
 
     Json(serde_json::json!({

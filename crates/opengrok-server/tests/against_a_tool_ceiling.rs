@@ -849,27 +849,59 @@ async fn two_puts_from_the_same_read_land_once_and_the_second_is_told_the_tools_
     assert_eq!(status, 422, "{refused}");
 }
 
-/// A 403 from these routes is a sentence the app can show, like every other refusal on them.
+/// A 403 from these routes is a sentence the app can show, like every other refusal on them, and
+/// both verbs give it: a withdrawn grant is not its owner's to read the switches of, nor to widen.
 #[tokio::test]
 async fn a_withdrawn_grant_is_refused_in_words_and_nothing_changes() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let agent = h.hire().await;
-    let before = h.ceiling(&agent).await;
+    let coworker = CoworkerId::from_stored(agent.clone());
+    let before = h.store.ceiling_at(&coworker).await.expect("before");
     h.store
-        .revoke_access(&h.owner, &CoworkerId::from_stored(agent.clone()), 1)
+        .revoke_access(&h.owner, &coworker, 1)
         .await
         .expect("withdraw the grant");
 
-    let (status, refused) = h.put(&agent, json!({ "enabled": ["shell"] })).await;
-    assert_eq!(status, 403, "{refused}");
-    assert!(
-        refused["error"]
-            .as_str()
-            .is_some_and(|why| why.contains("revoked")),
-        "{refused}"
-    );
-    assert_eq!(h.ceiling(&agent).await, before);
+    let path = format!("/coworkers/{agent}/ceiling");
+    for (method, body) in [
+        ("GET", None),
+        ("PUT", Some(json!({ "enabled": ["shell"] }))),
+    ] {
+        let (status, refused) = h.call(&h.token, method, &path, body).await;
+        assert_eq!(status, 403, "{method}: {refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|why| why.contains("revoked")),
+            "{method}: {refused}"
+        );
+    }
+    let after = h.store.ceiling_at(&coworker).await.expect("after");
+    assert_eq!(after, before, "nothing changed");
+}
+
+/// Saving what is already there is not a choice: the ceiling goes on following the built-ins, so a
+/// later built-in still reaches it at boot. Only a save that changes something is the owner's.
+#[tokio::test]
+async fn saving_the_ceiling_unchanged_does_not_make_it_a_choice() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let agent = h.hire().await;
+    let (status, same) = h.put(&agent, json!({ "enabled": builtins() })).await;
+    assert_eq!(status, 200, "{same}");
+    assert!(!chosen(&h.store, &agent).await, "nothing changed");
+    let (status, changed) = h.put(&agent, json!({ "enabled": ["shell"] })).await;
+    assert_eq!(status, 200, "{changed}");
+    assert!(chosen(&h.store, &agent).await, "a change is a choice");
+}
+
+async fn chosen(store: &PgStore, agent: &str) -> bool {
+    sqlx::query_scalar("select chosen from ceiling_view where coworker_id = $1")
+        .bind(agent)
+        .fetch_one(store.pool())
+        .await
+        .expect("chosen")
 }
 
 /// Intended: a built-in that is not there yet can still be switched on. The ceiling records the
@@ -916,4 +948,77 @@ async fn a_chosen_ceiling_equal_to_an_older_builtin_set_is_not_widened_at_boot()
         chosen,
         "the boot left the choice alone"
     );
+}
+
+/// THE RACE THIS PINS: `POST /coworkers/{id}/approvals` read the grant and the ceiling, then wrote
+/// them back beside what needs a human yes. When a ceiling save landed between its read and its
+/// write, the write put the old ceiling back: `shell`, switched off, came back on. Here the save
+/// is held open on the owner's grant row, written as `set_ceiling` writes it; the approvals save
+/// reads while it is open, and its write waits on that row until the save commits.
+#[tokio::test]
+async fn an_approvals_save_that_read_before_a_ceiling_save_does_not_undo_it() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let agent = h.hire().await;
+    assert!(h.listed(&agent).await.contains(&"shell".to_string()));
+
+    let narrow = serde_json::to_value(ToolSet::only(["read_file"])).expect("narrow");
+    let mut save = h.store.pool().begin().await.expect("begin the save");
+    sqlx::query("update grant_view set profile = $3 where principal_id = $1 and coworker_id = $2")
+        .bind(h.owner.as_str())
+        .bind(agent.as_str())
+        .bind(&narrow)
+        .execute(&mut *save)
+        .await
+        .expect("the owner's profile");
+    sqlx::query(
+        "update ceiling_view set tools = $2, version = version + 1, chosen = true
+         where coworker_id = $1",
+    )
+    .bind(agent.as_str())
+    .bind(&narrow)
+    .execute(&mut *save)
+    .await
+    .expect("the ceiling");
+
+    let approvals = tokio::spawn({
+        let request = h
+            .client
+            .post(format!("{}/coworkers/{agent}/approvals", h.base))
+            .bearer_auth(&h.token)
+            .json(&json!({ "tools": ["read_file"] }));
+        async move {
+            request
+                .send()
+                .await
+                .map(|response| response.status().as_u16())
+        }
+    });
+    // Its write is waiting on the row the save holds, so its read has been made.
+    let mut polls = 0;
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity
+             where datname = current_database() and wait_event_type = 'Lock'
+               and query like '%grant_view%'",
+        )
+        .fetch_one(h.store.pool())
+        .await
+        .expect("who is waiting");
+        if waiting > 0 {
+            break;
+        }
+        polls += 1;
+        assert!(polls < 500, "the approvals save never reached its write");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    save.commit().await.expect("the ceiling save lands");
+    let status = approvals.await.expect("join").expect("approvals");
+    assert_eq!(status, 200);
+
+    let body = h.ceiling(&agent).await;
+    assert_eq!(enabled(&body), vec!["read_file".to_string()], "{body}");
+    assert!(!h.listed(&agent).await.contains(&"shell".to_string()));
+    let offered = h.offered_on_a_turn(&agent).await;
+    assert!(!offered.contains(&"shell".to_string()), "{offered:?}");
 }

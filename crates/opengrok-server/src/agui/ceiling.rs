@@ -67,7 +67,8 @@ async fn rows(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet) -> Vec<Va
 }
 
 /// The owner, or the refusal: another account's coworker reads as "no such coworker", never as a
-/// refused one.
+/// refused one. An owner whose own grant is withdrawn is told so on both verbs, in words: that
+/// coworker is not theirs to use, nor to widen again through its own ceiling.
 async fn owner(
     state: &AgUiState,
     headers: &HeaderMap,
@@ -78,9 +79,16 @@ async fn owner(
     };
     let coworker_id = CoworkerId::from_stored(id);
     match owned_coworker(state, &account_id, &coworker_id).await {
-        Ok(true) => Ok((account_id, coworker_id)),
-        Ok(false) => Err(refusal(404, "no such coworker")),
-        Err(_) => Err(unavailable(&"the roster did not answer")),
+        Ok(true) => {}
+        Ok(false) => return Err(refusal(404, "no such coworker")),
+        Err(_) => return Err(unavailable(&"the roster did not answer")),
+    }
+    let policy = state.auth.store.policy_for(&account_id, &coworker_id).await;
+    let policy = policy.map_err(|error| unavailable(&error))?;
+    let action = opengrok_policy::Action::UseCoworker;
+    match opengrok_policy::decide(&account_id, &coworker_id, action, &policy).reason() {
+        Some(why) => Err(refusal(403, why)),
+        None => Ok((account_id, coworker_id)),
     }
 }
 
@@ -135,16 +143,6 @@ pub(super) async fn put_ceiling(
             return refusal(422, &format!("send {{\"enabled\": [names]}}: {why}"));
         }
     };
-    let policy = match state.auth.store.policy_for(&account_id, &coworker_id).await {
-        Ok(policy) => policy,
-        Err(error) => return unavailable(&error),
-    };
-    // A withdrawn grant is not the owner's to widen again through its own ceiling.
-    let action = opengrok_policy::Action::UseCoworker;
-    let decision = opengrok_policy::decide(&account_id, &coworker_id, action, &policy);
-    if let Some(why) = decision.reason() {
-        return refusal(403, why);
-    }
     // Named against the rows a GET shows now. A built-in is a row whether or not it is available,
     // so it can be switched on or off either way ON PURPOSE: the ceiling records the intent, and a
     // turn offers the tool only once it is there (the machine, once one is enrolled). A plugin

@@ -1184,8 +1184,8 @@ end $do$;
 alter table local_exec_audit add column if not exists rule text;
 
 -- #268: a ceiling its owner sets. `version` counts every change to `tools`, so a write made against
--- one it has not seen is refused (`set_ceiling`); `chosen` marks a ceiling its owner set, which the
--- built-in widenings in `EVERY_BOOT` must never touch. Guarded like the columns above.
+-- one it has not seen is refused (`set_ceiling`); `chosen` marks a ceiling its owner changed, which
+-- the built-in widenings in `EVERY_BOOT` must never touch. Guarded like the columns above.
 do $do$ begin
     if not exists (
         select 1 from information_schema.columns
