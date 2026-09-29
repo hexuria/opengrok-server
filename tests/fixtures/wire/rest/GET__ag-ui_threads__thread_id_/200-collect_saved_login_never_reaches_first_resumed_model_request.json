@@ -7,7 +7,7 @@
     "runs": [
       {
         "runId": "0199bb4e-0000-7000-8000-000000000002",
-        "status": "running",
+        "status": "finished",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
         "failure": null,
@@ -309,6 +309,62 @@
             "content": "The person submitted \"New tax profile\". Nothing was typed into a page. No fields were filled. Use these values. Do not ask for a field they already filled.",
             "timestamp": 100,
             "toolCallId": "collect-1"
+          },
+          {
+            "role": "assistant",
+            "type": "TEXT_MESSAGE_START",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_10",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "delta": "Collection complete.",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_10",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_END",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_10",
+            "timestamp": 100
+          },
+          {
+            "name": "run-timing",
+            "type": "CUSTOM",
+            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "value": {
+              "tools": [],
+              "budget": {
+                "idle_ms": 240000,
+                "max_rounds": 8,
+                "max_wall_ms": 900000,
+                "call_timeout_ms": 180000,
+                "max_computer_rounds": 24
+              },
+              "context": {
+                "limit": 128000,
+                "left_out": 0,
+                "estimated": [
+                  4046
+                ]
+              },
+              "model_ms": [
+                3
+              ],
+              "total_ms": 3,
+              "tool_rounds": 0,
+              "tool_wait_ms": 3,
+              "auto_review_ms": 3
+            },
+            "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+            "total_ms": 3,
+            "timestamp": 100,
+            "tool_rounds": 0
+          },
+          {
+            "type": "RUN_FINISHED",
+            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+            "timestamp": 100
           }
         ]
       }

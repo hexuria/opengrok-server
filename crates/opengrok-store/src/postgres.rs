@@ -2114,12 +2114,13 @@ impl PgStore {
         origin: &str,
         command: &str,
         decision: &str,
+        rule: Option<&str>,
         at_ms: i64,
     ) -> StoreResult<()> {
         sqlx::query(
             "insert into local_exec_audit
-               (id, account_id, machine_id, origin, command, decision, requested_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7)",
+               (id, account_id, machine_id, origin, command, decision, rule, requested_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(id)
         .bind(account_id)
@@ -2127,6 +2128,7 @@ impl PgStore {
         .bind(origin)
         .bind(command)
         .bind(decision)
+        .bind(rule)
         .bind(at_ms)
         .execute(&self.pool)
         .await?;
@@ -2163,9 +2165,12 @@ impl PgStore {
         account_id: &str,
         limit: i64,
     ) -> StoreResult<Vec<serde_json::Value>> {
-        let rows = sqlx::query(
-            "select id, machine_id, origin, command, decision, requested_at_ms, outcome,
-                    exit_code, finished_at_ms
+        // Built in SQL so the keys are the reply's; null where a row has no value.
+        let rows = sqlx::query_scalar(
+            "select json_build_object('id', id, 'machineId', machine_id, 'origin', origin,
+                    'command', command, 'decision', decision, 'rule', rule,
+                    'requestedAtMs', requested_at_ms, 'outcome', outcome,
+                    'exitCode', exit_code, 'finishedAtMs', finished_at_ms)
              from local_exec_audit where account_id = $1
              order by requested_at_ms desc limit $2",
         )
@@ -2173,21 +2178,7 @@ impl PgStore {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(serde_json::json!({
-                    "id": row.try_get::<String, _>("id")?,
-                    "machineId": row.try_get::<String, _>("machine_id")?,
-                    "origin": row.try_get::<String, _>("origin")?,
-                    "command": row.try_get::<String, _>("command")?,
-                    "decision": row.try_get::<String, _>("decision")?,
-                    "requestedAtMs": row.try_get::<i64, _>("requested_at_ms")?,
-                    "outcome": row.try_get::<Option<String>, _>("outcome")?,
-                    "exitCode": row.try_get::<Option<i32>, _>("exit_code")?,
-                    "finishedAtMs": row.try_get::<Option<i64>, _>("finished_at_ms")?,
-                }))
-            })
-            .collect()
+        Ok(rows)
     }
 
     // ---- WebAuthn device registry (passkey step-up, slice 7) ----

@@ -1175,6 +1175,9 @@ do $do$ begin
             where lease_until_ms is not null;
     end if;
 end $do$;
+
+-- The deny rule that refused a command (#224): the person reads it here, the model is not told it.
+alter table local_exec_audit add column if not exists rule text;
 "#;
 
 /// Run on EVERY boot, after `SCHEMA`, whether or not the schema itself was replayed.

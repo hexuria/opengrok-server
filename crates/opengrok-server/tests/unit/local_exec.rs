@@ -14,7 +14,7 @@ fn default_is_closed() {
     // The default policy (no config at all) denies everything — the channel is off.
     assert!(matches!(
         decide(&LocalExecPolicy::default(), "echo hi"),
-        LocalExecDecision::Deny(_)
+        LocalExecDecision::Deny { .. }
     ));
 }
 
@@ -22,7 +22,10 @@ fn default_is_closed() {
 fn never_denies_even_an_allowlisted_command() {
     // Mode is the baseline: Never denies regardless of the lists.
     let p = policy(LocalExecMode::Never, &["echo"], &[]);
-    assert!(matches!(decide(&p, "echo hi"), LocalExecDecision::Deny(_)));
+    assert!(matches!(
+        decide(&p, "echo hi"),
+        LocalExecDecision::Deny { .. }
+    ));
 }
 
 #[test]
@@ -44,7 +47,10 @@ fn ask_allowlist_allows_on_word_boundary_only() {
 #[test]
 fn ask_denylist_denies() {
     let p = policy(LocalExecMode::Ask, &[], &["rm"]);
-    assert!(matches!(decide(&p, "rm -rf /"), LocalExecDecision::Deny(_)));
+    assert!(matches!(
+        decide(&p, "rm -rf /"),
+        LocalExecDecision::Deny { .. }
+    ));
 }
 
 #[test]
@@ -53,7 +59,7 @@ fn deny_wins_over_allow() {
     let p = policy(LocalExecMode::Ask, &["sudo rm"], &["sudo"]);
     assert!(matches!(
         decide(&p, "sudo rm -rf /"),
-        LocalExecDecision::Deny(_)
+        LocalExecDecision::Deny { .. }
     ));
 }
 
@@ -87,7 +93,7 @@ fn session_allow_runs_under_ask_and_dies_with_the_struct() {
     denied.deny = vec!["git".into()];
     assert!(matches!(
         decide(&denied, "git status"),
-        LocalExecDecision::Deny(_)
+        LocalExecDecision::Deny { .. }
     ));
 }
 
