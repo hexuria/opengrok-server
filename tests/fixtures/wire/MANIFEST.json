@@ -1,5 +1,5 @@
 {
-  "server_sha": "d856dd922dcff6a618f464b8c3ca5695f7d5fa9e",
+  "server_sha": "ba46c64b6c1d006cf9a8290ee67835bf97b09663",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -294,6 +294,10 @@
       "source": "DELETE /ag-ui/threads/{thread_id}/pending/{id}, recorded from the test cancel_then_enqueue_the_same_bubble_is_a_new_pending_row (crates/opengrok-server/tests/against_pending_user_messages.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/DELETE__connections__id_/204-a_disconnected_connection_can_be_connected_again.json",
+      "source": "DELETE /connections/{id}, recorded from the test a_disconnected_connection_can_be_connected_again (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/DELETE__coworkers__coworker_id_/204-a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words.json",
       "source": "DELETE /coworkers/{coworker_id}, recorded from the test a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words (crates/opengrok-server/tests/against_spend_caps.rs); ids and times are placeholders"
     },
@@ -574,6 +578,22 @@
       "source": "GET /auth/verify, recorded from the test a_waiting_member_can_ask_for_a_new_verification_link_and_the_reply_never_says_who (crates/opengrok-server/tests/against_domain_proof.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__connections/200-a_disconnected_connection_can_be_connected_again.json",
+      "source": "GET /connections, recorded from the test a_disconnected_connection_can_be_connected_again (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connections/200-a_connection_cannot_be_lent_to_a_coworker_its_owner_may_not_use.json",
+      "source": "GET /connections, recorded from the test a_connection_cannot_be_lent_to_a_coworker_its_owner_may_not_use (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connections/200-a_persons_connection_is_kept_listed_lent_and_taken_back.json",
+      "source": "GET /connections, recorded from the test a_persons_connection_is_kept_listed_lent_and_taken_back (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connections/200-a_disconnected_connection_can_be_connected_again-2.json",
+      "source": "GET /connections, recorded from the test a_disconnected_connection_can_be_connected_again (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__coworkers/200-a_private_coworker_and_an_orgless_owner_share_with_nobody.json",
       "source": "GET /coworkers, recorded from the test a_private_coworker_and_an_orgless_owner_share_with_nobody (crates/opengrok-server/tests/against_visibility.rs); ids and times are placeholders"
     },
@@ -814,11 +834,15 @@
       "source": "GET /schedules, recorded from the test a_routine_above_the_ceiling_is_refused_naming_it (crates/opengrok-server/tests/against_run_limits.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__schedules/200-an_edited_routine_runs_now_with_its_new_prompt.json",
+      "source": "GET /schedules, recorded from the test an_edited_routine_runs_now_with_its_new_prompt (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-an_edited_routine_runs_now_with_its_new_prompt.json",
+      "file": "rest/GET__schedules/200-an_edited_routine_runs_now_with_its_new_prompt-2.json",
       "source": "GET /schedules, recorded from the test an_edited_routine_runs_now_with_its_new_prompt (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
@@ -1224,6 +1248,22 @@
     {
       "file": "rest/POST__auth_verify_resend/429-a_waiting_member_can_ask_for_a_new_verification_link_and_the_reply_never_says_who.json",
       "source": "POST /auth/verify/resend, recorded from the test a_waiting_member_can_ask_for_a_new_verification_link_and_the_reply_never_says_who (crates/opengrok-server/tests/against_domain_proof.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__connections__id__lend/200-a_persons_connection_is_kept_listed_lent_and_taken_back.json",
+      "source": "POST /connections/{id}/lend, recorded from the test a_persons_connection_is_kept_listed_lent_and_taken_back (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__connections__id__lend/200-a_disconnected_connection_can_be_connected_again.json",
+      "source": "POST /connections/{id}/lend, recorded from the test a_disconnected_connection_can_be_connected_again (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__connections__id__lend/404-a_connection_cannot_be_lent_to_a_coworker_its_owner_may_not_use.json",
+      "source": "POST /connections/{id}/lend, recorded from the test a_connection_cannot_be_lent_to_a_coworker_its_owner_may_not_use (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__connections__id__revoke/200-a_persons_connection_is_kept_listed_lent_and_taken_back.json",
+      "source": "POST /connections/{id}/revoke, recorded from the test a_persons_connection_is_kept_listed_lent_and_taken_back (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__coworkers/201-a_blank_name_is_refused_and_the_stored_name_stands.json",
