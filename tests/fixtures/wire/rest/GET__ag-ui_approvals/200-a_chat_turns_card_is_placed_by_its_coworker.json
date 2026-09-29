@@ -32,7 +32,8 @@
         "instruction": "Enter the address and password."
       },
       "reason": "user-form",
-      "why": "The coworker is asking you to fill in “Google account”: Enter the address and password."
+      "why": "The coworker is asking you to fill in “Google account”: Enter the address and password.",
+      "summary": null
     }
   ]
 }

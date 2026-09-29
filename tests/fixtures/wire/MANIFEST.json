@@ -1,5 +1,5 @@
 {
-  "server_sha": "244f0bc3df4a8a915c5df660d6e762e70bba3972",
+  "server_sha": "be048601e71dca417914059438015371a78f9628",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -344,6 +344,10 @@
     {
       "file": "rest/GET__ag-ui_runs__run_id_/200-a_form_raised_after_an_answer_has_its_card_and_entry_id.json",
       "source": "GET /ag-ui/runs/{run_id}, recorded from the test a_form_raised_after_an_answer_has_its_card_and_entry_id (crates/opengrok-server/tests/against_a_form_after_an_answer.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__ag-ui_runs__run_id_/200-the_card_carries_its_summary_live_on_replay_and_in_the_queue.json",
+      "source": "GET /ag-ui/runs/{run_id}, recorded from the test the_card_carries_its_summary_live_on_replay_and_in_the_queue (crates/opengrok-server/tests/against_a_no_on_the_desktop_card.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__ag-ui_runs__run_id_/200-stacked_user_forms_in_one_completion_each_get_an_entry_id.json",
@@ -722,12 +726,12 @@
       "source": "GET /schedules, recorded from the test another_account_sees_neither_the_routine_nor_its_key (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row.json",
-      "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_webhook_routine_is_minted_with_a_url_and_a_key.json",
+      "source": "GET /schedules, recorded from the test a_webhook_routine_is_minted_with_a_url_and_a_key (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
-      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row.json",
+      "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
@@ -739,6 +743,10 @@
     },
     {
       "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
+      "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-2.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {

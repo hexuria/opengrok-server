@@ -8,20 +8,14 @@
       "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
       "name": "Inbox",
       "cron": null,
-      "prompt": "sign in",
+      "prompt": "a webhook arrived; report in",
       "kind": "webhook",
       "active": true,
       "nextDueMs": null,
-      "lastRun": {
-        "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "running",
-        "startedAtMs": 1790000000000,
-        "finishedAtMs": null,
-        "summary": "Routine Inbox is running."
-      },
+      "lastRun": null,
       "webhook": {
         "type": "webhook",
-        "url": "http://opengrok.lan:1447/hooks/hook_0199bb4e-0000-7000-8000-000000000004",
+        "url": "http://opengrok.lan:1447/hooks/hook_0199bb4e-0000-7000-8000-000000000003",
         "key": "«redacted»",
         "header": "Authorization: Bearer «redacted»"
       }

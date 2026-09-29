@@ -15,7 +15,8 @@
         "content": "hi"
       },
       "reason": "auto-review",
-      "why": "Auto-review asked about this rather than allowing it. Write 2 bytes to /tmp/from-mcp on the agent's own box"
+      "why": "Auto-review asked about this rather than allowing it. Write 2 bytes to /tmp/from-mcp on the agent's own box",
+      "summary": "Write 2 bytes to /tmp/from-mcp on the agent's own box"
     }
   ]
 }

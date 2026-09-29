@@ -3496,6 +3496,10 @@ async fn append_events_once(
     }
 
     for event in events {
+        // The card's sentence goes into the log with the card, so a replay carries it (#249).
+        let mut stamped = event.clone();
+        crate::cards::stamp_summary(&mut stamped);
+        let event = &stamped;
         let payload = serde_json::to_value(event).map_err(|error| {
             AppendError::Store(opengrok_store::StoreError::Corrupt(error.to_string()))
         })?;
@@ -5112,6 +5116,14 @@ pub async fn list_awaiting(
                         // And why, in a sentence: the ask's own words when the run journalled
                         // them, else a sentence built from the reason — see `waiting_why`.
                         "why": waiting_why(&run, &pending),
+                        // WHAT THE CALL WILL DO, in the card's own words (#249): the sentence
+                        // `summary_for` builds and redacts, so a client shows it rather than
+                        // rebuilding it. Null for a form, whose card is the form.
+                        "summary": crate::cards::summary_for_ask(
+                            &pending.tool,
+                            &pending.arguments,
+                            pending.reason.as_str(),
+                        ),
                     }));
                 }
             }
@@ -5597,7 +5609,9 @@ where
     use futures::StreamExt;
 
     let body = events.map(|event| {
-        event.map(|event| {
+        event.map(|mut event| {
+            // Every card that leaves live says what its call will do (#249).
+            crate::cards::stamp_summary(&mut event);
             // An event that will not serialise is dropped rather than allowed to panic mid-run;
             // `to_sse_frame` returns None and the stream continues.
             event.to_sse_frame().unwrap_or_default()

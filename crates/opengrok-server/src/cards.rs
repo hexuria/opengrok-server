@@ -194,6 +194,43 @@ fn clip(text: &str, max: usize) -> String {
     format!("{kept}…")
 }
 
+/// The card's sentence for a call a person is asked about, or `None` for a form, whose card is
+/// the form itself. Shared by the approval frame and `GET /ag-ui/approvals` (#249), so a client
+/// never has to build its own copy of `summary_for` and its redaction rules.
+pub fn summary_for_ask(tool: &str, arguments: &Value, reason: &str) -> Option<String> {
+    (reason != "user-form").then(|| summary_for(tool, arguments))
+}
+
+/// Put `summary` on a `run-awaiting-approval` frame that has none (#249). The harness builds the
+/// frame and cannot reach this crate's `summary_for`, so the server adds it where frames leave:
+/// the live stream (`sse`) and the journal (`append_events_once`), which replays read from.
+pub fn stamp_summary(event: &mut opengrok_wire::agui::Event) {
+    if event.event_type != opengrok_wire::agui::EventType::Custom
+        || event.extra.get("name").and_then(Value::as_str) != Some("run-awaiting-approval")
+        || event.extra.contains_key("summary")
+    {
+        return;
+    }
+    let tool = event
+        .extra
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let reason = event
+        .extra
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let arguments = event.extra.get("arguments").cloned().unwrap_or(Value::Null);
+    if let Some(summary) = summary_for_ask(&tool, &arguments, &reason) {
+        event
+            .extra
+            .insert("summary".to_string(), Value::String(summary));
+    }
+}
+
 /// Set for the two shell tools only; the renderer shows it in place of `summary`.
 pub fn command_for(tool: &str, arguments: &Value) -> Option<String> {
     match tool {

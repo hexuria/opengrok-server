@@ -18,7 +18,8 @@
         ]
       },
       "reason": "auto-review",
-      "why": "This action would use your network through the egress tunnel. Review it before it runs."
+      "why": "This action would use your network through the egress tunnel. Review it before it runs.",
+      "summary": "Click at (120, 40) on the agent's own screen"
     }
   ]
 }

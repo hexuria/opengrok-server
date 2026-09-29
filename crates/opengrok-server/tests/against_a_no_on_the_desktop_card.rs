@@ -721,3 +721,93 @@ async fn an_allowed_card_continues_with_the_request_it_was_asked() {
         asked[0].system
     );
 }
+
+/// Every `run-awaiting-approval` object anywhere in `value`.
+fn cards_in(value: &Value, found: &mut Vec<Value>) {
+    match value {
+        Value::Object(object) => {
+            if object.get("name") == Some(&json!("run-awaiting-approval")) {
+                found.push(value.clone());
+            }
+            object.values().for_each(|child| cards_in(child, found));
+        }
+        Value::Array(items) => items.iter().for_each(|child| cards_in(child, found)),
+        _ => {}
+    }
+}
+
+/// THE CARD SAYS WHAT ITS CALL WILL DO, in the server's words, everywhere a client reads it
+/// (#249): on the live frame, on the frame a replay reads back from the journal, and on the row
+/// `GET /ag-ui/approvals` lists. NativeChat built its own copy of `summary_for`, which drifts from
+/// the server's clipping and redaction the day either changes; now it shows this field instead.
+#[tokio::test]
+async fn the_card_carries_its_summary_live_on_replay_and_in_the_queue() {
+    let database_url = database_or_skip!();
+    let email = format!("card-summary-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let hired: Value = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "name": "Ada" }))
+        .send()
+        .await
+        .expect("hire")
+        .json()
+        .await
+        .expect("hire json");
+    let agent = hired["id"].as_str().expect("coworker id").to_string();
+    h.client
+        .post(format!("{}/coworkers/{agent}/approvals", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "tools": ["shell"] }))
+        .send()
+        .await
+        .expect("approvals");
+    let expected =
+        "Command on the agent's own box: echo opengrok-tool-ran > /tmp/opengrok-tool-ran";
+
+    let sse = h.turn(&token, &agent, "run a command").await;
+    let live: Vec<Value> = sse
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|data| serde_json::from_str(data.trim()).ok())
+        .filter(|frame: &Value| frame["name"] == "run-awaiting-approval")
+        .collect();
+    assert_eq!(live.len(), 1, "{sse}");
+    assert_eq!(live[0]["summary"], expected, "live: {}", live[0]);
+
+    let (run_id, call_id) = h.wait_for_pending().await;
+    let replay: Value = h
+        .client
+        .get(format!("{}/ag-ui/runs/{}", h.base, run_id.as_str()))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("replay")
+        .json()
+        .await
+        .expect("replay json");
+    let mut replayed = Vec::new();
+    cards_in(&replay, &mut replayed);
+    assert_eq!(replayed.len(), 1, "{replay}");
+    assert_eq!(replayed[0]["summary"], expected, "replay: {}", replayed[0]);
+
+    let queue: Value = h
+        .client
+        .get(format!("{}/ag-ui/approvals", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("queue")
+        .json()
+        .await
+        .expect("queue json");
+    let row = queue
+        .as_array()
+        .or_else(|| queue["approvals"].as_array())
+        .and_then(|rows| rows.iter().find(|row| row["callId"] == call_id.as_str()))
+        .unwrap_or_else(|| panic!("no row for {call_id}: {queue}"));
+    assert_eq!(row["summary"], expected, "queue: {row}");
+}

@@ -14,7 +14,8 @@
         "command": "ls"
       },
       "reason": "auto-review",
-      "why": "The reviewer did not answer (this coworker's spend limit was reached), so this is being asked rather than allowed."
+      "why": "The reviewer did not answer (this coworker's spend limit was reached), so this is being asked rather than allowed.",
+      "summary": "Command on the agent's own box: ls"
     }
   ]
 }
