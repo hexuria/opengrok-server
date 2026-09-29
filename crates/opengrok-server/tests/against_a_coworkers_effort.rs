@@ -585,7 +585,7 @@ async fn one_sweeper(database_url: &str) -> sqlx::PgConnection {
         .await
         .expect("connect for the sweep lock");
     sqlx::query("select pg_advisory_lock($1)")
-        .bind(0x5eed_0271_i64)
+        .bind(0x5eed_0091_i64)
         .execute(&mut connection)
         .await
         .expect("take the sweep lock");
