@@ -64,23 +64,26 @@ struct SignedState {
 
 const STATE_PURPOSE: &str = "connection-state";
 
-/// Sign the state a person carries to the provider and back.
+/// Sign the state a person carries to the provider and back. The second it expires comes back
+/// with it, so what an app is told (`expiresAtMs`, #269) is the `exp` that was signed.
 pub fn sign_state(
     minter: &TokenMinter,
     claims: &StateClaims,
     now_seconds: i64,
-) -> Result<String, FlowError> {
+) -> Result<(String, i64), FlowError> {
+    let exp = now_seconds + STATE_TTL_SECONDS;
     let signed = SignedState {
         sub: claims.sub.clone(),
         connector: claims.connector.clone(),
         scope: claims.scope.clone(),
         coworker: claims.coworker.clone(),
         nonce: claims.nonce.clone(),
-        exp: now_seconds + STATE_TTL_SECONDS,
+        exp,
         purpose: STATE_PURPOSE.to_string(),
     };
     minter
         .mint_claims(&signed)
+        .map(|token| (token, exp))
         .map_err(|error| FlowError::Unreadable(error.to_string()))
 }
 

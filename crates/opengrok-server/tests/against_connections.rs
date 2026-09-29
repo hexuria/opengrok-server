@@ -1,4 +1,5 @@
-//! A person's connection can be kept, listed, lent to a coworker and taken back (#267).
+//! A person's connection can be kept, listed, lent to a coworker and taken back (#267), and a
+//! native app can list what can be connected and start a sign-in itself (#269).
 //!
 //! THE BUG THIS EXISTS FOR: the connection's owner did not serialize for a person or a coworker
 //! (an internally tagged newtype over a string), so every such `Connected` failed at append and
@@ -17,6 +18,7 @@ use opengrok_core::id::AccountId;
 use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
+use opengrok_server::connections::flow::verify_state;
 use opengrok_server::connections::oauth::ProviderConfig;
 use opengrok_server::connections::routes::Connectors;
 use opengrok_server::host_state::HostState;
@@ -85,6 +87,8 @@ struct Harness {
     store: PgStore,
     minter: Arc<TokenMinter>,
     vault: Arc<Vault>,
+    /// The stand-in provider every configured connector sends a person to.
+    provider: String,
     /// Follows no redirect, so `/authorize`'s answer can be read the way a browser receives it.
     client: reqwest::Client,
 }
@@ -118,6 +122,11 @@ async fn start_provider() -> String {
 }
 
 async fn harness(database_url: &str) -> Harness {
+    harness_offering(database_url, &["gmail"]).await
+}
+
+/// A server offering these connectors, each of them the stand-in provider under that name.
+async fn harness_offering(database_url: &str, connectors: &[&str]) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(database_url)
@@ -130,9 +139,13 @@ async fn harness(database_url: &str) -> Harness {
     let minter = Arc::new(TokenMinter::new(b"connections-secret"));
     let vault = Arc::new(Vault::from_base64_key(KEK).expect("vault"));
     let provider = start_provider().await;
-    let mut gmail = ProviderConfig::google("gmail", "client-id", "client-secret", &["gmail.send"]);
-    gmail.authorize_url = format!("{provider}/authorize");
-    gmail.token_url = format!("{provider}/token");
+    let providers = connectors.iter().map(|name| {
+        let mut config =
+            ProviderConfig::google(name, "client-id", "client-secret", &["gmail.send"]);
+        config.authorize_url = format!("{provider}/authorize");
+        config.token_url = format!("{provider}/token");
+        (name.to_string(), config)
+    });
     let agui = AgUiState {
         auth: AuthState::new(store.clone(), minter.clone(), "host@og.local".to_string()),
         door: Arc::new(MockDoor::echoing()),
@@ -141,7 +154,7 @@ async fn harness(database_url: &str) -> Harness {
         computer: None,
         vault: Some(vault.clone()),
         connectors: Connectors {
-            providers: Arc::new(BTreeMap::from([("gmail".to_string(), gmail)])),
+            providers: Arc::new(providers.collect()),
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
         plugins: Arc::new(BTreeMap::new()),
@@ -164,6 +177,7 @@ async fn harness(database_url: &str) -> Harness {
         store,
         minter,
         vault,
+        provider,
         client: reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -254,34 +268,72 @@ impl Harness {
             .expect("disconnect")
     }
 
-    /// Gmail connected the way a browser does it: our `/authorize` sends it to the provider with a
-    /// signed state, and the provider sends it back to `/callback` with that state and a code.
-    async fn connect_through_the_browser(&self, token: &str, code: &str) -> reqwest::Response {
-        let sent = self
-            .client
-            .get(format!("{}/connections/gmail/authorize", self.base))
+    async fn get(&self, token: &str, path: &str) -> reqwest::Response {
+        self.client
+            .get(format!("{}{path}", self.base))
             .header("authorization", format!("Bearer {token}"))
             .send()
             .await
-            .expect("authorize");
+            .expect("get")
+    }
+
+    /// Gmail connected the way a browser does it: our `/authorize` sends it to the provider with a
+    /// signed state, and the provider sends it back to `/callback` with that state and a code.
+    async fn connect_through_the_browser(&self, token: &str, code: &str) -> reqwest::Response {
+        let sent = self.get(token, "/connections/gmail/authorize").await;
         assert!(sent.status().is_redirection(), "{}", sent.status());
-        let to_provider = sent
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|location| location.to_str().ok())
-            .and_then(|location| reqwest::Url::parse(location).ok())
-            .expect("a redirect to the provider");
-        let state = to_provider
-            .query_pairs()
-            .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
-            .expect("a signed state");
+        self.callback(code, &state_in(&location(&sent))).await
+    }
+
+    /// The provider sending a person back with a code and the state they left with.
+    async fn callback(&self, code: &str, state: &str) -> reqwest::Response {
         self.client
             .get(format!("{}/connections/callback", self.base))
-            .query(&[("code", code), ("state", state.as_str())])
+            .query(&[("code", code), ("state", state)])
             .send()
             .await
             .expect("callback")
     }
+
+    /// A fresh account, and a bearer for it.
+    async fn account(&self, who: &str) -> (AccountId, String) {
+        let email = format!("{who}-{}@og.local", uuid::Uuid::now_v7().simple());
+        let account = seed_account(&self.store, &email).await;
+        let token = self.token(&account, &email);
+        (account, token)
+    }
+}
+
+/// Where a redirect sends the browser.
+fn location(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|location| location.to_str().ok())
+        .expect("a redirect to the provider")
+        .to_string()
+}
+
+/// The signed state a sign-in link carries to the provider and back.
+fn state_in(link: &str) -> String {
+    reqwest::Url::parse(link)
+        .expect("a sign-in link")
+        .query_pairs()
+        .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
+        .expect("a signed state")
+}
+
+/// A sign-in link without its state, which is fresh per attempt: where it sends a person, and
+/// with what.
+fn without_state(link: &str) -> (String, Vec<(String, String)>) {
+    let url = reqwest::Url::parse(link).expect("a sign-in link");
+    let pairs = url
+        .query_pairs()
+        .filter(|(key, _)| key != "state")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let (to, _) = link.split_once('?').expect("a query");
+    (to.to_string(), pairs)
 }
 
 fn row<'a>(listed: &'a Value, id: &str) -> &'a Value {
@@ -466,4 +518,200 @@ async fn a_disconnected_connection_can_be_connected_again() {
         Some("token-for-second"),
         "the new round trip's token is the one kept"
     );
+}
+
+/// What a person can connect, for an app to start a sign-in from (#269): one row per configured
+/// provider, by name, each with the label a person reads. A name the label table lacks reads as
+/// itself with a capital.
+#[tokio::test]
+async fn the_connectors_a_server_offers_are_listed_by_name_with_their_labels() {
+    let database_url = database_or_skip!();
+    let h = harness_offering(&database_url, &["gmail", "acme", "github", "gdrive"]).await;
+    let (_, token) = h.account("offered").await;
+
+    let listed = h.get(&token, "/connectors").await;
+    assert_eq!(listed.status().as_u16(), 200);
+    assert_eq!(
+        listed.json::<Value>().await.expect("connectors json"),
+        json!([
+            { "name": "acme", "label": "Acme" },
+            { "name": "gdrive", "label": "Google Drive" },
+            { "name": "github", "label": "GitHub" },
+            { "name": "gmail", "label": "Gmail" },
+        ])
+    );
+}
+
+/// A server that configures no connector offers none: an empty ARRAY, which is an answer and not
+/// an error an app should show.
+#[tokio::test]
+async fn a_server_with_no_connector_configured_lists_none() {
+    let database_url = database_or_skip!();
+    let h = harness_offering(&database_url, &[]).await;
+    let (_, token) = h.account("none").await;
+
+    let listed = h.get(&token, "/connectors").await;
+    assert_eq!(listed.status().as_u16(), 200);
+    assert_eq!(listed.json::<Value>().await.expect("json"), json!([]));
+}
+
+/// Signed out, neither the list nor a sign-in answers anything but why, in words an app reads.
+#[tokio::test]
+async fn a_signed_out_caller_is_refused_the_connectors_and_a_sign_in_in_json() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+
+    for path in [
+        "/connectors",
+        "/connections/gmail/authorize?format=json",
+        "/connections/gmail/authorize",
+    ] {
+        let url = format!("{}{path}", h.base);
+        let refused = h.client.get(url).send().await.expect("get");
+        assert_eq!(refused.status().as_u16(), 401, "{path}");
+        let body: Value = refused.json().await.expect("a JSON refusal");
+        assert_eq!(body, json!({ "error": "sign in first" }), "{path}");
+    }
+}
+
+/// A native app asks for the sign-in link rather than a redirect it cannot read (#269): the
+/// provider's authorize URL carrying a signed state, and the moment that state lapses, which is
+/// the state's own `exp` to the second. The same state then completes the round trip.
+#[tokio::test]
+async fn an_app_is_handed_the_sign_in_link_and_when_it_lapses() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (account, token) = h.account("handed").await;
+
+    let before = now_ms();
+    let handed = h
+        .get(&token, "/connections/gmail/authorize?format=json")
+        .await;
+    let after = now_ms();
+    assert_eq!(handed.status().as_u16(), 200);
+    let handed: Value = handed.json().await.expect("authorize json");
+    assert_eq!(
+        handed.as_object().map(|keys| keys.len()),
+        Some(2),
+        "{handed}"
+    );
+    let url = handed["url"].as_str().expect("a url");
+    let expires_at_ms = handed["expiresAtMs"]
+        .as_i64()
+        .expect("expiresAtMs, a number");
+    assert!(
+        url.starts_with(&format!("{}/authorize?", h.provider)),
+        "{url}"
+    );
+
+    let state = state_in(url);
+    let claims = verify_state(&h.minter, &state).expect("a state this server signed");
+    assert_eq!(claims.sub, account.as_str());
+    assert_eq!(
+        (claims.connector.as_str(), claims.scope.as_str()),
+        ("gmail", "user")
+    );
+    assert_eq!(expires_at_ms, claims.exp * 1_000, "the state's own expiry");
+    assert!(
+        (before + 599_000..=after + 600_000).contains(&expires_at_ms),
+        "{expires_at_ms} is not ten minutes on from {before}..{after}"
+    );
+
+    let back = h.callback("from-the-app", &state).await;
+    assert_eq!(back.status().as_u16(), 200);
+    let said = back.text().await.expect("callback text");
+    assert!(said.starts_with("gmail is connected"), "{said}");
+    let id = format!("conn_gmail_{}", account.as_str());
+    let listed = h.list(&token).await;
+    assert_eq!(
+        row(&listed, &id)["owner"],
+        json!({ "scope": "user", "id": account.as_str() })
+    );
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &id)
+            .await
+            .expect("open the credential")
+            .as_deref(),
+        Some("token-for-from-the-app")
+    );
+}
+
+/// Without `format=json` a browser is still sent on with a 307, to the place an app is handed:
+/// the same endpoint and parameters, and a state of its own (each attempt signs a fresh nonce)
+/// for the same person, connector and scope.
+#[tokio::test]
+async fn without_format_json_a_browser_is_still_redirected_to_the_same_place() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (_, token) = h.account("redirected").await;
+
+    let redirected = h.get(&token, "/connections/gmail/authorize").await;
+    assert_eq!(redirected.status().as_u16(), 307);
+    let sent_to = location(&redirected);
+    let handed: Value = h
+        .get(&token, "/connections/gmail/authorize?format=json")
+        .await
+        .json()
+        .await
+        .expect("authorize json");
+    let url = handed["url"].as_str().expect("a url");
+
+    assert_eq!(without_state(&sent_to), without_state(url));
+    let by_browser = verify_state(&h.minter, &state_in(&sent_to)).expect("signed");
+    let by_app = verify_state(&h.minter, &state_in(url)).expect("signed");
+    assert_eq!(
+        (by_browser.sub, by_browser.connector, by_browser.scope),
+        (by_app.sub, by_app.connector, by_app.scope)
+    );
+}
+
+/// A sign-in for a connector this server does not offer is refused in words, redirect or not:
+/// a 404 naming it. It was bare text, which an app reads as a proxy's and loses.
+#[tokio::test]
+async fn an_unknown_connector_is_refused_in_json_with_or_without_format_json() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (_, token) = h.account("unknown").await;
+
+    for query in ["", "?format=json"] {
+        let refused = h
+            .get(&token, &format!("/connections/dropbox/authorize{query}"))
+            .await;
+        assert_eq!(refused.status().as_u16(), 404, "{query}");
+        let body: Value = refused.json().await.expect("a JSON refusal");
+        assert_eq!(
+            body,
+            json!({ "error": "no connector named dropbox" }),
+            "{query}"
+        );
+    }
+}
+
+/// A connection for a coworker may be started only by somebody who may use that coworker, or
+/// this would attach a provider account to a stranger's bot. Another account's is refused
+/// before any state is signed, in JSON, redirect or not.
+#[tokio::test]
+async fn a_sign_in_for_a_coworker_the_caller_may_not_use_is_refused_in_json() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (account, token) = h.account("caller").await;
+    let (_, stranger) = h.account("stranger").await;
+    let theirs = h.hire(&stranger).await;
+
+    for query in [
+        format!("?coworker_id={theirs}"),
+        format!("?coworker_id={theirs}&format=json"),
+    ] {
+        let refused = h
+            .get(&token, &format!("/connections/gmail/authorize{query}"))
+            .await;
+        assert_eq!(refused.status().as_u16(), 403, "{query}");
+        let body: Value = refused.json().await.expect("a JSON refusal");
+        assert_eq!(
+            body,
+            json!({ "error": format!("no grant lets {} use coworker {theirs}", account.as_str()) }),
+            "{query}"
+        );
+    }
 }

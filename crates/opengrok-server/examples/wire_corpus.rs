@@ -40,19 +40,19 @@ const REST_PREFIXES: &[&str] = &[
     "/skills",
     // A person's attachments (#229): the upload and the thread's list a replay draws them from.
     "/artifacts",
-    // A person's connections and their loans (#267): the list, lend, revoke and disconnect.
+    // A person's connections and their loans (#267): the list, lend, revoke and disconnect; and
+    // a connector's sign-in link, which an app asks for with `format=json` (#269).
     "/connections",
+    // What can be connected, for an app to start a sign-in from (#269).
+    "/connectors",
 ];
 
 /// Routes under those prefixes that are not JSON NativeChat reads: the screen proxy serves noVNC's
 /// own pages and a websocket, an artifact's `/bytes` is the file itself, and a connector's
-/// `/authorize` and `/callback` are a redirect and a page for the browser, not the app.
-const REST_LEFT_OUT: &[&str] = &[
-    "/computer/vnc/",
-    "/bytes",
-    "/connections/{connector}/authorize",
-    "/connections/callback",
-];
+/// `/callback` is a page for the browser, not the app. A connector's `/authorize` is kept: its
+/// `format=json` link and its refusals are JSON an app reads, and its redirect has no body or
+/// type, which the recorder (`tests/support/wire_record.rs`) never writes.
+const REST_LEFT_OUT: &[&str] = &["/computer/vnc/", "/bytes", "/connections/callback"];
 
 /// Recordings kept whatever their shape, by test and route: a sequence NativeChat checks that a
 /// shape alone cannot tell apart from one already kept. The replay of a message sent with files

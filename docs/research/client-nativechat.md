@@ -101,12 +101,13 @@ Skills, recipes, connectors and the tools a coworker is offered.
 
 | Route | Methods | Mounted at (`crates/opengrok-server/src/`) | Reply (the server's side) | Callers on record |
 |---|---|---|---|---|
-| `/connections` | GET | `connections/routes.rs:53` | JSON: what a person has connected and to whom it is lent | *unverified* |
-| `/connections/callback` | GET | `connections/routes.rs:55` | the provider's return leg (the signed state is the only trusted input) | *unverified* |
-| `/connections/{connector}/authorize` | GET | `connections/routes.rs:54` | a redirect to the provider | *unverified* |
-| `/connections/{id}` | DELETE | `connections/routes.rs:58` | see the mount | *unverified* |
-| `/connections/{id}/lend` | POST | `connections/routes.rs:56` | see the mount | *unverified* |
-| `/connections/{id}/revoke` | POST | `connections/routes.rs:57` | see the mount | *unverified* |
+| `/connections` | GET | `connections/routes.rs:54` | JSON: what a person has connected and to whom it is lent | *unverified* |
+| `/connections/callback` | GET | `connections/routes.rs:56` | the provider's return leg (the signed state is the only trusted input) | *unverified* |
+| `/connections/{connector}/authorize` | GET | `connections/routes.rs:55` | a 307 to the provider; `?format=json`: `{url, expiresAtMs}`, the same link and signed state for an app to open, `expiresAtMs` the state's own expiry (`?coworker_id=` for a coworker's connection); 401, 403, 404 "no connector named …", 503, all `{error}` | the shape agreed with NativeChat in #269. NativeChat file: *unverified* |
+| `/connections/{id}` | DELETE | `connections/routes.rs:59` | see the mount | *unverified* |
+| `/connections/{id}/lend` | POST | `connections/routes.rs:57` | see the mount | *unverified* |
+| `/connections/{id}/revoke` | POST | `connections/routes.rs:58` | see the mount | *unverified* |
+| `/connectors` | GET | `connections/routes.rs:53` | JSON array, one `{name, label}` per configured provider, by name; `[]` when none is configured; 401 `{error}` | the shape agreed with NativeChat in #269. NativeChat file: *unverified* |
 | `/coworkers/{coworker_id}/ceiling` | GET PUT | `agui/routes.rs:997` | `{tools: [{name, kind, description, enabled, available?, label?, connector?}], version}`: one row per built-in (`user_machine_shell` carries `available`), per loaded plugin, and per plugin still switched on that the server no longer loads (`available: false`). PUT `{enabled: [names], version?}` replaces the ceiling with exactly those rows and answers the same body; `[]` switches everything off. A stale `version` is 409 `{error, code: "ceiling-changed"}` with nothing changed; without one the write is unconditional. 404 `{error: "no such coworker"}` unless you own it; 403 `{error}` for a withdrawn grant; 422 `{error}` for a name no row shows or a malformed body, with nothing changed; 503 `{error}` | the wire NativeChat agreed on #268. NativeChat file: *unverified* |
 | `/coworkers/{coworker_id}/tools` | GET | `agui/routes.rs:934` | see the mount | *unverified* |
 | `/recipes` | GET POST | `recipes.rs:71` | see the mount | *unverified* |
