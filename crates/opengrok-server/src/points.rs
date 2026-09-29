@@ -83,21 +83,6 @@ pub struct Effective {
 }
 
 impl Effective {
-    /// Nothing set, for the arithmetic tests. Deliberately NOT a `Default` impl: outside a test
-    /// an `Effective` has to name whose pool it is, and a derived default would let a caller
-    /// skip saying — which is exactly the bug this type was re-keyed to prevent.
-    #[cfg(test)]
-    pub fn none_set() -> Self {
-        Self {
-            cap: None,
-            day_cap: None,
-            cap_set_by: None,
-            payer: AccountId::from_stored("acct_test".to_string()),
-            pool: None,
-            pool_set_by: None,
-        }
-    }
-
     /// Whether anything at all is enforced: with nothing set the guard never touches the meter.
     pub fn is_limited(&self) -> bool {
         self.cap.is_some() || self.day_cap.is_some() || self.pool.is_some()

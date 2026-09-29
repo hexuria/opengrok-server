@@ -272,14 +272,6 @@ impl GatewayAdmin {
             .map(|_| ())
     }
 
-    /// The method OAG does not serve. GET of the collection is 405 by design; this exists so
-    /// the contract test can prove that 405 is `Refused`, never `Unreachable`.
-    #[cfg(test)]
-    async fn get_principals_collection(&self) -> Result<serde_json::Value, AdminError> {
-        self.send(reqwest::Method::GET, "/admin/api/principals", None)
-            .await
-    }
-
     /// Mint one member's key on the org's principal. `label` is what the console shows; the
     /// gateway also uses it as the key's name, so a key is identifiable from the gateway side too.
     pub async fn mint_member_key(

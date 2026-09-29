@@ -269,6 +269,17 @@ fn the_computer_prompt_tracks_whether_the_tools_exist() {
     );
 }
 
+/// The room's transcribed prompt with the standing role appended. The transcription is returned
+/// unchanged when there is no role, and never edited when there is: the role is a new paragraph
+/// after it, so a diff of the transcribed text stays empty. Here, beside its test, until rooms
+/// have a caller (ROADMAP "P11"): nothing the server serves composes a room's prompt yet.
+fn with_standing_role(transcribed: &str, persona: &Persona) -> String {
+    match persona.standing() {
+        Some(standing) => format!("{transcribed}\n\n{standing}"),
+        None => transcribed.to_string(),
+    }
+}
+
 /// The transcription rule, as a test: the room's text must survive byte-for-byte.
 #[test]
 fn the_rooms_transcribed_prompt_is_never_edited() {

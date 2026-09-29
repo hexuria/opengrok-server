@@ -142,25 +142,11 @@ impl AuthState {
         }
     }
 
-    /// Tests only: where an org's box.ascii.dev key is used (see `ascii_base_url`).
-    #[must_use]
-    pub fn with_ascii_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.ascii_base_url = base_url.into();
-        self
-    }
-
     /// Turn the password-free dev sign-in on (see `dev_sign_in`). The binary passes
     /// `OG_DEV_SIGN_IN=1`; a test passes `true` to drive the smokes' path.
     #[must_use]
     pub fn with_dev_sign_in(mut self, on: bool) -> Self {
         self.dev_sign_in = on;
-        self
-    }
-
-    /// Tests only: allow a client id metadata document on a loopback address.
-    #[must_use]
-    pub fn with_cimd_loopback(mut self) -> Self {
-        self.cimd_allow_loopback = true;
         self
     }
 
@@ -177,13 +163,6 @@ impl AuthState {
         self
     }
 
-    /// Send mail somewhere other than Resend — a test's stand-in mailbox.
-    #[must_use]
-    pub fn with_resend_endpoint(mut self, endpoint: String) -> Self {
-        self.resend_endpoint = endpoint;
-        self
-    }
-
     /// The mailer, when this deployment has one.
     #[must_use]
     pub fn mailer(&self) -> Option<super::resend::Mailer> {
@@ -193,40 +172,6 @@ impl AuthState {
                 endpoint: self.resend_endpoint.clone(),
                 key: key.clone(),
             })
-    }
-
-    /// Point the catalogue at an explicit gateway — what a test uses to stand in for a real one
-    /// without touching the process environment.
-    #[must_use]
-    pub fn with_model_catalogue(
-        mut self,
-        catalogue: Option<std::sync::Arc<crate::models::ModelCatalogue>>,
-    ) -> Self {
-        self.model_catalogue = catalogue;
-        self
-    }
-
-    /// Hold turns to `tokens` when the catalogue cannot say; `None` turns the guard off.
-    #[must_use]
-    pub fn with_context_tokens(mut self, tokens: Option<u64>) -> Self {
-        self.context_tokens = tokens;
-        self
-    }
-
-    /// Point the gateway's admin door somewhere explicit — what a test uses to stand in for the
-    /// real gateway without touching the process environment.
-    #[must_use]
-    pub fn with_gateway_admin(mut self, admin: Option<crate::gateway_admin::GatewayAdmin>) -> Self {
-        self.gateway_admin = admin;
-        self
-    }
-
-    /// Point Jev somewhere explicit — what a test uses to answer deterministically with no key,
-    /// no spend and no network, the way `MockDoor` stands in for the model door.
-    #[must_use]
-    pub fn with_jev(mut self, jev: Option<crate::jev::SharedJev>) -> Self {
-        self.jev = jev;
-        self
     }
 }
 

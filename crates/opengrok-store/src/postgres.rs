@@ -1224,6 +1224,7 @@ impl PgStore {
              values ($1, $2, $3)
              on conflict (coworker_id) do update set
                tools = excluded.tools,
+               version = ceiling_view.version + (ceiling_view.tools <> excluded.tools)::int,
                updated_at_ms = excluded.updated_at_ms",
         )
         .bind(coworker.as_str())
@@ -1234,6 +1235,101 @@ impl PgStore {
 
         tx.commit().await?;
         Ok(())
+    }
+
+    /// A coworker's ceiling and the `version` a write against it names, read together so the
+    /// number is the tools' own. No row is `None` at version 0: it admits nothing.
+    pub async fn ceiling_at(
+        &self,
+        coworker: &CoworkerId,
+    ) -> StoreResult<(opengrok_policy::ToolSet, i64)> {
+        let row = sqlx::query("select tools, version from ceiling_view where coworker_id = $1")
+            .bind(coworker.as_str())
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else {
+            return Ok((opengrok_policy::ToolSet::None, 0));
+        };
+        let tools: serde_json::Value = row.try_get("tools")?;
+        let tools = serde_json::from_value(tools).unwrap_or(opengrok_policy::ToolSet::None);
+        Ok((tools, row.try_get("version")?))
+    }
+
+    /// Set a coworker's ceiling as its owner chose it, and the owner's profile equal to it as hire
+    /// writes them, only while the ceiling is still at `expected` (whatever it is, for `None`).
+    /// `Ok(None)` when it has moved on, and nothing is written. ONE CONDITIONAL WRITE, not a read
+    /// then a write: the version is compared on the locked row, so two writes made from the same
+    /// read cannot both land. The grant goes first, the order `grant_access` locks them in. Only
+    /// a save that changes the tools marks the ceiling `chosen`: one that changes nothing leaves
+    /// it following the built-ins as before.
+    pub async fn set_ceiling(
+        &self,
+        owner: &AccountId,
+        coworker: &CoworkerId,
+        tools: &opengrok_policy::ToolSet,
+        expected: Option<i64>,
+        at_ms: i64,
+    ) -> StoreResult<Option<i64>> {
+        let tools =
+            serde_json::to_value(tools).map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "update grant_view set profile = $3, updated_at_ms = $4
+             where principal_id = $1 and coworker_id = $2",
+        )
+        .bind(owner.as_str())
+        .bind(coworker.as_str())
+        .bind(&tools)
+        .bind(at_ms)
+        .execute(&mut *tx)
+        .await?;
+        let version: Option<i64> = sqlx::query_scalar(
+            "insert into ceiling_view (coworker_id, tools, updated_at_ms, version, chosen)
+             values ($1, $2, $3, 1, true)
+             on conflict (coworker_id) do update set
+               tools = excluded.tools, updated_at_ms = excluded.updated_at_ms,
+               chosen = ceiling_view.chosen or ceiling_view.tools <> excluded.tools,
+               version = ceiling_view.version + (ceiling_view.tools <> excluded.tools)::int
+             where $4::bigint is null or ceiling_view.version = $4
+             returning version",
+        )
+        .bind(coworker.as_str())
+        .bind(&tools)
+        .bind(at_ms)
+        .bind(expected)
+        .fetch_optional(&mut *tx)
+        .await?;
+        // Dropped without a commit, the profile write above is rolled back with it.
+        if version.is_some() {
+            tx.commit().await?;
+        }
+        Ok(version)
+    }
+
+    /// Change only what needs a human yes, on this principal's own live grant as it is NOW.
+    /// Nothing else of the grant and nothing of the ceiling is written: a write built from what a
+    /// request read puts back whatever changed since it read, and that undid an owner's ceiling
+    /// save (#268). `false` when there is no live grant to change.
+    pub async fn set_needs_approval(
+        &self,
+        principal: &AccountId,
+        coworker: &CoworkerId,
+        needs_approval: &opengrok_policy::ToolSet,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let needs_approval = serde_json::to_value(needs_approval)
+            .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+        let written = sqlx::query(
+            "update grant_view set needs_approval = $3, updated_at_ms = $4
+             where principal_id = $1 and coworker_id = $2 and not revoked",
+        )
+        .bind(principal.as_str())
+        .bind(coworker.as_str())
+        .bind(needs_approval)
+        .bind(at_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(written.rows_affected() == 1)
     }
 
     /// Withdraw a grant. The row stays, so the log still says a grant existed and when it stopped.
@@ -2179,122 +2275,6 @@ impl PgStore {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
-    }
-
-    // ---- WebAuthn device registry (passkey step-up, slice 7) ----
-
-    /// Register (or replace) a WebAuthn credential for an account. Upsert on the credential id so a
-    /// re-registration of the same authenticator refreshes it rather than erroring; a re-register
-    /// also clears a prior revocation, because registering it again IS re-authorising it.
-    pub async fn register_webauthn_credential(
-        &self,
-        account_id: &str,
-        credential_id: &str,
-        public_key: &str,
-        label: &str,
-        at_ms: i64,
-    ) -> StoreResult<()> {
-        sqlx::query(
-            "insert into webauthn_credential
-               (account_id, credential_id, public_key, sign_count, label, created_at_ms, revoked)
-             values ($1, $2, $3, 0, $4, $5, false)
-             on conflict (account_id, credential_id) do update
-               set public_key = excluded.public_key,
-                   label = excluded.label,
-                   revoked = false",
-        )
-        .bind(account_id)
-        .bind(credential_id)
-        .bind(public_key)
-        .bind(label)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// An account's registered devices, newest first. Includes revoked rows (the dashboard shows
-    /// them as revoked); callers that verify an assertion filter to `!revoked` themselves.
-    pub async fn webauthn_credentials(
-        &self,
-        account_id: &str,
-    ) -> StoreResult<Vec<(String, String, i64, String, i64, Option<i64>, bool)>> {
-        let rows = sqlx::query(
-            "select credential_id, public_key, sign_count, label, created_at_ms,
-                    last_used_at_ms, revoked
-             from webauthn_credential where account_id = $1
-             order by created_at_ms desc",
-        )
-        .bind(account_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok((
-                    row.try_get::<String, _>("credential_id")?,
-                    row.try_get::<String, _>("public_key")?,
-                    row.try_get::<i64, _>("sign_count")?,
-                    row.try_get::<String, _>("label")?,
-                    row.try_get::<i64, _>("created_at_ms")?,
-                    row.try_get::<Option<i64>, _>("last_used_at_ms")?,
-                    row.try_get::<bool, _>("revoked")?,
-                ))
-            })
-            .collect()
-    }
-
-    /// Record a successful assertion: bump the stored sign_count (replay/cloning defence) and stamp
-    /// last-used. Only touches a non-revoked row.
-    pub async fn touch_webauthn_credential(
-        &self,
-        account_id: &str,
-        credential_id: &str,
-        sign_count: i64,
-        at_ms: i64,
-    ) -> StoreResult<()> {
-        sqlx::query(
-            "update webauthn_credential
-                set sign_count = $3, last_used_at_ms = $4
-              where account_id = $1 and credential_id = $2 and not revoked",
-        )
-        .bind(account_id)
-        .bind(credential_id)
-        .bind(sign_count)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Revoke a device from the registry — it can no longer satisfy a step-up. Not deleted, so the
-    /// dashboard can still show it as revoked and a re-register can un-revoke it.
-    pub async fn revoke_webauthn_credential(
-        &self,
-        account_id: &str,
-        credential_id: &str,
-    ) -> StoreResult<()> {
-        sqlx::query(
-            "update webauthn_credential set revoked = true
-              where account_id = $1 and credential_id = $2",
-        )
-        .bind(account_id)
-        .bind(credential_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    /// Does this account have ANY registered, non-revoked device? The gate for "an unregistered
-    /// device gets no remote control" — false ⇒ the control plane refuses the dangerous actions.
-    pub async fn has_registered_device(&self, account_id: &str) -> StoreResult<bool> {
-        let row = sqlx::query(
-            "select 1 as one from webauthn_credential
-              where account_id = $1 and not revoked limit 1",
-        )
-        .bind(account_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.is_some())
     }
 
     // ---- A computer keyed by the scope that shares it (org / account / bot) ----
@@ -3554,20 +3534,11 @@ impl PgStore {
         .await?;
         rows.iter().map(recipe_run_row).collect()
     }
-
-    pub async fn recipe_runs(&self, recipe_id: &str, limit: i64) -> StoreResult<Vec<RecipeRunRow>> {
-        let rows = sqlx::query(
-            "select id, recipe_id, version, coworker_id, run_id, ok, stopped_at, receipt, at_ms,
-                    lease_until_ms
-               from recipe_run where recipe_id = $1 order by at_ms desc limit $2",
-        )
-        .bind(recipe_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(recipe_run_row).collect()
-    }
 }
+
+// Calls only the tests make, kept beside them like `tests/unit/*`: nothing the server serves asks.
+#[path = "../tests/support/test_only.rs"]
+mod test_only;
 
 /// An artifact (screenshot, recording, or file attachment) as a listing shows it.
 /// Does not carry the bytes themselves — a listing must never carry megabytes.

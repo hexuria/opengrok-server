@@ -1212,12 +1212,9 @@ async fn user_machine_shell_is_offered_only_when_a_machine_is_attached() {
     );
 }
 
-#[tokio::test]
-async fn user_machine_shell_is_offered_and_runs_even_when_the_grant_omits_it() {
-    // The real bug: a coworker's grant lists only the box tools, so the per-coworker policy would
-    // DENY "user_machine_shell". The reverse-exec tool must be authorized by the local-exec
-    // policy (the sink), not the grant — so it is still offered AND still runs.
-    let restrictive = opengrok_policy::Context {
+/// A policy whose profile lists only the box tools, under `ceiling`.
+fn box_tools_profile_under(ceiling: opengrok_policy::ToolSet) -> opengrok_policy::Context {
+    opengrok_policy::Context {
         grant: Some(opengrok_policy::Grant {
             principal: AccountId::from_stored("acct_1"),
             coworker: CoworkerId::from_stored("cw_1"),
@@ -1227,9 +1224,23 @@ async fn user_machine_shell_is_offered_and_runs_even_when_the_grant_omits_it() {
         }),
         ceiling: Some(opengrok_policy::Ceiling {
             coworker: CoworkerId::from_stored("cw_1"),
-            tools: opengrok_policy::ToolSet::only(["read_file", "shell", "write_file"]),
+            tools: ceiling,
         }),
-    };
+    }
+}
+
+#[tokio::test]
+async fn user_machine_shell_is_offered_and_runs_even_when_the_grant_omits_it() {
+    // The real bug: a coworker's grant lists only the box tools, so the per-coworker policy would
+    // DENY "user_machine_shell". The reverse-exec tool must be authorized by the local-exec
+    // policy (the sink), not the grant's profile — so, where its ceiling lets the coworker reach
+    // the machine at all (#268), it is still offered AND still runs.
+    let restrictive = box_tools_profile_under(opengrok_policy::ToolSet::only([
+        "read_file",
+        "shell",
+        "write_file",
+        USER_MACHINE_SHELL,
+    ]));
     let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
     let executor = Executor::with_policy(Arc::new(SpyComputer::default()), restrictive)
         .with_user_machine(sink.clone());
@@ -1256,6 +1267,46 @@ async fn user_machine_shell_is_offered_and_runs_even_when_the_grant_omits_it() {
     assert_eq!(
         sink.seen.lock().unwrap().as_slice(),
         &["mkdir ~/Code/x".to_string()]
+    );
+}
+
+/// #268: the ceiling is the owner's switch for the machine. Switched off, the tool is not offered,
+/// and a call that arrives anyway (a resumed card, an old turn's habit) is refused saying why —
+/// before the machine is asked anything.
+#[tokio::test]
+async fn user_machine_shell_is_neither_offered_nor_run_when_the_ceiling_leaves_it_out() {
+    let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
+    let executor = Executor::with_policy(
+        Arc::new(SpyComputer::default()),
+        box_tools_profile_under(opengrok_policy::ToolSet::only(["read_file", "shell"])),
+    )
+    .with_user_machine(sink.clone());
+    assert!(
+        !executor
+            .tool_names()
+            .iter()
+            .any(|n| n == USER_MACHINE_SHELL)
+    );
+    let schemas = executor.tool_schemas(
+        &AccountId::from_stored("acct_1"),
+        &CoworkerId::from_stored("cw_1"),
+    );
+    assert!(
+        !schemas
+            .iter()
+            .any(|s| s["function"]["name"] == USER_MACHINE_SHELL)
+    );
+    let result = executor
+        .execute(
+            &no_box_context(),
+            &call(USER_MACHINE_SHELL, json!({"command": "whoami"})),
+        )
+        .await;
+    assert!(!result.ok, "{result:?}");
+    assert!(result.content.contains("tool ceiling"), "{result:?}");
+    assert!(
+        sink.seen.lock().unwrap().is_empty(),
+        "the machine was never asked"
     );
 }
 

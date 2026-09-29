@@ -414,6 +414,13 @@ fn load_plugins() -> std::collections::BTreeMap<String, opengrok_plugins::Plugin
             continue;
         }
         match opengrok_plugins::Plugin::load(&path) {
+            // The spec allows a dot in a name; this server cannot route one (its tools' names
+            // would read as another plugin's server), so it says so here, once, rather than
+            // loading a plugin that silently never works.
+            Ok(plugin) if plugin.manifest.name.contains('.') => {
+                let name = plugin.manifest.name;
+                tracing::warn!(plugin = name, "skipping a plugin whose name has a dot");
+            }
             Ok(plugin) => {
                 tracing::info!(
                     plugin = plugin.manifest.name,

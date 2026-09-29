@@ -42,7 +42,8 @@ pub fn validate(input: &TemplateInput) -> Result<(ToolSet, ToolSet), String> {
     if name.is_empty() || name.chars().count() > 80 {
         return Err("name: required, up to 80 characters".to_string());
     }
-    let known = opengrok_tools::Executor::builtin_tool_names();
+    // The person's machine among them: a ceiling decides it now (#268), a template's too.
+    let known: Vec<&str> = opengrok_tools::Executor::every_builtin().collect();
     for tool in &input.tools {
         if !known.contains(&tool.as_str()) {
             return Err(format!(

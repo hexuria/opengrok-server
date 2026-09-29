@@ -1,6 +1,23 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
 
+impl Effective {
+    /// Nothing set, for the arithmetic tests here and in `spend`'s. Deliberately NOT a `Default`
+    /// impl, and here rather than beside the type: outside a test an `Effective` has to name whose
+    /// pool it is, and a default would let a caller skip saying — the bug the type was re-keyed to
+    /// prevent.
+    pub(crate) fn none_set() -> Self {
+        Self {
+            cap: None,
+            day_cap: None,
+            cap_set_by: None,
+            payer: opengrok_core::id::AccountId::from_stored("acct_test".to_string()),
+            pool: None,
+            pool_set_by: None,
+        }
+    }
+}
+
 #[test]
 fn an_alias_prices_at_its_base_model() {
     assert_eq!(base_model("xai/grok-4.6@sub"), "xai/grok-4.6");

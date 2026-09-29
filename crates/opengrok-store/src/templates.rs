@@ -158,18 +158,4 @@ impl PgStore {
         .await?;
         Ok(())
     }
-
-    /// The template a coworker was hired from, if any.
-    pub async fn template_of(
-        &self,
-        coworker: &opengrok_core::id::CoworkerId,
-    ) -> StoreResult<Option<String>> {
-        let row =
-            sqlx::query("select template_id from coworker_template_use where coworker_id = $1")
-                .bind(coworker.as_str())
-                .fetch_optional(self.pool())
-                .await?;
-        row.map(|row| row.try_get("template_id").map_err(Into::into))
-            .transpose()
-    }
 }

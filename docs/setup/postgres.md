@@ -180,9 +180,19 @@ and on a database that already went through it:
    UPDATE with its own predicate, never DDL.
 4. **Rehearse it on a restored dump** (above) before it runs anywhere real.
 
-The first transform that **cannot** be made idempotent (one that must run exactly once) is the
-point to add a `schema_migrations (name text primary key, applied_at timestamptz)` table. That
-table would be created in `SCHEMA` like everything else, written under the same lock, and a
-missing row would mean "not yet run". An existing deployment is the baseline, because every
-statement before it was idempotent. Until that transform exists, the table would be a mechanism
-with nothing to guard.
+A transform that **cannot** be made idempotent (one that must run exactly once) is recorded in
+`schema_migrations (name text primary key, applied_at timestamptz)`. The table is created in
+`SCHEMA` like everything else and written under the same lock. The transform's own statement is
+guarded by "no row with my name", and the insert of that row follows it in the same script, so
+a missing row means "not yet run". An existing deployment is the baseline, because every
+statement before the table was idempotent. The first is #268's
+`the-machine-joins-the-ceiling`. Every ceiling written before a coworker's ceiling governed the
+person's machine gains `user_machine_shell`, once. A second pass would switch the machine back
+on for an owner who had switched it off (`crates/opengrok-store/tests/the_machine_joins_the_ceiling.rs`).
+A row an older replica writes after the pass misses it, and that coworker starts with the machine
+off.
+
+**Where a run-once transform goes is decided by what it must come after.** This one runs last in
+`EVERY_BOOT`, not in `SCHEMA`. The built-in widenings look for an exact older list, which never
+names the machine. Run first, the pass left a ceiling on an older list narrow for good while its
+profile widened (review of #282). Its row makes it match nothing on every later boot.
