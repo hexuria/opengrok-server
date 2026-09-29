@@ -65,6 +65,12 @@ impl ToolRunner {
         self
     }
 
+    /// The skills `use_skill` reads this turn, as a run captures them: its resumes offer these.
+    pub fn offered_skills(&self) -> Vec<opengrok_core::run::OfferedSkill> {
+        let offers = self.skills.iter().flat_map(|(offers, _)| offers);
+        offers.map(Into::into).collect()
+    }
+
     /// The system message's list of the skills this runner offers, or nothing.
     pub fn skills_line(&self) -> String {
         let offers = self.skills.as_ref().map(|(offers, _)| offers.as_slice());

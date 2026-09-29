@@ -24,7 +24,7 @@ use crate::auth::AuthState;
 use opengrok_core::coworker::{CoworkerCommand, CoworkerView, Effort};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::limits::RunLimits;
-use opengrok_core::run::{RunCommand, RunStatus, RunView};
+use opengrok_core::run::{OfferedSkill, RunCommand, RunStatus, RunView};
 use opengrok_harness::{
     ChatMessage, EventSink, ModelDoor, ModelRequest, RunBudget, RunContext, ToolRunner,
     run_conversation_within,
@@ -275,8 +275,9 @@ pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
     Some(ChosenSkill::Id(id.to_string()))
 }
 
-/// The skill segment of this turn's system message: the person's instructions quoted between
-/// unforgeable markers, or the sentence saying they were not.
+/// The skill segment of this turn's system message — the person's instructions quoted between
+/// unforgeable markers, and the id to record on `RunEvent::Started` — or the sentence saying they
+/// were not, and no id, so a skill that cannot be given does not stick.
 ///
 /// EVERY PATH OUT OF HERE SAYS SOMETHING. A chosen skill that cannot be given is the case the
 /// refusal line exists for, so returning an empty string on any of these would be precisely the
@@ -286,7 +287,7 @@ async fn skill_segment(
     account: &AccountId,
     chosen: &ChosenSkill,
     tools: Option<&opengrok_harness::ToolRunner>,
-) -> String {
+) -> (String, Option<String>) {
     // EVERY REFUSAL BELOW GOES THROUGH `NotForThisTurn::line`, including the two this function
     // decides itself. A sentence chosen at the call site is a sentence that drifts from the table
     // that decides the rest.
@@ -297,7 +298,7 @@ async fn skill_segment(
             // a client shape change from somebody probing.
             let why = crate::skills::NotForThisTurn::NotAnId;
             tracing::warn!(kind, why = ?why, "a turn carried a `skill` that cannot be an id");
-            return why.line().to_string();
+            return (why.line().to_string(), None);
         }
         ChosenSkill::Id(id) => id,
     };
@@ -309,7 +310,7 @@ async fn skill_segment(
             // request, at a position the caller picks. Which case it was is recorded here and
             // nowhere else: the sentence the person reads names no cause at all.
             tracing::warn!(skill = ?id, why = ?why, "a chosen skill was not given to a turn");
-            return why.line().to_string();
+            return (why.line().to_string(), None);
         }
     };
     // The files go before the closing line, so our restatement of the rules stays the last word:
@@ -329,16 +330,15 @@ async fn skill_segment(
         // we say it closes. Refuse rather than quote it unbounded.
         let why = crate::skills::NotForThisTurn::Unquotable;
         tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
-        return why.line().to_string();
+        return (why.line().to_string(), None);
     }
-    quoted
+    (quoted, Some(id.clone()))
 }
 
 /// The skill line for this turn, and the id to record on `RunEvent::Started`.
 ///
 /// An id on this request is used as sent. None means look at prior runs on this
-/// thread, newest first, and take the first that quoted a skill. A refusal line
-/// records no id, so a skill that cannot be given does not stick.
+/// thread, newest first, and take the first that quoted a skill.
 async fn skill_line_for_turn(
     state: &AgUiState,
     account: &AccountId,
@@ -353,61 +353,34 @@ async fn skill_line_for_turn(
             None => return (String::new(), None),
         },
     };
-    let id = match &chosen {
-        ChosenSkill::Id(id) => Some(id.clone()),
-        ChosenSkill::Unusable(_) => None,
-    };
-    let line = skill_segment(state, account, &chosen, tools).await;
-    let recorded = line
-        .contains("For THIS message the person chose the skill `")
-        .then_some(id)
-        .flatten();
-    (line, recorded)
+    skill_segment(state, account, &chosen, tools).await
 }
 
-/// Newest prior run on this thread, owned by this account, that quoted a skill.
-/// Walks past a turn that recorded none: that is the follow-up which dropped the
-/// skill (run 01a0c9ef) and the turn before it still has the body.
+/// Newest prior run on this thread, owned by this account, that recorded a quoted skill
+/// (`RunEvent::Started::skill_id`). Walks past a turn that recorded none: that is the follow-up
+/// which dropped the skill (run 01a0c9ef) and the turn before it still has the body.
+///
+/// NEVER READ BACK OUT OF A SYSTEM MESSAGE. An attached skill's description sits in that message
+/// on every turn, and one that wrote the sentence a chosen skill opens with would choose a skill
+/// for the next turn (review of #290). A run from before the id was recorded inherits nothing.
 async fn inherited_skill_id(
     state: &AgUiState,
     account: &AccountId,
     thread_id: &str,
 ) -> Option<String> {
-    let runs = state
-        .auth
-        .store
-        .runs_for_thread_owned_by(thread_id, account, 8)
-        .await
-        .ok()?;
-    for run in runs {
-        let loaded = match state.auth.store.load_run(&run.id).await {
+    let store = &state.auth.store;
+    let runs = store.runs_for_thread_owned_by(thread_id, account, 8).await;
+    for run in runs.ok()? {
+        let loaded = match store.load_run(&run.id).await {
             Ok((loaded, _)) => loaded,
             Err(error) => {
                 tracing::warn!(%error, "could not read a prior run while inheriting a skill");
                 continue;
             }
         };
-        if let Some(skill_id) = loaded
-            .skill_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            return Some(skill_id.to_string());
-        }
-        if let Some(name) = loaded
-            .system
-            .as_deref()
-            .and_then(crate::persona::skill_name_from_system)
-        {
-            match state.auth.store.skill_named(account.as_str(), name).await {
-                Ok(Some(row)) => return Some(row.id),
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(%error, "could not resolve an inherited skill by name");
-                    return None;
-                }
-            }
+        let recorded = loaded.skill_id.as_deref().map(str::trim);
+        if let Some(id) = recorded.filter(|id| !id.is_empty()) {
+            return Some(id.to_string());
         }
     }
     None
@@ -3108,6 +3081,7 @@ async fn start_claimed_turn(
         effort,
         system,
         skill_id: recorded_skill,
+        offered_skills: tools.iter().flat_map(ToolRunner::offered_skills).collect(),
         prompt: Some(asked.prompt),
         limits,
         generation: 0,
@@ -3196,6 +3170,9 @@ pub struct StoreJournal {
     /// The skill quoted into `system`, recorded so the next message on this thread
     /// can reuse it when the client sends no skill id.
     pub skill_id: Option<String>,
+    /// The attached skills `system` lists (`RunEvent::Started::offered_skills`): what a resume
+    /// of this run offers `use_skill` for.
+    pub offered_skills: Vec<OfferedSkill>,
     /// What the person asked this turn (`RunEvent::Started::prompt`). Only a turn that starts the
     /// run writes it; a resume finds the run already started and passes `None`.
     pub prompt: Option<Vec<serde_json::Value>>,
@@ -3362,6 +3339,7 @@ impl StoreJournal {
             effort: self.effort,
             system: self.system.as_deref(),
             skill_id: self.skill_id.as_deref(),
+            offered_skills: &self.offered_skills,
             prompt: self.prompt.as_deref(),
             limits: self.limits,
             generation: self.generation,
@@ -3424,6 +3402,7 @@ fn start_command(start: &RunStart<'_>, at_ms: i64) -> RunCommand {
             .map(str::trim)
             .filter(|id| !id.is_empty())
             .map(str::to_string),
+        offered_skills: start.offered_skills.to_vec(),
         prompt: start.prompt.map(<[serde_json::Value]>::to_vec),
         limits: start.limits,
         at_ms,
@@ -3485,6 +3464,7 @@ struct RunStart<'a> {
     effort: Effort,
     system: Option<&'a str>,
     skill_id: Option<&'a str>,
+    offered_skills: &'a [OfferedSkill],
     prompt: Option<&'a [serde_json::Value]>,
     limits: RunLimits,
     generation: u32,
@@ -5057,8 +5037,8 @@ async fn continue_run(
         )
         // Every judge failure parks the run, so only its journal can count them in a row (#201).
         .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
-    // Its skills as the turn offered them, read as they stand now (#270).
-    let runner = crate::skills::onto(&state, &account_id, &coworker_id, runner).await;
+    // The skills the captured system message lists, and no others (#270).
+    let runner = crate::skills::onto_captured(&state, &account_id, runner, &run.offered_skills);
 
     // The system message this turn OPENED with, not a fresh composition: a role edited while the
     // person was answering the card must not change the coworker halfway through. A run journalled
@@ -5081,6 +5061,7 @@ async fn continue_run(
         effort: run.effort,
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
+        offered_skills: run.offered_skills.clone(),
         prompt: None,
         limits: run.limits,
         generation,

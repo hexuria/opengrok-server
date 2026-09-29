@@ -237,19 +237,6 @@ pub fn skill_files_unavailable_line(why: &str) -> String {
     )
 }
 
-/// The name in the sentence [`fenced_skill`] writes for a chosen skill. A later turn on the same
-/// thread reads it when the log has no `skill_id` yet. The user's message is not
-/// a source: this sentence is one the server wrote.
-#[must_use]
-pub fn skill_name_from_system(system: &str) -> Option<&str> {
-    const LEAD: &str = "For THIS message the person chose the skill `";
-    let start = system.find(LEAD)? + LEAD.len();
-    let rest = system.get(start..)?;
-    let end = rest.find('`')?;
-    let name = rest.get(..end)?.trim();
-    (!name.is_empty()).then_some(name)
-}
-
 /// What a coworker is told when the person chose a skill for this message and it could not be
 /// given: the turn runs, and it runs honestly.
 ///

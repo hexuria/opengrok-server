@@ -386,24 +386,32 @@ impl PgStore {
 
     /// The skills a coworker's owner attached (#270), deleted ones too, and the `version` a save
     /// against them names. An id whose row is gone is not among them; no set is none, at 0.
+    ///
+    /// THE SET AND ITS VERSION COME FROM ONE STATEMENT, so they are one snapshot: read apart, a
+    /// save landing between them paired one set with another's version, and the client's next
+    /// conditional save got a 409 for a set it had in fact seen. The rows are then read for
+    /// exactly those ids.
     pub async fn coworker_skills(
         &self,
         coworker: &CoworkerId,
     ) -> StoreResult<(Vec<SkillRow>, i64)> {
-        let version: Option<i64> =
-            sqlx::query_scalar("select version from coworker_skill_set where coworker_id = $1")
-                .bind(coworker.as_str())
-                .fetch_optional(self.pool())
-                .await?;
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{SKILL_SELECT} where s.id in
-               (select unnest(skill_ids) from coworker_skill_set where coworker_id = $1)"
-        )))
+        let set: Option<(Vec<String>, i64)> = sqlx::query_as(
+            "select skill_ids, version from coworker_skill_set where coworker_id = $1",
+        )
         .bind(coworker.as_str())
-        .fetch_all(self.pool())
+        .fetch_optional(self.pool())
         .await?;
+        let (ids, version) = set.unwrap_or_default();
+        if ids.is_empty() {
+            return Ok((Vec::new(), version));
+        }
+        let query = format!("{SKILL_SELECT} where s.id = any($1)");
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+            .bind(&ids)
+            .fetch_all(self.pool())
+            .await?;
         let rows = rows.iter().map(skill_row).collect::<StoreResult<_>>()?;
-        Ok((rows, version.unwrap_or(0)))
+        Ok((rows, version))
     }
 
     /// Replace a coworker's attached skills with `ids`, sorted so one set is one array, only while

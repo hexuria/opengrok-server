@@ -843,6 +843,8 @@ async fn persist_mcp_ask(
             // none to restore, which is the pre-existing behaviour.
             system: None,
             skill_id: None,
+            // No turn of its own, so no skill list for a resume to keep to.
+            offered_skills: Vec::new(),
             // Journaled, and nobody spoke: an MCP ask is a call, not a message.
             prompt: Some(Vec::new()),
             // No loop ever runs it (`is_mcp_audit_run`): nothing to spend, no turn to think in.

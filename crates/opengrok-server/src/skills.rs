@@ -33,6 +33,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
 use opengrok_core::id::{AccountId, CoworkerId};
+use opengrok_core::run::OfferedSkill;
 use opengrok_harness::ToolRunner;
 use opengrok_recipes::{Screen, TapeEvent};
 use opengrok_store::{NewSkill, NewSkillVersion, PgStore, SkillFileRow, SkillRow, StoreError};
@@ -452,16 +453,20 @@ pub(crate) async fn files_line_for_turn(
 
 /// The attached skills a turn of `coworker` offers `account`, the person it is for (#270):
 /// switched on, written, and theirs to invoke by the `may()` table `/skills` and `for_turn`
-/// answer by, so a member of the owner's org gets the owner's org skills and never the rest. Of
-/// two called the same, their own, as `/name` resolves one (`summary`); of two colleagues',
-/// neither. By name, so the system message keeps its order. None when the store does not answer:
-/// the turn goes on without them.
+/// answer by, so a member of the owner's org gets the owner's org skills and never the rest.
+///
+/// EXACTLY ONE PER NAME, since `use_skill` reads by name: of those that share one, the coworker's
+/// owner's own — the attached set is the owner's setup, and a colleague's must not shadow it — and
+/// else the one written first, then the lower id, so every turn picks the same. In name order, so
+/// the system message keeps its order. None when the store does not answer: the turn goes on
+/// without them.
 pub(crate) async fn offered(
     state: &AgUiState,
     account: &AccountId,
     coworker: &CoworkerId,
 ) -> Vec<SkillRow> {
-    let attached = match state.auth.store.coworker_skills(coworker).await {
+    let store = &state.auth.store;
+    let mut offered = match store.coworker_skills(coworker).await {
         Ok((attached, _)) if attached.is_empty() => return attached,
         Ok((attached, _)) => attached,
         Err(error) => {
@@ -470,30 +475,23 @@ pub(crate) async fn offered(
         }
     };
     let org = org_of(state, account).await;
-    let usable: Vec<SkillRow> = attached
-        .into_iter()
-        .filter(|skill| {
-            let relation = relation_to(account, org.as_deref(), skill);
-            may(relation, Action::Invoke).is_ok()
-                && skill.enabled
-                && skill.version_count > 0
-                && skill.deleted_at_ms.is_none()
-        })
-        .collect();
-    let named = |name: &str| usable.iter().filter(|skill| skill.name == name).count();
-    let mut offered: Vec<SkillRow> = usable
-        .iter()
-        .filter(|skill| skill.owner_id == account.as_str() || named(&skill.name) == 1)
-        .cloned()
-        .collect();
-    offered.sort_by(|a, b| a.name.cmp(&b.name));
+    offered.retain(|s| {
+        let may_use = may(relation_to(account, org.as_deref(), s), Action::Invoke).is_ok();
+        may_use && s.enabled && s.version_count > 0 && s.deleted_at_ms.is_none()
+    });
+    let Ok(owner) = store.coworker_owner(coworker).await else {
+        return Vec::new();
+    };
+    let not_owners = |s: &SkillRow| owner.as_ref().is_none_or(|o| s.owner_id != o.as_str());
+    offered.sort_by_key(|s| (s.name.clone(), not_owners(s), s.created_at_ms, s.id.clone()));
+    offered.dedup_by(|later, kept| later.name == kept.name);
     offered
 }
 
 /// `runner`, offering `use_skill` for what `offered` gives this turn (#270). A skill is read as
-/// `account` — the turn's person, never anybody a call names (CLAUDE.md #7) — through `for_turn`,
-/// so one switched off or taken away since the turn began is refused at the call, and its files
-/// go onto the box this runner holds, as `/name` places them.
+/// `account` — the turn's person, never anybody a call names (CLAUDE.md #7) — through `for_turn`
+/// when it is called, so one switched off, deleted or no longer theirs since the turn began is
+/// refused in words, and its files go onto the box this runner holds, as `/name` places them.
 pub(crate) async fn onto(
     state: &AgUiState,
     account: &AccountId,
@@ -506,12 +504,30 @@ pub(crate) async fn onto(
         name: skill.name,
         description: skill.description,
     });
-    let reader = Reader {
-        state: state.clone(),
-        account: account.clone(),
-        target: runner.fill_target(),
-    };
-    runner.with_skills(offers.collect(), Arc::new(reader))
+    with_offers(state, account, runner, offers.collect())
+}
+
+/// `onto` for a resume: exactly the skills its run captured (`RunEvent::Started::offered_skills`),
+/// which the system message it keeps lists, and none for a log from before they were — never names
+/// read back out of that message's prose. One attached since is not offered.
+pub(crate) fn onto_captured(
+    state: &AgUiState,
+    account: &AccountId,
+    runner: ToolRunner,
+    captured: &[OfferedSkill],
+) -> ToolRunner {
+    let offers = captured.iter().map(SkillOffer::from).collect();
+    with_offers(state, account, runner, offers)
+}
+
+fn with_offers(
+    state: &AgUiState,
+    account: &AccountId,
+    runner: ToolRunner,
+    offers: Vec<SkillOffer>,
+) -> ToolRunner {
+    let (state, who, target) = (state.clone(), account.clone(), runner.fill_target());
+    runner.with_skills(offers, Arc::new(Reader { state, who, target }))
 }
 
 /// `onto` for a turn that may have no runner: it gets one only when there is a skill to offer.
@@ -528,17 +544,17 @@ pub(crate) async fn onto_any(
     (!runner.tool_schemas().is_empty()).then_some(runner)
 }
 
-/// Where `use_skill` reads the skills one turn offers.
+/// Where `use_skill` reads the skills one turn offers, as `who`, the person the turn is for.
 struct Reader {
     state: AgUiState,
-    account: AccountId,
+    who: AccountId,
     target: Option<(Arc<dyn opengrok_box::Computer>, String)>,
 }
 
 #[async_trait::async_trait]
 impl SkillSource for Reader {
     async fn read(&self, offer: &SkillOffer) -> Option<SkillRead> {
-        let skill = match for_turn(&self.state, &self.account, &offer.id).await {
+        let skill = match for_turn(&self.state, &self.who, &offer.id).await {
             Ok(skill) => skill,
             Err(why) => {
                 tracing::warn!(skill = %offer.id, why = ?why, "use_skill was not given a skill");
@@ -902,7 +918,7 @@ async fn attached_reply(state: &AgUiState, owner: &AccountId, coworker: &Coworke
 /// more, so it stays attached, and offered to no turn, until a save leaves it out. It can never be
 /// newly attached. A deleted skill is no row, so the next save drops it. Theirs first, by name.
 /// `enabled` is its switch on AND the owner still may use it: an attached, enabled skill reaches
-/// the owner's turns once it has a body, unless another offered skill has its name (`offered`).
+/// the owner's turns once it has a body, unless it shares its name with one `offered` keeps.
 async fn attached_rows(
     state: &AgUiState,
     owner: &AccountId,

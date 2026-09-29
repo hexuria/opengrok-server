@@ -23,6 +23,7 @@ fn run_with(prompt: Option<Vec<Value>>, emitted: Vec<Value>) -> Run {
             effort: Default::default(),
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt,
             limits: Default::default(),
             at_ms: 1,

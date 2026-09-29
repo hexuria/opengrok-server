@@ -98,6 +98,7 @@ fn a_started_run_keeps_the_effort_it_started_with() {
             effort: Effort::High,
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt: None,
             limits: Default::default(),
             at_ms: 1,

@@ -3220,6 +3220,7 @@ async fn submit_resumes_the_run_parked_on_its_own_call_not_the_oldest() {
             effort: Default::default(),
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt: None,
             limits: Default::default(),
             at_ms,

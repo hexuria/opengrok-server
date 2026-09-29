@@ -131,10 +131,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     )
     .await;
     let tools = crate::skills::onto_any(&state, &account_id, &coworker_id, tools).await;
-    let skills = tools
-        .as_ref()
-        .map(|tools| tools.skills_line())
-        .unwrap_or_default();
+    let skills: String = tools.iter().map(|t| t.skills_line()).collect();
 
     // Composed once: a routine's turn is still this coworker's turn, its skills (#270) too.
     let hirer = crate::persona::caller(&state, &account_id).await;
@@ -152,6 +149,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         effort: coworker.effort,
         system: Some(system.clone()),
         skill_id: None,
+        offered_skills: tools.iter().flat_map(|t| t.offered_skills()).collect(),
         // The hirer's instruction is this turn's question. Journaled like a person's message, so
         // a routine that parks on a card resumes knowing what it was told to do.
         prompt: Some(crate::agui::history::routine_prompt(&run_id, &prompt)),

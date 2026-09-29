@@ -244,7 +244,7 @@ pub fn chosen_recipe_line(
 pub use opengrok_plugins::skill::{
     SKILL_CLOSING_LINE, SKILL_DRAFT_LINE, SKILL_FILES_UNAVAILABLE, SKILL_UNAVAILABLE_LINE,
     SkillAuthor, SkillDoor, fenced_skill, skill_files_line, skill_files_unavailable_line,
-    skill_marker, skill_name_from_system,
+    skill_marker,
 };
 
 pub fn computer_system_prompt(

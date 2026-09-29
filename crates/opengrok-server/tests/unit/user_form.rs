@@ -351,6 +351,7 @@ fn a_run_parked_again_no_longer_waits_on_a_twin_from_before_its_answer() {
             effort: Default::default(),
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt: None,
             limits: Default::default(),
             at_ms: 1,

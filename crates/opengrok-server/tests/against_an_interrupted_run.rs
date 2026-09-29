@@ -300,6 +300,7 @@ async fn seed_run_for(
         effort: Default::default(),
         system: None,
         skill_id: None,
+        offered_skills: Vec::new(),
         prompt: Some(vec![json!({
             "id": "m-person",
             "role": "user",
