@@ -610,8 +610,8 @@ pub struct GuardedDoor {
     /// set to zero to count meter reads.
     still_known_ms: i64,
     /// How long a reading is reused without asking the meter again. `FRESH_MS` in production;
-    /// a test that counts reads sets it to zero.
-    fresh_ms: i64,
+    /// a test that counts reads sets it to zero (`with_fresh_ms`, `tests/support/seams.rs`).
+    pub(crate) fresh_ms: i64,
 }
 
 impl std::fmt::Debug for GuardedDoor {
@@ -662,14 +662,6 @@ impl GuardedDoor {
             cache.insert(cache_key, (limits.clone(), now_ms()));
         }
         Ok(limits)
-    }
-
-    /// Reuse a reading for this long. Zero ⇒ every call reads the meter — for tests that assert
-    /// on the meter itself; production keeps the default so a tool loop pays for one read.
-    #[must_use]
-    pub fn with_fresh_ms(mut self, fresh_ms: i64) -> Self {
-        self.fresh_ms = fresh_ms;
-        self
     }
 
     fn cached(&self, key_id: &str, within_ms: i64) -> Option<KeyUsage> {

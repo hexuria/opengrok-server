@@ -14,8 +14,6 @@
 //! A TXT record is a sequence of character-strings; a long value arrives split. They are joined
 //! before comparison, which is how every other verifier reads them and what a DNS host shows.
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 
 #[async_trait]
@@ -67,40 +65,8 @@ impl TxtLookup for SystemDns {
     }
 }
 
-/// A lookup answered from a map — the test double, and what a deployment with no resolver uses so
-/// the surface still answers (with "no record") instead of panicking. Pub so integration tests
-/// can drive it without reaching into private modules.
-#[derive(Default)]
-pub struct StaticDns {
-    records: tokio::sync::RwLock<BTreeMap<String, Vec<String>>>,
-}
-
-impl StaticDns {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Publish (or replace) the TXT values at `name`.
-    pub async fn publish(&self, name: &str, values: Vec<String>) {
-        self.records
-            .write()
-            .await
-            .insert(name.trim_end_matches('.').to_string(), values);
-    }
-}
-
-#[async_trait]
-impl TxtLookup for StaticDns {
-    async fn txt(&self, name: &str) -> Result<Vec<String>, String> {
-        Ok(self
-            .records
-            .read()
-            .await
-            .get(name.trim_end_matches('.'))
-            .cloned()
-            .unwrap_or_default())
-    }
-}
+/// The test double: a lookup answered from a map (`tests/support/seams.rs`).
+pub use crate::seams::StaticDns;
 
 /// The lookup a state has when nobody bound one. Every query fails with a reason, so the surface
 /// answers 503 "resolver not configured" — never a false "your record is not there".

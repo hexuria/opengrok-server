@@ -7,6 +7,15 @@ use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
+impl GatewayAdmin {
+    /// The method OAG does not serve. GET of the collection is 405 by design; this exists so
+    /// the contract test can prove that 405 is `Refused`, never `Unreachable`.
+    async fn get_principals_collection(&self) -> Result<serde_json::Value, AdminError> {
+        self.send(reqwest::Method::GET, "/admin/api/principals", None)
+            .await
+    }
+}
+
 #[derive(Default)]
 struct PrincipalLog {
     /// `(method, path, body)` for every principals call. GET of the collection must stay empty.

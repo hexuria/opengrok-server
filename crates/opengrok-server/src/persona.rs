@@ -674,17 +674,6 @@ pub async fn caller(state: &AgUiState, account: &opengrok_core::id::AccountId) -
     }
 }
 
-/// The room's transcribed prompt with the standing role appended. The transcription is returned
-/// unchanged when there is no role, and never edited when there is: the role is a new paragraph
-/// after it, so a diff of the transcribed text stays empty.
-#[must_use]
-pub fn with_standing_role(transcribed: &str, persona: &Persona) -> String {
-    match persona.standing() {
-        Some(standing) => format!("{transcribed}\n\n{standing}"),
-        None => transcribed.to_string(),
-    }
-}
-
 /// The persona of a coworker as the run path needs it: the title from the coworker's profile, where
 /// the client's decoration lives, and the role from the aggregate, where a field the model reads
 /// every turn belongs. A failed read is not a failed turn — a coworker with no persona is still

@@ -166,11 +166,6 @@ impl ImageVisibility {
             Self::End => "end",
         }
     }
-
-    #[must_use]
-    pub fn is_agent(self) -> bool {
-        matches!(self, Self::Agent)
-    }
 }
 
 /// An image a tool hands back, base64 so it rides JSON as-is.
@@ -197,14 +192,6 @@ impl From<Screenshot> for ToolImage {
             // Step shots are the model's eyes, not a chat event the client must journal.
             visibility: ImageVisibility::Agent,
         }
-    }
-}
-
-impl ToolImage {
-    #[must_use]
-    pub fn with_visibility(mut self, visibility: ImageVisibility) -> Self {
-        self.visibility = visibility;
-        self
     }
 }
 
@@ -1379,14 +1366,6 @@ impl Executor {
                     .iter()
                     .find(|tool| tool.qualified_name == qualified)
             })
-    }
-
-    /// What the model is told each tool does, so it can choose between them.
-    pub fn tool_descriptions(&self) -> Vec<(String, Option<String>)> {
-        self.plugin_tools
-            .iter()
-            .map(|tool| (tool.qualified_name.clone(), tool.description.clone()))
-            .collect()
     }
 
     /// The OpenAI function-calling tool definitions this coworker is OFFERED for a request: built-ins
