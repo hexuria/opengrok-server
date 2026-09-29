@@ -28,8 +28,15 @@ use serde::{Deserialize, Serialize};
 use crate::id::{AccountId, CoworkerId};
 
 /// Whose authentication this is.
+///
+/// ADJACENTLY TAGGED, `{"scope": "user", "id": "acct_…"}`, and it must stay that way (#267). It
+/// was internally tagged, and serde refuses to serialize an internally tagged newtype variant
+/// that holds a string, so every `Connected` for a person or a coworker failed at append: only
+/// `Global` could ever be written, and a person could never keep a connection. `Global` reads
+/// `{"scope": "global"}` either way, so every event already in the log still loads. One `id` key
+/// for every scope, agreed with NativeChat so a client reads an owner the same way whatever it is.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(tag = "scope", rename_all = "kebab-case")]
+#[serde(tag = "scope", content = "id", rename_all = "kebab-case")]
 pub enum Owner {
     /// The whole deployment. Nothing personal may be stored here.
     Global,
@@ -257,7 +264,11 @@ impl Connection {
 }
 
 /// One row of the read side: enough to choose between candidates without replaying anything.
+///
+/// Also the reply of `GET /connections` and of a lend or a revoke, camelCase like the rest of the
+/// wire (#267, agreed with NativeChat), so one client type reads all three.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectionView {
     pub id: String,
     pub connector: String,

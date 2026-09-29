@@ -417,11 +417,13 @@ where
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
 
-    Json(serde_json::json!({
-        "id": id,
-        "connector": connection.connector,
-        "lentTo": connection.loans.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-        "disconnected": connection.disconnected,
-    }))
-    .into_response()
+    // The connection as `GET /connections` lists it, so one client type reads both (#267). A
+    // disconnected one is no longer listed, and nothing is left to show.
+    match state.auth.store.connections_owned_by(&account_id).await {
+        Ok(views) => match views.into_iter().find(|view| view.id == id) {
+            Some(view) => Json(view).into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
