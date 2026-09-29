@@ -1128,6 +1128,14 @@ async fn abandon_escalated_form(
     coworker_id: &CoworkerId,
     entry: Value,
 ) -> (u16, Value) {
+    // READ THE LOG FIRST, as a hand-back does: settled before a resume that cannot read the run,
+    // the form replayed as declined over a run still parked (review of #277).
+    if waiting_calls(state, account_id, coworker_id)
+        .await
+        .is_none()
+    {
+        return (503, json!({ "error": "run log unavailable; try again" }));
+    }
     let call = call_id_of(&entry);
     settle_live_handoffs(state, account_id, coworker_id, "declined", false, call).await;
     // Name the call this Skip answers; with `None` a stacked sibling's parked

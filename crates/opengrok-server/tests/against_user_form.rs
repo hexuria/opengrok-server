@@ -4213,7 +4213,7 @@ async fn a_form_escalated_after_its_run_stopped_replays_its_hand_back_on_its_par
 #[tokio::test]
 async fn a_hand_back_that_cannot_read_the_run_log_settles_nothing() {
     let database_url = database_or_skip!();
-    hand_back_with_an_unreadable_log(&database_url, "handoff-unread", false).await;
+    end_with_an_unreadable_log(&database_url, "handoff-unread", Ending::HandBackByHandoff).await;
 }
 
 /// The same, posted with the escalated form's own id, which names its call: the log is read
@@ -4221,10 +4221,26 @@ async fn a_hand_back_that_cannot_read_the_run_log_settles_nothing() {
 #[tokio::test]
 async fn a_hand_back_by_the_forms_id_that_cannot_read_the_run_log_settles_nothing() {
     let database_url = database_or_skip!();
-    hand_back_with_an_unreadable_log(&database_url, "handoff-unread-form", true).await;
+    end_with_an_unreadable_log(&database_url, "handoff-unread-form", Ending::HandBackByForm).await;
 }
 
-async fn hand_back_with_an_unreadable_log(database_url: &str, tag: &str, by_form: bool) {
+/// And Skip on an escalated form (`dismissUserForm`, mode dismissed), which declines its handoff:
+/// the same read first, and the same 503 (review of #277).
+#[tokio::test]
+async fn a_skip_that_cannot_read_the_run_log_settles_nothing() {
+    let database_url = database_or_skip!();
+    end_with_an_unreadable_log(&database_url, "handoff-unread-skip", Ending::Skip).await;
+}
+
+/// How a handoff is ended in `end_with_an_unreadable_log`.
+#[derive(Clone, Copy)]
+enum Ending {
+    HandBackByHandoff,
+    HandBackByForm,
+    Skip,
+}
+
+async fn end_with_an_unreadable_log(database_url: &str, tag: &str, ending: Ending) {
     let email = format!("{tag}-{}@og.local", uuid::Uuid::now_v7().simple());
     let h = harness_with_door(database_url, &email, Arc::new(HoldDoor)).await;
     let token = h.access_token(&email);
@@ -4252,11 +4268,21 @@ async fn hand_back_with_an_unreadable_log(database_url: &str, tag: &str, by_form
         .await
         .expect("break the log");
 
-    let posted = if by_form { &form_id } else { &handoff_id };
-    let hand_back = json!({ "entryId": posted, "agentId": agent, "resolution": "handed_back" });
-    let (status, body) = h
-        .agui(&token, "/ag-ui/box-handoff/resolve", hand_back.clone())
-        .await;
+    let (route, post) = match ending {
+        Ending::HandBackByHandoff => (
+            "/ag-ui/box-handoff/resolve",
+            json!({ "entryId": handoff_id, "agentId": agent, "resolution": "handed_back" }),
+        ),
+        Ending::HandBackByForm => (
+            "/ag-ui/box-handoff/resolve",
+            json!({ "entryId": form_id, "agentId": agent, "resolution": "handed_back" }),
+        ),
+        Ending::Skip => (
+            "/ag-ui/user-form/dismiss",
+            json!({ "entryId": form_id, "agentId": agent, "mode": "dismissed" }),
+        ),
+    };
+    let (status, body) = h.agui(&token, route, post.clone()).await;
     assert_eq!(status, 503, "{body}");
     let handoff = stored_card(&h, &agent, &handoff_id).await;
     assert!(handoff.get("boxResolution").is_none(), "{handoff}");
@@ -4268,13 +4294,21 @@ async fn hand_back_with_an_unreadable_log(database_url: &str, tag: &str, by_form
         status_of(&h, &run).await,
         opengrok_core::run::RunStatus::AwaitingApproval
     );
-    end_handoff(&h, &token, &agent, &handoff_id, "handed_back").await;
+    let (status, body) = h.agui(&token, route, post).await;
+    assert_eq!(
+        status, 200,
+        "once the log reads, the same post lands: {body}"
+    );
     assert_eq!(
         wait_for_status(&h, &run, opengrok_core::run::RunStatus::Finished).await,
         opengrok_core::run::RunStatus::Finished
     );
+    let word = match ending {
+        Ending::Skip => "declined",
+        Ending::HandBackByHandoff | Ending::HandBackByForm => "handed_back",
+    };
     let stored = stored_card(&h, &agent, &form_id).await;
-    assert_eq!(stored["boxResolution"], "handed_back", "{stored}");
+    assert_eq!(stored["boxResolution"], word, "{stored}");
 }
 
 /// A form handed back and its run finished, then unstamped: the form as a server before #143
