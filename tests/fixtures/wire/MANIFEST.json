@@ -1,5 +1,5 @@
 {
-  "server_sha": "98a68a5d51bfe106952200744b628c52426208ea",
+  "server_sha": "ee800091c11e4e758d4117fdd7ce61b801232ff7",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -626,6 +626,10 @@
       "source": "GET /coworkers/{coworker_id}/ceiling, recorded from the test a_ceiling_with_one_plugin_on_reads_it_on_and_the_machine_unavailable (crates/opengrok-server/tests/against_a_tool_ceiling.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__coworkers__coworker_id__ceiling/403-a_withdrawn_grant_is_refused_in_words_and_nothing_changes.json",
+      "source": "GET /coworkers/{coworker_id}/ceiling, recorded from the test a_withdrawn_grant_is_refused_in_words_and_nothing_changes (crates/opengrok-server/tests/against_a_tool_ceiling.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__coworkers__coworker_id__ceiling/404-another_account_is_told_no_such_coworker_on_both_verbs.json",
       "source": "GET /coworkers/{coworker_id}/ceiling, recorded from the test another_account_is_told_no_such_coworker_on_both_verbs (crates/opengrok-server/tests/against_a_tool_ceiling.rs); ids and times are placeholders"
     },
@@ -816,6 +820,10 @@
     {
       "file": "rest/GET__recipes__id_/200-a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_they_cannot_open.json",
       "source": "GET /recipes/{id}, recorded from the test a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_they_cannot_open (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__recipes__id_/200-a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures-2.json",
+      "source": "GET /recipes/{id}, recorded from the test a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__recipes__id_/200-a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route.json",
