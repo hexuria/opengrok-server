@@ -20,7 +20,9 @@ pub mod hooks;
 pub mod host_state;
 #[cfg(feature = "jev")]
 pub mod jev;
+// Test tooling kept beside the tests: only this crate's own tests turn `record-wire` on.
 #[cfg(feature = "record-wire")]
+#[path = "../tests/support/wire_record.rs"]
 mod wire_record;
 #[cfg(not(feature = "jev"))]
 pub mod jev {

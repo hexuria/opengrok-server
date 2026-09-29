@@ -1,4 +1,4 @@
-//! Build the wire corpus NativeChat vendors (#255) from what `src/wire_record.rs` recorded, or
+//! Build the wire corpus NativeChat vendors (#255) from what `tests/support/wire_record.rs` recorded, or
 //! check a committed corpus against a fresh build. `scripts/record-wire.sh` drives both.
 //!
 //! ```text

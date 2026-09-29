@@ -11,7 +11,7 @@ license.workspace = true
 # one hyper.
 default = ["jev"]
 jev = ["dep:typesafe-sdk"]
-# Records the wire NativeChat reads while `OG_RECORD_WIRE` is set (#255, `src/wire_record.rs`).
+# Records the wire NativeChat reads while `OG_RECORD_WIRE` is set (#255, `tests/support/wire_record.rs`).
 # Only this crate's own tests turn it on, through the dev-dependency on itself below; the
 # shipped binary never carries it.
 record-wire = []
