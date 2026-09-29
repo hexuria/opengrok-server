@@ -8,6 +8,7 @@ fn run_with(events: Vec<serde_json::Value>) -> Run {
         thread_id: "t1".to_string(),
         coworker_id: None,
         model: None,
+        effort: Default::default(),
         system: None,
         skill_id: None,
         prompt: None,

@@ -72,6 +72,16 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_answer",
         "/ag-ui/runs/{run_id}",
     ),
+    // A coworker's effort (#271): its PATCH and its refusal have the shapes of any other edit and
+    // any other 400, so only a pin keeps the two NativeChat asked for by name.
+    (
+        "an_owner_sets_how_hard_a_coworker_thinks_and_every_row_says_so",
+        "/coworkers/{coworker_id}",
+    ),
+    (
+        "an_unknown_effort_is_refused_and_nothing_in_the_patch_is_applied",
+        "/coworkers/{coworker_id}",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

@@ -124,6 +124,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
         updated_at_ms: at_ms,
         role: None,
         visibility: Default::default(),
+        effort: Default::default(),
     };
     store
         .append_coworker(&coworker, &account, 0, &events, &view)
@@ -137,6 +138,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
             thread_id: coworker.to_string(),
             coworker_id: Some(coworker.clone()),
             model: Some("oag/cheap".to_string()),
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt: None,

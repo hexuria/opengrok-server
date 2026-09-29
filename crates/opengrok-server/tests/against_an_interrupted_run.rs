@@ -297,6 +297,7 @@ async fn seed_run_for(
         thread_id: thread.clone(),
         coworker_id: Some(h.coworker.clone()),
         model: Some("oag/cheap".to_string()),
+        effort: Default::default(),
         system: None,
         skill_id: None,
         prompt: Some(vec![json!({

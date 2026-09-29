@@ -870,9 +870,9 @@ impl PgStore {
         let members = serde_json::to_value(&view.members)
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         sqlx::query(
-            "insert into coworker_view
-                (id, account_id, name, model, box_id, retired, updated_at_ms, members, role, visibility)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "insert into coworker_view (id, account_id, name, model, box_id, retired,
+                updated_at_ms, members, role, visibility, effort)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              on conflict (id) do update set
                name = excluded.name,
                model = excluded.model,
@@ -881,7 +881,8 @@ impl PgStore {
                updated_at_ms = excluded.updated_at_ms,
                members = excluded.members,
                role = excluded.role,
-               visibility = excluded.visibility",
+               visibility = excluded.visibility,
+               effort = excluded.effort",
         )
         .bind(view.id.as_str())
         .bind(account_id.as_str())
@@ -893,6 +894,7 @@ impl PgStore {
         .bind(&members)
         .bind(&view.role)
         .bind(view.visibility.as_str())
+        .bind(view.effort.as_str())
         .execute(&mut *tx)
         .await?;
 
@@ -953,7 +955,7 @@ impl PgStore {
     ) -> StoreResult<Vec<(CoworkerView, RosterOwner)>> {
         let rows = sqlx::query(
             "select c.id, c.name, c.model, c.box_id, c.retired, c.updated_at_ms, c.members,
-                    c.role, c.visibility,
+                    c.role, c.visibility, c.effort,
                     c.account_id as owner_id, coalesce(owner.first_name, '') as owner_first,
                     coalesce(owner.last_name, '') as owner_last, owner.org_id as owner_org
              from coworker_view c
@@ -995,7 +997,7 @@ impl PgStore {
     /// roster: a coworker an org-mate shared is `roster_for`'s, never this.
     pub async fn coworkers_for(&self, account_id: &AccountId) -> StoreResult<Vec<CoworkerView>> {
         let rows = sqlx::query(
-            "select id, name, model, box_id, retired, updated_at_ms, members, role, visibility
+            "select id, name, model, box_id, retired, updated_at_ms, members, role, visibility, effort
              from coworker_view
              where account_id = $1 and retired = false
              order by updated_at_ms desc",
@@ -1330,25 +1332,6 @@ impl PgStore {
         .execute(&self.pool)
         .await?;
         Ok(written.rows_affected() == 1)
-    }
-
-    /// Withdraw a grant. The row stays, so the log still says a grant existed and when it stopped.
-    pub async fn revoke_access(
-        &self,
-        principal: &AccountId,
-        coworker: &CoworkerId,
-        at_ms: i64,
-    ) -> StoreResult<()> {
-        sqlx::query(
-            "update grant_view set revoked = true, updated_at_ms = $3
-             where principal_id = $1 and coworker_id = $2",
-        )
-        .bind(principal.as_str())
-        .bind(coworker.as_str())
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
     }
 }
 
@@ -2673,6 +2656,9 @@ fn coworker_view_row(row: &sqlx::postgres::PgRow) -> StoreResult<CoworkerView> {
         visibility: row
             .try_get::<Option<String>, _>("visibility")?
             .and_then(|text| opengrok_core::coworker::Visibility::parse(&text))
+            .unwrap_or_default(),
+        // An unrecognised word reads as inherit: no `reasoning_effort` sent, the route's default.
+        effort: opengrok_core::coworker::Effort::parse(&row.try_get::<String, _>("effort")?)
             .unwrap_or_default(),
     })
 }

@@ -146,6 +146,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         account_id: Some(account_id.clone()),
         coworker_id: Some(coworker_id.clone()),
         model: Some(coworker.model.clone()),
+        effort: coworker.effort,
         system: Some(system.clone()),
         skill_id: None,
         // The hirer's instruction is this turn's question. Journaled like a person's message, so
@@ -161,8 +162,10 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         // Nobody is talking: a coworker acting on its own schedule acts for whoever hired it.
         spend_actor: Some(account_id.as_str().to_string()),
         context_tokens: state.context_for(&coworker.model).await,
-        // The coworker's own model — the rule `run()` enforces holds for runs nobody asked for.
+        // The coworker's own model and effort — the rule `run()` enforces holds for runs nobody
+        // asked for.
         model: coworker.model.clone(),
+        effort: coworker.effort,
         // A routine's turn is still this coworker's turn: same identity, same standing role.
         system: Some(system.clone()),
         tools: Vec::new(),

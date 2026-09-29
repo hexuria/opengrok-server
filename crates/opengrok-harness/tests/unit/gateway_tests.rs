@@ -422,13 +422,9 @@ fn unknown_fields_do_not_break_a_frame() {
 fn pinned(scope: Option<&str>, actor: Option<&str>) -> Option<String> {
     conversation_pin(&ModelRequest {
         model: "m".to_string(),
-        messages: Vec::new(),
-        system: None,
-        tools: Vec::new(),
-        gateway_key: None,
         spend_scope: scope.map(str::to_string),
         spend_actor: actor.map(str::to_string),
-        context_tokens: None,
+        ..ModelRequest::default()
     })
 }
 
@@ -594,4 +590,74 @@ fn a_screenshot_follows_its_round_as_a_user_message() {
         messages[3]["content"][1]["image_url"]["url"],
         "data:image/png;base64,AAAA"
     );
+}
+
+/// A gateway that keeps the JSON body of every request it is sent, and answers each with a
+/// stream that is over at once.
+async fn a_gateway_keeping_bodies() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let kept = bodies.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            // Read until the headers and the whole body they announce are in: one `read` can end
+            // between the two.
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 8192];
+            let body = loop {
+                match socket.read(&mut buffer).await {
+                    Ok(0) | Err(_) => break None,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+                let text = String::from_utf8_lossy(&request).to_string();
+                let Some((head, body)) = text.split_once("\r\n\r\n") else {
+                    continue;
+                };
+                let length = head.lines().find_map(|line| {
+                    let line = line.to_ascii_lowercase();
+                    line.strip_prefix("content-length:")
+                        .and_then(|n| n.trim().parse::<usize>().ok())
+                });
+                if body.len() >= length.unwrap_or(0) {
+                    break serde_json::from_str::<serde_json::Value>(body).ok();
+                }
+            };
+            kept.lock().unwrap().extend(body);
+            let reply = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         content-length: 14\r\nconnection: close\r\n\r\ndata: [DONE]\n\n";
+            let _ = socket.write_all(reply.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (url, bodies)
+}
+
+/// How hard the coworker thinks reaches the gateway as `reasoning_effort` (#271), and only when
+/// it chose: inherit sends no field at all, because absent is how the gateway hears "the route's
+/// default" — while `none` is a word, the one that switches reasoning off.
+#[tokio::test]
+async fn the_door_sends_reasoning_effort_only_when_the_coworker_chose_one() {
+    use opengrok_core::coworker::Effort;
+    let (url, bodies) = a_gateway_keeping_bodies().await;
+    let door = GatewayDoor::new(url, "k");
+    for effort in [Effort::High, Effort::Inherit, Effort::Off] {
+        let request = ModelRequest {
+            effort,
+            ..asking(vec![ChatMessage::text("user", "hi")])
+        };
+        let mut stream = door.stream(request).await.expect("a stream");
+        while stream.next().await.is_some() {}
+    }
+    let bodies = bodies.lock().unwrap().clone();
+    assert_eq!(bodies.len(), 3, "one body per request: {bodies:?}");
+    assert_eq!(bodies[0]["reasoning_effort"], "high", "{}", bodies[0]);
+    assert_eq!(bodies[0]["model"], "xai/grok-4.6", "{}", bodies[0]);
+    assert!(
+        bodies[1].get("reasoning_effort").is_none(),
+        "inherit leaves the field off, not null: {}",
+        bodies[1]
+    );
+    assert_eq!(bodies[2]["reasoning_effort"], "none", "{}", bodies[2]);
 }

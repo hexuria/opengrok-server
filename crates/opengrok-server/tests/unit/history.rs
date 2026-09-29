@@ -20,6 +20,7 @@ fn run_with(prompt: Option<Vec<Value>>, emitted: Vec<Value>) -> Run {
             thread_id: "t1".to_string(),
             coworker_id: None,
             model: None,
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt,

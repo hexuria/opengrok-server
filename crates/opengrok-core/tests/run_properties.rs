@@ -23,6 +23,7 @@ fn command() -> impl Strategy<Value = RunCommand> {
             thread_id: "t".into(),
             coworker_id: None,
             model: None,
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt: None,

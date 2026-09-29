@@ -400,6 +400,7 @@ async fn a_runs_owner_is_set_once() {
             thread_id: "th".to_string(),
             coworker_id: None,
             model: None,
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt: None,

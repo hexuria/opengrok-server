@@ -68,14 +68,9 @@ fn tool_runner_on(
 
 fn request(text: &str) -> ModelRequest {
     ModelRequest {
-        gateway_key: None,
-        spend_scope: None,
-        spend_actor: None,
-        context_tokens: None,
         model: "mock".to_string(),
-        system: None,
-        tools: Vec::new(),
         messages: vec![ChatMessage::text("user", text.to_string())],
+        ..ModelRequest::default()
     }
 }
 

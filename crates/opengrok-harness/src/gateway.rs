@@ -597,13 +597,18 @@ fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
     out
 }
 
-/// The body of one chat completion request.
+/// The body of one chat completion request. `reasoning_effort` only when the coworker chose one:
+/// absent is how the gateway hears "the route's default", and `none` would switch reasoning off.
 fn chat_body(request: &ModelRequest) -> serde_json::Value {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": request.model,
         "stream": true,
         "messages": chat_messages(request),
-    })
+    });
+    if let Some(effort) = request.effort.reasoning_effort() {
+        body["reasoning_effort"] = effort.into();
+    }
+    body
 }
 
 #[async_trait::async_trait]

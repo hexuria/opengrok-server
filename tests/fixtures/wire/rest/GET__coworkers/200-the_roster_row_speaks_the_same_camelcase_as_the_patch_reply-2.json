@@ -7,6 +7,7 @@
       "id": "cw_0199bb4e-0000-7000-8000-000000000001",
       "name": "Ada",
       "model": "oag/cheap",
+      "effort": "inherit",
       "role": null,
       "title": "a release engineer",
       "avatarShape": "hex",

@@ -105,6 +105,7 @@ async fn abandon_a_run(
             thread_id: thread_id.to_string(),
             coworker_id: Some(coworker.clone()),
             model: Some("oag/cheap".to_string()),
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt: None,

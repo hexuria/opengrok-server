@@ -20,6 +20,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::coworker::Effort;
 use crate::id::{CoworkerId, RunId};
 use crate::limits::RunLimits;
 
@@ -159,6 +160,11 @@ pub enum RunEvent {
         /// existed (`#[serde(default)]`); those keep the old behaviour — the current pin.
         #[serde(default)]
         model: Option<String>,
+        /// How hard this turn thinks, captured for the reason the pin is: a resume must not
+        /// pick up an effort changed while a person answered a card. Absent on logs written
+        /// before this field, which read as inherit — exactly what those turns sent.
+        #[serde(default)]
+        effort: Effort,
         /// The system message this turn opened with. A resume must not recompose it from a
         /// coworker whose role or title moved while a person was answering an approval card —
         /// the turn would change identity halfway through, at the moment somebody intervened.
@@ -325,6 +331,8 @@ pub struct Run {
     pub coworker_id: Option<CoworkerId>,
     /// Captured at start. See `RunEvent::Started::model`.
     pub model: Option<String>,
+    /// Captured at start, and what a resume sends. See `RunEvent::Started::effort`.
+    pub effort: Effort,
     /// Captured at start. See `RunEvent::Started::system`.
     pub system: Option<String>,
     /// Captured at start. See `RunEvent::Started::skill_id`.
@@ -373,6 +381,7 @@ impl Default for Run {
             thread_id: String::new(),
             coworker_id: None,
             model: None,
+            effort: Effort::Inherit,
             system: None,
             skill_id: None,
             prompt: None,
@@ -443,6 +452,8 @@ pub enum RunCommand {
         thread_id: String,
         coworker_id: Option<CoworkerId>,
         model: Option<String>,
+        /// See `RunEvent::Started::effort`.
+        effort: Effort,
         /// The composed system message this turn opens with, captured so a resume speaks with
         /// the same identity and standing role the turn began with.
         system: Option<String>,
@@ -521,6 +532,7 @@ impl Run {
                 thread_id,
                 coworker_id,
                 model,
+                effort,
                 system,
                 skill_id,
                 prompt,
@@ -531,6 +543,7 @@ impl Run {
                 self.thread_id = thread_id.clone();
                 self.coworker_id = coworker_id.clone();
                 self.model = model.clone();
+                self.effort = *effort;
                 self.system.clone_from(system);
                 self.skill_id.clone_from(skill_id);
                 self.prompt.clone_from(prompt);
@@ -666,6 +679,7 @@ impl Run {
                 thread_id,
                 coworker_id,
                 model,
+                effort,
                 system,
                 skill_id,
                 prompt,
@@ -675,6 +689,7 @@ impl Run {
                 thread_id,
                 coworker_id,
                 model,
+                effort,
                 system,
                 skill_id,
                 prompt,
@@ -864,6 +879,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
                 prompt: None,
@@ -1231,6 +1247,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: Some("openai/gpt-5.6-luna".to_string()),
+                effort: Effort::Inherit,
                 system: Some("You are Ada.".to_string()),
                 skill_id: None,
                 prompt: None,
@@ -1249,6 +1266,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
                 prompt: None,
@@ -1267,6 +1285,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                effort: Effort::Inherit,
                 system: Some(String::new()),
                 skill_id: None,
                 prompt: None,
@@ -1306,6 +1325,7 @@ mod tests {
             thread_id: "t1".to_string(),
             coworker_id: None,
             model: None,
+            effort: Effort::Inherit,
             system: None,
             skill_id: None,
             prompt: None,
@@ -1403,6 +1423,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
                 prompt: None,
@@ -1564,6 +1585,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
                 prompt: None,
@@ -1762,6 +1784,7 @@ mod tests {
             thread_id: "t1".to_string(),
             coworker_id: None,
             model: None,
+            effort: Effort::Inherit,
             system: None,
             skill_id: None,
             prompt: None,
@@ -1846,6 +1869,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
                 prompt: None,
@@ -1931,6 +1955,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: Some("openai/gpt-5.5".to_string()),
+                effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
                 prompt: None,
@@ -1970,6 +1995,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
                 prompt: None,
@@ -2020,6 +2046,7 @@ mod tests {
                 thread_id: "t1".to_string(),
                 coworker_id: None,
                 model: None,
+                effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
                 prompt: Some(vec![asked.clone()]),

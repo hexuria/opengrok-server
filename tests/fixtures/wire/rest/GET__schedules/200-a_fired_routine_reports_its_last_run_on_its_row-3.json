@@ -8,7 +8,7 @@
       "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
       "name": "Inbox",
       "cron": null,
-      "prompt": "sign in",
+      "prompt": "a webhook arrived; report in",
       "kind": "webhook",
       "active": true,
       "nextDueMs": null,
@@ -19,10 +19,10 @@
       },
       "lastRun": {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "awaiting-approval",
+        "status": "finished",
         "startedAtMs": 1790000000000,
-        "finishedAtMs": null,
-        "summary": "Routine Inbox is waiting for you: The coworker is asking you to fill in “Google account”: Enter the address and password."
+        "finishedAtMs": 1790000001000,
+        "summary": "Routine Inbox ran: You said: a webhook arrived; report in\n\n<webhook_event>\n{\"item\":\"milk\"}\n</webhook_event>. This is the mock door standing in for oag/cheap — no model was called."
       },
       "webhook": {
         "type": "webhook",

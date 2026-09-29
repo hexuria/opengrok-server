@@ -302,6 +302,7 @@ async fn seed_run(
             thread_id: thread.to_string(),
             coworker_id: coworker.map(|id| CoworkerId::from_stored(id.to_string())),
             model: None,
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt,

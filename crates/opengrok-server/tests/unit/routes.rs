@@ -358,6 +358,7 @@ async fn a_run_through_the_mock_door_is_well_formed() {
             spend_actor: None,
             context_tokens: None,
             model: "mock".to_string(),
+            effort: Default::default(),
             system: None,
             messages: to_chat_messages(&input(vec![message("user", Some("ping"))])),
             tools: Vec::new(),

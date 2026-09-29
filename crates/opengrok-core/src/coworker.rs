@@ -56,6 +56,70 @@ impl Visibility {
     }
 }
 
+/// How hard a coworker thinks (#271): the gateway's own `reasoning_effort` words
+/// (open-ai-gateway `oag-proto/src/canonical.rs`, `Effort::as_str`), plus `Inherit`, which sends
+/// no word at all. THE GATEWAY'S LIST, NOT OURS: a word it cannot parse it drops without a
+/// refusal, and the coworker would think at its route's default while its row said otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    /// No `reasoning_effort` on the request, so the route thinks as hard as it does by default.
+    /// THE DEFAULT, because it is what every turn sent before effort existed: a coworker, a view
+    /// or a run log written then reads as this and behaves as it did.
+    #[default]
+    Inherit,
+    /// Reasoning off, spelled `none`: a word the gateway is sent like any other, which is not the
+    /// same request as sending none.
+    #[serde(rename = "none")]
+    Off,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl Effort {
+    /// Every word, in the order a refusal lists them.
+    pub const ALL: [Self; 7] = [
+        Self::Inherit,
+        Self::Off,
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+    ];
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Off => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    /// Parse what a client sent, exactly. `None` is a refusal rather than a default, for the
+    /// reason `Visibility::parse` gives: storing inherit for "loud" would answer 200 about a
+    /// coworker that does not think the way its caller asked. The gateway also reads `minimal`;
+    /// it is not a word the client agreed, so it is refused here like any other.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|effort| effort.as_str() == word)
+    }
+
+    /// The `reasoning_effort` a turn sends: none for `Inherit`, so the field is left off.
+    #[must_use]
+    pub fn reasoning_effort(self) -> Option<&'static str> {
+        (self != Self::Inherit).then(|| self.as_str())
+    }
+}
+
 /// The most a standing role may be. Long enough for a paragraph of intent, short enough that it
 /// cannot become a second system prompt smuggled through a text field.
 pub const MAX_ROLE_CHARS: usize = 1000;
@@ -91,6 +155,12 @@ pub enum CoworkerEvent {
     Repinned {
         /// A route through the gateway (`openai/gpt-5.5`), never a key.
         model: String,
+        at_ms: i64,
+    },
+    /// How hard this coworker thinks changed. Its own event for the reason `Repinned` is: a
+    /// caller who meant to change how hard it thinks must not also rename or repin it.
+    EffortSet {
+        effort: Effort,
         at_ms: i64,
     },
     /// A computer became this coworker's.
@@ -130,6 +200,7 @@ impl CoworkerEvent {
             Self::Hired { .. } => "coworker-hired",
             Self::Renamed { .. } => "coworker-renamed",
             Self::Repinned { .. } => "coworker-repinned",
+            Self::EffortSet { .. } => "coworker-effort-set",
             Self::RoleSet { .. } => "coworker-role-set",
             Self::VisibilitySet { .. } => "coworker-visibility-set",
             Self::ComputerAssigned { .. } => "computer-assigned",
@@ -158,6 +229,9 @@ pub struct Coworker {
     /// the blob is where the client's decoration lives, and a field the model reads every turn
     /// is not decoration.
     pub role: Option<String>,
+    /// How hard it thinks: sent to the gateway on every turn, so on the aggregate for the reason
+    /// the role is. A run captures it at its start (`RunEvent::Started::effort`).
+    pub effort: Effort,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -214,6 +288,11 @@ pub enum CoworkerCommand {
         model: String,
         at_ms: i64,
     },
+    /// Set how hard it thinks; `Inherit` goes back to the route's own default.
+    SetEffort {
+        effort: Effort,
+        at_ms: i64,
+    },
     AssignComputer {
         box_id: BoxId,
         mode: BoxMode,
@@ -257,6 +336,7 @@ impl Coworker {
             }
             CoworkerEvent::Renamed { name, .. } => self.name = name.clone(),
             CoworkerEvent::Repinned { model, .. } => self.model = model.clone(),
+            CoworkerEvent::EffortSet { effort, .. } => self.effort = *effort,
             CoworkerEvent::RoleSet { role, .. } => self.role.clone_from(role),
             CoworkerEvent::VisibilitySet { visibility, .. } => self.visibility = *visibility,
             CoworkerEvent::ComputerAssigned { box_id, mode, .. } => {
@@ -347,6 +427,11 @@ impl Coworker {
                 self.alive()?;
                 let model = Self::non_blank(model)?;
                 Ok(vec![CoworkerEvent::Repinned { model, at_ms }])
+            }
+
+            CoworkerCommand::SetEffort { effort, at_ms } => {
+                self.alive()?;
+                Ok(vec![CoworkerEvent::EffortSet { effort, at_ms }])
             }
 
             CoworkerCommand::Rename { name, at_ms } => {
@@ -456,6 +541,30 @@ pub struct CoworkerView {
     /// decides what to show from it, on every listing.
     #[serde(default)]
     pub visibility: Visibility,
+    /// How hard it thinks, on the row so the roster carries it; inherit on a row from before.
+    #[serde(default)]
+    pub effort: Effort,
+}
+
+impl CoworkerView {
+    /// The row this aggregate projects to. ONE mapping for every writer, because
+    /// `append_coworker` rewrites every column: a writer that spelled the row out and missed a
+    /// field would reset it, and assigning a computer would quietly put the effort back to inherit.
+    #[must_use]
+    pub fn of(id: CoworkerId, coworker: &Coworker, updated_at_ms: i64) -> Self {
+        Self {
+            id,
+            name: coworker.name.clone(),
+            model: coworker.model.clone(),
+            box_id: coworker.box_id.clone(),
+            retired: coworker.retired,
+            updated_at_ms,
+            members: coworker.members.clone(),
+            role: coworker.role.clone(),
+            visibility: coworker.visibility,
+            effort: coworker.effort,
+        }
+    }
 }
 
 #[cfg(test)]

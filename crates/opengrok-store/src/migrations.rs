@@ -63,6 +63,8 @@ create table if not exists coworker_view (
 alter table coworker_view add column if not exists role text;
 -- Who may see and talk to a coworker: 'private' (the default, and the safe one) or 'org'.
 alter table coworker_view add column if not exists visibility text not null default 'private';
+-- How hard it thinks (#271): a gateway `reasoning_effort` word, or 'inherit', which sends none.
+alter table coworker_view add column if not exists effort text not null default 'inherit';
 -- A viewer's hide-from-sidebar preference. Not a coworker event: hiding is the reader's
 -- decoration, not a fact about the coworker, so another org member still sees it.
 create table if not exists coworker_hidden (

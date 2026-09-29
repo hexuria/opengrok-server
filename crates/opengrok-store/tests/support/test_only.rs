@@ -38,6 +38,27 @@ impl PgStore {
             .transpose()
     }
 
+    /// Withdraw a grant. The row stays, so the log still says a grant existed and when it stopped.
+    /// No route withdraws one yet; `against_visibility.rs` does, to show that a member's access
+    /// to a shared coworker goes with its owner's.
+    pub async fn revoke_access(
+        &self,
+        principal: &opengrok_core::id::AccountId,
+        coworker: &opengrok_core::id::CoworkerId,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update grant_view set revoked = true, updated_at_ms = $3
+             where principal_id = $1 and coworker_id = $2",
+        )
+        .bind(principal.as_str())
+        .bind(coworker.as_str())
+        .bind(at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     // ---- WebAuthn device registry (passkey step-up, slice 7) ----
     //
     // The foundation slice 7 laid; no route registers, lists or checks a device yet, so its only

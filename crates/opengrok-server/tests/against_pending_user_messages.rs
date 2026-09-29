@@ -91,6 +91,7 @@ async fn seed_run(store: &PgStore, account: &AccountId, thread: &str, at_ms: i64
             thread_id: thread.to_string(),
             coworker_id: None,
             model: None,
+            effort: Default::default(),
             system: None,
             skill_id: None,
             prompt: None,

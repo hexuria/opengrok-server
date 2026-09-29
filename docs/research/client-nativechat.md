@@ -39,8 +39,8 @@ Who the coworkers are, their routes, their keys and their limits.
 | Route | Methods | Mounted at (`crates/opengrok-server/src/`) | Reply (the server's side) | Callers on record |
 |---|---|---|---|---|
 | `/ag-ui/host-settings` | GET PUT | `agui/routes.rs:895` | the host settings record (+ `egressTunnelAvailable` with `?coworker=`); PUT merges and answers the whole record | calls it — `ROADMAP.md` Phase 0 re-homed the three seam-A verbs NativeChat still called onto this route. NativeChat file: *unverified* |
-| `/coworkers` | POST GET | `agui/routes.rs:899` | GET: JSON array of roster rows, newest first; POST: the hired row (`id`, `model`, `name`, `boxId`, …) | *unverified* |
-| `/coworkers/{coworker_id}` | PATCH DELETE | `agui/routes.rs:905` | PATCH: the updated row; DELETE: retires it (409 if already retired); 404 if not yours | *unverified* |
+| `/coworkers` | POST GET | `agui/routes.rs:899` | GET: JSON array of roster rows, newest first; POST: the hired row (`id`, `model`, `effort`, `name`, `boxId`, …). `effort` is always a word, `inherit` until its owner sets one | *unverified* |
+| `/coworkers/{coworker_id}` | PATCH DELETE | `agui/routes.rs:905` | PATCH: the updated row. `effort` is one of `inherit`, `none`, `low`, `medium`, `high`, `xhigh`, `max`, and null is `inherit`; any other value is 400 `{error: "effort must be one of …"}` with nothing in the body applied. Owner-only, like every field but `hiddenFromSidebar`: 403 `{error}` for a member of a shared coworker. DELETE: retires it (409 if already retired); 404 if not yours | `effort` is the wire NativeChat agreed on #271. NativeChat file: *unverified* |
 | `/coworkers/{coworker_id}/keys` | POST GET | `agui/routes.rs:920` | POST: `{key, jti, …}` — the key shown once; GET: JSON array, never the key | *unverified* |
 | `/coworkers/{coworker_id}/keys/{jti}` | DELETE | `agui/routes.rs:924` | 204; 404 "no such key" | *unverified* |
 | `/coworkers/{coworker_id}/limit` | GET PUT | `agui/routes.rs:916` | JSON `{cap, dayCap, …}`; PUT refuses a cap above the pool with the numbers | not NativeChat: the console, `web/src/api/coworkers.ts`. NativeChat: *unverified* |

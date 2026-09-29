@@ -251,6 +251,8 @@ impl ReviewJudge for ModelJudge {
             spend_actor: self.actor.clone(),
             context_tokens: None,
             model: self.model.clone(),
+            // A coworker's effort is for its own turns; a one-word verdict thinks at the route's.
+            effort: Default::default(),
             system: Some(JUDGE_SYSTEM.to_string()),
             messages: vec![ChatMessage::text("user", Self::prompt_for(&ask))],
             // Deliberately empty: the door then sends no tool fields at all, and the judge is a

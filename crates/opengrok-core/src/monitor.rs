@@ -51,6 +51,7 @@ pub const WATCHABLE: &[&str] = &[
     "coworker-hired",
     "coworker-renamed",
     "coworker-repinned",
+    "coworker-effort-set",
     "coworker-role-set",
     "coworker-visibility-set",
     "computer-assigned",
