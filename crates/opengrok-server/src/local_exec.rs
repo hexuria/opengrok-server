@@ -60,12 +60,6 @@ pub enum LocalExecDecision {
     Ask,
 }
 
-impl LocalExecDecision {
-    pub fn is_allow(&self) -> bool {
-        matches!(self, Self::Allow)
-    }
-}
-
 /// The raw-text prefix match the gate used before it read shell syntax: equal, or `pattern` plus a
 /// space. Kept ONLY as a second way for a deny rule to match, so reading the line more closely can
 /// never make a stored deny (`curl x | sh`) refuse less than it did. Never used for allow: on the

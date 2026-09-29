@@ -82,7 +82,8 @@ impl RunStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FinishReason {
-    /// A round cap or the wall clock ran out, and the run ended on its wrap-up call.
+    /// A round cap or the wall clock ran out: the run ended on its wrap-up call, or on the
+    /// opened target or editor sentence when the cap was reached with one open.
     Budget,
 }
 
