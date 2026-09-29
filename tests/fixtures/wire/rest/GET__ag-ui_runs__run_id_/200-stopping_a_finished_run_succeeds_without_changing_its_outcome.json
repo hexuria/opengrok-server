@@ -8,6 +8,7 @@
     "status": "failed",
     "startedAtMs": 1790000000000,
     "failure": "the model gateway refused",
+    "finishReason": null,
     "pending": null,
     "events": [
       {

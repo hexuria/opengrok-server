@@ -130,7 +130,10 @@ fn an_earlier_turn_is_its_question_its_calls_and_its_answer() {
         ],
     );
     let mut run = run;
-    run.apply(&RunEvent::Finished { at_ms: 3 });
+    run.apply(&RunEvent::Finished {
+        at_ms: 3,
+        reason: None,
+    });
     let messages = thread_messages(std::slice::from_ref(&run));
     let roles: Vec<&str> = messages
         .iter()

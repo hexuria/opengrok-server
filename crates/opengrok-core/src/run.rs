@@ -75,6 +75,34 @@ impl RunStatus {
     }
 }
 
+/// Why a run that finished finished, when it was not simply done (#244). A run that reached a
+/// cap still ends as `Finished` — the model's last call said what it did — but a person reading
+/// the routines pane has to be able to tell "stopped at its limit" from "done".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FinishReason {
+    /// A round cap or the wall clock ran out, and the run ended on its wrap-up call.
+    Budget,
+}
+
+impl FinishReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Budget => "budget",
+        }
+    }
+
+    /// The reason a `RUN_FINISHED` frame names. An unknown word is no reason: a frame is the
+    /// harness's own, so a word this build does not know was written by a newer one, and reading
+    /// it as `Budget` would be a guess.
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "budget" => Some(Self::Budget),
+            _ => None,
+        }
+    }
+}
+
 /// WHY a run is waiting. Two different cards can now come from the same tool — the machine owner's
 /// consent for a command, or the auto-review judge's "ask" — so the answer path has to know which
 /// question was asked: the wrong verb must not settle the other card.
@@ -181,6 +209,9 @@ pub enum RunEvent {
     },
     Finished {
         at_ms: i64,
+        /// Absent on logs written before #244, and on every run that was simply done.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<FinishReason>,
     },
     Failed {
         reason: String,
@@ -295,6 +326,8 @@ pub struct Run {
     /// The rendered events, in order — what a reconnecting client replays.
     pub emitted: Vec<Value>,
     pub failure: Option<String>,
+    /// Why a finished run finished, when it was not simply done (#244).
+    pub finish_reason: Option<FinishReason>,
     /// Who stopped it, when somebody did. `None` on every other run, which is how a reader tells
     /// "nobody stopped this" from "stopped by somebody we did not write down".
     pub stopped_by: Option<String>,
@@ -335,6 +368,7 @@ impl Default for Run {
             status: RunStatus::Running,
             emitted: Vec::new(),
             failure: None,
+            finish_reason: None,
             stopped_by: None,
             pending: None,
             answered: BTreeSet::new(),
@@ -412,6 +446,7 @@ pub enum RunCommand {
     },
     Finish {
         at_ms: i64,
+        reason: Option<FinishReason>,
     },
     Fail {
         reason: String,
@@ -558,7 +593,10 @@ impl Run {
                 // whether the run continues.
                 self.status = RunStatus::Running;
             }
-            RunEvent::Finished { .. } => self.status = RunStatus::Finished,
+            RunEvent::Finished { reason, .. } => {
+                self.status = RunStatus::Finished;
+                self.finish_reason = *reason;
+            }
             RunEvent::Failed { reason, .. } => {
                 self.status = RunStatus::Failed;
                 self.failure = Some(reason.clone());
@@ -652,11 +690,11 @@ impl Run {
                 }])
             }
 
-            RunCommand::Finish { at_ms } => {
+            RunCommand::Finish { at_ms, reason } => {
                 if self.status.is_terminal() {
                     return Err(RunError::AlreadyEnded);
                 }
-                Ok(vec![RunEvent::Finished { at_ms }])
+                Ok(vec![RunEvent::Finished { at_ms, reason }])
             }
 
             RunCommand::Fail { reason, at_ms } => {
@@ -1077,7 +1115,13 @@ mod tests {
     #[test]
     fn an_ended_run_records_nothing_spent() {
         let mut run = started();
-        for event in run.decide(RunCommand::Finish { at_ms: 2 }).unwrap() {
+        for event in run
+            .decide(RunCommand::Finish {
+                at_ms: 2,
+                reason: None,
+            })
+            .unwrap()
+        {
             run.apply(&event);
         }
         assert_eq!(
@@ -1266,7 +1310,13 @@ mod tests {
     #[test]
     fn a_finished_run_refuses_further_events() {
         let mut run = started();
-        for event in run.decide(RunCommand::Finish { at_ms: 20 }).unwrap() {
+        for event in run
+            .decide(RunCommand::Finish {
+                at_ms: 20,
+                reason: None,
+            })
+            .unwrap()
+        {
             run.apply(&event);
         }
         assert_eq!(
@@ -1281,11 +1331,20 @@ mod tests {
     #[test]
     fn a_run_cannot_end_twice() {
         let mut run = started();
-        for event in run.decide(RunCommand::Finish { at_ms: 20 }).unwrap() {
+        for event in run
+            .decide(RunCommand::Finish {
+                at_ms: 20,
+                reason: None,
+            })
+            .unwrap()
+        {
             run.apply(&event);
         }
         assert_eq!(
-            run.decide(RunCommand::Finish { at_ms: 21 }),
+            run.decide(RunCommand::Finish {
+                at_ms: 21,
+                reason: None
+            }),
             Err(RunError::AlreadyEnded)
         );
         assert_eq!(
@@ -1380,7 +1439,13 @@ mod tests {
             run.apply(event);
         }
         assert_eq!(run.emitted.len(), 1);
-        assert!(run.decide(RunCommand::Finish { at_ms: 30 }).is_ok());
+        assert!(
+            run.decide(RunCommand::Finish {
+                at_ms: 30,
+                reason: None
+            })
+            .is_ok()
+        );
     }
 
     /// THE EXACTLY-ONCE PROPERTY. A second answer for the same call produces no event, so the tool
@@ -1546,7 +1611,10 @@ mod tests {
                 by: "acct_1".to_string(),
                 at_ms: 21,
             },
-            RunCommand::Finish { at_ms: 22 },
+            RunCommand::Finish {
+                at_ms: 22,
+                reason: None,
+            },
             RunCommand::Fail {
                 reason: "late".to_string(),
                 at_ms: 23,
@@ -1565,7 +1633,13 @@ mod tests {
     #[test]
     fn stopping_a_finished_run_leaves_its_outcome_alone() {
         let mut run = started();
-        for event in run.decide(RunCommand::Finish { at_ms: 20 }).unwrap() {
+        for event in run
+            .decide(RunCommand::Finish {
+                at_ms: 20,
+                reason: None,
+            })
+            .unwrap()
+        {
             run.apply(&event);
         }
         assert_eq!(
@@ -1681,7 +1755,13 @@ mod tests {
     #[test]
     fn a_finished_run_cannot_be_started_again() {
         let mut run = started();
-        apply_all(&mut run, RunCommand::Finish { at_ms: 2 });
+        apply_all(
+            &mut run,
+            RunCommand::Finish {
+                at_ms: 2,
+                reason: None,
+            },
+        );
         assert_eq!(run.decide(start_command()), Err(RunError::AlreadyStarted));
         assert_eq!(run.status, RunStatus::Finished);
     }
@@ -1690,7 +1770,13 @@ mod tests {
     #[test]
     fn a_run_ended_before_it_started_cannot_start() {
         let mut run = Run::default();
-        apply_all(&mut run, RunCommand::Finish { at_ms: 1 });
+        apply_all(
+            &mut run,
+            RunCommand::Finish {
+                at_ms: 1,
+                reason: None,
+            },
+        );
         assert_eq!(run.decide(start_command()), Err(RunError::AlreadyStarted));
     }
 
@@ -1703,7 +1789,10 @@ mod tests {
                 reason: "the hold timed out".to_string(),
                 at_ms: 20,
             },
-            RunCommand::Finish { at_ms: 20 },
+            RunCommand::Finish {
+                at_ms: 20,
+                reason: None,
+            },
         ] {
             let mut run = suspended();
             apply_all(&mut run, ending);
@@ -1750,7 +1839,10 @@ mod tests {
         assert_eq!(run.status, RunStatus::Stopped);
         assert_eq!(run.emitted.len(), 1, "and nothing it emitted was lost");
         assert_eq!(
-            run.decide(RunCommand::Finish { at_ms: 4 }),
+            run.decide(RunCommand::Finish {
+                at_ms: 4,
+                reason: None
+            }),
             Err(RunError::AlreadyEnded),
             "a restarted process must not finish a run somebody stopped"
         );

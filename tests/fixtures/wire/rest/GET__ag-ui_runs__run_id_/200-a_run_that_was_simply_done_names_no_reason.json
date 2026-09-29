@@ -4,16 +4,17 @@
   "status": 200,
   "body": {
     "runId": "0199bb4e-0000-7000-8000-000000000001",
-    "threadId": "thr-second-device-0199bb4e000070008000000000000002",
+    "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
     "status": "finished",
     "startedAtMs": 1790000000000,
     "failure": null,
+    "finishReason": null,
     "pending": null,
     "events": [
       {
         "type": "RUN_STARTED",
         "runId": "0199bb4e-0000-7000-8000-000000000001",
-        "threadId": "thr-second-device-0199bb4e000070008000000000000002",
+        "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
         "timestamp": 100
       },
       {
@@ -25,7 +26,7 @@
       {
         "type": "TEXT_MESSAGE_CONTENT",
         "messageId": "m1",
-        "delta": "my name is Juana",
+        "delta": "hello",
         "timestamp": 100
       },
       {
@@ -41,7 +42,7 @@
       },
       {
         "type": "TEXT_MESSAGE_CONTENT",
-        "delta": "Hello Juana",
+        "delta": "You said: hello. This is the mock door standing in for oag/cheap — no model was called.",
         "messageId": "msg_0199bb4e-0000-7000-8000-000000000001_1",
         "timestamp": 100
       },
@@ -67,7 +68,7 @@
             "limit": 128000,
             "left_out": 0,
             "estimated": [
-              1518
+              3392
             ]
           },
           "model_ms": [
@@ -78,7 +79,7 @@
           "tool_wait_ms": 3,
           "auto_review_ms": 3
         },
-        "threadId": "thr-second-device-0199bb4e000070008000000000000002",
+        "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
         "total_ms": 3,
         "timestamp": 100,
         "tool_rounds": 0
@@ -86,7 +87,7 @@
       {
         "type": "RUN_FINISHED",
         "runId": "0199bb4e-0000-7000-8000-000000000001",
-        "threadId": "thr-second-device-0199bb4e000070008000000000000002",
+        "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
         "timestamp": 100
       }
     ]

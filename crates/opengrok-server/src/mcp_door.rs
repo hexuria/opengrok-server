@@ -1087,6 +1087,7 @@ pub async fn settle_mcp_answer(
 
     let finished = match run.decide(RunCommand::Finish {
         at_ms: answer.at_ms,
+        reason: None,
     }) {
         Ok(finished) => finished,
         Err(error) => {

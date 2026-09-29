@@ -1943,7 +1943,9 @@ async fn converse_raw(
                 if let Some(why) = over {
                     // An opened target or editor is the answer, so spending the last call on it
                     // finishes with its sentence rather than failing.
+                    // It still stopped at its limit, and says so like the wrap-up (#244).
                     if let Some((_, sentence)) = opened.clone() {
+                        projection.finishing_because(opengrok_core::run::FinishReason::Budget);
                         end_run!(round_events, Ending::Finish(Some(sentence)));
                     }
                     // DURABLE BEFORE THE WRAP-UP CALL, as before any call.
@@ -2062,6 +2064,7 @@ async fn wrap_up(
     }
     if streamed.is_ok() && round_has_assistant_text(&round) {
         timing.wrapped_up(&why);
+        projection.finishing_because(opengrok_core::run::FinishReason::Budget);
         (round, Ending::Finish(None))
     } else {
         (round, Ending::Fail(why))

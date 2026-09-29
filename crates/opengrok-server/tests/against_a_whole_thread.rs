@@ -146,7 +146,10 @@ async fn seed_run(
     }
 
     let produced = match ending {
-        Ending::Finished => run.decide(RunCommand::Finish { at_ms }),
+        Ending::Finished => run.decide(RunCommand::Finish {
+            at_ms,
+            reason: None,
+        }),
         Ending::Failed(reason) => run.decide(RunCommand::Fail {
             reason: reason.to_string(),
             at_ms,

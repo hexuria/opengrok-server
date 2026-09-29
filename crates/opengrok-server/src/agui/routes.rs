@@ -3572,7 +3572,16 @@ async fn append_events_once(
             opengrok_wire::agui::EventType::RunFinished
                 if run.status != RunStatus::AwaitingApproval =>
             {
-                Some(run.decide(RunCommand::Finish { at_ms }))
+                Some(
+                    run.decide(RunCommand::Finish {
+                        at_ms,
+                        reason: event
+                            .extra
+                            .get("reason")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(opengrok_core::run::FinishReason::parse),
+                    }),
+                )
             }
             opengrok_wire::agui::EventType::RunFinished => None,
             opengrok_wire::agui::EventType::RunError => Some(
@@ -3879,6 +3888,9 @@ pub async fn replay_run(
         // noticed, and the turn would sort to the wrong place in the thread for good.
         "startedAtMs": started_at_ms(window),
         "failure": run.failure,
+        // Why a finished run finished, when it was not simply done: `"budget"` for a run that
+        // reached a cap and ended on its wrap-up (#244). Null otherwise.
+        "finishReason": run.finish_reason.map(|reason| reason.as_str()),
         "pending": run.pending,
         "events": events,
     }))
@@ -3970,6 +3982,8 @@ struct ThreadRunReplay {
     started_at_ms: i64,
     updated_at_ms: i64,
     failure: Option<String>,
+    /// See `replay_run`'s `finishReason`.
+    finish_reason: Option<&'static str>,
     /// ABSENT, not empty, when `?events=false` asked for the list without the bodies. An empty
     /// array would say this run emitted nothing, which is a different claim and a false one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4113,6 +4127,7 @@ pub async fn replay_thread(
             started_at_ms: summary.started_at_ms,
             updated_at_ms: summary.updated_at_ms,
             failure: run.failure,
+            finish_reason: run.finish_reason.map(|reason| reason.as_str()),
             // The frames are loaded either way: whether a run started and why it failed are only
             // knowable from its log, and answering those two from the projection would mean
             // guessing. `events=false` saves the client the megabytes, not the server the read.
