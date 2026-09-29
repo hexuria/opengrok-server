@@ -242,6 +242,9 @@ impl ToolRunner {
         if let Some(handler) = self.local_for(&call.name) {
             return handler(call);
         }
+        // Before the executor, so no ceiling, grant or approval gates it, ON PURPOSE: it only reads
+        // instructions its owner attached, as the system message already lists them, and it never
+        // raises a card — no approval list may name it (the server's `set_approvals`).
         if let Some((offers, source)) = self.skills.as_ref().filter(|_| call.name == USE_SKILL) {
             return opengrok_tools::skill::answer(call, offers, source.as_ref()).await;
         }

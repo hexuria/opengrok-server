@@ -16,7 +16,7 @@
 //!
 //! A SKILL IS THE LAST SEGMENT OF THAT ONE MESSAGE, AND LAST IS NOT A DETAIL. A skill body is
 //! unbounded prose a person wrote, so of everything that goes into this message it is the likeliest
-//! to contradict the machine discipline above it. `chosen_skill_line` says why it lands after every
+//! to contradict the machine discipline above it. `fenced_skill` says why it lands after every
 //! segment that decides what the coworker may do, rather than before.
 //!
 //! The room is the exception, and deliberately: `group::member_system_prompt` is transcribed from
@@ -243,8 +243,8 @@ pub fn chosen_recipe_line(
 // name check and the frontmatter parser they rest on (`opengrok_plugins::skill`).
 pub use opengrok_plugins::skill::{
     SKILL_CLOSING_LINE, SKILL_DRAFT_LINE, SKILL_FILES_UNAVAILABLE, SKILL_UNAVAILABLE_LINE,
-    SkillAuthor, chosen_skill_line, skill_files_line, skill_files_unavailable_line, skill_marker,
-    skill_name_from_system,
+    SkillAuthor, SkillDoor, fenced_skill, skill_files_line, skill_files_unavailable_line,
+    skill_marker, skill_name_from_system,
 };
 
 pub fn computer_system_prompt(

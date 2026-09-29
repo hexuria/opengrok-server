@@ -901,6 +901,8 @@ async fn attached_reply(state: &AgUiState, owner: &AccountId, coworker: &Coworke
 /// or no longer in their org): kept by the name the store has, switched off and saying nothing
 /// more, so it stays attached, and offered to no turn, until a save leaves it out. It can never be
 /// newly attached. A deleted skill is no row, so the next save drops it. Theirs first, by name.
+/// `enabled` is its switch on AND the owner still may use it: an attached, enabled skill reaches
+/// the owner's turns once it has a body, unless another offered skill has its name (`offered`).
 async fn attached_rows(
     state: &AgUiState,
     owner: &AccountId,

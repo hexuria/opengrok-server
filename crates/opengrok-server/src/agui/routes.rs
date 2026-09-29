@@ -312,32 +312,26 @@ async fn skill_segment(
             return why.line().to_string();
         }
     };
-    let quoted = crate::persona::skill_marker(&skill.body)
-        .map(|marker| {
-            crate::persona::chosen_skill_line(&skill.name, &skill.body, &marker, skill.author)
-        })
-        .filter(|segment| !segment.is_empty());
-    let target = tools.and_then(ToolRunner::fill_target);
-    match quoted {
-        Some(segment) => match crate::skills::files_line_for_turn(state, &skill, target).await {
-            // Before the closing line, so our restatement of the rules stays the last word.
-            Some(files) => {
-                let close = crate::persona::SKILL_CLOSING_LINE;
-                let joined = segment
-                    .strip_suffix(close)
-                    .map(|head| format!("{head}{files}{close}"));
-                joined.unwrap_or(segment)
-            }
-            None => segment,
-        },
-        None => {
-            // No marker the body does not already contain, so the quote could not be closed where
-            // we say it closes. Refuse rather than quote it unbounded.
-            let why = crate::skills::NotForThisTurn::Unquotable;
-            tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
-            why.line().to_string()
+    // The files go before the closing line, so our restatement of the rules stays the last word:
+    // the fence places them, as it does for a skill read with `use_skill`.
+    let quoted = match crate::persona::skill_marker(&skill.body) {
+        Some(marker) => {
+            let target = tools.and_then(ToolRunner::fill_target);
+            let files = crate::skills::files_line_for_turn(state, &skill, target).await;
+            let (door, author) = (crate::persona::SkillDoor::Chosen, skill.author);
+            let files = files.unwrap_or_default();
+            crate::persona::fenced_skill(door, &skill.name, &skill.body, &marker, author, &files)
         }
+        None => String::new(),
+    };
+    if quoted.is_empty() {
+        // No marker the body does not already contain, so the quote could not be closed where
+        // we say it closes. Refuse rather than quote it unbounded.
+        let why = crate::skills::NotForThisTurn::Unquotable;
+        tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
+        return why.line().to_string();
     }
+    quoted
 }
 
 /// The skill line for this turn, and the id to record on `RunEvent::Started`.
@@ -1797,6 +1791,17 @@ pub async fn set_approvals(
         return refuse_use(&state, &account_id, &coworker_id, reason).await;
     }
 
+    // `use_skill` NEVER NEEDS A YES, and listing it would promise a card that never comes: it only
+    // reads skills its owner attached, is answered before any gate (`ToolRunner::run_one`), and
+    // raises no card. Refused, not dropped, so the list a client saved is the list that stands.
+    if request
+        .tools
+        .iter()
+        .any(|tool| tool == opengrok_tools::skill::USE_SKILL)
+    {
+        let why = "use_skill never needs a yes: it only reads skills its owner attached";
+        return crate::health::refusal(422, why);
+    }
     let needs_approval = if request.tools.is_empty() {
         opengrok_policy::ToolSet::None
     } else {
@@ -3020,7 +3025,7 @@ async fn start_claimed_turn(
                     chosen_line,
                     // LAST, AFTER EVERY SEGMENT THAT SAYS WHAT THIS COWORKER MAY DO. A skill body
                     // is prose a person wrote; it must not be able to read as granting itself
-                    // something the segments above just withheld. `persona::chosen_skill_line`
+                    // something the segments above just withheld. `persona::fenced_skill`
                     // carries the rest of the reason, and an empty one adds nothing at all — a
                     // turn with no skill is byte-for-byte the turn we had before.
                     skill_line,

@@ -270,6 +270,9 @@ pub fn summary_for(tool: &str, arguments: &Value) -> String {
             "Play the recipe \"{}\" on the agent's own computer",
             clip(string_arg(arguments, "recipe").unwrap_or("(unnamed)"), 80)
         ),
+        // Never asked about: `use_skill` only reads what its owner attached and raises no card,
+        // and no approval list may name it (`set_approvals`). Here so a replayed or foreign frame
+        // that names it reads well.
         opengrok_tools::skill::USE_SKILL => format!(
             "Read the skill \"{}\"",
             clip(string_arg(arguments, "name").unwrap_or("(unnamed)"), 80)
