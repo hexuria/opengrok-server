@@ -1,5 +1,5 @@
 {
-  "server_sha": "b56bdeebd78b4c4be0f76d2d854cfb6330302e6c",
+  "server_sha": "07d5652cc028adeedb79cfafd54d4f576dc3a6d0",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -850,6 +850,10 @@
       "source": "GET /recipes/{id}, recorded from the test a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_they_cannot_open (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__recipes__id_/200-a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures-2.json",
+      "source": "GET /recipes/{id}, recorded from the test a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__recipes__id_/200-a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route.json",
       "source": "GET /recipes/{id}, recorded from the test a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
@@ -866,8 +870,8 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted.json",
-      "source": "GET /schedules, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
+      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
@@ -882,11 +886,15 @@
       "source": "GET /schedules, recorded from the test a_routine_above_the_ceiling_is_refused_naming_it (crates/opengrok-server/tests/against_run_limits.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__schedules/200-an_edited_routine_runs_now_with_its_new_prompt.json",
+      "source": "GET /schedules, recorded from the test an_edited_routine_runs_now_with_its_new_prompt (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-an_edited_routine_runs_now_with_its_new_prompt.json",
+      "file": "rest/GET__schedules/200-an_edited_routine_runs_now_with_its_new_prompt-2.json",
       "source": "GET /schedules, recorded from the test an_edited_routine_runs_now_with_its_new_prompt (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
@@ -982,6 +990,14 @@
       "source": "PATCH /ag-ui/threads/{thread_id}/pending/{id}, recorded from the test a_send_that_reaches_the_row_first_makes_the_late_edit_miss (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/PATCH__coworkers__coworker_id_/200-an_owner_sets_how_hard_a_coworker_thinks_and_every_row_says_so.json",
+      "source": "PATCH /coworkers/{coworker_id}, recorded from the test an_owner_sets_how_hard_a_coworker_thinks_and_every_row_says_so (crates/opengrok-server/tests/against_a_coworkers_effort.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/PATCH__coworkers__coworker_id_/200-an_unknown_effort_is_refused_and_nothing_in_the_patch_is_applied.json",
+      "source": "PATCH /coworkers/{coworker_id}, recorded from the test an_unknown_effort_is_refused_and_nothing_in_the_patch_is_applied (crates/opengrok-server/tests/against_a_coworkers_effort.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/PATCH__coworkers__coworker_id_/200-a_coworker_is_hired_on_a_pin_and_can_be_repinned.json",
       "source": "PATCH /coworkers/{coworker_id}, recorded from the test a_coworker_is_hired_on_a_pin_and_can_be_repinned (crates/opengrok-server/tests/against_model_pins.rs); ids and times are placeholders"
     },
@@ -1000,6 +1016,10 @@
     {
       "file": "rest/PATCH__coworkers__coworker_id_/200-the_decoration_lands_in_the_profile_blob_and_comes_back-2.json",
       "source": "PATCH /coworkers/{coworker_id}, recorded from the test the_decoration_lands_in_the_profile_blob_and_comes_back (crates/opengrok-server/tests/against_a_renamed_coworker.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/PATCH__coworkers__coworker_id_/400-an_unknown_effort_is_refused_and_nothing_in_the_patch_is_applied.json",
+      "source": "PATCH /coworkers/{coworker_id}, recorded from the test an_unknown_effort_is_refused_and_nothing_in_the_patch_is_applied (crates/opengrok-server/tests/against_a_coworkers_effort.rs); ids and times are placeholders"
     },
     {
       "file": "rest/PATCH__coworkers__coworker_id_/400-a_blank_name_is_refused_and_the_stored_name_stands.json",
