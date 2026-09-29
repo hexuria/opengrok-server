@@ -10,14 +10,16 @@
         "status": "finished",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000000000,
-        "failure": null
+        "failure": null,
+        "finishReason": null
       },
       {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
         "status": "failed",
         "startedAtMs": 1790000001000,
         "updatedAtMs": 1790000001000,
-        "failure": "the model gateway refused"
+        "failure": "the model gateway refused",
+        "finishReason": null
       }
     ],
     "hiddenRunIds": [],

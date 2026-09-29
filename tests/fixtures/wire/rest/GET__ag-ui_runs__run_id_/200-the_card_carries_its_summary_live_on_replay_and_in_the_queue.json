@@ -8,6 +8,7 @@
     "status": "awaiting-approval",
     "startedAtMs": 1790000000000,
     "failure": null,
+    "finishReason": null,
     "pending": {
       "call_id": "mock-call-1",
       "tool": "shell",

@@ -8,6 +8,7 @@
     "status": "finished",
     "startedAtMs": 1790000000000,
     "failure": null,
+    "finishReason": null,
     "pending": null,
     "events": [
       {

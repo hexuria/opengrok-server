@@ -11,6 +11,7 @@
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
         "failure": null,
+        "finishReason": null,
         "events": [
           {
             "type": "RUN_STARTED",
