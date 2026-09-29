@@ -28,7 +28,7 @@ use opengrok_server::connections::routes::Connectors;
 use opengrok_server::host_state::HostState;
 use opengrok_server::persona::SKILL_CLOSING_LINE;
 use opengrok_store::PgStore;
-use opengrok_tools::skill::{USE_SKILL, USE_SKILL_DESCRIPTION};
+use opengrok_tools::skill::{SKILL_LINES_DENIAL, USE_SKILL, USE_SKILL_DESCRIPTION};
 use serde_json::{Value, json};
 
 macro_rules! database_or_skip {
@@ -896,6 +896,7 @@ async fn a_turn_lists_its_attached_skills_and_offers_use_skill_only_while_one_is
         said.contains("\n- `alpha`: Sort incoming bugs by severity."),
         "one line, the description folded onto it: {said}"
     );
+    our_words_last(&said, &["Sort incoming bugs by severity."]);
     assert!(!said.contains("`beta`"), "{said}");
     let tools = &asked[0].tools;
     let use_skill: Vec<&Value> = tools
@@ -929,6 +930,23 @@ async fn a_turn_lists_its_attached_skills_and_offers_use_skill_only_while_one_is
         !listed.iter().any(|tool| tool["name"] == USE_SKILL),
         "{listed:?}"
     );
+}
+
+/// With no `/name` the attached skills end the system message, so our denial must come after every
+/// author's description and be the message's last words (review of #290).
+fn our_words_last(said: &str, descriptions: &[&str]) {
+    assert!(
+        said.trim_end().ends_with(SKILL_LINES_DENIAL),
+        "the system message ends on our sentence: {said}"
+    );
+    let denial = said.rfind(SKILL_LINES_DENIAL).unwrap_or(0);
+    for description in descriptions {
+        let at = said.find(description).unwrap_or(usize::MAX);
+        assert!(
+            at < denial,
+            "{description:?} comes before the denial: {said}"
+        );
+    }
 }
 
 /// The recording NativeChat asked for: a turn calls `use_skill` and reads the skill's body back.
@@ -1385,6 +1403,7 @@ async fn a_routine_firing_lists_the_attached_skills_and_offers_use_skill() {
         "{}",
         system(first)
     );
+    our_words_last(&system(first), &["Sort bugs."]);
     assert!(
         offered(first).contains(&USE_SKILL.to_string()),
         "{:?}",
