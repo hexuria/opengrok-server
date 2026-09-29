@@ -188,17 +188,6 @@ pub async fn take_over_with_local_docker(
 pub const FELL_BACK: &str = "box.ascii.dev refused this computer, so it now runs as a Local VM \
 on this server — files on the old computer are not on this one";
 
-/// The provider for an account's existing computer of `kind`, resolving the account's org itself.
-/// The run path uses this so tools execute on the same provider that created the box.
-pub async fn provider_for_account(
-    state: &AgUiState,
-    account_id: &AccountId,
-    kind: &str,
-) -> Option<Arc<dyn Computer>> {
-    let org_id = account_org(state, account_id).await;
-    provider_for(state, org_id.as_deref(), kind).await
-}
-
 /// Local VM (server-host Docker) is a SELF-HOST / dev convenience only. A hosted, multi-tenant
 /// deployment (`OG_HOSTED=1`) must never run untrusted bot containers on the API host — a container
 /// escape lands on the machine holding the token secret and the org vault — so it is neither
