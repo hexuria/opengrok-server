@@ -635,7 +635,10 @@ async fn a_turn_the_person_moved_past_is_not_carried_on() {
         &h,
         thread,
         quiet_since + 1_000,
-        vec![RunCommand::Finish { at_ms: now_ms() }],
+        vec![RunCommand::Finish {
+            at_ms: now_ms(),
+            reason: None,
+        }],
     )
     .await;
     not_carried_on(&settle(&h, &old).await, "newer turn");

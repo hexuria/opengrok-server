@@ -2062,6 +2062,7 @@ async fn wrap_up(
     }
     if streamed.is_ok() && round_has_assistant_text(&round) {
         timing.wrapped_up(&why);
+        projection.finishing_because(opengrok_core::run::FinishReason::Budget);
         (round, Ending::Finish(None))
     } else {
         (round, Ending::Fail(why))

@@ -309,7 +309,12 @@ async fn seed_run(
         })
         .expect("start");
     record(&mut run, &mut log, produced);
-    let produced = run.decide(RunCommand::Finish { at_ms }).expect("finish");
+    let produced = run
+        .decide(RunCommand::Finish {
+            at_ms,
+            reason: None,
+        })
+        .expect("finish");
     record(&mut run, &mut log, produced);
     let view = RunView {
         id: id.clone(),

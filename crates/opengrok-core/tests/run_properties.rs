@@ -32,7 +32,10 @@ fn command() -> impl Strategy<Value = RunCommand> {
             payload: json!({"type": "TEXT"}),
             at_ms: 0,
         }),
-        Just(RunCommand::Finish { at_ms: 0 }),
+        Just(RunCommand::Finish {
+            at_ms: 0,
+            reason: None
+        }),
         Just(RunCommand::Fail {
             reason: "r".into(),
             at_ms: 0,

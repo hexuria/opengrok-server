@@ -144,7 +144,10 @@ async fn seed_run(
 
     let produced = match ending {
         Ending::Running => Ok(Vec::new()),
-        Ending::Finished => run.decide(RunCommand::Finish { at_ms }),
+        Ending::Finished => run.decide(RunCommand::Finish {
+            at_ms,
+            reason: None,
+        }),
         Ending::Failed(reason) => run.decide(RunCommand::Fail {
             reason: reason.to_string(),
             at_ms,
@@ -356,7 +359,10 @@ async fn a_running_run_is_stopped_and_stays_stopped() {
 
     // Nothing may move it off that status afterwards, whatever arrives late.
     for late in [
-        RunCommand::Finish { at_ms: now_ms() },
+        RunCommand::Finish {
+            at_ms: now_ms(),
+            reason: None,
+        },
         RunCommand::Fail {
             reason: "a late failure".to_string(),
             at_ms: now_ms(),

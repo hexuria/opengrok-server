@@ -36,6 +36,8 @@ pub struct Projection {
     open: Open,
     started: bool,
     finished: bool,
+    /// Said on `RUN_FINISHED` when the run was not simply done (#244).
+    finish_reason: Option<opengrok_core::run::FinishReason>,
     /// Distinguishes the messages of one run from each other.
     message_seq: u32,
 }
@@ -66,6 +68,7 @@ impl Projection {
             open: Open::Nothing,
             started: false,
             finished: false,
+            finish_reason: None,
             message_seq: 0,
         }
     }
@@ -300,12 +303,21 @@ impl Projection {
         }
         events.extend(self.close_open());
         self.finished = true;
-        events.push(
-            self.event(EventType::RunFinished)
-                .with("threadId", self.thread_id.clone())
-                .with("runId", self.run_id.clone()),
-        );
+        let mut finished = self
+            .event(EventType::RunFinished)
+            .with("threadId", self.thread_id.clone())
+            .with("runId", self.run_id.clone());
+        if let Some(reason) = self.finish_reason {
+            finished = finished.with("reason", reason.as_str());
+        }
+        events.push(finished);
         events
+    }
+
+    /// The `RUN_FINISHED` this projection closes with will say why (#244). The journal reads the
+    /// word off the frame into the run's `Finished`, so the log and the stream say the same.
+    pub fn finishing_because(&mut self, reason: opengrok_core::run::FinishReason) {
+        self.finish_reason = Some(reason);
     }
 
     /// One frame before the first box-bound tool of a turn starts a sleeping box, so a client

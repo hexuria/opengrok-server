@@ -842,6 +842,8 @@ async fn a_model_that_never_stops_is_bounded_and_told_why() {
 
     let last = events.last().unwrap();
     assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
+    // The run finished, but at its limit, and the frame says which (#244).
+    assert_eq!(last.extra.get("reason").unwrap(), "budget", "{last:?}");
     assert!(
         assistant_text(&events).contains("eight times"),
         "the wrap-up is the answer: {events:?}"
