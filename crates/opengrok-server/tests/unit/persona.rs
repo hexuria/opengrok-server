@@ -1,4 +1,5 @@
 use super::*;
+use opengrok_plugins::skill::{SKILL_MARKER_CHARS, begin_skill, end_skill};
 use serde_json::json;
 
 #[test]

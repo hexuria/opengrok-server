@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 opengrok-core = { path = "../opengrok-core" }
+# The marker around a quoted skill body (`skill::skill_marker`): its randomness is the boundary.
+rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
