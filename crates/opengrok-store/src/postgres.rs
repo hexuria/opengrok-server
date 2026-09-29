@@ -1,9 +1,9 @@
 //! The Postgres event store.
 //!
-//! Async, unlike the `EventStore` trait, which is deliberately sync so the pure in-memory store
-//! needs no runtime. Rather than making the trait async (and infecting every caller with a boxed
-//! future for the sake of a HashMap), the async surface is stated plainly here and the service
-//! layer takes whichever it was handed.
+//! Async, unlike the `EventStore` trait the store's unit tests replay accounts through, which is
+//! deliberately sync so their in-memory store needs no runtime. Rather than making the trait async
+//! (and infecting every caller with a boxed future for the sake of a HashMap), the async surface
+//! is stated plainly here.
 //!
 //! APPEND AND PROJECT IN ONE TRANSACTION. If the log and the view can drift, a caller can be told
 //! "signed in" and then read a projection that has never heard of them. They commit together or
