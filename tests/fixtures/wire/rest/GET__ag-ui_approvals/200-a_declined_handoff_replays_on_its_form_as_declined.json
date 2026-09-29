@@ -1,0 +1,6 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/approvals",
+  "status": 200,
+  "body": []
+}
