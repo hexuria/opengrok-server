@@ -1,7 +1,0 @@
-{
-  "type": "TOOL_CALL_RESULT",
-  "timestamp": 100,
-  "toolCallId": "call_1",
-  "content": "waiting for approval: running shell on coworker cw_0199bb4e-0000-7000-8000-000000000001 needs a human yes",
-  "ok": false
-}

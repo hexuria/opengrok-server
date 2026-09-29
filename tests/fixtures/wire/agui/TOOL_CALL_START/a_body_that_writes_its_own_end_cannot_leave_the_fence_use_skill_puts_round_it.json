@@ -1,0 +1,6 @@
+{
+  "type": "TOOL_CALL_START",
+  "timestamp": 100,
+  "toolCallId": "call-use-skill",
+  "toolCallName": "use_skill"
+}

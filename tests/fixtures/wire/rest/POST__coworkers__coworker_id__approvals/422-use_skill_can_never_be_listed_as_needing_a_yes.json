@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/approvals",
+  "status": 422,
+  "body": {
+    "error": "use_skill never needs a yes: it only reads skills its owner attached"
+  }
+}

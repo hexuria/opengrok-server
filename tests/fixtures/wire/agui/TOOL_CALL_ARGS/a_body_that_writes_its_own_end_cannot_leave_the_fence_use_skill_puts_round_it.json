@@ -1,0 +1,6 @@
+{
+  "type": "TOOL_CALL_ARGS",
+  "timestamp": 100,
+  "toolCallId": "call-use-skill",
+  "delta": "{\"name\":\"triage\"}"
+}

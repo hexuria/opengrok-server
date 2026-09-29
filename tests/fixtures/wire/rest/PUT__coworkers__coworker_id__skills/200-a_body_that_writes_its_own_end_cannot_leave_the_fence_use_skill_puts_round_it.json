@@ -6,16 +6,8 @@
     "skills": [
       {
         "id": "skl_0199bb4e-0000-7000-8000-000000000002",
-        "name": "alpha",
-        "description": "First.",
-        "scope": "mine",
-        "attached": true,
-        "enabled": true
-      },
-      {
-        "id": "skl_0199bb4e-0000-7000-8000-000000000003",
-        "name": "beta",
-        "description": "Second.",
+        "name": "triage",
+        "description": "Sort incoming bugs.",
         "scope": "mine",
         "attached": true,
         "enabled": true
