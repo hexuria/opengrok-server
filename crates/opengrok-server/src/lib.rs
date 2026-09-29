@@ -119,6 +119,9 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
 
 /// Wrap a plain-text 502/503/504 body as `{"error": text}` (see `router`). A JSON body is left as
 /// the handler wrote it, and so is a streamed or empty one.
+/// The longest plain-text 502/503/504 body `gateway_errors_as_json` reads before it gives up.
+const GATEWAY_ERROR_MAX: usize = 256 * 1024;
+
 async fn gateway_errors_as_json(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -138,10 +141,13 @@ async fn gateway_errors_as_json(
         return response;
     }
     let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
-        return axum::response::Response::from_parts(parts, axum::body::Body::empty());
+    // A body past the cap, or one whose stream broke, still gets a sentence: an empty 503 is the
+    // "out of reach" reading this layer exists to replace (review of #262). The cap clears the
+    // longest sentence written today, a from-tape refusal of 64 KiB plus its promise.
+    let sentence = match axum::body::to_bytes(body, GATEWAY_ERROR_MAX).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).trim().to_string(),
+        Err(_) => "the server could not say why; it is still running".to_string(),
     };
-    let sentence = String::from_utf8_lossy(&bytes).trim().to_string();
     let json = serde_json::json!({ "error": sentence }).to_string();
     parts.headers.insert(
         header::CONTENT_TYPE,
@@ -411,6 +417,10 @@ fn console_content_type(path: &std::path::Path) -> &'static str {
 pub(crate) use auth::password::hash_password as password_hash;
 /// Re-exports so `account_api` can call the password helpers by a stable path.
 pub(crate) use auth::password::verify_password as password_verify;
+
+#[cfg(test)]
+#[path = "../tests/unit/gateway_errors.rs"]
+mod gateway_errors_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/console.rs"]
