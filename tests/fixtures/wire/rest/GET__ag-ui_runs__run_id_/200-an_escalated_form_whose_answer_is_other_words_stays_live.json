@@ -139,7 +139,6 @@
           "instruction": ""
         },
         "formResolution": "escalated",
-        "boxResolution": "handed_back",
         "value": {
           "id": "e_0199bb4e-0000-7000-8000-000000000005",
           "kind": "send-message",
@@ -170,8 +169,7 @@
           },
           "timestampMs": 1790000001000,
           "formResolution": "escalated",
-          "widgetDismissed": true,
-          "boxResolution": "handed_back"
+          "widgetDismissed": true
         }
       },
       {
@@ -252,8 +250,7 @@
           },
           "timestampMs": 1790000001000,
           "formResolution": "escalated",
-          "widgetDismissed": true,
-          "boxResolution": "handed_back"
+          "widgetDismissed": true
         },
         "callId": "form-0199bb4e000070008000000000000004",
         "entryId": "e_0199bb4e-0000-7000-8000-000000000005",
@@ -304,13 +301,12 @@
           "liveHost": "accounts.google.com",
           "instruction": ""
         },
-        "formResolution": "escalated",
-        "boxResolution": "handed_back"
+        "formResolution": "escalated"
       },
       {
         "ok": true,
         "type": "TOOL_CALL_RESULT",
-        "content": "Person finished on computer. Screenshot and confirm login; if another challenge, call request_user_form.",
+        "content": "Person finished on computer.",
         "timestamp": 100,
         "toolCallId": "form-0199bb4e000070008000000000000004"
       },

@@ -1,5 +1,5 @@
 {
-  "server_sha": "5f248befa4191a467349b33e9d62922aa1784179",
+  "server_sha": "6f82fdac125107b12ed58e2000b95bf3433e6e3b",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -374,6 +374,14 @@
       "source": "GET /ag-ui/host-settings, recorded from the test a_stranger_and_a_bad_patch_are_refused (crates/opengrok-server/tests/against_host_settings.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__ag-ui_runs__run_id_/200-a_form_escalated_after_its_run_stopped_replays_its_hand_back_on_its_park.json",
+      "source": "GET /ag-ui/runs/{run_id}, recorded from the test a_form_escalated_after_its_run_stopped_replays_its_hand_back_on_its_park (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__ag-ui_runs__run_id_/200-an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_answer.json",
+      "source": "GET /ag-ui/runs/{run_id}, recorded from the test an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_answer (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__ag-ui_runs__run_id_/200-a_form_raised_after_an_answer_has_its_card_and_entry_id.json",
       "source": "GET /ag-ui/runs/{run_id}, recorded from the test a_form_raised_after_an_answer_has_its_card_and_entry_id (crates/opengrok-server/tests/against_a_form_after_an_answer.rs); ids and times are placeholders"
     },
@@ -390,12 +398,8 @@
       "source": "GET /ag-ui/runs/{run_id}, recorded from the test a_declined_handoff_replays_on_its_form_as_declined (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__ag-ui_runs__run_id_/200-a_form_escalated_after_its_run_stopped_replays_its_hand_back_on_its_park.json",
-      "source": "GET /ag-ui/runs/{run_id}, recorded from the test a_form_escalated_after_its_run_stopped_replays_its_hand_back_on_its_park (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
-    },
-    {
-      "file": "rest/GET__ag-ui_runs__run_id_/200-an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_answer.json",
-      "source": "GET /ag-ui/runs/{run_id}, recorded from the test an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_answer (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__ag-ui_runs__run_id_/200-an_escalated_form_whose_answer_is_other_words_stays_live.json",
+      "source": "GET /ag-ui/runs/{run_id}, recorded from the test an_escalated_form_whose_answer_is_other_words_stays_live (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__ag-ui_runs__run_id_/200-a_handed_back_form_replays_as_handed_back_and_leaves_the_approvals_queue.json",
@@ -778,10 +782,6 @@
       "source": "GET /recipes/{id}, recorded from the test a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_they_cannot_open (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__recipes__id_/200-a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures-2.json",
-      "source": "GET /recipes/{id}, recorded from the test a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
-    },
-    {
       "file": "rest/GET__recipes__id_/200-a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route.json",
       "source": "GET /recipes/{id}, recorded from the test a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
@@ -798,8 +798,8 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted.json",
-      "source": "GET /schedules, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
+      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
@@ -812,10 +812,6 @@
     {
       "file": "rest/GET__schedules/200-a_routine_above_the_ceiling_is_refused_naming_it.json",
       "source": "GET /schedules, recorded from the test a_routine_above_the_ceiling_is_refused_naming_it (crates/opengrok-server/tests/against_run_limits.rs); ids and times are placeholders"
-    },
-    {
-      "file": "rest/GET__schedules/200-run_now_starts_a_run_the_history_calls_manual.json",
-      "source": "GET /schedules, recorded from the test run_now_starts_a_run_the_history_calls_manual (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
@@ -1030,8 +1026,8 @@
       "source": "POST /ag-ui/box-handoff/resolve, recorded from the test a_declined_handoff_replays_on_its_form_as_declined (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/POST__ag-ui_box-handoff_resolve/503-a_hand_back_that_cannot_read_the_run_log_settles_nothing.json",
-      "source": "POST /ag-ui/box-handoff/resolve, recorded from the test a_hand_back_that_cannot_read_the_run_log_settles_nothing (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/POST__ag-ui_box-handoff_resolve/503-a_hand_back_by_the_forms_id_that_cannot_read_the_run_log_settles_nothing.json",
+      "source": "POST /ag-ui/box-handoff/resolve, recorded from the test a_hand_back_by_the_forms_id_that_cannot_read_the_run_log_settles_nothing (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__ag-ui_runs__run_id__answer/200-a_no_on_an_mcp_card_finishes_the_run_and_the_next_call_asks_again.json",
