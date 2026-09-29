@@ -357,6 +357,23 @@ async fn a_run_that_reached_its_limit_finishes_and_says_so() {
         replay["finishReason"], "budget",
         "the log kept it: {replay}"
     );
+    // And the thread's own history, which is what a client reloading a conversation reads.
+    let thread = finished["threadId"].as_str().expect("thread id");
+    let history: Value = h
+        .client
+        .get(format!("{}/ag-ui/threads/{thread}", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("thread")
+        .json()
+        .await
+        .expect("thread json");
+    let row = history["runs"]
+        .as_array()
+        .and_then(|runs| runs.iter().find(|run| run["runId"] == run_id.as_str()))
+        .unwrap_or_else(|| panic!("no row for {run_id}: {history}"));
+    assert_eq!(row["finishReason"], "budget", "thread row: {row}");
     let (run, _) = h
         .store
         .load_run(&opengrok_core::id::RunId::from_stored(run_id.clone()))

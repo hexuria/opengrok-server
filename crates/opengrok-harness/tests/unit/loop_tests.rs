@@ -981,6 +981,54 @@ async fn a_model_call_that_never_starts_ends_with_a_reason() {
     assert!(message.contains("did not start answering"), "{message}");
 }
 
+/// A run that reached its cap with a target already open ends on the opened sentence, not a
+/// wrap-up call, and it still says it stopped at its limit (#244, review of #265).
+#[tokio::test]
+async fn a_cap_reached_with_a_target_open_still_says_budget() {
+    struct Door(Mutex<usize>);
+    #[async_trait::async_trait]
+    impl ModelDoor for Door {
+        async fn stream(&self, _request: ModelRequest) -> Result<DeltaStream, ModelError> {
+            let round = {
+                let mut count = self.0.lock().unwrap();
+                *count += 1;
+                *count
+            };
+            let script = shell_deltas(&format!("c{round}"), &format!("step {round}"));
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+    let runner = ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+        Arc::new(|call| {
+            let body = if call.arguments["command"] == "step 1" {
+                "exit 0\n--- stdout ---\n{\"ok\":true,\"result\":{\"name\":\"Inbox\",\"view\":\"mail\"}}\n"
+            } else {
+                "exit 0\n--- stdout ---\ndone\n"
+            };
+            opengrok_tools::ToolResult::ok(&call.id, body)
+        }),
+    );
+    let events = run_conversation(
+        &Door(Mutex::new(0)),
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("keep going"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunFinished, "{last:?}");
+    assert!(
+        assistant_text(&events).contains("Inbox is selected on mail."),
+        "{:?}",
+        assistant_text(&events)
+    );
+    assert_eq!(last.extra.get("reason").unwrap(), "budget", "{last:?}");
+}
+
 /// Past its wall clock, a run stops starting work and wraps up.
 #[tokio::test]
 async fn a_run_past_its_wall_clock_wraps_up() {
@@ -1029,7 +1077,9 @@ async fn a_run_past_its_wall_clock_wraps_up() {
         1,
         "the second command never starts"
     );
-    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let last = events.last().unwrap();
+    assert_eq!(last.event_type, EventType::RunFinished);
+    assert_eq!(last.extra.get("reason").unwrap(), "budget", "{last:?}");
     assert!(assistant_text(&events).contains("Out of time"));
     let timing = run_timing_value(&events).expect("run-timing");
     assert!(
