@@ -1,5 +1,5 @@
 {
-  "server_sha": "ee800091c11e4e758d4117fdd7ce61b801232ff7",
+  "server_sha": "a496271caabd1f55092022ca8691062933e6b879",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -822,10 +822,6 @@
       "source": "GET /recipes/{id}, recorded from the test a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_they_cannot_open (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__recipes__id_/200-a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures-2.json",
-      "source": "GET /recipes/{id}, recorded from the test a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
-    },
-    {
       "file": "rest/GET__recipes__id_/200-a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route.json",
       "source": "GET /recipes/{id}, recorded from the test a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
@@ -842,8 +838,8 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted.json",
-      "source": "GET /schedules, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
+      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
