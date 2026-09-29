@@ -6,12 +6,12 @@
     {
       "id": "sched_0199bb4e-0000-7000-8000-000000000001",
       "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
-      "name": "Standup",
+      "name": "Weekly",
       "cron": "0 0 9 * * 1",
-      "prompt": "summarise the standup notes",
+      "prompt": "write the weekly report",
       "kind": "cron",
-      "active": true,
-      "nextDueMs": 1790000000000,
+      "active": false,
+      "nextDueMs": null,
       "runLimits": {
         "maxRounds": null,
         "maxComputerRounds": null,
@@ -20,9 +20,9 @@
       "lastRun": {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
         "status": "running",
-        "startedAtMs": 1790000001000,
+        "startedAtMs": 1790000000000,
         "finishedAtMs": null,
-        "summary": "Routine Standup is running."
+        "summary": "Routine Weekly is running."
       }
     }
   ]
