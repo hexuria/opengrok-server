@@ -48,11 +48,23 @@ const REST_LEFT_OUT: &[&str] = &["/computer/vnc/", "/bytes"];
 
 /// Recordings kept whatever their shape, by test and route: a sequence NativeChat checks that a
 /// shape alone cannot tell apart from one already kept. The replay of a message sent with files
-/// and no words is START then END for the person's message (#229, nativechat#135).
-const ALSO_KEEP: &[(&str, &str)] = &[(
-    "a_message_of_files_keeps_its_parts_and_is_drawn_on_replay",
-    "/ag-ui/threads/{thread_id}",
-)];
+/// and no words is START then END for the person's message (#229, nativechat#135). An escalated
+/// form's replay after its run stopped waiting, and one read back from its run's answer, have the
+/// shape of a declined one but are cases NativeChat's ledger checks by name (#143, review of #277).
+const ALSO_KEEP: &[(&str, &str)] = &[
+    (
+        "a_message_of_files_keeps_its_parts_and_is_drawn_on_replay",
+        "/ag-ui/threads/{thread_id}",
+    ),
+    (
+        "a_form_escalated_after_its_run_stopped_replays_its_hand_back_on_its_park",
+        "/ag-ui/runs/{run_id}",
+    ),
+    (
+        "an_escalated_form_from_before_the_stamp_reads_its_end_from_its_runs_answer",
+        "/ag-ui/runs/{run_id}",
+    ),
+];
 
 const REDACTED: &str = "«redacted»";
 
