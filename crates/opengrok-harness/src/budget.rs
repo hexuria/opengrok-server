@@ -5,14 +5,16 @@
 //! `recovery::hold` renewed its lease the whole time, so the sweep never reclaimed it either. The
 //! Stop button could not reach it: Stop is read between rounds, and the round never ended.
 
+use std::num::{NonZeroU32, NonZeroU64};
 use std::time::Duration;
 
 use futures::StreamExt;
+use opengrok_core::limits::RunLimits;
 
 use crate::model::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 
-/// The limits one run is held to. `Default` is what every run gets unless its caller says
-/// otherwise.
+/// The limits one run is held to. `Default` is the server's own budget, the most any run gets;
+/// `held_to` narrows it by what an org and a routine set, and never widens it.
 ///
 /// The round limits keep their meaning: rounds that ended in words or other work, and rounds
 /// spent on the screen, counted apart because a desktop task is a dozen looks before a sentence.
@@ -52,6 +54,40 @@ impl Default for RunBudget {
 }
 
 impl RunBudget {
+    /// The server's budget, narrowed wherever `limits` say something: what a run is held to once
+    /// its org's ceiling and its routine have spoken. Only the three a person may set move; a
+    /// model call's own clocks stay the server's.
+    #[must_use]
+    pub fn held_to(limits: &RunLimits) -> Self {
+        let server = Self::default();
+        let rounds = |limit: Option<NonZeroU32>, most: usize| {
+            limit
+                .and_then(|limit| usize::try_from(limit.get()).ok())
+                .map_or(most, |limit| limit.min(most))
+        };
+        Self {
+            max_rounds: rounds(limits.max_rounds, server.max_rounds),
+            max_computer_rounds: rounds(limits.max_computer_rounds, server.max_computer_rounds),
+            max_wall_ms: limits.max_wall_ms.map_or(server.max_wall_ms, |limit| {
+                limit.get().min(server.max_wall_ms)
+            }),
+            ..server
+        }
+    }
+
+    /// The three a person may set, as this budget holds them. Read off the server's own budget
+    /// only, every field of which a `RunLimits` can hold: it is the most any limit may be, and
+    /// where every run's captured limits start.
+    #[must_use]
+    pub fn limits(&self) -> RunLimits {
+        let rounds = |rounds: usize| u32::try_from(rounds).ok().and_then(NonZeroU32::new);
+        RunLimits {
+            max_rounds: rounds(self.max_rounds),
+            max_computer_rounds: rounds(self.max_computer_rounds),
+            max_wall_ms: NonZeroU64::new(self.max_wall_ms),
+        }
+    }
+
     pub(crate) fn max_wall(&self) -> Duration {
         Duration::from_millis(self.max_wall_ms)
     }
@@ -121,13 +157,6 @@ pub(crate) fn spoken(duration: Duration) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_limit_reads_as_a_person_would_say_it() {
-        assert_eq!(spoken(Duration::from_millis(100)), "100 ms");
-        assert_eq!(spoken(Duration::from_secs(90)), "90 seconds");
-        assert_eq!(spoken(Duration::from_secs(15 * 60)), "15 minutes");
-    }
-}
+#[allow(clippy::unwrap_used)]
+#[path = "../tests/unit/budget_tests.rs"]
+mod tests;

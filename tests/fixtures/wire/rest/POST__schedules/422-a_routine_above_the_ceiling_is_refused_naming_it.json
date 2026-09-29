@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/schedules",
+  "status": 422,
+  "body": {
+    "error": "maxRounds 3 is above your organization's ceiling of 2; set 2 or less, or ask its admin to raise the ceiling"
+  }
+}

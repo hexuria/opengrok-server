@@ -5,7 +5,8 @@
 //! reaction to something the event log recorded (`sweep::monitors_forever`), with the laptop that
 //! configured it long since closed.
 //!
-//! A FIRED RUN IS AN ORDINARY RUN. It goes through `run_conversation`, is journaled by
+//! A FIRED RUN IS AN ORDINARY RUN. It goes through `run_conversation_within`, held to its org's
+//! ceiling and its routine's own limits like any chat to theirs, is journaled by
 //! `StoreJournal`, is owned by the account that created the schedule or monitor, holds a recovery
 //! lease while it works, and is replayable at `GET /ag-ui/runs/{id}` — which is exactly how a
 //! client that was away catches up on what its coworkers did alone.
@@ -32,7 +33,8 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
-use opengrok_harness::{ChatMessage, ModelRequest, run_conversation};
+use opengrok_core::limits::RunLimits;
+use opengrok_harness::{ChatMessage, ModelRequest, RunBudget, RunContext, run_conversation_within};
 
 use crate::agui::routes::{AgUiState, StoreJournal};
 use crate::host_state::HostState;
@@ -59,6 +61,8 @@ pub(crate) struct Firing {
     pub prompt: String,
     pub thread_id: String,
     pub run_id: RunId,
+    /// The routine's own limits; empty for a monitor, which sets none.
+    pub run_limits: RunLimits,
 }
 
 /// Fire one run as this coworker, for this account, and see it through to its ending.
@@ -79,6 +83,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         prompt,
         thread_id,
         run_id,
+        run_limits,
     } = firing;
     let policy = state
         .auth
@@ -107,6 +112,14 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         tracing::warn!(%origin, coworker = %coworker_id, "a firing named a coworker that cannot take work");
         return;
     }
+    // The org's ceiling as it stands NOW, over the routine's own limits: one lowered after the
+    // routine was saved still binds, since `and` only ever narrows.
+    let limits =
+        crate::agui::routes::run_limits(&state, &account_id, Some(&coworker_id), run_limits);
+    let Some(limits) = limits.await else {
+        tracing::warn!(%origin, "a firing was refused: its org's run ceiling could not be read");
+        return;
+    };
 
     let tools = crate::agui::routes::tools_for_coworker(
         &state,
@@ -138,6 +151,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         // The hirer's instruction is this turn's question. Journaled like a person's message, so
         // a routine that parks on a card resumes knowing what it was told to do.
         prompt: Some(crate::agui::history::routine_prompt(&run_id, &prompt)),
+        limits,
         generation: 0,
     };
 
@@ -159,14 +173,14 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     // abandoned run; dropped (or killed) when the process dies, which is when recovery should.
     let _lease = crate::recovery::Lease::new(crate::recovery::hold(state.clone(), run_id.clone()));
 
-    let events = run_conversation(
+    let events = run_conversation_within(
         state.door.as_ref(),
         tools.as_ref(),
         &journal,
         request,
-        &thread_id,
-        run_id.as_str(),
-        now_ms(),
+        RunContext::new(&thread_id, run_id.as_str(), now_ms()),
+        RunBudget::held_to(&limits),
+        None,
     )
     .await;
 
@@ -230,7 +244,8 @@ pub(crate) async fn too_busy(
 /// Start the run whose `Fired` the log already holds (`sweep.rs` says why the event goes first),
 /// and answer `202 {accepted, runId}` — the half of the webhook door and both "run now"s that is
 /// the same. The coworker comes from the aggregate that append produced, so it is the one the
-/// routine or monitor has NOW, not whichever one a client last listed.
+/// routine or monitor has NOW, not whichever one a client last listed — and so do its limits.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn start_fired(
     host: &HostState,
     coworker_id: Option<CoworkerId>,
@@ -239,6 +254,7 @@ pub(crate) fn start_fired(
     run_id: RunId,
     prompt: String,
     origin: String,
+    run_limits: RunLimits,
 ) -> Response {
     let Some(coworker_id) = coworker_id else {
         return json_reply(
@@ -256,6 +272,7 @@ pub(crate) fn start_fired(
             prompt,
             thread_id: thread_id.to_string(),
             run_id,
+            run_limits,
         },
     ));
     (StatusCode::ACCEPTED, Json(reply)).into_response()

@@ -140,6 +140,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             at_ms,
         })
         .expect("start");
@@ -167,6 +168,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
             wake: Wake::Cron {
                 cron: "0 */15 * * * *".to_string(),
             },
+            run_limits: Default::default(),
             at_ms,
         })
         .expect("create schedule");

@@ -329,6 +329,10 @@ create unique index if not exists schedule_hook_idx
 -- as "this routine has no key".
 alter table schedule_view add column if not exists secret_hash text not null default '';
 alter table schedule_view add column if not exists webhook_key text not null default '';
+-- A routine's own run limits (`opengrok_core::limits`), projected so a listing reads one row
+-- rather than a stream that grows by a `schedule-fired` per firing. '{}' sets none, which is
+-- true of every routine projected before the column existed.
+alter table schedule_view add column if not exists run_limits jsonb not null default '{}'::jsonb;
 
 create table if not exists monitor_view (
     id            text        primary key,

@@ -95,6 +95,7 @@ async fn seed_run(store: &PgStore, account: &AccountId, thread: &str, at_ms: i64
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             at_ms,
         })
         .expect("start");

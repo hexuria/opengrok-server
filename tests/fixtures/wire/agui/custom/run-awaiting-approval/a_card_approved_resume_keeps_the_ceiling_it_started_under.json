@@ -1,0 +1,15 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-awaiting-approval",
+  "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "callId": "call_1",
+  "tool": "shell",
+  "arguments": {
+    "command": "echo 1"
+  },
+  "reason": "policy-approval",
+  "why": "running shell on coworker cw_0199bb4e-0000-7000-8000-000000000003 needs a human yes",
+  "summary": "Command on the agent's own box: echo 1"
+}

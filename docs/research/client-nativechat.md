@@ -214,6 +214,7 @@ The web console, browser pages, the MCP door and its OAuth, probes.
 | `/admin/points/members/{account_id}` | PUT | `account_api.rs:58` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
 | `/admin/points/reference` | PUT | `account_api.rs:57` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
 | `/admin/recipes` | GET | `recipes.rs:87` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
+| `/admin/run-limits` | GET PUT | `account_api.rs:63` | `{maxRounds, maxComputerRounds, maxWallMs}` (null = no ceiling) plus `serverLimits`; 403 unless org admin; 422 with a sentence | not NativeChat yet: the org ceiling on every run (#244); no client reads it |
 | `/admin/templates` | GET POST | `account_api.rs:60` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
 | `/admin/templates/{id}` | PUT DELETE | `account_api.rs:64` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |
 | `/admin/users` | GET | `account_api.rs:35` | JSON for the console; see the mount | not NativeChat: the console, `web/src/api/admin.ts` |

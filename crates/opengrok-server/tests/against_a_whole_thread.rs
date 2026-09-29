@@ -126,6 +126,7 @@ async fn seed_run(
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             at_ms,
         })
         .expect("start");

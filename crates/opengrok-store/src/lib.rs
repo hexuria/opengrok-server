@@ -54,7 +54,7 @@ pub use postgres::{
 pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use skills::{NewSkill, NewSkillVersion, SkillFileRow, SkillRow, SkillVersionRow};
-pub use spend::{SpendLimit, SpendScope};
+pub use spend::SpendLimit;
 pub use templates::CoworkerTemplate;
 pub use vault::{Sealed, Vault};
 pub use vault_rows::{ResealReport, VaultCheck};

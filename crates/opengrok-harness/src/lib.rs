@@ -498,10 +498,8 @@ pub async fn run_conversation(
     .await
 }
 
-/// `run_conversation`, with a sink that sees each event as it is produced.
-///
-/// For the surfaces where a person is watching a bubble fill: seam A's `sendPrompt`, and
-/// NativeChat's `POST /ag-ui`. Everything else keeps `run_conversation`.
+/// `run_conversation`, with a sink that sees each event as it is produced, on the server's own
+/// budget. `POST /ag-ui` streams through `run_conversation_within`, held to its org's ceiling.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_conversation_streaming(
     door: &dyn ModelDoor,
@@ -529,8 +527,9 @@ pub async fn run_conversation_streaming(
 
 /// `run_conversation`, held to `budget` rather than the default, with an optional live sink.
 ///
-/// The door a routine or a schedule would give its own limits through; every other entry point
-/// runs on `RunBudget::default()`.
+/// EVERY RUN THE SERVER STARTS COMES THROUGH HERE, chats and routines alike, held to what its
+/// org's ceiling and its routine allow (`RunBudget::held_to`). The other entry points run on the
+/// server's own budget, which a run whose org set a ceiling must never be handed.
 pub async fn run_conversation_within(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
@@ -640,6 +639,10 @@ pub struct Resumption {
     pub outcome: ResumeOutcome,
     /// What the run spent before the card (#256).
     pub spent: Spent,
+    /// What the continuation may spend: the limits the run captured at its start, under its
+    /// org's ceiling as it stands now. A card answered must not buy a run a budget it never had,
+    /// and the constructors' server budget is for runs that set none.
+    pub budget: RunBudget,
 }
 
 impl Resumption {
@@ -656,6 +659,7 @@ impl Resumption {
             message_seq,
             outcome: ResumeOutcome::Approved,
             spent: Spent::default(),
+            budget: RunBudget::default(),
         }
     }
 
@@ -669,6 +673,7 @@ impl Resumption {
             message_seq,
             outcome: ResumeOutcome::Refused(why.into()),
             spent: Spent::default(),
+            budget: RunBudget::default(),
         }
     }
 
@@ -682,6 +687,7 @@ impl Resumption {
             message_seq,
             outcome: ResumeOutcome::Settled(content.into()),
             spent: Spent::default(),
+            budget: RunBudget::default(),
         }
     }
 }
@@ -705,6 +711,7 @@ pub async fn resume_conversation(
         message_seq,
         outcome,
         spent,
+        budget,
     } = resumption;
     let run_id = context.run_id.clone();
     // Already started: a resumed run must not draw itself twice.
@@ -851,8 +858,8 @@ pub async fn resume_conversation(
     let carried = Carried {
         started_a_tool: true,
         played,
+        budget,
         spent_rounds: (spent.spoken_rounds, spent.computer_rounds),
-        ..Carried::default()
     };
     let mut rest = converse(
         door,
@@ -874,7 +881,9 @@ pub async fn resume_conversation(
 ///
 /// Drawn as a continuation of the run it resumes (`Projection::resumed`), not a new one, and
 /// asked `stopped` at the top of its first round like every round. `request.messages` is the
-/// conversation rebuilt from the log, and `spent` what the run already did (#256).
+/// conversation rebuilt from the log, `spent` what the run already did (#256), and `budget` what
+/// it may spend in all: its captured limits, as `Resumption::budget` is.
+#[allow(clippy::too_many_arguments)]
 pub async fn continue_interrupted(
     door: &dyn ModelDoor,
     tools: Option<&ToolRunner>,
@@ -883,6 +892,7 @@ pub async fn continue_interrupted(
     context: RunContext,
     message_seq: u32,
     spent: Spent,
+    budget: RunBudget,
 ) -> Vec<Event> {
     let run_id = context.run_id.clone();
     let projection = Projection::resumed(
@@ -894,8 +904,8 @@ pub async fn continue_interrupted(
     let carried = Carried {
         started_a_tool: spent.started_a_tool,
         played: spent.recipes,
+        budget,
         spent_rounds: (spent.spoken_rounds, spent.computer_rounds),
-        ..Carried::default()
     };
     converse(
         door, tools, journal, request, projection, &run_id, None, carried,

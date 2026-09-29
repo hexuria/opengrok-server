@@ -305,6 +305,7 @@ async fn seed_run(
             system: None,
             skill_id: None,
             prompt,
+            limits: Default::default(),
             at_ms,
         })
         .expect("start");
@@ -373,6 +374,7 @@ async fn seed_schedule(
             prompt: "check the queue".to_string(),
             name: name.to_string(),
             wake,
+            run_limits: Default::default(),
             at_ms,
         })
         .expect("create schedule");

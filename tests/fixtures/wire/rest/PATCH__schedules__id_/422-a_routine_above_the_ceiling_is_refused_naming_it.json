@@ -3,6 +3,6 @@
   "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001",
   "status": 422,
   "body": {
-    "error": "not a cron expression: not a cron"
+    "error": "maxRounds 5 is above your organization's ceiling of 2; set 2 or less, or ask its admin to raise the ceiling"
   }
 }

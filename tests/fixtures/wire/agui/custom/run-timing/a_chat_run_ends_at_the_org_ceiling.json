@@ -8,39 +8,9 @@
     "model_ms": [
       3,
       3,
-      3,
-      3,
-      3,
-      3,
-      3,
-      3,
       3
     ],
     "tools": [
-      {
-        "name": "shell",
-        "ms": 3
-      },
-      {
-        "name": "shell",
-        "ms": 3
-      },
-      {
-        "name": "shell",
-        "ms": 3
-      },
-      {
-        "name": "shell",
-        "ms": 3
-      },
-      {
-        "name": "shell",
-        "ms": 3
-      },
-      {
-        "name": "shell",
-        "ms": 3
-      },
       {
         "name": "shell",
         "ms": 3
@@ -53,31 +23,25 @@
     "tool_wait_ms": 3,
     "auto_review_ms": 3,
     "total_ms": 3,
-    "tool_rounds": 8,
+    "tool_rounds": 2,
     "budget": {
-      "max_rounds": 8,
+      "max_rounds": 2,
       "max_computer_rounds": 24,
       "max_wall_ms": 900000,
       "call_timeout_ms": 180000,
       "idle_ms": 240000
     },
-    "wrapped_up": "this run reached its limit of 8 model calls",
+    "wrapped_up": "this run reached its limit of 2 model calls",
     "context": {
       "limit": 128000,
       "estimated": [
         3394,
         3412,
-        3430,
-        3448,
-        3466,
-        3484,
-        3502,
-        3520,
-        1312
+        1204
       ],
       "left_out": 0
     }
   },
   "total_ms": 3,
-  "tool_rounds": 8
+  "tool_rounds": 2
 }

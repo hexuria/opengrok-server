@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_harness::{DeltaStream, GatewayKey, ModelDoor, ModelError, ModelRequest};
 use opengrok_store::PgStore;
-pub use opengrok_store::{SpendLimit, SpendScope};
+pub use opengrok_store::SpendLimit;
 use serde::Serialize;
 
 use crate::agui::AgUiState;
@@ -363,26 +363,6 @@ pub async fn key_for_opt(
         // unsigned turn and bounds a coworker-less one per account (`budget::AGUI_UNSCOPED`);
         // inventing a payer here would put a stranger's turn on somebody's pool.
         _ => None,
-    }
-}
-
-/// Whose spend a turn is. The person talking when there is one; the coworker's owner when there
-/// is not — a coworker acting on its own schedule is acting for whoever hired it, and that is an
-/// answer rather than a default. `None` only when the coworker has no owner to fall back to.
-pub async fn actor_for(
-    state: &AgUiState,
-    coworker_id: &CoworkerId,
-    acting: Option<&AccountId>,
-) -> Option<AccountId> {
-    match acting {
-        Some(account) => Some(account.clone()),
-        None => state
-            .auth
-            .store
-            .coworker_owner(coworker_id)
-            .await
-            .ok()
-            .flatten(),
     }
 }
 

@@ -3085,6 +3085,7 @@ async fn a_recipe_played_before_a_restart_is_not_played_again_after_it() {
         resumed_context(),
         5,
         spent,
+        RunBudget::default(),
     )
     .await;
     assert_eq!(*plays.lock().unwrap(), 0, "the box did not play it again");
@@ -3150,6 +3151,7 @@ async fn a_resumed_segment_spends_what_is_left_of_the_run_s_rounds() {
         resumed_context(),
         5,
         spent,
+        RunBudget::default(),
     )
     .await;
     assert!(
@@ -3157,6 +3159,82 @@ async fn a_resumed_segment_spends_what_is_left_of_the_run_s_rounds() {
         "one round left, then the wrap-up: {} calls",
         door.calls()
     );
+}
+
+/// A shell call every round, each a different command, for as long as the door is asked.
+fn endless_shell() -> Rounds {
+    Rounds::new(
+        (0..MAX_ROUNDS + 2)
+            .map(|n| shell_deltas(&format!("s{n}"), &format!("echo {n}")))
+            .collect(),
+        "done",
+    )
+}
+
+fn two_rounds() -> RunBudget {
+    RunBudget::held_to(&opengrok_core::limits::RunLimits {
+        max_rounds: std::num::NonZeroU32::new(2),
+        ..Default::default()
+    })
+}
+
+/// A segment the sweep resumed is held to the budget it is handed — what its run captured under
+/// its org's ceiling — and not to the server's: a restart must not buy a run what the ceiling
+/// took away.
+#[tokio::test]
+async fn a_resumed_segment_is_held_to_the_budget_it_is_handed() {
+    let door = endless_shell();
+    let (runner, _) = fix_then_test_runner(usize::MAX);
+    let spent = Spent {
+        started_a_tool: true,
+        ..Spent::default()
+    };
+    let events = continue_interrupted(
+        &door,
+        Some(&runner),
+        &MemoryJournal::new(),
+        request("keep going"),
+        resumed_context(),
+        5,
+        spent,
+        two_rounds(),
+    )
+    .await;
+    assert_eq!(door.calls(), 3, "two rounds, then the wrap-up");
+    let timing = run_timing_value(&events).expect("run-timing");
+    assert_eq!(timing["budget"]["max_rounds"], 2, "{timing}");
+}
+
+/// A card's continuation keeps its fresh rounds per answer, of the run's own size: the budget it
+/// is handed, never the server's.
+#[tokio::test]
+async fn a_card_continuation_is_held_to_the_budget_it_is_handed() {
+    let door = endless_shell();
+    let (runner, ran) = fix_then_test_runner(usize::MAX);
+    let call = opengrok_tools::ToolCall {
+        id: "approved".to_string(),
+        name: "shell".to_string(),
+        arguments: serde_json::json!({"command": "echo approved"}),
+    };
+    let resumption = Resumption {
+        budget: two_rounds(),
+        ..Resumption::approved(call, 1)
+    };
+    resume_conversation(
+        &door,
+        &runner,
+        &MemoryJournal::new(),
+        request("go"),
+        resumed_context(),
+        resumption,
+    )
+    .await;
+    assert_eq!(
+        ran.lock().unwrap()[0],
+        "echo approved",
+        "the approved call ran"
+    );
+    assert_eq!(door.calls(), 3, "two rounds, then the wrap-up");
 }
 
 /// Two plays of one recipe in ONE completion both reached `run_all`: `played` learns a round's

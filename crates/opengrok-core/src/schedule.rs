@@ -21,6 +21,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{CoworkerId, RunId};
+use crate::limits::RunLimits;
 
 /// How a schedule wakes. Cron is the original and the default for events written before webhooks
 /// existed — a missing `kind` must replay as a clock, never as a hook that has no secret.
@@ -138,6 +139,10 @@ pub enum ScheduleEvent {
         /// show it; rotating replaces it. Absent on cron wakes and on rows from before webhooks.
         #[serde(default)]
         webhook_key: String,
+        /// The routine's own limits on every run it starts, under its org's ceiling. Absent on
+        /// rows written before limits existed, which set none.
+        #[serde(default)]
+        run_limits: RunLimits,
         at_ms: i64,
     },
     /// The person edited the routine in place. An edit is not delete-and-create: the schedule
@@ -162,6 +167,10 @@ pub enum ScheduleEvent {
         /// what every `schedule-updated` written before the field existed replays as.
         #[serde(default)]
         coworker_id: Option<CoworkerId>,
+        /// The routine's limits, replaced whole. `None` keeps the ones it had, as every
+        /// `schedule-updated` written before limits existed does.
+        #[serde(default)]
+        run_limits: Option<RunLimits>,
     },
     Paused {
         at_ms: i64,
@@ -229,6 +238,9 @@ pub struct Schedule {
     /// Runs the clock started, by id. Kept rather than inferred as "neither of the above": the
     /// routine's thread takes a person's replies too, and those are no firing at all.
     pub clock_runs: std::collections::BTreeSet<String>,
+    /// What every run this routine starts may spend, at most. Its org's ceiling still binds at
+    /// run time, so a ceiling lowered after these were saved narrows them.
+    pub run_limits: RunLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -260,6 +272,9 @@ pub enum ScheduleCommand {
         prompt: String,
         name: String,
         wake: Wake,
+        /// Already held to the server's budget and the org's ceiling by the caller, which can
+        /// read both; the aggregate can read neither.
+        run_limits: RunLimits,
         at_ms: i64,
     },
     Update {
@@ -268,6 +283,8 @@ pub enum ScheduleCommand {
         wake: Wake,
         /// `None` keeps the coworker it has.
         coworker_id: Option<CoworkerId>,
+        /// `None` keeps the limits it has; checked by the caller as `Create`'s are.
+        run_limits: Option<RunLimits>,
         at_ms: i64,
     },
     Pause {
@@ -311,6 +328,7 @@ impl Schedule {
                 hook_id,
                 secret_hash,
                 webhook_key,
+                run_limits,
                 ..
             } => {
                 self.created = true;
@@ -322,6 +340,7 @@ impl Schedule {
                 self.hook_id = hook_id.clone();
                 self.secret_hash = secret_hash.clone();
                 self.webhook_key = webhook_key.clone();
+                self.run_limits = *run_limits;
             }
             ScheduleEvent::Updated {
                 name,
@@ -332,11 +351,15 @@ impl Schedule {
                 secret_hash,
                 webhook_key,
                 coworker_id,
+                run_limits,
                 ..
             } => {
                 self.name = name.clone();
                 if let Some(coworker_id) = coworker_id {
                     self.coworker_id = Some(coworker_id.clone());
+                }
+                if let Some(run_limits) = run_limits {
+                    self.run_limits = *run_limits;
                 }
                 self.cron = cron.clone();
                 self.prompt = prompt.clone();
@@ -396,6 +419,7 @@ impl Schedule {
         prompt: String,
         name: String,
         wake: Wake,
+        run_limits: RunLimits,
         at_ms: i64,
     ) -> Result<ScheduleEvent, ScheduleError> {
         if prompt.trim().is_empty() {
@@ -419,6 +443,7 @@ impl Schedule {
                     hook_id: String::new(),
                     secret_hash: String::new(),
                     webhook_key: String::new(),
+                    run_limits,
                     at_ms,
                 })
             }
@@ -442,6 +467,7 @@ impl Schedule {
                     hook_id: hook_id.trim().to_string(),
                     secret_hash: secret_hash.trim().to_string(),
                     webhook_key,
+                    run_limits,
                     at_ms,
                 })
             }
@@ -453,6 +479,7 @@ impl Schedule {
         prompt: String,
         wake: Wake,
         coworker_id: Option<CoworkerId>,
+        run_limits: Option<RunLimits>,
         at_ms: i64,
     ) -> Result<ScheduleEvent, ScheduleError> {
         if prompt.trim().is_empty() {
@@ -475,6 +502,7 @@ impl Schedule {
                     secret_hash: Some(String::new()),
                     webhook_key: Some(String::new()),
                     coworker_id,
+                    run_limits,
                 })
             }
             Wake::Webhook {
@@ -498,6 +526,7 @@ impl Schedule {
                     secret_hash: Some(secret_hash.trim().to_string()),
                     webhook_key: Some(webhook_key),
                     coworker_id,
+                    run_limits,
                 })
             }
         }
@@ -510,12 +539,14 @@ impl Schedule {
                 prompt,
                 name,
                 wake,
+                run_limits,
                 at_ms,
             } => Ok(vec![Self::created_from_wake(
                 coworker_id,
                 prompt,
                 name,
                 wake,
+                run_limits,
                 at_ms,
             )?]),
 
@@ -524,6 +555,7 @@ impl Schedule {
                 prompt,
                 wake,
                 coworker_id,
+                run_limits,
                 at_ms,
             } => {
                 self.alive()?;
@@ -532,6 +564,7 @@ impl Schedule {
                     prompt,
                     wake,
                     coworker_id,
+                    run_limits,
                     at_ms,
                 )?])
             }
@@ -635,6 +668,11 @@ pub struct ScheduleView {
     /// Empty on a cron row, and on a webhook row projected before the column existed.
     #[serde(default)]
     pub webhook_key: String,
+    /// The routine's own limits, projected so a listing need not replay a stream that grows by
+    /// one `Fired` per firing. Empty on rows projected before the column existed, as the
+    /// routines behind them are: none could set limits then.
+    #[serde(default)]
+    pub run_limits: RunLimits,
 }
 
 #[cfg(test)]
@@ -653,6 +691,7 @@ mod tests {
             hook_id: String::new(),
             secret_hash: String::new(),
             webhook_key: String::new(),
+            run_limits: RunLimits::default(),
             at_ms: 1_000,
         }])
     }
@@ -667,6 +706,7 @@ mod tests {
             hook_id: "hook_abc".to_string(),
             secret_hash: "hash".to_string(),
             webhook_key: "og_secret".to_string(),
+            run_limits: RunLimits::default(),
             at_ms: 1_000,
         }])
     }
@@ -692,6 +732,7 @@ mod tests {
                 prompt: "y".to_string(),
                 wake: cron_wake("not cron"),
                 coworker_id: None,
+                run_limits: None,
                 at_ms: 2,
             }),
             Err(ScheduleError::BadCron(_))
@@ -702,6 +743,7 @@ mod tests {
                 prompt: "write the weekly report".to_string(),
                 wake: cron_wake("0 9 * * 1"),
                 coworker_id: None,
+                run_limits: None,
                 at_ms: 2,
             })
             .expect("update");
@@ -733,6 +775,7 @@ mod tests {
                 prompt: "hi".to_string(),
                 name: String::new(),
                 wake: cron_wake("every tuesday probably"),
+                run_limits: RunLimits::default(),
                 at_ms: 0,
             })
             .expect_err("should refuse");
@@ -747,6 +790,7 @@ mod tests {
                 prompt: "   ".to_string(),
                 name: String::new(),
                 wake: cron_wake("*/2 * * * * *"),
+                run_limits: RunLimits::default(),
                 at_ms: 0,
             })
             .expect_err("should refuse");
@@ -828,6 +872,7 @@ mod tests {
                     secret_hash: "hash".to_string(),
                     webhook_key: "og_secret".to_string(),
                 },
+                run_limits: RunLimits::default(),
                 at_ms: 1,
             })
             .expect("webhook create");
@@ -851,6 +896,7 @@ mod tests {
                     secret_hash: String::new(),
                     webhook_key: "og_secret".to_string(),
                 },
+                run_limits: RunLimits::default(),
                 at_ms: 1,
             })
             .expect_err("empty hash");
@@ -962,6 +1008,7 @@ mod tests {
                 prompt: "check the queue".to_string(),
                 wake: cron_wake("0 */5 * * * *"),
                 coworker_id: Some(CoworkerId::from_stored("cw_2")),
+                run_limits: None,
                 at_ms: 2,
             })
             .expect("update");
@@ -982,6 +1029,7 @@ mod tests {
                 prompt: "check the queue".to_string(),
                 wake: cron_wake("0 */5 * * * *"),
                 coworker_id: None,
+                run_limits: None,
                 at_ms: 2,
             })
             .expect("update");
@@ -996,6 +1044,64 @@ mod tests {
         .expect("an updated event from before coworker_id");
         schedule.apply(&old);
         assert_eq!(schedule.coworker_id, Some(CoworkerId::from_stored("cw_1")));
+    }
+
+    /// A routine's limits are set at create, kept by an edit that says nothing about them, and
+    /// replaced whole by one that does — and every event written before limits existed replays
+    /// as one that set or changed none.
+    #[test]
+    fn a_routine_keeps_its_limits_until_an_edit_replaces_them() {
+        let two = RunLimits {
+            max_rounds: std::num::NonZeroU32::new(2),
+            ..RunLimits::default()
+        };
+        let events = Schedule::default()
+            .decide(ScheduleCommand::Create {
+                coworker_id: CoworkerId::from_stored("cw_1"),
+                prompt: "check the queue".to_string(),
+                name: String::new(),
+                wake: cron_wake("0 */5 * * * *"),
+                run_limits: two,
+                at_ms: 1,
+            })
+            .expect("create");
+        let mut schedule = Schedule::replay(&events);
+        assert_eq!(schedule.run_limits, two);
+
+        let edit = |run_limits| ScheduleCommand::Update {
+            name: "renamed".to_string(),
+            prompt: "check the queue".to_string(),
+            wake: cron_wake("0 */5 * * * *"),
+            coworker_id: None,
+            run_limits,
+            at_ms: 2,
+        };
+        for event in &schedule.decide(edit(None)).expect("rename") {
+            schedule.apply(event);
+        }
+        assert_eq!(
+            schedule.run_limits, two,
+            "an edit that names no limits keeps them"
+        );
+        let old: ScheduleEvent = serde_json::from_str(
+            r#"{"type":"updated","name":"n","cron":"0 */5 * * * *","prompt":"p","at_ms":3}"#,
+        )
+        .expect("an updated event from before run limits");
+        schedule.apply(&old);
+        assert_eq!(schedule.run_limits, two);
+        for event in &schedule
+            .decide(edit(Some(RunLimits::default())))
+            .expect("clear")
+        {
+            schedule.apply(event);
+        }
+        assert!(schedule.run_limits.is_empty(), "replaced whole, so cleared");
+
+        let old: ScheduleEvent = serde_json::from_str(
+            r#"{"type":"created","coworker_id":"cw_1","cron":"0 */5 * * * *","prompt":"x","at_ms":1}"#,
+        )
+        .expect("a created event from before run limits");
+        assert!(Schedule::replay(&[old]).run_limits.is_empty());
     }
 
     #[test]

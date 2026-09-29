@@ -271,6 +271,7 @@ async fn inbound(
         run_id,
         prompt,
         format!("automation {schedule_id} (webhook)"),
+        after.run_limits,
     )
 }
 

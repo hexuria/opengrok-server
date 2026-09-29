@@ -69,21 +69,6 @@ impl MockJev {
         self
     }
 
-    /// The model name this door answers under.
-    #[must_use]
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = model.into();
-        self
-    }
-
-    /// The request id this door reports — `None` for a service that sent none, which a caller
-    /// must be able to survive.
-    #[must_use]
-    pub fn with_request_id(mut self, request_id: Option<String>) -> Self {
-        self.request_id = request_id;
-        self
-    }
-
     /// What this door was asked, in order.
     #[must_use]
     pub fn asked(&self) -> Vec<Ask> {

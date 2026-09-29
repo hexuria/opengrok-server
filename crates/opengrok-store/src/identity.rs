@@ -7,6 +7,7 @@
 //! the account behind an email.
 
 use opengrok_core::id::{AccountId, OrgId};
+use opengrok_core::limits::RunLimits;
 use opengrok_core::org::{InviteState, Org, OrgEvent, OrgView};
 use sqlx::Row;
 
@@ -126,6 +127,36 @@ impl PgStore {
 
         tx.commit().await?;
         Ok(seq)
+    }
+
+    /// The org ceiling over a run of `coworker` for `account`: the ceiling of every org the
+    /// account or the coworker's owner is in, each narrowing the other. An account in no org, or
+    /// an org that set none, adds nothing.
+    ///
+    /// A READ THAT FAILS IS AN ERROR, never "no org": taken for an account with no ceiling over
+    /// it, a failed read would hand the run the server's whole budget.
+    pub async fn org_run_ceiling(
+        &self,
+        account: &AccountId,
+        coworker: Option<&opengrok_core::id::CoworkerId>,
+    ) -> StoreResult<RunLimits> {
+        let mut people = vec![account.clone()];
+        if let Some(coworker) = coworker {
+            people.extend(
+                self.coworker_owner(coworker)
+                    .await?
+                    .filter(|owner| owner != account),
+            );
+        }
+        let mut ceiling = RunLimits::default();
+        for person in &people {
+            let (person, _) = self.load_account(person).await?;
+            if let Some(org) = person.org_id.filter(|org| !org.is_empty()) {
+                let (org, _) = self.load_org(&OrgId::from_stored(org)).await?;
+                ceiling = ceiling.and(org.run_limits);
+            }
+        }
+        Ok(ceiling)
     }
 
     /// The org that issued an invite code, if any — signup's first lookup.

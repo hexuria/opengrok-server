@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{AccountId, OrgId};
+use crate::limits::RunLimits;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -77,6 +78,13 @@ pub enum OrgEvent {
         account: AccountId,
         at_ms: i64,
     },
+    /// The admin set the org's run ceiling: the most any run by the org's coworkers may use,
+    /// chats and routines alike. Replaces the ceiling whole; a limit left unset is no ceiling
+    /// there, and the server's own budget still bounds it.
+    RunLimitsSet {
+        limits: RunLimits,
+        at_ms: i64,
+    },
 }
 
 impl OrgEvent {
@@ -91,6 +99,7 @@ impl OrgEvent {
             Self::InviteRedeemed { .. } => "org-invite-redeemed",
             Self::InviteRevoked { .. } => "org-invite-revoked",
             Self::MemberJoined { .. } => "org-member-joined",
+            Self::RunLimitsSet { .. } => "org-run-limits-set",
         }
     }
 }
@@ -114,6 +123,9 @@ pub struct Org {
     pub pending_domains: BTreeMap<String, String>,
     pub invites: BTreeMap<String, InviteState>,
     pub members: Vec<AccountId>,
+    /// The ceiling on every run by the org's coworkers (`RunLimitsSet`). Empty on an org that
+    /// never set one: its runs are held to the server's budget alone.
+    pub run_limits: RunLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -188,6 +200,12 @@ pub enum OrgCommand {
     },
     RevokeInvite {
         code: String,
+        at_ms: i64,
+    },
+    /// Set the run ceiling. The caller has already refused a value above the server's budget
+    /// (`RunLimits::from_json`), which the aggregate cannot know; a zero cannot be held at all.
+    SetRunLimits {
+        limits: RunLimits,
         at_ms: i64,
     },
 }
@@ -294,6 +312,7 @@ impl Org {
                     self.members.push(account.clone());
                 }
             }
+            OrgEvent::RunLimitsSet { limits, .. } => self.run_limits = *limits,
         }
     }
 
@@ -437,6 +456,10 @@ impl Org {
                     Some(InviteState::Redeemed(_)) => Err(OrgError::InviteSpent),
                     _ => Ok(vec![OrgEvent::InviteRevoked { code, at_ms }]),
                 }
+            }
+            OrgCommand::SetRunLimits { limits, at_ms } => {
+                self.alive()?;
+                Ok(vec![OrgEvent::RunLimitsSet { limits, at_ms }])
             }
         }
     }
@@ -620,6 +643,52 @@ mod tests {
             &["opengrok-verify=dv_abcd".to_string()]
         ));
         assert!(!challenge_satisfied("dv_abc", &[]));
+    }
+
+    /// The ceiling is the org's to set and to replace whole; an org that never set one, and an
+    /// org that does not exist, hold no run to anything.
+    #[test]
+    fn the_run_ceiling_is_set_whole_and_replayed() {
+        let three = RunLimits {
+            max_rounds: std::num::NonZeroU32::new(3),
+            ..RunLimits::default()
+        };
+        let mut org = org();
+        assert!(org.run_limits.is_empty(), "no ceiling until one is set");
+        let events = org
+            .decide(OrgCommand::SetRunLimits {
+                limits: three,
+                at_ms: 2,
+            })
+            .expect("set");
+        assert_eq!(events[0].event_type(), "org-run-limits-set");
+        apply_all(&mut org, events.clone());
+        assert_eq!(org.run_limits, three);
+        let stored: OrgEvent =
+            serde_json::from_value(serde_json::to_value(&events[0]).expect("store"))
+                .expect("read back");
+        let mut replayed = self::org();
+        replayed.apply(&stored);
+        assert_eq!(replayed.run_limits, three);
+
+        let events = org
+            .decide(OrgCommand::SetRunLimits {
+                limits: RunLimits::default(),
+                at_ms: 3,
+            })
+            .expect("clear");
+        apply_all(&mut org, events);
+        assert!(
+            org.run_limits.is_empty(),
+            "a new ceiling replaces the old whole"
+        );
+        assert!(matches!(
+            Org::default().decide(OrgCommand::SetRunLimits {
+                limits: three,
+                at_ms: 1,
+            }),
+            Err(OrgError::NotCreated)
+        ));
     }
 
     #[test]

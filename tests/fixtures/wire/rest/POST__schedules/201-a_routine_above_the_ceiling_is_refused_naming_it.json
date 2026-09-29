@@ -1,20 +1,20 @@
 {
-  "method": "PATCH",
-  "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001",
-  "status": 200,
+  "method": "POST",
+  "path": "/schedules",
+  "status": 201,
   "body": {
     "id": "sched_0199bb4e-0000-7000-8000-000000000001",
     "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
-    "name": "Weekly",
+    "name": "keep going",
     "cron": "0 0 9 * * 1",
-    "prompt": "write the weekly report",
+    "prompt": "keep going",
     "kind": "cron",
     "active": true,
     "nextDueMs": 1790000000000,
     "runLimits": {
-      "maxRounds": null,
+      "maxRounds": 1,
       "maxComputerRounds": null,
-      "maxWallMs": null
+      "maxWallMs": 60000
     },
     "lastRun": null
   }

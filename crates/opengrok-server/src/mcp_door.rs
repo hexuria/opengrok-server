@@ -845,6 +845,8 @@ async fn persist_mcp_ask(
             skill_id: None,
             // Journaled, and nobody spoke: an MCP ask is a call, not a message.
             prompt: Some(Vec::new()),
+            // No loop ever runs it (`is_mcp_audit_run`), so there is nothing to spend.
+            limits: opengrok_core::limits::RunLimits::default(),
             at_ms,
         })
         .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;

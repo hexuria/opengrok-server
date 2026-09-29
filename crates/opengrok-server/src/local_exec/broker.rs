@@ -129,29 +129,6 @@ impl LocalExecBroker {
         Self::default()
     }
 
-    const SESSION_ALLOW_CAP: usize = 256;
-
-    /// Remember a session allow for this account+machine. Empty patterns are ignored.
-    /// Duplicates (exact) are ignored. Oldest dropped past `SESSION_ALLOW_CAP`.
-    pub async fn remember_session_allow(&self, account_id: &str, machine_id: &str, pattern: &str) {
-        let pattern = pattern.trim();
-        if pattern.is_empty() {
-            return;
-        }
-        let mut inner = self.inner.lock().await;
-        let list = inner
-            .session_allows
-            .entry((account_id.to_string(), machine_id.to_string()))
-            .or_default();
-        if list.iter().any(|existing| existing == pattern) {
-            return;
-        }
-        list.push(pattern.to_string());
-        if list.len() > Self::SESSION_ALLOW_CAP {
-            list.remove(0);
-        }
-    }
-
     pub async fn session_allows(&self, account_id: &str, machine_id: &str) -> Vec<String> {
         let inner = self.inner.lock().await;
         inner

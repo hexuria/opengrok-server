@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::id::{AccountId, OrgId};
+use opengrok_core::limits::RunLimits;
 use opengrok_core::org::OrgCommand;
 
 use crate::auth::AuthState;
@@ -58,6 +59,8 @@ pub fn router(state: AuthState) -> Router {
         .route("/admin/points", get(points_overview))
         .route("/admin/points/reference", put(set_points_reference))
         .route("/admin/points/members/{account_id}", put(set_member_pool))
+        // The run ceiling: the most any run by the org's coworkers may use, chats and routines.
+        .route("/admin/run-limits", get(get_run_limits).put(set_run_limits))
         // Coworker templates (`templates.rs`): types members hire from.
         .route(
             "/admin/templates",
@@ -1428,6 +1431,60 @@ async fn set_member_pool(
     {
         Ok(()) => Json(json!({ "id": member, "pool": input.pool })).into_response(),
         Err(error) => storage_failed(&error),
+    }
+}
+
+// ---- The run ceiling (`opengrok_core::limits`) ----
+
+/// The ceiling as the console reads it: each limit, `null` where the org sets none, beside the
+/// server's own budget, which is what a `null` leaves a run to and the most any limit may be.
+fn run_ceiling_json(ceiling: &RunLimits) -> Value {
+    let mut body = ceiling.to_json();
+    body["serverLimits"] = opengrok_harness::RunBudget::default().limits().to_json();
+    body
+}
+
+/// `GET /admin/run-limits` — the org's run ceiling.
+async fn get_run_limits(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    match admin_org(&state, &headers).await {
+        Ok((_, org, _)) => Json(run_ceiling_json(&org.run_limits)).into_response(),
+        Err(refusal) => refusal,
+    }
+}
+
+/// `PUT /admin/run-limits` ← `{maxRounds, maxComputerRounds, maxWallMs}`, each a whole number or
+/// `null` for none. Replaces the ceiling whole. Routines saved above a lowered ceiling keep
+/// their limits and are held to the ceiling when they run.
+async fn set_run_limits(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Json(sent): Json<Value>,
+) -> Response {
+    let (org_id, org, org_seq) = match admin_org(&state, &headers).await {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    let most = opengrok_harness::RunBudget::default().limits();
+    let limits = match RunLimits::from_json(&sent, &most) {
+        Ok(limits) => limits,
+        Err(why) => {
+            let body = Json(json!({ "error": why }));
+            return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
+        }
+    };
+    let events = match org.decide(OrgCommand::SetRunLimits {
+        limits,
+        at_ms: now_ms(),
+    }) {
+        Ok(events) => events,
+        Err(reason) => return (StatusCode::CONFLICT, reason.to_string()).into_response(),
+    };
+    match append_org_events(&state, &org_id, org, org_seq, &events).await {
+        Ok(after) => Json(run_ceiling_json(&after.run_limits)).into_response(),
+        Err(refusal) => refusal,
     }
 }
 

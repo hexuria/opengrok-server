@@ -118,6 +118,7 @@ pub async fn schedule_tick(
                 // continuing conversation rather than a pile of orphans.
                 thread_id: schedule.id.as_str().to_string(),
                 run_id,
+                run_limits: after.run_limits,
             },
         ));
         fired += 1;
@@ -300,6 +301,7 @@ pub async fn monitor_tick(
                     prompt,
                     thread_id: monitor_id.as_str().to_string(),
                     run_id,
+                    run_limits: opengrok_core::limits::RunLimits::default(),
                 },
             ));
             fired += 1;

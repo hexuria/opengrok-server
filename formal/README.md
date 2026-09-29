@@ -236,7 +236,9 @@ Each trace is TLC's shortest.
   (`measure_decreases`). After *k* continuing rounds, `spoken + computer = k` (`after_sum`),
   so at most `R + C − 2` rounds continue. Every iteration reached is `< R + C`
   (`never_falls_out`), for all `R, C ≥ 1`. Assumption: the only `continue` spends a budget,
-  which is `lib.rs`'s bookkeeping, transcribed.
+  which is `lib.rs`'s bookkeeping, transcribed. `R` and `C` are each run's own since run
+  limits: the server's budget under its org's ceiling and its routine's limits
+  (`RunBudget::held_to`), whose `RunLimits` holds no zero, so every run meets the hypothesis.
 - **`Ending`.** The projection's `finished` flag is an invariant, "ended ⇔ exactly one terminal
   emitted", preserved by every operation. Any operation sequence emits at most one terminal,
   and an ended projection is a fixed point. `awaiting_approval` is modelled as non-terminal,

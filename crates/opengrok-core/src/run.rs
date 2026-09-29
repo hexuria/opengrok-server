@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::id::{CoworkerId, RunId};
+use crate::limits::RunLimits;
 
 /// Where a run got to. A run that is `Running` with no process behind it is the interesting case:
 /// it means a restart interrupted it, and something must decide what to do about that.
@@ -81,7 +82,8 @@ impl RunStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FinishReason {
-    /// A round cap or the wall clock ran out, and the run ended on its wrap-up call.
+    /// A round cap or the wall clock ran out: the run ended on its wrap-up call, or on the
+    /// opened target or editor sentence when the cap was reached with one open.
     Budget,
 }
 
@@ -178,6 +180,13 @@ pub enum RunEvent {
         /// history, while "journaled, and nobody spoke" (an MCP ask) does not.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<Vec<Value>>,
+        /// What this run may spend, captured at its start: the server's budget narrowed by its
+        /// org's ceiling and its routine's own limits (`RunLimits::and`). A resume is held to
+        /// these AND to its org's ceiling as it stands then, so a ceiling lowered while the run
+        /// waited binds it, and one raised, or a routine edited, cannot widen it. Empty on logs
+        /// written before limits existed, which are held to the server's budget and the org's.
+        #[serde(default)]
+        limits: RunLimits,
         at_ms: i64,
     },
     /// One rendered protocol event, stored verbatim so a replay is byte-exact rather than
@@ -322,6 +331,8 @@ pub struct Run {
     pub skill_id: Option<String>,
     /// Captured at start. See `RunEvent::Started::prompt`.
     pub prompt: Option<Vec<Value>>,
+    /// Captured at start. See `RunEvent::Started::limits`.
+    pub limits: RunLimits,
     pub status: RunStatus,
     /// The rendered events, in order — what a reconnecting client replays.
     pub emitted: Vec<Value>,
@@ -365,6 +376,7 @@ impl Default for Run {
             system: None,
             skill_id: None,
             prompt: None,
+            limits: RunLimits::default(),
             status: RunStatus::Running,
             emitted: Vec::new(),
             failure: None,
@@ -438,6 +450,8 @@ pub enum RunCommand {
         skill_id: Option<String>,
         /// See `RunEvent::Started::prompt`.
         prompt: Option<Vec<Value>>,
+        /// See `RunEvent::Started::limits`.
+        limits: RunLimits,
         at_ms: i64,
     },
     Emit {
@@ -510,6 +524,7 @@ impl Run {
                 system,
                 skill_id,
                 prompt,
+                limits,
                 ..
             } => {
                 self.started = true;
@@ -519,6 +534,7 @@ impl Run {
                 self.system.clone_from(system);
                 self.skill_id.clone_from(skill_id);
                 self.prompt.clone_from(prompt);
+                self.limits = *limits;
                 self.status = RunStatus::Running;
             }
             RunEvent::Emitted { payload, .. } => {
@@ -653,6 +669,7 @@ impl Run {
                 system,
                 skill_id,
                 prompt,
+                limits,
                 at_ms,
             } => Ok(vec![RunEvent::Started {
                 thread_id,
@@ -661,6 +678,7 @@ impl Run {
                 system,
                 skill_id,
                 prompt,
+                limits,
                 at_ms,
             }]),
 
@@ -849,6 +867,7 @@ mod tests {
                 system: None,
                 skill_id: None,
                 prompt: None,
+                limits: Default::default(),
                 at_ms: 1,
             })
             .unwrap()
@@ -1215,6 +1234,7 @@ mod tests {
                 system: Some("You are Ada.".to_string()),
                 skill_id: None,
                 prompt: None,
+                limits: Default::default(),
                 at_ms: 1,
             })
             .expect("start")
@@ -1232,6 +1252,7 @@ mod tests {
                 system: None,
                 skill_id: None,
                 prompt: None,
+                limits: Default::default(),
                 at_ms: 1,
             })
             .expect("start")
@@ -1249,6 +1270,7 @@ mod tests {
                 system: Some(String::new()),
                 skill_id: None,
                 prompt: None,
+                limits: Default::default(),
                 at_ms: 1,
             })
             .expect("start")
@@ -1287,6 +1309,7 @@ mod tests {
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             at_ms: 1,
         }];
         for index in 0..5 {
@@ -1383,6 +1406,7 @@ mod tests {
                 system: None,
                 skill_id: None,
                 prompt: None,
+                limits: Default::default(),
                 at_ms: 1,
             },
             RunEvent::Emitted {
@@ -1543,6 +1567,7 @@ mod tests {
                 system: None,
                 skill_id: None,
                 prompt: None,
+                limits: Default::default(),
                 at_ms: 1,
             },
             RunEvent::Suspended {
@@ -1740,6 +1765,7 @@ mod tests {
             system: None,
             skill_id: None,
             prompt: None,
+            limits: Default::default(),
             at_ms: 30,
         }
     }
@@ -1823,6 +1849,7 @@ mod tests {
                 system: None,
                 skill_id: None,
                 prompt: None,
+                limits: Default::default(),
                 at_ms: 1,
             },
             RunEvent::Emitted {
@@ -1907,6 +1934,7 @@ mod tests {
                 system: None,
                 skill_id: None,
                 prompt: None,
+                limits: Default::default(),
                 at_ms: 1,
             })
             .unwrap()
@@ -1926,6 +1954,47 @@ mod tests {
         let run = Run::replay([&event]);
         assert_eq!(run.model, None);
         assert_eq!(run.pin_for_resume("oag/auto"), "oag/auto");
+    }
+
+    /// What a run may spend goes into the log with its start and comes back out of it, so a
+    /// resume days later is held to the budget the run began with.
+    #[test]
+    fn a_started_run_keeps_the_limits_it_started_with() {
+        let limits = RunLimits {
+            max_rounds: std::num::NonZeroU32::new(3),
+            max_computer_rounds: std::num::NonZeroU32::new(24),
+            max_wall_ms: std::num::NonZeroU64::new(900_000),
+        };
+        let started = Run::default()
+            .decide(RunCommand::Start {
+                thread_id: "t1".to_string(),
+                coworker_id: None,
+                model: None,
+                system: None,
+                skill_id: None,
+                prompt: None,
+                limits,
+                at_ms: 1,
+            })
+            .unwrap();
+        let stored: Vec<RunEvent> = started
+            .iter()
+            .map(|event| serde_json::from_value(serde_json::to_value(event).unwrap()).unwrap())
+            .collect();
+        assert_eq!(Run::replay(&stored).limits, limits);
+    }
+
+    /// A start written before run limits existed still folds, as a run that set none: it is held
+    /// to the server's budget, which is what every run was held to then.
+    #[test]
+    fn a_start_written_before_run_limits_sets_none() {
+        let event: RunEvent = serde_json::from_str(
+            r#"{"type":"started","thread_id":"t1","coworker_id":null,"model":"xai/grok-4.6","at_ms":1}"#,
+        )
+        .unwrap();
+        let run = Run::replay([&event]);
+        assert!(run.started);
+        assert_eq!(run.limits, RunLimits::default());
     }
 
     /// A log written before prompts were journaled still folds, and says it was never journaled
@@ -1954,6 +2023,7 @@ mod tests {
                 system: None,
                 skill_id: None,
                 prompt: Some(vec![asked.clone()]),
+                limits: Default::default(),
                 at_ms: 1,
             })
             .unwrap();
