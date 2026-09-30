@@ -295,6 +295,25 @@ impl Route {
             Self::LocalProxy { model, .. } => Some((model, SourceKind::LocalProxy)),
         }
     }
+
+    /// A routine's: THE GATEWAY, whatever its hirer chose for their own turns, since a person's
+    /// subscription is theirs to spend in person and a routine fires with nobody at the keyboard.
+    /// A coworker whose own `source` is `local_proxy` answers on a plan alone, so its routine is
+    /// refused in words before any model is asked, never run on the server's keys instead. Only
+    /// that door counts; the hirer's own setting never does (#294).
+    pub fn for_routine(source: Option<SourceKind>, pin: &str) -> Self {
+        if source != Some(SourceKind::LocalProxy) {
+            return Self::Gateway;
+        }
+        let why = "This Bot answers on your own plan, and routines run on the server's keys, so \
+                   this routine did not run. Give the Bot a Server model to run it on a schedule.";
+        let endpoint = ModelEndpoint::Unavailable {
+            why: why.to_string(),
+            via: None,
+        };
+        let model = pin.to_string();
+        Self::LocalProxy { model, endpoint }
+    }
 }
 
 /// THE ONE PLACE A TURN'S SOURCE IS RESOLVED, for every path that asks a model for a person: a

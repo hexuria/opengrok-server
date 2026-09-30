@@ -48,22 +48,6 @@ use opengrok_wire::agui::Event;
 /// thread a person's own subscription answered, and how it was reached.
 pub const INFERENCE_SOURCE_NAME: &str = "opengrok.inferenceSource";
 
-/// Run one turn and collect every event a client should see.
-///
-/// Collecting rather than streaming, for now: a run's events are small, and having the whole
-/// sequence in hand is what lets the caller write it to the event log before the client sees it —
-/// which is how a run survives the client disconnecting. Streaming straight through would be
-/// faster to the first token and is the obvious next step; it is not what makes a run durable.
-pub async fn run_turn(
-    door: &dyn ModelDoor,
-    request: ModelRequest,
-    thread_id: &str,
-    run_id: &str,
-    at_ms: i64,
-) -> Vec<Event> {
-    run_turn_with_tools(door, None, request, thread_id, run_id, at_ms).await
-}
-
 /// How many model calls one conversation may make.
 ///
 /// A model that answers every tool result with another tool call would otherwise run until it ran

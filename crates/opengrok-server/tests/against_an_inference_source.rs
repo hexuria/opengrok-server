@@ -432,6 +432,39 @@ impl Harness {
         let row = rows.into_iter().find(|row| row["id"] == coworker);
         row.unwrap_or_else(|| panic!("{coworker} is on the roster: {roster}"))
     }
+
+    /// A routine `who` makes for `coworker` and runs now: its id, and its row's `lastRun` once
+    /// that run has ended.
+    async fn routine_run(&self, who: &Person, coworker: &str) -> (String, Value) {
+        let body = json!({ "coworkerId": coworker, "name": "Weekly", "cron": "0 9 * * 1",
+                           "prompt": "write the weekly report" });
+        let post = reqwest::Method::POST;
+        let (status, created) = self
+            .send(Some(who), post.clone(), "/schedules", Some(body))
+            .await;
+        assert_eq!(status, 201, "{created}");
+        let id = created["id"].as_str().expect("id").to_string();
+        let path = format!("/schedules/{id}/run");
+        let (status, accepted) = self.send(Some(who), post, &path, Some(json!({}))).await;
+        assert_eq!(status, 202, "{accepted}");
+        let mut rows = Value::Null;
+        for _ in 0..80 {
+            let get = reqwest::Method::GET;
+            rows = self.send(Some(who), get, "/schedules", None).await.1;
+            let row = rows
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["id"] == id);
+            let last = row.map(|row| row["lastRun"].clone()).unwrap_or_default();
+            let ended = matches!(last["status"].as_str(), Some("failed" | "finished"));
+            if last["runId"] == accepted["runId"] && ended {
+                return (id, last);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        panic!("the routine's run never ended: {rows}");
+    }
 }
 
 fn user(id: &str, text: &str) -> Value {
@@ -1523,6 +1556,50 @@ async fn a_teammate_with_no_proxy_is_refused_in_words_on_a_shared_coworkers_own_
         .cloned()
         .unwrap_or_default();
     assert_eq!(ended["type"], "RUN_ERROR", "{replay}");
+}
+
+/// A ROUTINE RUNS ON THE SERVER'S KEYS, so one for a coworker on its own plan is refused in words
+/// before any model is asked: nothing goes to the gateway in its plan's place, nor to the person's
+/// proxy, and its row says why. A coworker off its own plan runs its routine on the gateway, on
+/// its pin, as before, though its person's own setting is their proxy (#294).
+#[tokio::test]
+async fn a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("from the proxy")], true).await;
+    let ada = h.person().await;
+    h.on_the_proxy(&ada, "local_proxy").await;
+    let luna = h.hire(&ada, "Luna").await;
+    let body = json!({ "source": "local_proxy", "model": PLAN_PIN });
+    assert_eq!(h.patch(&ada, &luna, body).await.0, 200);
+
+    let (routine, last) = h.routine_run(&ada, &luna).await;
+    let said = "This Bot answers on your own plan, and routines run on the server's keys, so this \
+                routine did not run. Give the Bot a Server model to run it on a schedule.";
+    assert_eq!(last["status"], "failed", "{last}");
+    // A row's summary drops the sentence's closing stop, as every routine's failure does.
+    let summary = format!("Routine Weekly failed: {}", said.trim_end_matches('.'));
+    assert_eq!(last["summary"], summary, "{last}");
+    let asked = (h.gateway.asked().len(), h.proxy.asked().len());
+    assert_eq!(asked, (0, 0), "no model asked anywhere, and nothing billed");
+    let replay = h.replay(&ada, &routine).await;
+    let events = replay["runs"][0]["events"].as_array().cloned();
+    let events = events.unwrap_or_default();
+    let ended = events.last().cloned().unwrap_or_default();
+    assert_eq!(ended["type"], "RUN_ERROR", "{replay}");
+    assert_eq!(ended["message"], said, "{replay}");
+    assert!(ended.get("code").is_none(), "{ended}");
+    let on_its_plan = json!({"kind": "local_proxy", "model": PLAN_PIN});
+    assert_eq!(sources(&events), [on_its_plan], "{replay}");
+
+    let ada_bot = h.hire(&ada, "Ada").await;
+    let (_, last) = h.routine_run(&ada, &ada_bot).await;
+    assert_eq!(last["status"], "finished", "{last}");
+    let ran = "Routine Weekly ran: from the gateway";
+    assert_eq!(last["summary"], ran, "{last}");
+    let asked = h.gateway.asked();
+    assert_eq!(asked.len(), 1, "on the gateway, as before");
+    assert_eq!(asked[0].1["model"], "xai/grok-4.6", "on its pin");
+    assert_eq!(h.proxy.asked().len(), 0, "never the person's own proxy");
 }
 
 /// THE COWORKER IS TOLD WHAT IT RUNS ON, first, ahead of every word its owner wrote: the model its

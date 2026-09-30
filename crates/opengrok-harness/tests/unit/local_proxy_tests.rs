@@ -418,6 +418,29 @@ async fn a_coworkers_own_door_and_pin_sit_between_the_turn_and_the_setting() {
     );
 }
 
+/// A ROUTINE RUNS ON THE SERVER'S KEYS: on the gateway for a coworker whose own door is none or
+/// the gateway, on its pin; refused in words, asking nothing, for one on its own plan.
+#[test]
+fn a_routine_asks_the_gateway_unless_its_coworker_is_on_its_own_plan() {
+    for source in [None, Some(SourceKind::Gateway)] {
+        let routed = Route::for_routine(source, "xai/grok-4.6");
+        let asked = routed.asked("xai/grok-4.6".to_string());
+        assert_eq!(asked, ("xai/grok-4.6".to_string(), None), "{source:?}");
+    }
+    let routed = Route::for_routine(Some(SourceKind::LocalProxy), "gpt-6-luna");
+    assert_eq!(routed.source(), SourceKind::LocalProxy.into());
+    assert_eq!(routed.asks("gpt-6-luna"), None, "a refusal asks no model");
+    let (model, endpoint) = routed.asked("gpt-6-luna".to_string());
+    assert_eq!(model, "gpt-6-luna");
+    let said = "This Bot answers on your own plan, and routines run on the server's keys, so this \
+                routine did not run. Give the Bot a Server model to run it on a schedule.";
+    let refused = ModelEndpoint::Unavailable {
+        why: said.to_string(),
+        via: None,
+    };
+    assert_eq!(endpoint, Some(refused));
+}
+
 /// THE SAME RULE BY THE MAC: a coworker on its own plan asks the person's Mac for its pin; one off
 /// it asks the Mac for the setting's `relay.localModel`, whatever it is pinned to.
 #[tokio::test]
