@@ -155,7 +155,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         offered_skills: tools.iter().flat_map(|t| t.offered_skills()).collect(),
         // The hirer's instruction is this turn's question. Journaled like a person's message, so
         // a routine that parks on a card resumes knowing what it was told to do.
-        prompt: Some(crate::agui::history::routine_prompt(&run_id, &prompt)),
+        prompt: Some(opengrok_core::run::routine_prompt(&run_id, &prompt)),
         limits,
         generation: 0,
     };

@@ -452,6 +452,70 @@ fn a_routine_asks_the_gateway_unless_its_coworker_is_on_its_own_plan() {
     assert_eq!(endpoint, Some(refused), "not the person's gap to fill");
 }
 
+/// A CARRY-ON GOES BY ITS START'S RULE, on what the start captured. A routine's is `for_routine`:
+/// one refused on its coworker's plan, carried on after a restart, is refused again in the same
+/// words and never sent to the person's proxy, though their setting is that proxy; one that
+/// started on the gateway goes on there. A turn's is `route`, and goes on at the proxy it started
+/// at, on the model it started on.
+#[tokio::test]
+async fn a_routines_carry_on_goes_by_the_routines_rule_and_never_to_a_plan() {
+    use opengrok_core::run::{Run, RunCommand, routine_prompt};
+    let ada = AccountId::new();
+    let on_proxy = stored(Some(InferenceSource {
+        kind: SourceKind::LocalProxy,
+        base_url: Some("http://127.0.0.1:8080".to_string()),
+        local_model: Some("gpt-5.5".to_string()),
+        ..Default::default()
+    }));
+    let run_id = RunId::new();
+    let started = |kind: SourceKind, prompt: Vec<serde_json::Value>| {
+        let mut run = Run::default();
+        let start = RunCommand::Start {
+            thread_id: "sched_weekly".to_string(),
+            coworker_id: None,
+            model: Some("gpt-6-luna".to_string()),
+            effort: Default::default(),
+            inference_source: kind.into(),
+            system: None,
+            skill_id: None,
+            offered_skills: Vec::new(),
+            prompt: Some(prompt),
+            limits: Default::default(),
+            at_ms: 1,
+        };
+        for event in run.decide(start).unwrap() {
+            run.apply(&event);
+        }
+        run
+    };
+    let pin = "gpt-6-luna";
+    let fired = || routine_prompt(&run_id, "write the weekly report");
+
+    let refused = started(SourceKind::LocalProxy, fired());
+    let routed = resumed(&on_proxy, &ada, (&refused, &run_id), pin).await;
+    let again = Route::for_routine(Some(SourceKind::LocalProxy), pin);
+    assert_eq!(
+        routed.asked(pin.to_string()),
+        again.asked(pin.to_string()),
+        "refused again, in the same words, never the proxy"
+    );
+
+    let on_the_gateway = started(SourceKind::Gateway, fired());
+    let routed = resumed(&on_proxy, &ada, (&on_the_gateway, &run_id), pin).await;
+    assert_eq!(routed.asked(pin.to_string()), (pin.to_string(), None));
+
+    let person = vec![serde_json::json!({"id": "m1", "role": "user", "content": "hi"})];
+    let turn = started(SourceKind::LocalProxy, person);
+    let (model, endpoint) = resumed(&on_proxy, &ada, (&turn, &run_id), pin)
+        .await
+        .asked(pin.to_string());
+    assert_eq!(model, "gpt-6-luna", "the model the turn started on");
+    assert!(
+        matches!(endpoint, Some(ModelEndpoint::Proxy { .. })),
+        "{endpoint:?}"
+    );
+}
+
 /// THE SAME RULE BY THE MAC: a coworker on its own plan asks the person's Mac for its pin; one off
 /// it asks the Mac for the setting's `relay.localModel`, whatever it is pinned to.
 #[tokio::test]

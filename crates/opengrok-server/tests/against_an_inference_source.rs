@@ -22,7 +22,7 @@ use opengrok_box::{BoxResult, CommandOutput, Computer, StartedCommand};
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::inference::SourceKind;
-use opengrok_core::run::RunStatus;
+use opengrok_core::run::{Run, RunCommand, RunStatus, RunView};
 use opengrok_harness::GatewayDoor;
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
@@ -196,6 +196,8 @@ struct Harness {
     gateway: StandIn,
     proxy: StandIn,
     proxy_url: String,
+    /// For driving the recovery sweep by hand.
+    host: HostState,
 }
 
 /// The server, with a gateway stand-in behind its door and its catalogue, and a proxy stand-in
@@ -253,7 +255,7 @@ async fn harness_on(
         host_settings: None,
     };
     let host = HostState::new(agui.clone(), Some("http://opengrok.lan:1447".to_string()));
-    let app = opengrok_server::router(agui, host);
+    let app = opengrok_server::router(agui, host.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -269,6 +271,7 @@ async fn harness_on(
         gateway,
         proxy,
         proxy_url,
+        host,
     }
 }
 
@@ -1619,6 +1622,117 @@ async fn a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_n
     assert_eq!(asked.len(), 1, "on the gateway, as before");
     assert_eq!(asked[0].1["model"], "xai/grok-4.6", "on its pin");
     assert_eq!(h.proxy.asked().len(), 0, "never the person's own proxy");
+}
+
+/// A ROUTINE IS NEVER CARRIED ON AT A PLAN. A restart between the opening of a routine's run for
+/// a coworker on its own plan and its refusal leaves the run `running`, having captured the
+/// proxy. The recovery sweep carries it on (#91), and by the routine's rule rather than a turn's:
+/// it is refused again in the same words, nothing is asked of the person's proxy though their
+/// setting is that proxy, nothing of the gateway in its place, and the routine's row says it
+/// failed.
+#[tokio::test]
+async fn a_routine_interrupted_before_its_refusal_is_refused_again_and_never_asks_the_plan() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("from the proxy")], true).await;
+    let ada = h.person().await;
+    h.on_the_proxy(&ada, "local_proxy").await;
+    let luna = h.hire(&ada, "Luna").await;
+    let body = json!({ "source": "local_proxy", "model": PLAN_PIN });
+    assert_eq!(h.patch(&ada, &luna, body).await.0, 200);
+    let body = json!({ "coworkerId": luna, "name": "Weekly", "cron": "0 9 * * 1",
+                       "prompt": "write the weekly report" });
+    let post = reqwest::Method::POST;
+    let (status, created) = h.send(Some(&ada), post, "/schedules", Some(body)).await;
+    assert_eq!(status, 201, "{created}");
+    let routine = created["id"].as_str().expect("id").to_string();
+
+    // The run as `autonomy::fire` left it when its process died after the opening write: on the
+    // routine's thread, with the routine's question, the proxy captured, quiet past a lease.
+    let run_id = RunId::new();
+    let quiet_since = now_ms() - 3 * opengrok_server::recovery::LEASE_MS;
+    let start = RunCommand::Start {
+        thread_id: routine.clone(),
+        coworker_id: Some(CoworkerId::from_stored(luna.clone())),
+        model: Some(PLAN_PIN.to_string()),
+        effort: Default::default(),
+        inference_source: SourceKind::LocalProxy.into(),
+        system: None,
+        skill_id: None,
+        offered_skills: Vec::new(),
+        prompt: Some(opengrok_core::run::routine_prompt(
+            &run_id,
+            "write the weekly report",
+        )),
+        limits: Default::default(),
+        at_ms: quiet_since,
+    };
+    let opening = [
+        json!({ "type": "RUN_STARTED", "threadId": routine, "runId": run_id.as_str() }),
+        json!({ "type": "CUSTOM", "name": "opengrok.inferenceSource",
+                "value": { "kind": "local_proxy", "model": PLAN_PIN } }),
+    ];
+    let emits = opening.map(|payload| RunCommand::Emit {
+        payload,
+        at_ms: quiet_since,
+    });
+    let (mut run, mut log) = (Run::default(), Vec::new());
+    for command in std::iter::once(start).chain(emits) {
+        for event in run.decide(command).expect("a command the run accepts") {
+            run.apply(&event);
+            log.push(event);
+        }
+    }
+    let view = RunView {
+        id: run_id.clone(),
+        thread_id: routine.clone(),
+        status: run.status,
+        event_count: run.emitted.len() as i64,
+        updated_at_ms: quiet_since,
+    };
+    h.store
+        .append_run(&run_id, 0, &log, &view, Some(&ada.id))
+        .await
+        .expect("the interrupted run");
+
+    let mut run = run;
+    for _ in 0..80 {
+        opengrok_server::recovery::sweep_once(&h.host)
+            .await
+            .expect("sweep");
+        run = h.store.load_run(&run_id).await.expect("load").0;
+        if run.status.is_terminal() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert_eq!(run.status, RunStatus::Failed, "{:?}", run.emitted);
+    assert_eq!(run.generation, 1, "carried on, in its next generation");
+    let said = "This Bot answers on your own plan, and routines run on the server's keys, so this \
+                routine did not run. Give the Bot a Server model to run it on a schedule.";
+    let ended = run.emitted.last().cloned().unwrap_or_default();
+    assert_eq!(ended["type"], "RUN_ERROR", "{ended}");
+    assert_eq!(ended["message"], said, "the same words: {ended}");
+    assert!(ended.get("code").is_none(), "{ended}");
+    assert_eq!(h.proxy.asked().len(), 0, "never the person's plan");
+    let asked_for_it = h
+        .gateway
+        .asked()
+        .iter()
+        .any(|(_, body)| conversation(body).contains("write the weekly report"));
+    assert!(!asked_for_it, "nor the gateway in its place");
+
+    let get = reqwest::Method::GET;
+    let (_, rows) = h.send(Some(&ada), get, "/schedules", None).await;
+    let row = rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|r| r["id"] == routine);
+    let last = row.map(|row| row["lastRun"].clone()).unwrap_or_default();
+    assert_eq!(last["runId"], run_id.as_str(), "{rows}");
+    assert_eq!(last["status"], "failed", "{rows}");
+    let summary = format!("Routine Weekly failed: {}", said.trim_end_matches('.'));
+    assert_eq!(last["summary"], summary, "{rows}");
 }
 
 /// THE COWORKER IS TOLD WHAT IT RUNS ON, first, ahead of every word its owner wrote: the model its

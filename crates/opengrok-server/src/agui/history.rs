@@ -546,14 +546,6 @@ pub(crate) fn title_of(prompt: &[Value]) -> Option<String> {
 /// does not become a row.
 const TITLE_MAX_CHARS: usize = 200;
 
-/// The id a routine's journaled instruction goes under: the run's own, so it is unique and says
-/// where it came from.
-pub(crate) fn routine_prompt(run_id: &RunId, instruction: &str) -> Vec<Value> {
-    vec![
-        json!({"id": format!("{}-prompt", run_id.as_str()), "role": "user", "content": instruction}),
-    ]
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "../../tests/unit/history.rs"]

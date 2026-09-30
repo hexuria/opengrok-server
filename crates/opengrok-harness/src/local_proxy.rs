@@ -15,8 +15,9 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use opengrok_core::id::AccountId;
+use opengrok_core::id::{AccountId, RunId};
 use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource, Via, subscription_model};
+use opengrok_core::run::Run;
 
 use crate::model::ModelEndpoint;
 use crate::relay::{RelayBroker, RelayTo};
@@ -315,7 +316,7 @@ impl Route {
 /// THE ONE PLACE A TURN'S SOURCE IS RESOLVED, for every path that asks a model for a person: a
 /// fresh turn, whose `chosen` is its own pick (a drained queued send's, else its
 /// `forwardedProps.inferenceSource`) over its coworker's own `source`, over the account's setting;
-/// a carry-on after a card or a restart, whose `chosen` is the kind and the way its run captured;
+/// a turn's carry-on (`resumed`), whose `chosen` is the kind and the way its run captured;
 /// and, through that turn's request, its judge and its wrap-up. On the proxy the model is
 /// `captured` — the one the run started on — else the coworker's `pin`, but ONLY when its own
 /// `source` is `local_proxy` (its owner picked a plan model for it) and a subscription may answer
@@ -389,6 +390,20 @@ pub async fn route(
     let key = saved.key(account, setting.has_key).await;
     let endpoint = endpoint(base, &model, key);
     Route::LocalProxy { model, endpoint }
+}
+
+/// Where a carry-on asks, after a card, a form or a restart: by its start's rule, on what it
+/// captured. A turn's is `route`. A ROUTINE'S IS `for_routine`, NEVER `route`: one refused on its
+/// coworker's plan captured the proxy, and `route` would carry it on at the person's plan after a
+/// restart between its start and its refusal (#304). It is refused again, in the same words.
+pub async fn resumed(saved: &dyn Saved, who: &AccountId, run: (&Run, &RunId), pin: &str) -> Route {
+    let (run, run_id) = run;
+    if run.fired_by_routine(run_id) {
+        return Route::for_routine(Some(run.inference_source), pin);
+    }
+    let (source, captured) = (Some(run.source_for_resume()), run.model.as_deref());
+    let (run_id, none) = (run_id.as_str(), (None, None));
+    route(saved, Some(who), source, captured, run_id, none).await
 }
 
 /// The model a proxy turn asks ahead of any setting's, whichever way it goes: the one its run
