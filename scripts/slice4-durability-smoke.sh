@@ -95,7 +95,7 @@ last=$(echo "$theirs" | jq -r '.[-1].type')
 [ "$first" = "RUN_STARTED" ]  || fail "first replayed event is $first"
 [ "$last"  = "RUN_FINISHED" ] || fail "last replayed event is $last"
 text=$(echo "$theirs" | jq -r '.[] | select(.type == "TEXT_MESSAGE_CONTENT") | .delta' | tr -d '\n')
-echo "$text" | grep -q "remember this" || fail "the reply did not survive: $text"
+grep -q "remember this" <<<"$text" || fail "the reply did not survive: $text"
 ok "RUN_STARTED … RUN_FINISHED, and the reply is intact"
 
 echo "5. a run that never happened is not invented"

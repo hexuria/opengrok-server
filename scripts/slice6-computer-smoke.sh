@@ -62,7 +62,7 @@ echo "4. proof the work happened INSIDE the coworker's own computer"
 # The file is written by the model's own tool call, not by this script. That is the difference
 # between "the run finished" and "the work happened" — and the earlier version of this step wrote
 # the marker itself, which proved only that the box was reachable.
-if [ "${OG_MODEL_DOOR:-}" = "mock-tools" ] || echo "$events" | grep -q TOOL_CALL_RESULT; then
+if [ "${OG_MODEL_DOOR:-}" = "mock-tools" ] || grep -q TOOL_CALL_RESULT <<<"$events"; then
   seen=$(docker exec "$BOX_ID" cat /tmp/opengrok-tool-ran 2>/dev/null | tr -d '\n')
   [ "$seen" = "opengrok-tool-ran" ] \
     || fail "the tool did not run on the coworker's box (marker: '$seen')"

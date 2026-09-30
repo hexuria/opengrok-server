@@ -158,7 +158,7 @@ echo "5. the listing has the key and NOT the secret"
 listed=$(curl -fsS "$BASE/admin/gateway/keys" -b "$WORK/admin.jar")
 echo "$listed" | jq -e --arg id "$key_id" '.keys | map(.id) | index($id)' >/dev/null \
   || fail "the key is not listed: $listed"
-echo "$listed" | grep -q "shown_once" && fail "the listing leaked the secret"
+grep -q "shown_once" <<<"$listed" && fail "the listing leaked the secret"
 ok "listed by prefix only; the secret appears nowhere"
 
 echo "6. usage and budget round-trip"
