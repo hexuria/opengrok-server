@@ -34,7 +34,7 @@ events=$(echo "$raw" | sed -n 's/^data: //p')
 [ -n "$events" ] || fail "no data frames"
 
 echo "1. the run opens and ends exactly once"
-first=$(echo "$events" | head -1 | jq -r '.type')
+first=$(printf '%s\n' "${events%%$'\n'*}" | jq -r '.type')
 [ "$first" = "RUN_STARTED" ] || fail "first event is $first"
 endings=$(echo "$events" | jq -r 'select(.type == "RUN_FINISHED" or .type == "RUN_ERROR") | .type')
 [ "$(echo "$endings" | wc -l | tr -d ' ')" = "1" ] || fail "expected one ending, got: $endings"
@@ -77,8 +77,8 @@ ok "start … content … end, one messageId"
 
 echo "4. the user's message reached the model, the developer note did not"
 text=$(echo "$events" | jq -r 'select(.type == "TEXT_MESSAGE_CONTENT") | .delta' | tr -d '\n')
-echo "$text" | grep -q "streaming please" || fail "the user's text did not reach the run: $text"
-echo "$text" | grep -q "internal note" && fail "a developer-role message reached the model"
+grep -q "streaming please" <<<"$text" || fail "the user's text did not reach the run: $text"
+grep -q "internal note" <<<"$text" && fail "a developer-role message reached the model"
 ok "user content in, developer note filtered"
 
 echo

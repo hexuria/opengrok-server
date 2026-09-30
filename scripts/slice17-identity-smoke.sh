@@ -86,7 +86,7 @@ curl -s "$BASE/loginDeepControl?challenge=$C&uuid=$U&mode=login&redirectTarget=c
 page=$(curl -s -X POST "$BASE/loginDeepControl" \
   --data-urlencode "challenge=$C" --data-urlencode "uuid=$U" \
   --data-urlencode "email=jo@$DOMAIN" --data-urlencode "password=password1")
-echo "$page" | grep -qi "awaiting an administrator" || fail "expected the not-enabled message, got: $(echo "$page" | tr -d '\n' | head -c 200)"
+grep -qi "awaiting an administrator" <<<"$page" || fail "expected the not-enabled message, got: $(echo "$page" | tr -d '\n' | head -c 200)"
 # and poll must still be pending — no token slipped out
 pcode=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/auth/poll?uuid=$U&verifier=$V")
 [ "$pcode" = "404" ] || fail "poll released a token for a not-enabled account ($pcode)"
@@ -99,7 +99,7 @@ curl -s "$BASE/loginDeepControl?challenge=$C2&uuid=$U2&mode=login&redirectTarget
 page2=$(curl -s -X POST "$BASE/loginDeepControl" \
   --data-urlencode "challenge=$C2" --data-urlencode "uuid=$U2" \
   --data-urlencode "email=jo@$DOMAIN" --data-urlencode "password=password1")
-echo "$page2" | grep -qi "signed in" || fail "enabled login did not succeed: $(echo "$page2" | tr -d '\n' | head -c 200)"
+grep -qi "signed in" <<<"$page2" || fail "enabled login did not succeed: $(echo "$page2" | tr -d '\n' | head -c 200)"
 tokens=$(curl -s "$BASE/auth/poll?uuid=$U2&verifier=$V2")
 tok=$(echo "$tokens" | jq -r '.accessToken')
 [ -n "$tok" ] && [ "$tok" != "null" ] || fail "no token after enabled login: $tokens"
@@ -111,11 +111,11 @@ echo "8. a wrong password is refused, indistinguishably from a wrong email"
 bad=$(curl -s -X POST "$BASE/loginDeepControl" \
   --data-urlencode "challenge=$C2" --data-urlencode "uuid=wrong-$STAMP" \
   --data-urlencode "email=jo@$DOMAIN" --data-urlencode "password=WRONG")
-echo "$bad" | grep -qi "wrong email or password" || fail "wrong password leaked something specific"
+grep -qi "wrong email or password" <<<"$bad" || fail "wrong password leaked something specific"
 nobody=$(curl -s -X POST "$BASE/loginDeepControl" \
   --data-urlencode "challenge=$C2" --data-urlencode "uuid=wrong2-$STAMP" \
   --data-urlencode "email=ghost@$DOMAIN" --data-urlencode "password=x")
-echo "$nobody" | grep -qi "wrong email or password" || fail "a nonexistent email leaked that it does not exist"
+grep -qi "wrong email or password" <<<"$nobody" || fail "a nonexistent email leaked that it does not exist"
 ok "wrong password and unknown email give the same answer"
 
 echo "9. the CLI mints a second test identity directly (Uriah's multi-account need)"
@@ -125,14 +125,14 @@ curl -s "$BASE/loginDeepControl?challenge=$C3&uuid=$U3&mode=login&redirectTarget
 page3=$(curl -s -X POST "$BASE/loginDeepControl" \
   --data-urlencode "challenge=$C3" --data-urlencode "uuid=$U3" \
   --data-urlencode "email=tester@$DOMAIN" --data-urlencode "password=testpass1")
-echo "$page3" | grep -qi "signed in" || fail "the CLI-minted account cannot log in"
+grep -qi "signed in" <<<"$page3" || fail "the CLI-minted account cannot log in"
 ok "a second identity logs in — multi-account is real and testable"
 
 echo "10. the operator vouches for a second domain from the shell — no DNS proof, it admits at once"
 EXTRA="extra$STAMP.com"
 # Captured, not piped: `grep -q` would close the pipe mid-print and pipefail would call that a failure.
 added=$(admin org domain add --org "$org" --domain "$EXTRA")
-echo "$added" | grep -q "operator-vouched" || fail "domain add: $added"
+grep -q "operator-vouched" <<<"$added" || fail "domain add: $added"
 code2=$(admin invite --org "$org" | awk '/invite code:/{print $3}')
 r10=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/auth/signup" -H 'content-type: application/json' \
   -d "{\"email\":\"kai@$EXTRA\",\"password\":\"password1\",\"code\":\"$code2\"}")
@@ -171,17 +171,17 @@ curl -s "$BASE/forgot-password" | grep -qi "not set up to send email" || fail "f
 fj=$(curl -s -X POST "$BASE/auth/password/forgot" -H 'content-type: application/json' -d "{\"email\":\"jo@$DOMAIN\"}")
 echo "$fj" | jq -e '.accepted == true and .mailer == false' >/dev/null || fail "forgot json: $fj"
 reset=$(admin account password --email "jo@$DOMAIN" --password "newpass123")
-echo "$reset" | grep -q "password set" || fail "account password: $reset"
+grep -q "password set" <<<"$reset" || fail "account password: $reset"
 U4="u4-$STAMP"; V4="verifier4-$STAMP"; C4=$(pkce_challenge "$V4")
 curl -s "$BASE/loginDeepControl?challenge=$C4&uuid=$U4&mode=login&redirectTarget=cli" >/dev/null
 page4=$(curl -s -X POST "$BASE/loginDeepControl" \
   --data-urlencode "challenge=$C4" --data-urlencode "uuid=$U4" \
   --data-urlencode "email=jo@$DOMAIN" --data-urlencode "password=newpass123")
-echo "$page4" | grep -qi "signed in" || fail "the shell-reset password does not sign in"
+grep -qi "signed in" <<<"$page4" || fail "the shell-reset password does not sign in"
 old4=$(curl -s -X POST "$BASE/loginDeepControl" \
   --data-urlencode "challenge=$C4" --data-urlencode "uuid=old-$STAMP" \
   --data-urlencode "email=jo@$DOMAIN" --data-urlencode "password=password1")
-echo "$old4" | grep -qi "wrong email or password" || fail "the old password still signs in"
+grep -qi "wrong email or password" <<<"$old4" || fail "the old password still signs in"
 ok "forgot is honest with no mailer; shell reset moved the login"
 
 echo

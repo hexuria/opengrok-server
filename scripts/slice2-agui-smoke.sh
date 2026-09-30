@@ -39,8 +39,8 @@ echo "1. the endpoint streams server-sent events"
 # headers of a fresh run.
 headers=$(curl -sS -o /dev/null -D - -X POST "$BASE/ag-ui" -H "authorization: Bearer $TOKEN" \
   -H 'content-type: application/json' -d "${BODY/$RUN/$RUN-headers}" --max-time 10)
-echo "$headers" | grep -qi "content-type: text/event-stream" \
-  || fail "not an event stream: $(echo "$headers" | head -5)"
+grep -qi "content-type: text/event-stream" <<<"$headers" \
+  || fail "not an event stream: $(head -5 <<<"$headers")"
 ok "content-type is text/event-stream"
 
 raw=$(curl -sN -X POST "$BASE/ag-ui" -H "authorization: Bearer $TOKEN" \
@@ -50,7 +50,7 @@ events=$(echo "$raw" | sed -n 's/^data: //p')
 
 echo "2. the run opens and closes"
 # A consumer holds its spinner open until the closing event; a run that never finishes hangs the UI.
-first=$(echo "$events" | head -1 | jq -r '.type')
+first=$(printf '%s\n' "${events%%$'\n'*}" | jq -r '.type')
 last=$(echo "$events" | tail -1 | jq -r '.type')
 [ "$first" = "RUN_STARTED" ]  || fail "first event is $first, expected RUN_STARTED"
 [ "$last"  = "RUN_FINISHED" ] || fail "last event is $last, expected RUN_FINISHED"
@@ -80,8 +80,8 @@ echo "$events" | jq -e 'select(.type == "CUSTOM" and .name == "run-timing")' >/d
 
 echo "4. our ids come back, not ids the server invented"
 # openbot correlates its own UI against these; minting our own would orphan the reply.
-got_thread=$(echo "$events" | head -1 | jq -r '.threadId')
-got_run=$(echo "$events" | head -1 | jq -r '.runId')
+got_thread=$(printf '%s\n' "${events%%$'\n'*}" | jq -r '.threadId')
+got_run=$(printf '%s\n' "${events%%$'\n'*}" | jq -r '.runId')
 [ "$got_thread" = "$THREAD" ] || fail "threadId came back as $got_thread"
 [ "$got_run" = "$RUN" ]       || fail "runId came back as $got_run"
 ok "threadId and runId echoed"

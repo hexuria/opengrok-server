@@ -40,7 +40,7 @@ echo "2. the admin issues an invite LINK (code + paste-or-click URL)"
 inv=$(curl -s -X POST "$BASE/admin/invites" -H "authorization: Bearer $ADMIN_TOK")
 code=$(echo "$inv" | jq -r '.code'); link=$(echo "$inv" | jq -r '.link')
 [ -n "$code" ] && [ "$code" != "null" ] || fail "no invite code: $inv"
-echo "$link" | grep -q "/signup?code=$code" || fail "the link is not a signup URL with the code: $link"
+grep -q "/signup?code=$code" <<<"$link" || fail "the link is not a signup URL with the code: $link"
 ok "invite $code with link $link"
 
 echo "3. a user signs up with the code, admin enables them"

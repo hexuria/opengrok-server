@@ -11,8 +11,9 @@ fallback.)
 ## Running it
 
 ```sh
-# checks and tests only: fmt --check, crate sizes, the architecture guard, cargo deny,
-# the formal models, cargo check (also --no-default-features), clippy -D warnings, the tests
+# checks and tests only: fmt --check, crate sizes, the architecture guard, no value echoed
+# into head or grep -q (pipefail makes that a random failure), cargo deny, the formal models,
+# cargo check (also --no-default-features), clippy -D warnings, the tests
 scripts/gate.sh
 
 # optional, pinned by sha256: what CI installs. Without them the gate skips cargo deny and
@@ -76,7 +77,7 @@ directory.
 | Suite | What it runs | Time |
 |---|---|---|
 | `server` | `scripts/gate.sh --smoke`: every check, every test, the smokes | ~7 min |
-| `checks` | `scripts/gate.sh --checks`: fmt, crate sizes, architecture, cargo deny, check, clippy | ~2 min |
+| `checks` | `scripts/gate.sh --checks`: fmt, crate sizes, architecture, echoed pipes, cargo deny, check, clippy | ~2 min |
 | `formal` | `scripts/formal.sh --require`: TLC and Lean on `formal/` | ~1 min |
 | `web` | the console: typecheck, test, build | seconds |
 | `docs` | `crates/opengrok/tests/setup_docs.rs`, compiled with `rustc` alone | seconds |

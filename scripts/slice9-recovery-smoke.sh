@@ -83,10 +83,10 @@ echo "4. and it says what happened, including what it would not guess about"
 # The command may have run, may have half-run, may never have started. Re-running it would repeat
 # whatever it did, so the run says so instead of pretending to know.
 reason=$(curl -fsS "$BASE/ag-ui/runs/$RUN" -H "authorization: Bearer $token" | jq -r '.failure')
-echo "$reason" | grep -q "interrupted by a restart" || fail "the reason does not say why: $reason"
-echo "$reason" | grep -q "shell" || fail "the reason does not name the call in flight: $reason"
-echo "$reason" | grep -q "unknown" || fail "the reason should not claim to know if it ran: $reason"
-ok "$(echo "$reason" | head -c 90)…"
+grep -q "interrupted by a restart" <<<"$reason" || fail "the reason does not say why: $reason"
+grep -q "shell" <<<"$reason" || fail "the reason does not name the call in flight: $reason"
+grep -q "unknown" <<<"$reason" || fail "the reason should not claim to know if it ran: $reason"
+ok "$(head -c 90 <<<"$reason")…"
 
 echo "5. a run being served right now is NOT reclaimed"
 # The lease is what tells a restart from a run that is simply still going. A live run must survive

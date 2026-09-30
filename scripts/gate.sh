@@ -7,7 +7,7 @@
 # predicting the remote one and people stop trusting either.
 #
 # Usage:
-#   scripts/gate.sh --checks     # checks only: fmt, sizes, architecture, deny, formal, clippy
+#   scripts/gate.sh --checks     # checks only: fmt, sizes, architecture, pipes, deny, formal, clippy
 #   scripts/gate.sh              # checks and tests
 #   scripts/gate.sh --smoke      # also stands the server up and runs the smoke scripts
 set -euo pipefail
@@ -38,6 +38,23 @@ scripts/crate-size.sh || fail "crate size (a crate grew past its ceiling)"
 
 step "scripts/check-architecture.sh"
 scripts/check-architecture.sh || fail "architecture (a crate edge scripts/architecture.txt does not allow)"
+
+# NO SCRIPT ECHOES A VALUE INTO A READER THAT STOPS EARLY. `head` and `grep -q` (or -m, -l) exit
+# once they have their answer; the echo still writing dies of SIGPIPE, or gets EPIPE where SIGPIPE
+# is ignored as on GitHub's runners, and under pipefail the pipeline fails: an aborted assignment,
+# or a `|| fail` on a check that passed. bash's echo writes a multi-line value a line or two per
+# write(2), so no value is too small to lose the race — slice2-agui failed CI this way on 30 Sep
+# 2026. Read the variable instead: `grep -q x <<<"$v"`, and `${v%%$'\n'*}` for its first line.
+# Every script here runs under pipefail.
+step "scripts: no value echoed into head or grep -q"
+early_exit='^[^#]*(echo|printf)[[:space:]][^|]*[$][^|]*[|][[:space:]]*(head([[:space:]]|$)|grep([[:space:]]+-[[:alnum:]]+)*[[:space:]]+-[[:alnum:]]*[lmq])'
+found=0
+grep -nE "$early_exit" scripts/*.sh || found=$?
+case "$found" in
+  1) ;;
+  0) fail "a value echoed into head or grep -q (above) fails at random under pipefail; read the variable instead" ;;
+  *) fail "the check for echoed pipes could not run (grep exited $found)" ;;
+esac
 
 # cargo-deny is CI's `supply-chain` job. It is optional here because it reads the RustSec
 # advisory feed over the network; scripts/install-ci-tools.sh installs the pinned binary.
@@ -128,8 +145,13 @@ cargo build -p opengrok-server --bin opengrok-pdf-text || fail "build the PDF re
 #
 # The guard is DATABASE-SCOPED, not "any opengrok": a server on a different database (e.g. a live
 # verification server, or another checkout) shares no rows and cannot race, so it is left alone.
+#
+# Captured, then searched: as `ps | tr | grep -q`, grep exited at the match while GNU tr was still
+# writing a dev server's environment 4 KiB at a time, and pipefail turned the racing server it had
+# found into no server at all — 41 of 300 checks missed a 10 KB environment on Ubuntu 24.04.
 for pid in $(pgrep -f "target/debug/opengrok" 2>/dev/null || true); do
-  if ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -qxF "OG_DATABASE_URL=$OG_DATABASE_URL"; then
+  procenv=$(ps eww -p "$pid" 2>/dev/null) || continue
+  if grep -qxF "OG_DATABASE_URL=$OG_DATABASE_URL" <<<"${procenv// /$'\n'}"; then
     fail "another opengrok is running on $OG_DATABASE_URL; it would race the smokes — use a separate database"
   fi
 done

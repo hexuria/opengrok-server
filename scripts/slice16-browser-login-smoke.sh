@@ -56,11 +56,11 @@ UUID="u-$(date +%s)-$$"
 VERIFIER="verifier-secret-$(date +%s)"
 CHALLENGE=$(pkce "$VERIFIER")
 page=$(curl -s "$BASE/loginDeepControl?challenge=$CHALLENGE&uuid=$UUID&mode=login&redirectTarget=cli")
-echo "$page" | grep -qi "Sign in" || fail "loginDeepControl did not render a sign-in form"
-echo "$page" | grep -qi "Open Grok" || fail "the login page is not branded"
-echo "$page" | grep -qi 'name=password' || fail "the form has no password field"
+grep -qi "Sign in" <<<"$page" || fail "loginDeepControl did not render a sign-in form"
+grep -qi "Open Grok" <<<"$page" || fail "the login page is not branded"
+grep -qi 'name=password' <<<"$page" || fail "the form has no password field"
 # It must NOT hand out a session just for opening the URL — that was the old behaviour, now gone.
-echo "$page" | grep -qi "Signed in" && fail "opening the URL alone still signs in (opener-is-host regression)"
+grep -qi "Signed in" <<<"$page" && fail "opening the URL alone still signs in (opener-is-host regression)"
 ok "a credential form, no token from merely opening the page"
 
 echo "3. a poll before any credential login stays pending"

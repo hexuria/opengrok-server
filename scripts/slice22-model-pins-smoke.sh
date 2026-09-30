@@ -84,7 +84,7 @@ esac
 echo "8. the catalogue never carries the gateway's key"
 models=$(curl -fsS "$BASE/models" -H "authorization: Bearer $token")
 echo "$models" | jq -e 'has("models")' >/dev/null || fail "no models key: $models"
-echo "$models" | grep -q "oag_live_" && fail "the gateway key reached the client"
+grep -q "oag_live_" <<<"$models" && fail "the gateway key reached the client"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/models")
 [ "$code" = "401" ] || fail "the catalogue answered $code without a token"
 ok "listed without leaking a key; 401 without a token"
