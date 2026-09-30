@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/ag-ui",
+  "status": 400,
+  "body": {
+    "error": "inferenceSource must be \"gateway\" or \"local_proxy\""
+  }
+}

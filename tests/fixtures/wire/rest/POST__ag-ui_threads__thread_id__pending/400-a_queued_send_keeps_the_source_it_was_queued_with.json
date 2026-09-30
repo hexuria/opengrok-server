@@ -1,0 +1,6 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/threads/thr-0199bb4e000070008000000000000001/pending",
+  "status": 400,
+  "body": "inferenceSource must be \"gateway\" or \"local_proxy\""
+}

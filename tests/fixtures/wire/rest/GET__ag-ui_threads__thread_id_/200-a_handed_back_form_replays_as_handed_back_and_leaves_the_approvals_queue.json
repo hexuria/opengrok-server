@@ -37,6 +37,17 @@
             "timestamp": 100
           },
           {
+            "name": "opengrok.inferenceSource",
+            "type": "CUSTOM",
+            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "value": {
+              "kind": "gateway",
+              "model": "oag/cheap"
+            },
+            "threadId": "thr-a-0199bb4e-0000-7000-8000-000000000001",
+            "timestamp": 100
+          },
+          {
             "type": "TOOL_CALL_START",
             "timestamp": 100,
             "toolCallId": "form-0199bb4e000070008000000000000004",
@@ -319,18 +330,18 @@
           {
             "role": "assistant",
             "type": "TEXT_MESSAGE_START",
-            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_10",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_11",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "done",
-            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_10",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_11",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_END",
-            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_10",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_11",
             "timestamp": 100
           },
           {
