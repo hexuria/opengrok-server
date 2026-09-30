@@ -437,17 +437,6 @@ fn error_sentence(text: &str) -> Option<String> {
     })
 }
 
-/// Turn one SSE line into deltas, then close any tool call that line named.
-///
-/// For a whole stream — where argument fragments arrive on later lines — use
-/// `SseParser` instead. Closing here is what a single-frame test expects.
-pub fn parse_sse_line(line: &str) -> Result<Vec<ModelDelta>, ModelError> {
-    let mut parser = SseParser::default();
-    let mut deltas = parser.push_line(line)?;
-    deltas.extend(parser.finish());
-    Ok(deltas)
-}
-
 /// An opaque, stable id for the CONVERSATION this request belongs to, for the gateway's session
 /// affinity — sent as `user`, which is the field its OpenAI-shaped parser reads
 /// (`oag-proto/src/openai.rs`: `client_session: body["user"]`).
@@ -715,6 +704,11 @@ impl ModelDoor for GatewayDoor {
                 return to_proxy(&self.proxy_http, (base_url, auth), &request).await;
             }
             Some(ModelEndpoint::Relay(to)) => return to.broker.stream(to, &request).await,
+            Some(ModelEndpoint::Unavailable {
+                why, unset: true, ..
+            }) => {
+                return Err(ModelError::PlanUnavailable(why.clone()));
+            }
             Some(ModelEndpoint::Unavailable { why, .. }) => {
                 return Err(ModelError::Proxy(why.clone()));
             }

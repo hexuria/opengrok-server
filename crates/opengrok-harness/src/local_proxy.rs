@@ -307,11 +307,7 @@ impl Route {
         }
         let why = "This Bot answers on your own plan, and routines run on the server's keys, so \
                    this routine did not run. Give the Bot a Server model to run it on a schedule.";
-        let endpoint = ModelEndpoint::Unavailable {
-            why: why.to_string(),
-            via: None,
-        };
-        let model = pin.to_string();
+        let (model, endpoint) = (pin.to_string(), unavailable(why.to_string(), None, false));
         Self::LocalProxy { model, endpoint }
     }
 }
@@ -332,7 +328,8 @@ impl Route {
 /// THE PLAN IS `account`'S, the person driving the turn, whoever owns the coworker: a coworker's
 /// `source` names a door, not whose subscription pays nor which way it goes, which the person's
 /// setting says. A teammate with no proxy set is refused in words on a coworker whose owner has
-/// one, never sent to the gateway or to the owner's proxy or Mac.
+/// one, never sent to the gateway or to the owner's proxy or Mac. Like every gap in a person's own
+/// setting, no address or no model for the way it goes, the refusal is `plan_unavailable`.
 ///
 /// THE RELAY IS A WAY, NOT A SOURCE: `via: "mac"` behind the same `kind: "local_proxy"`, resolved
 /// here to `ModelEndpoint::Relay` for the account's Mac and `run_id`, whose `infer` frames name
@@ -343,7 +340,7 @@ impl Route {
 /// gateway (a carry-on of a run that started there does). Guessed as the gateway, it would be a
 /// silent fall back for a person who chose their own subscription, billing a key they chose not to
 /// use. It is refused as a proxy turn with a gap is: in words, with nothing asked anywhere, no
-/// gateway key minted and no meter consulted.
+/// gateway key minted and no meter consulted; but with no code, as the fault is this side's.
 pub async fn route(
     saved: &dyn Saved,
     account: Option<&AccountId>,
@@ -363,10 +360,7 @@ pub async fn route(
         let why = "Your reply source could not be read, so the turn was not sent; try again in a \
                    moment.";
         let via = chosen.and_then(|chosen| chosen.via);
-        let endpoint = ModelEndpoint::Unavailable {
-            why: why.to_string(),
-            via,
-        };
+        let endpoint = unavailable(why.to_string(), via, false);
         let model = captured.unwrap_or_default();
         return Route::LocalProxy { model, endpoint };
     };
@@ -489,12 +483,16 @@ pub async fn described(
     })
 }
 
-/// A turn its setting cannot send the way it goes, refused in words at the door.
+/// A turn refused in words at the door; `unset` when what is missing is the person's to set.
+fn unavailable(why: String, via: Option<Via>, unset: bool) -> ModelEndpoint {
+    ModelEndpoint::Unavailable { why, via, unset }
+}
+
+/// A turn its setting cannot send the way it goes for want of an address or a model: the
+/// person's own gap, which their `RUN_ERROR` names `plan_unavailable`.
 fn refused(why: &str, via: Via) -> ModelEndpoint {
-    ModelEndpoint::Unavailable {
-        why: format!("{why}, or switch this turn to the gateway."),
-        via: Some(via),
-    }
+    let why = format!("{why}, or switch this turn to the gateway.");
+    unavailable(why, Some(via), true)
 }
 
 /// Where a turn on a person's own subscription goes by the loopback, from their setting: `base`
@@ -520,12 +518,14 @@ fn endpoint(base: Option<&str>, model: &str, key: Result<Option<String>, String>
             base_url: base.to_string(),
             auth: key.map(|key| (KEY_HEADER.to_string(), key)),
         },
-        Err(why) => refused(
-            &format!(
+        // Not the person's gap: the vault on this side could not open what they saved.
+        Err(why) => unavailable(
+            format!(
                 "Your proxy's key could not be opened ({why}), so the turn was not sent; save \
-                 the key again"
+                 the key again, or switch this turn to the gateway."
             ),
-            Via::Loopback,
+            Some(Via::Loopback),
+            false,
         ),
     }
 }

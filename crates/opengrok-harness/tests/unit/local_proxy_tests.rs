@@ -77,29 +77,36 @@ fn anything_but_this_machine_is_refused_with_a_sentence() {
     }
 }
 
-/// A turn's gaps are refusals the door will say, never a fall back to the gateway.
+/// A turn's gaps are refusals the door will say, never a fall back to the gateway. A gap the
+/// person can fill, an address or a model, is `unset`; a key the vault cannot open is not.
 #[test]
 fn a_setting_with_a_gap_is_a_refusal_that_names_the_gap() {
-    let unavailable = |endpoint: ModelEndpoint| match endpoint {
+    let refusal = |endpoint: ModelEndpoint| match endpoint {
         ModelEndpoint::Unavailable {
             why,
             via: Some(Via::Loopback),
-        } => why,
-        dialled => format!("a gap must not dial, and this one does: {dialled:?}"),
+            unset,
+        } => (why, unset),
+        dialled => (format!("a gap must not dial: {dialled:?}"), false),
     };
     let base = Some("http://127.0.0.1:8080");
-    let no_base = unavailable(endpoint(None, "gpt-5.5", Ok(None)));
-    assert!(no_base.contains("no proxy address is set"), "{no_base}");
-    let no_model = unavailable(endpoint(base, "", Ok(None)));
+    let no_base = refusal(endpoint(None, "gpt-5.5", Ok(None)));
+    assert!(no_base.0.contains("no proxy address is set"), "{no_base:?}");
+    assert!(no_base.1, "the person's own gap: {no_base:?}");
+    let no_model = refusal(endpoint(base, "", Ok(None)));
     assert!(
-        no_model.starts_with("Choose a model for your own subscription first"),
-        "{no_model}"
+        no_model
+            .0
+            .starts_with("Choose a model for your own subscription first"),
+        "{no_model:?}"
     );
-    let no_key = unavailable(endpoint(base, "gpt-5.5", Err("no vault".to_string())));
+    assert!(no_model.1, "the person's own gap: {no_model:?}");
+    let no_key = refusal(endpoint(base, "gpt-5.5", Err("no vault".to_string())));
     assert!(
-        no_key.contains("could not be opened (no vault)"),
-        "{no_key}"
+        no_key.0.contains("could not be opened (no vault)"),
+        "{no_key:?}"
     );
+    assert!(!no_key.1, "the vault's fault, not a gap: {no_key:?}");
 
     assert_eq!(
         endpoint(base, "gpt-5.5", Ok(Some("k".to_string()))),
@@ -218,8 +225,9 @@ async fn a_turns_source_is_resolved_in_one_place_and_never_guessed() {
         assert_eq!(model, "", "{chosen:?}");
         let refused = "Your reply source could not be read, so the turn was not sent";
         assert!(
-            matches!(&endpoint, Some(ModelEndpoint::Unavailable { why, .. }) if why.starts_with(refused)),
-            "{chosen:?}: {endpoint:?}"
+            matches!(&endpoint, Some(ModelEndpoint::Unavailable { why, unset: false, .. })
+                if why.starts_with(refused)),
+            "this side's fault, not a gap the person can fill: {chosen:?}: {endpoint:?}"
         );
     }
     let carried = route(
@@ -304,8 +312,9 @@ async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
         .asked(String::new());
     assert_eq!(model, "", "never the loopback's model");
     assert!(
-        matches!(&endpoint, Some(ModelEndpoint::Unavailable { why, via: Some(Via::Mac) })
-            if why.starts_with("Choose a model for your Mac first")),
+        matches!(&endpoint,
+            Some(ModelEndpoint::Unavailable { why, via: Some(Via::Mac), unset: true })
+                if why.starts_with("Choose a model for your Mac first")),
         "{endpoint:?}"
     );
 }
@@ -413,8 +422,9 @@ async fn a_coworkers_own_door_and_pin_sit_between_the_turn_and_the_setting() {
     let (model, endpoint) = asked(routed);
     assert_eq!(model, "gpt-6-luna");
     assert!(
-        matches!(&endpoint, Some(ModelEndpoint::Unavailable { why, .. }) if why.contains("no proxy address is set")),
-        "{endpoint:?}"
+        matches!(&endpoint, Some(ModelEndpoint::Unavailable { why, unset: true, .. })
+            if why.contains("no proxy address is set")),
+        "the teammate's own gap: {endpoint:?}"
     );
 }
 
@@ -437,8 +447,9 @@ fn a_routine_asks_the_gateway_unless_its_coworker_is_on_its_own_plan() {
     let refused = ModelEndpoint::Unavailable {
         why: said.to_string(),
         via: None,
+        unset: false,
     };
-    assert_eq!(endpoint, Some(refused));
+    assert_eq!(endpoint, Some(refused), "not the person's gap to fill");
 }
 
 /// THE SAME RULE BY THE MAC: a coworker on its own plan asks the person's Mac for its pin; one off
@@ -653,19 +664,25 @@ async fn the_door_refuses_a_request_its_setting_should_never_have_allowed() {
             "{forbidden}: {error:?}"
         );
     }
-    let error = said(
-        &door,
-        ModelRequest {
-            endpoint: Some(ModelEndpoint::Unavailable {
-                why: "no proxy address is set".to_string(),
-                via: Some(Via::Loopback),
-            }),
-            ..to_the_proxy(&elsewhere, None, "gpt-5.5")
-        },
-    )
-    .await
-    .expect_err("a gap is a refusal");
-    assert_eq!(error.sentence(), "no proxy address is set");
+    // The person's own gap carries `plan_unavailable` onto the run's RUN_ERROR; a fault on this
+    // side carries no code.
+    for (unset, code) in [(true, Some("plan_unavailable")), (false, None)] {
+        let error = said(
+            &door,
+            ModelRequest {
+                endpoint: Some(ModelEndpoint::Unavailable {
+                    why: "no proxy address is set".to_string(),
+                    via: Some(Via::Loopback),
+                    unset,
+                }),
+                ..to_the_proxy(&elsewhere, None, "gpt-5.5")
+            },
+        )
+        .await
+        .expect_err("a gap is a refusal");
+        assert_eq!(error.sentence(), "no proxy address is set");
+        assert_eq!(error.code(), code, "{error:?}");
+    }
     assert!(reached.lock().unwrap().is_empty(), "nothing was dialled");
 }
 

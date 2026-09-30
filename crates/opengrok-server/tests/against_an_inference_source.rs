@@ -959,7 +959,9 @@ async fn a_turns_own_source_beats_the_accounts() {
 }
 
 /// NEVER A SILENT FALL BACK TO THE GATEWAY: a turn that asks for the proxy with no address, or no
-/// model, ends in a sentence that says which, and nothing is asked anywhere.
+/// model, ends in a sentence that says which, and nothing is asked anywhere. Either gap is the
+/// person's own to fill, so its `RUN_ERROR` says `plan_unavailable` beside the sentence: a client
+/// can offer to send the reply on the gateway instead.
 #[tokio::test]
 async fn a_turn_that_names_the_proxy_with_nothing_set_ends_in_words() {
     let database_url = database_or_skip!();
@@ -975,10 +977,7 @@ async fn a_turn_that_names_the_proxy_with_nothing_set_ends_in_words() {
     assert_eq!(end["type"], "RUN_ERROR", "{frames:?}");
     let said = end["message"].as_str().unwrap_or_default();
     assert!(said.contains("no proxy address is set"), "{said}");
-    assert!(
-        end.get("code").is_none(),
-        "a proxy's gap has no relay code: {end}"
-    );
+    assert_eq!(end["code"], "plan_unavailable", "{end}");
     assert_eq!(
         sources(&frames),
         [json!({"kind": "local_proxy", "via": "loopback", "model": ""})]
@@ -991,14 +990,13 @@ async fn a_turn_that_names_the_proxy_with_nothing_set_ends_in_words() {
         "a proxy with no model is accepted"
     );
     let (_, frames) = h.turn(&ada, &unique("thr"), hi(), props).await;
-    let said = ending(&frames)["message"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let end = ending(&frames);
+    let said = end["message"].as_str().unwrap_or_default();
     assert!(
         said.starts_with("Choose a model for your own subscription first"),
         "{said}"
     );
+    assert_eq!(end["code"], "plan_unavailable", "{end}");
     assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
 }
 
@@ -1233,6 +1231,10 @@ async fn a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_
     assert!(
         said.starts_with("Your reply source could not be read"),
         "{said}"
+    );
+    assert!(
+        end.get("code").is_none(),
+        "this side's fault, not a gap in the person's setting: {end}"
     );
     // Refused as a proxy turn with a gap is: no model asked, no gateway key minted.
     assert_eq!(
@@ -1509,7 +1511,9 @@ async fn a_coworker_off_its_own_plan_asks_the_proxy_for_the_persons_model_not_it
 
 /// THE PLAN IS ALWAYS THE DRIVING PERSON'S. A coworker its owner shared and put on its own plan,
 /// driven by a teammate with no proxy of their own, is refused in words: never the gateway, and
-/// never the owner's proxy, though the owner has one. Its door stays the owner's to move.
+/// never the owner's proxy, though the owner has one. Its door stays the owner's to move. The
+/// refusal says `plan_unavailable` beside its words, live and on replay, so the teammate's app can
+/// offer to send the reply on the gateway, which that turn's own pick may do.
 #[tokio::test]
 async fn a_teammate_with_no_proxy_is_refused_in_words_on_a_shared_coworkers_own_plan() {
     let database_url = database_or_skip!();
@@ -1539,6 +1543,11 @@ async fn a_teammate_with_no_proxy_is_refused_in_words_on_a_shared_coworkers_own_
     assert_eq!(end["type"], "RUN_ERROR", "{frames:?}");
     let said = end["message"].as_str().unwrap_or_default();
     assert!(said.contains("no proxy address is set"), "{said}");
+    assert!(
+        said.ends_with("or switch this turn to the gateway."),
+        "{said}"
+    );
+    assert_eq!(end["code"], "plan_unavailable", "{end}");
     let refused = json!({"kind": "local_proxy", "via": "loopback", "model": PLAN_PIN});
     assert_eq!(sources(&frames), [refused]);
     let asked = (h.gateway.asked().len(), h.proxy.asked().len());
@@ -1556,12 +1565,22 @@ async fn a_teammate_with_no_proxy_is_refused_in_words_on_a_shared_coworkers_own_
         .cloned()
         .unwrap_or_default();
     assert_eq!(ended["type"], "RUN_ERROR", "{replay}");
+    assert_eq!(ended["code"], "plan_unavailable", "journaled: {replay}");
+
+    // What the app offers for it, "Send this reply on Server": the same turn, picking the gateway.
+    let props = json!({ "coworkerId": coworker, "inferenceSource": "gateway" });
+    let (_, frames) = h
+        .turn(&teammate, &thread, json!([user("m1", "hi")]), props)
+        .await;
+    assert_eq!(text_of(&frames), "from the gateway", "{frames:?}");
+    assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (1, 0));
 }
 
 /// A ROUTINE RUNS ON THE SERVER'S KEYS, so one for a coworker on its own plan is refused in words
 /// before any model is asked: nothing goes to the gateway in its plan's place, nor to the person's
-/// proxy, and its row says why. A coworker off its own plan runs its routine on the gateway, on
-/// its pin, as before, though its person's own setting is their proxy (#294).
+/// proxy, and its row says why. No `plan_unavailable`: there is no reply to send on the gateway
+/// instead. A coworker off its own plan runs its routine on the gateway, on its pin, as before,
+/// though its person's own setting is their proxy (#294).
 #[tokio::test]
 async fn a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing() {
     let database_url = database_or_skip!();

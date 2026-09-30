@@ -181,7 +181,7 @@ fn failure_of(error: &ModelError) -> JudgeFailure {
         ModelError::Unreachable(_) => JudgeFailure::Unreachable,
         ModelError::Stream(_) => JudgeFailure::StreamBroke,
         // A person's own proxy or Mac that refused or is not there: the judge could not be asked.
-        ModelError::Proxy(_) => JudgeFailure::Unreachable,
+        ModelError::Proxy(_) | ModelError::PlanUnavailable(_) => JudgeFailure::Unreachable,
         ModelError::Relay { code, .. } if *code == "relay_timeout" => JudgeFailure::TimedOut,
         ModelError::Relay { .. } => JudgeFailure::Unreachable,
         // The door's own clock (`RunBudget`) ran out before the judge's did: the same silence.

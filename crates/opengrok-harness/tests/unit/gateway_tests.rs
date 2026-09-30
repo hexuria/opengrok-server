@@ -1,5 +1,15 @@
 use super::*;
 
+/// Turn one SSE line into deltas, then close any tool call that line named, as a single-frame
+/// test expects. The door reads a whole stream with `SseParser`, where argument fragments arrive
+/// on later lines.
+fn parse_sse_line(line: &str) -> Result<Vec<ModelDelta>, ModelError> {
+    let mut parser = SseParser::default();
+    let mut deltas = parser.push_line(line)?;
+    deltas.extend(parser.finish());
+    Ok(deltas)
+}
+
 /// A client that could not be built answers every call as an unreachable gateway. The old
 /// fallback, `reqwest::Client::new()`, panics on the failure it was there to survive.
 #[tokio::test]

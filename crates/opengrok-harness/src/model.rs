@@ -107,7 +107,8 @@ impl std::fmt::Debug for GatewayKey {
 /// their own subscription and it cannot be used as set, so the door refuses with this sentence
 /// rather than send the turn anywhere else — never quietly to the gateway, which would bill a key
 /// they chose not to use, nor the other way to their subscription. `via` is the way it would have
-/// gone, when that is known, for the turn's frame to say.
+/// gone, when that is known, for the turn's frame to say. `unset` when what is missing is the
+/// person's own to set, an address or a model: the door's refusal is `PlanUnavailable` then.
 ///
 /// `auth` is the header the proxy reads its key from, and the key: the person's own, sealed in the
 /// vault, never the gateway's. Redacted `Debug`, no `Serialize`, for the reason `GatewayKey` has.
@@ -121,6 +122,7 @@ pub enum ModelEndpoint {
     Unavailable {
         why: String,
         via: Option<opengrok_core::inference::Via>,
+        unset: bool,
     },
 }
 
@@ -329,6 +331,12 @@ pub enum ModelError {
         code: &'static str,
         sentence: String,
     },
+    /// The person's own setting names no proxy address, or no model for the way the turn goes,
+    /// so nothing was sent. Already a sentence; `plan_unavailable` rides the run's `RUN_ERROR`
+    /// beside it as a relay's codes do, so a client can offer to send the turn on the gateway.
+    /// Any other refusal before sending, a fault on this side or a routine's, is `Proxy`, uncoded.
+    #[error("{0}")]
+    PlanUnavailable(String),
 }
 
 impl ModelError {
@@ -336,6 +344,7 @@ impl ModelError {
     pub fn code(&self) -> Option<&'static str> {
         match self {
             Self::Relay { code, .. } => Some(code),
+            Self::PlanUnavailable(_) => Some("plan_unavailable"),
             _ => None,
         }
     }
@@ -366,6 +375,7 @@ impl ModelError {
             | Self::SpendCap(sentence)
             | Self::Held(sentence)
             | Self::Proxy(sentence)
+            | Self::PlanUnavailable(sentence)
             | Self::Relay { sentence, .. } => sentence.clone(),
         }
     }
