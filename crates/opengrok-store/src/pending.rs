@@ -31,12 +31,12 @@ pub struct PendingUserMessageRow {
     pub updated_at_ms: i64,
     pub drained_at_ms: Option<i64>,
     pub drained_run_id: Option<String>,
+    /// The source the send asked for (`gateway` or `local_proxy`); `None` is the account's.
+    pub inference_source: Option<String>,
 }
 
-const PENDING_SELECT: &str = "select id, thread_id, account_id, content, reply_to, recipe_id,
-        recipe_values, skill_id, client_message_id, status, created_at_ms, updated_at_ms,
-        drained_at_ms, drained_run_id
-   from pending_user_message";
+/// Every column: `pending_row` reads each by name, so a column added later cannot shift another.
+const PENDING_SELECT: &str = "select * from pending_user_message";
 
 fn pending_row(row: &sqlx::postgres::PgRow) -> StoreResult<PendingUserMessageRow> {
     Ok(PendingUserMessageRow {
@@ -54,6 +54,7 @@ fn pending_row(row: &sqlx::postgres::PgRow) -> StoreResult<PendingUserMessageRow
         updated_at_ms: row.try_get("updated_at_ms")?,
         drained_at_ms: row.try_get("drained_at_ms")?,
         drained_run_id: row.try_get("drained_run_id")?,
+        inference_source: row.try_get("inference_source")?,
     })
 }
 
@@ -70,6 +71,7 @@ pub struct NewPendingUserMessage<'a> {
     pub recipe_values: Option<&'a Value>,
     pub skill_id: Option<&'a str>,
     pub client_message_id: Option<&'a str>,
+    pub inference_source: Option<&'a str>,
 }
 
 /// Fields an edit may change. `None` keeps the stored value; `Some(None)` clears an optional.
@@ -80,6 +82,7 @@ pub struct PendingUserMessagePatch<'a> {
     pub recipe_id: Option<Option<&'a str>>,
     pub recipe_values: Option<Option<&'a Value>>,
     pub skill_id: Option<Option<&'a str>>,
+    pub inference_source: Option<Option<&'a str>>,
 }
 
 /// Create against a client message id: return the live row, or refuse to resurrect a drained one.
@@ -170,14 +173,11 @@ impl PgStore {
         let inserted = sqlx::query(
             "insert into pending_user_message (
                 id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
-                skill_id, client_message_id, status, created_at_ms, updated_at_ms
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $10)
+                skill_id, client_message_id, status, created_at_ms, updated_at_ms, inference_source
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $10, $11)
              on conflict (account_id, thread_id, client_message_id)
                 where client_message_id is not null
-             do nothing
-             returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
-                       skill_id, client_message_id, status, created_at_ms, updated_at_ms,
-                       drained_at_ms, drained_run_id",
+             do nothing returning *",
         )
         .bind(new.id)
         .bind(new.thread_id)
@@ -189,6 +189,7 @@ impl PgStore {
         .bind(new.skill_id)
         .bind(new.client_message_id)
         .bind(at_ms)
+        .bind(new.inference_source)
         .fetch_optional(self.pool())
         .await?;
         if let Some(row) = inserted.as_ref() {
@@ -240,11 +241,10 @@ impl PgStore {
                     recipe_id = case when $7 then $8 else recipe_id end,
                     recipe_values = case when $9 then $10 else recipe_values end,
                     skill_id = case when $11 then $12 else skill_id end,
-                    updated_at_ms = $13
+                    updated_at_ms = $13,
+                    inference_source = case when $14 then $15 else inference_source end
               where id = $1 and account_id = $2 and thread_id = $3 and status = 'pending'
-              returning id, thread_id, account_id, content, reply_to, recipe_id, recipe_values,
-                        skill_id, client_message_id, status, created_at_ms, updated_at_ms,
-                        drained_at_ms, drained_run_id",
+              returning *",
         )
         .bind(id)
         .bind(account.as_str())
@@ -259,6 +259,8 @@ impl PgStore {
         .bind(patch.skill_id.is_some())
         .bind(patch.skill_id.flatten())
         .bind(at_ms)
+        .bind(patch.inference_source.is_some())
+        .bind(patch.inference_source.flatten())
         .fetch_optional(self.pool())
         .await?;
         updated.as_ref().map(pending_row).transpose()
@@ -356,10 +358,7 @@ impl PgStore {
                     "update pending_user_message
                         set status = 'drained', updated_at_ms = $2, drained_at_ms = $2,
                             drained_run_id = $3
-                      where id = $1
-                      returning id, thread_id, account_id, content, reply_to, recipe_id,
-                                recipe_values, skill_id, client_message_id, status,
-                                created_at_ms, updated_at_ms, drained_at_ms, drained_run_id",
+                      where id = $1 returning *",
                 )
                 .bind(&row.id)
                 .bind(at_ms)

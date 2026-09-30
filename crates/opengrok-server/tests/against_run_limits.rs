@@ -668,6 +668,7 @@ async fn a_run_carried_on_after_a_restart_keeps_the_limits_it_started_with() {
             coworker_id: Some(CoworkerId::from_stored(agent)),
             model: Some("oag/cheap".to_string()),
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),

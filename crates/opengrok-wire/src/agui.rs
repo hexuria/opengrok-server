@@ -284,8 +284,9 @@ pub const SENT_TYPES: &[EventType] = &[
 /// as `SENT_TYPES`. Producers: `run-awaiting-approval`, `box-waking` and `run-stopped` in
 /// opengrok-harness `projection.rs` (and `run-stopped` again on the server's stop paths);
 /// `run-timing` in opengrok-harness `timing.rs`; `pending-user-message` in opengrok-server
-/// `agui/pending.rs`; `user-form` in opengrok-server `agui/user_form.rs`; and
-/// `credential.offer_save` in opengrok-tools `credential.rs`.
+/// `agui/pending.rs`; `user-form` in opengrok-server `agui/user_form.rs`;
+/// `credential.offer_save` in opengrok-tools `credential.rs`; and `opengrok.inferenceSource` in
+/// opengrok-harness `lib.rs`, right after `RUN_STARTED`: `{kind, model}`, where the turn asks.
 pub const CUSTOM_NAMES: &[&str] = &[
     "run-awaiting-approval",
     "run-stopped",
@@ -294,6 +295,7 @@ pub const CUSTOM_NAMES: &[&str] = &[
     "pending-user-message",
     "user-form",
     "credential.offer_save",
+    "opengrok.inferenceSource",
 ];
 
 #[cfg(test)]

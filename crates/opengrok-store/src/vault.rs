@@ -112,11 +112,6 @@ impl HeldKey {
 }
 
 impl Vault {
-    /// Build from a base64 KEK of exactly 32 bytes, with no retired keys.
-    pub fn from_base64_key(kek: &str) -> StoreResult<Self> {
-        Self::from_base64_keys(kek, &[])
-    }
-
     /// The current key (`OG_CREDENTIAL_KEK`) and the retired ones (`OG_CREDENTIAL_KEK_OLD`).
     /// A key listed twice, or the current key pasted into the retired list, is one key.
     pub fn from_base64_keys(current: &str, retired: &[&str]) -> StoreResult<Self> {

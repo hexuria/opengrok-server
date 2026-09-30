@@ -307,7 +307,7 @@ The state graph was the object being minimised. The results:
   `RUN_ERROR` that is true, keeping its brackets and its `run-timing`.
 - `crates/opengrok-server/src/agui/routes.rs`
   - `append_events` retries a `Conflict` (`APPEND_ATTEMPTS`), and no other error.
-  - `continue_run` holds a recovery `Lease`; so does `resume_suspended_run` (`resume.rs`).
+  - `continue_run` holds a recovery `Lease`; so does `resume_where_it_lives` (`resume.rs`).
   - `start_claimed_turn` answers a run id that already has a run before any side effect, and
     claims the run (`StoreJournal::claim`) before it starts a loop. `answer_for_existing_run`
     gives the owner its run back through `attach` (the log's own frames, then one closer by

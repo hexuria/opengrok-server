@@ -18,6 +18,7 @@ pub mod gateway_admin;
 pub mod health;
 pub mod hooks;
 pub mod host_state;
+pub mod inference;
 #[cfg(feature = "jev")]
 pub mod jev;
 // Test tooling kept beside the tests: only this crate's own tests turn `record-wire` on.
@@ -74,6 +75,7 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
         .merge(agui::router(state.clone()))
         .merge(autonomy::routes::router(host.clone()))
         .merge(account_api::router(state.auth.clone()))
+        .merge(inference::router(state.clone()))
         .merge(recipes::router(state.clone()))
         .merge(workflows::router(state.clone()))
         .merge(skills::router(state.clone()))

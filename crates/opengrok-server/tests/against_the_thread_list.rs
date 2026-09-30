@@ -303,6 +303,7 @@ async fn seed_run(
             coworker_id: coworker.map(|id| CoworkerId::from_stored(id.to_string())),
             model: None,
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),

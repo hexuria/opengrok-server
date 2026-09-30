@@ -3218,6 +3218,7 @@ async fn submit_resumes_the_run_parked_on_its_own_call_not_the_oldest() {
             coworker_id: Some(opengrok_core::id::CoworkerId::from_stored(agent.clone())),
             model: None,
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),

@@ -45,6 +45,8 @@ const REST_PREFIXES: &[&str] = &[
     "/connections",
     // What can be connected, for an app to start a sign-in from (#269).
     "/connectors",
+    // The model picker, whose entries say which source serves them (the inference source).
+    "/models",
 ];
 
 /// Routes under those prefixes that are not JSON NativeChat reads: the screen proxy serves noVNC's
@@ -52,7 +54,13 @@ const REST_PREFIXES: &[&str] = &[
 /// `/callback` is a page for the browser, not the app. A connector's `/authorize` is kept: its
 /// `format=json` link and its refusals are JSON an app reads, and its redirect has no body or
 /// type, which the recorder (`tests/support/wire_record.rs`) never writes.
-const REST_LEFT_OUT: &[&str] = &["/computer/vnc/", "/bytes", "/connections/callback"];
+const REST_LEFT_OUT: &[&str] = &[
+    "/computer/vnc/",
+    "/bytes",
+    "/connections/callback",
+    // A console's Test button, not the app's (`client-nativechat.md`).
+    "/models/probe",
+];
 
 /// Recordings kept whatever their shape, by test and route: a sequence NativeChat checks that a
 /// shape alone cannot tell apart from one already kept. The replay of a message sent with files
@@ -87,6 +95,46 @@ const ALSO_KEEP: &[(&str, &str)] = &[
     (
         "an_unknown_effort_is_refused_and_nothing_in_the_patch_is_applied",
         "/coworkers/{coworker_id}",
+    ),
+    // The inference source: its read, its save, its refusals and its signed-out answer share the
+    // shapes of other replies and other 400s, and NativeChat asked for each by name; so did the
+    // model list with both sources and with a proxy that is down, a thread's replay whose turns
+    // each say where they asked, and a queued send that names its own source.
+    (
+        "a_person_is_on_the_gateway_until_they_choose_their_own_subscription",
+        "/account/inference-source",
+    ),
+    (
+        "a_person_saves_their_own_proxy_and_reads_it_back_healthy",
+        "/account/inference-source",
+    ),
+    (
+        "an_address_off_this_machine_is_refused_whatever_the_kind",
+        "/account/inference-source",
+    ),
+    (
+        "a_model_whose_terms_forbid_it_is_refused_by_name",
+        "/account/inference-source",
+    ),
+    (
+        "a_signed_out_caller_is_refused_the_inference_source",
+        "/account/inference-source",
+    ),
+    (
+        "the_model_list_carries_both_sources_when_a_proxy_is_stored",
+        "/models",
+    ),
+    (
+        "a_stored_proxy_that_is_unreachable_leaves_the_gateway_list_whole",
+        "/models",
+    ),
+    (
+        "a_thread_moves_from_the_gateway_to_the_persons_own_proxy_and_keeps_its_history",
+        "/ag-ui/threads/{thread_id}",
+    ),
+    (
+        "a_queued_send_keeps_the_source_it_was_queued_with",
+        "/ag-ui/threads/{thread_id}/pending",
     ),
 ];
 

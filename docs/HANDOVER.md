@@ -46,7 +46,7 @@ by drift.
 | Rust, Axum 0.8, sqlx 0.9, edition 2024, crate-per-concern mirroring open-ai-gateway | `PLAN.md` §3 |
 | Our own loop and our own door — the suspension is the product; the `rig-core` door was retired 17 Sep 2026 | `PLAN.md` §4.2, `GOAL.md` stack |
 | The client contract is transcribed, never invented; no vendored generated stubs. For NativeChat that means a route's place in the contract is proven by the NativeChat file that calls it — the route map says which rows are still unread | `CLAUDE.md` #1, #3; `research/client-nativechat.md` |
-| Every model call exits through open-ai-gateway; a pin is a route, not a key. The shipped default route is `xai/grok-4.6`, chosen because it is on the record making tool calls | `CLAUDE.md` #4; `setup/environment.md` |
+| Every model call exits through open-ai-gateway, except a person's own-subscription turns, which go to their loopback proxy when they choose it (`/account/inference-source`); a pin is a route, not a key. The shipped default route is `xai/grok-4.6`, chosen because it is on the record making tool calls | `CLAUDE.md` #4; `setup/environment.md` |
 | One consent model: the server decides, cards never expire, judge failure = ask | `AUTO-REVIEW.md` §0 |
 | Repo went public 1 Sep 2026 with the rights review still outstanding — the transcription rule is harder, not softer | this page |
 | Redis only after a measured hot query | `ROADMAP.md` Later |

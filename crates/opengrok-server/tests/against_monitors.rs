@@ -272,6 +272,7 @@ async fn seed_failed_run(store: &PgStore, account: Option<&AccountId>, thread: &
             coworker_id: Some(CoworkerId::from_stored("cw_somebody")),
             model: Some("oag/cheap".to_string()),
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),

@@ -362,6 +362,7 @@ async fn seed_running_run(store: &PgStore, account: &AccountId, thread: &str) ->
             coworker_id: Some(CoworkerId::from_stored("cw_in_flight")),
             model: Some("oag/cheap".to_string()),
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),

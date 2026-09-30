@@ -96,6 +96,7 @@ fn a_started_run_keeps_the_effort_it_started_with() {
             coworker_id: None,
             model: Some("openai/gpt-5.5".to_string()),
             effort: Effort::High,
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),

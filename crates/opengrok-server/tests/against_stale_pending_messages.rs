@@ -93,6 +93,7 @@ async fn seed_run(store: &PgStore, account: &AccountId, thread: &str, at_ms: i64
             coworker_id: None,
             model: None,
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),

@@ -121,3 +121,44 @@ fn the_pool_refusal_says_who_spent_it() {
         "no blame when there is nobody else to name: {s}"
     );
 }
+
+/// A PERSON'S OWN SUBSCRIPTION IS NOT THE GATEWAY'S TO METER. A proxy turn of a scoped, paid-for
+/// coworker goes straight through the guard: no limit is read, no meter asked, no key repaired, so
+/// nothing about it can be billed, capped or booked on the gateway. The same turn for the gateway
+/// is counted first, and here the store answers nothing, so counting it holds it.
+#[tokio::test]
+async fn a_proxy_turn_is_never_metered_or_billed_on_the_gateway() {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(200))
+        .connect_lazy("postgres://nobody@127.0.0.1:1/nowhere")
+        .unwrap();
+    let inner: Arc<dyn ModelDoor> = Arc::new(opengrok_harness::MockDoor::echoing());
+    let guard = GuardedDoor::new(inner, PgStore::new(pool), None);
+    let turn = |endpoint| ModelRequest {
+        model: "gpt-5.5".to_string(),
+        spend_scope: Some("cw_paid".to_string()),
+        spend_actor: Some("acct_payer".to_string()),
+        gateway_key: None,
+        endpoint,
+        ..ModelRequest::default()
+    };
+    let proxy = opengrok_harness::ModelEndpoint::Proxy {
+        base_url: "http://127.0.0.1:18080".to_string(),
+        auth: None,
+    };
+    assert!(
+        guard.stream(turn(Some(proxy))).await.is_ok(),
+        "the proxy turn reached the door untouched"
+    );
+    let counted = guard
+        .stream(turn(None))
+        .await
+        .err()
+        .map(|error| error.to_string());
+    assert!(
+        counted
+            .as_deref()
+            .is_some_and(|why| why.contains("could not be read")),
+        "a gateway turn is counted first, and held here: {counted:?}"
+    );
+}

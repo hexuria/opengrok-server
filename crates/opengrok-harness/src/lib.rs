@@ -15,6 +15,7 @@ mod context;
 pub mod gateway;
 mod intent;
 pub mod journal;
+pub mod local_proxy;
 pub mod mock;
 pub mod model;
 pub mod projection;
@@ -27,8 +28,8 @@ pub use gateway::GatewayDoor;
 pub use journal::{JournalError, MemoryJournal, RunJournal};
 pub use mock::MockDoor;
 pub use model::{
-    ChatMessage, DeltaStream, GatewayKey, ImagePart, ModelDelta, ModelDoor, ModelError,
-    ModelRequest, ToolCallRef,
+    ChatMessage, DeltaStream, GatewayKey, ImagePart, ModelDelta, ModelDoor, ModelEndpoint,
+    ModelError, ModelRequest, ToolCallRef,
 };
 use opengrok_core::run::{RoundKind, RoundSpent};
 pub use projection::Projection;
@@ -39,6 +40,11 @@ pub use tools::{LocalTool, ToolRunner, collect_tool_calls};
 use std::collections::HashSet;
 
 use opengrok_wire::agui::Event;
+
+/// The CUSTOM frame right after `RUN_STARTED` that says where the turn asks: `{kind, model}`,
+/// `kind` the wire word of `opengrok_core::inference::SourceKind`. Journaled with the opening,
+/// so a replay says which turns of a thread a person's own subscription answered.
+pub const INFERENCE_SOURCE_NAME: &str = "opengrok.inferenceSource";
 
 /// Run one turn and collect every event a client should see.
 ///
@@ -1309,6 +1315,18 @@ async fn converse_raw(
     }
 
     let mut opening = projection.start();
+    // Where this turn asks, IN THE OPENING'S OWN WRITE: one write as before, so the opening still
+    // lands or fails whole (`HarnessLoop` Open). A resumed segment opens nothing and says nothing
+    // again; it asks where its start asked.
+    if !opening.is_empty() {
+        use opengrok_core::inference::SourceKind;
+        let kind = match request.endpoint {
+            Some(_) => SourceKind::LocalProxy,
+            None => SourceKind::Gateway,
+        };
+        let said = serde_json::json!({ "kind": kind.as_str(), "model": request.model });
+        opening.push(projection.custom(INFERENCE_SOURCE_NAME, said));
+    }
     let opened_ok = journal.record(run_id, &opening).await;
     emit_live(sink, &opening).await;
     all.append(&mut opening);
@@ -1616,7 +1634,8 @@ async fn converse_raw(
                         (Vec::new(), Vec::new(), 0)
                     } else {
                         let ((ran, times), ms) =
-                            review::time_auto_review(runner.run_all_timed(&runnable)).await;
+                            review::time_auto_review(runner.run_all_timed(&runnable), &request)
+                                .await;
                         (ran, times, ms)
                     };
                     let mut ran = ran.into_iter();
@@ -1648,7 +1667,7 @@ async fn converse_raw(
                         .collect();
                     ((results, times), review_ms)
                 } else {
-                    review::time_auto_review(runner.run_all_timed(&calls)).await
+                    review::time_auto_review(runner.run_all_timed(&calls), &request).await
                 };
                 timing.record_tools(
                     per_tool

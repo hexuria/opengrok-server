@@ -24,6 +24,7 @@ fn command() -> impl Strategy<Value = RunCommand> {
             coworker_id: None,
             model: None,
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),

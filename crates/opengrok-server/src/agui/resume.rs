@@ -9,9 +9,14 @@
 
 use serde_json::{Value, json};
 
-use opengrok_core::id::{CoworkerId, RunId};
-use opengrok_harness::ModelRequest;
+use opengrok_core::coworker::Coworker;
+use opengrok_core::id::{AccountId, CoworkerId, RunId};
+use opengrok_core::limits::RunLimits;
+use opengrok_core::run::{PendingApproval, Run};
+use opengrok_harness::{ModelRequest, local_proxy};
 
+use crate::agui::AgUiState;
+use crate::agui::routes::{TURN_WAKE_PATIENCE, tools_for_coworker};
 use crate::host_state::HostState;
 
 fn now_ms() -> i64 {
@@ -557,8 +562,10 @@ pub(crate) fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bo
         .is_some_and(|owner| owner.as_str() != agent.as_str())
 }
 
-/// A resumed run continues where it lives — which, since the rooms went with seam A, is always
-/// the coworker's own transcript.
+/// Resume an answered suspended run where it lives — which, since the rooms went with seam A, is
+/// always the coworker's own transcript: re-run the conversation with the approved tool call
+/// (which makes `user_machine_shell` dispatch instead of re-asking), then land the model's summary
+/// in the transcript as an ordinary bot message.
 ///
 /// A run that belongs to a ROOM is not resumed at all: it is left parked, with a line in the log
 /// saying so. No surviving door can create a room, so the only runs that can take this branch are
@@ -568,11 +575,11 @@ pub(crate) fn in_a_room(run: &opengrok_core::run::Run, agent: &CoworkerId) -> bo
 pub(crate) async fn resume_where_it_lives(
     in_a_room: bool,
     state: HostState,
-    account_id: opengrok_core::id::AccountId,
+    account_id: AccountId,
     run_id: RunId,
     generation: u32,
     coworker_id: CoworkerId,
-    pending: opengrok_core::run::PendingApproval,
+    pending: PendingApproval,
     resumed_seq: u32,
     outcome: opengrok_harness::ResumeOutcome,
 ) {
@@ -584,187 +591,32 @@ pub(crate) async fn resume_where_it_lives(
         );
         return;
     }
-    resume_suspended_run(
-        state,
-        account_id,
-        run_id,
-        generation,
-        coworker_id,
-        pending,
-        resumed_seq,
-        outcome,
-    )
-    .await;
-}
-
-/// Resume an approved suspended run: re-run the conversation with the approved tool call (which
-/// makes `user_machine_shell` dispatch instead of re-asking), then land the model's summary in
-/// the transcript as an ordinary bot message.
-#[allow(clippy::too_many_arguments)]
-async fn resume_suspended_run(
-    state: HostState,
-    account_id: opengrok_core::id::AccountId,
-    run_id: RunId,
-    generation: u32,
-    coworker_id: CoworkerId,
-    pending: opengrok_core::run::PendingApproval,
-    resumed_seq: u32,
-    outcome: opengrok_harness::ResumeOutcome,
-) {
-    // HOLD THE RUN WHILE IT IS CARRIED ON, as `continue_run` does and for the same reason. The answer
-    // flips the run back to `running`; the parked turn's lease died with it, so without one
-    // here an approved call that ran past LEASE_MS with nothing journaled — a recipe on the
-    // box — was claimed by the sweep and failed as "interrupted by a restart" while it was
-    // still running (`formal/tla/RunLifecycle.tla` NoFalseFailure: TLC's trace is park,
-    // answer, sweep). Held before anything is loaded, so no early return runs unleased.
+    // HOLD THE RUN WHILE IT IS CARRIED ON, before anything is loaded, as `continue_run` does and
+    // for the reason it gives (`formal/tla/RunLifecycle.tla` NoFalseFailure).
     let _lease =
         crate::recovery::Lease::new(crate::recovery::hold(state.agui.clone(), run_id.clone()));
     // Anything that stops it from starting fails the run with the reason. Only a generation
     // it no longer holds is a bare return: then another loop owns the run.
     let cannot =
         |why: &str| format!("this run could not be carried on after its card was answered: {why}");
-    let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
-        crate::recovery::fail_continuation(
-            &state.agui,
-            &run_id,
-            &cannot("its log could not be read"),
-        )
-        .await;
-        return;
+    let at = (&run_id, generation);
+    let loaded = loaded(&state.agui, &account_id, at, Some(&coworker_id)).await;
+    let (run, _, coworker, limits) = match loaded {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => return,
+        Err(why) => {
+            crate::recovery::fail_continuation(&state.agui, &run_id, &cannot(why)).await;
+            return;
+        }
     };
-    // The generation the answer (or the sweep's resume) was given under — see `continue_run`.
-    if run.generation != generation {
-        tracing::warn!(run = %run_id, "an answered run was carried on by another loop first");
-        return;
-    }
-    let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
-        crate::recovery::fail_continuation(
-            &state.agui,
-            &run_id,
-            &cannot("its coworker could not be loaded"),
-        )
-        .await;
-        return;
-    };
-    // What the run captured, under its org's ceiling as it stands now (`continue_run`'s rule).
-    let limits =
-        crate::agui::routes::run_limits(&state.agui, &account_id, Some(&coworker_id), run.limits);
-    let Some(limits) = limits.await else {
-        let why = cannot("its organization's run limits could not be read");
+    let who = (&account_id, &coworker_id);
+    let at = (&run_id, &run, generation, limits);
+    let answer = (pending, resumed_seq, outcome);
+    let Some(events) = carry_out_answer(&state.agui, who, at, &coworker, answer).await else {
+        let why = cannot("its coworker's tools could not be loaded");
         crate::recovery::fail_continuation(&state.agui, &run_id, &why).await;
         return;
     };
-    // The runner carries the answered call id — as a GATE approval (the machine owner's or the
-    // policy's card) or a REVIEW approval, by the suspension's reason. A review yes skips the
-    // judge and releases nothing else; a gate yes is what makes user_machine_shell dispatch.
-    let (gate_yes, review_yes): (&[String], &[String]) = match pending.reason {
-        opengrok_core::run::SuspendReason::AutoReview => {
-            (&[], std::slice::from_ref(&pending.call_id))
-        }
-        _ => (std::slice::from_ref(&pending.call_id), &[]),
-    };
-    let Some(runner) = crate::agui::routes::tools_for_coworker(
-        &state.agui,
-        &account_id,
-        &coworker_id,
-        gate_yes,
-        review_yes,
-        crate::agui::routes::TURN_WAKE_PATIENCE,
-    )
-    .await
-    else {
-        crate::recovery::fail_continuation(
-            &state.agui,
-            &run_id,
-            &cannot("its coworker's tools could not be loaded"),
-        )
-        .await;
-        return;
-    };
-    // A YES on a leave-box action is the person's consent to leave through the tunnel for the
-    // rest of this run: one card per run, not one per click. A no is not (see `continue_run`),
-    // and neither is a yes to a screenshot, which never asked about the network.
-    let runner = runner
-        .with_egress_consented(
-            matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
-                && pending.reason == opengrok_core::run::SuspendReason::AutoReview
-                && opengrok_tools::needs_egress_consent(&pending.tool, &pending.arguments),
-        )
-        .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
-    // The skills the captured system message lists, and no others (#270).
-    let runner =
-        crate::skills::onto_captured(&state.agui, &account_id, runner, &run.offered_skills);
-    // The system message this turn OPENED with, not a fresh composition: a role or title edited
-    // while the person was answering the card must not change the coworker halfway through the
-    // turn. A run journalled before this was captured has none and composes one, as before.
-    let system = match run.system_for_resume() {
-        Some(captured) => captured,
-        None => crate::persona::system_message(
-            &coworker.name,
-            &crate::persona::of(&state.agui, &coworker_id, coworker.role.clone()).await,
-            None,
-        ),
-    };
-    let journal = crate::agui::routes::StoreJournal {
-        state: state.agui.clone(),
-        thread_id: run.thread_id.clone(),
-        account_id: Some(account_id.clone()),
-        coworker_id: Some(coworker_id.clone()),
-        model: run.model.clone(),
-        effort: run.effort,
-        system: Some(system.clone()),
-        skill_id: run.skill_id.clone(),
-        offered_skills: run.offered_skills.clone(),
-        prompt: None,
-        limits: run.limits,
-        generation,
-    };
-    let pin = run.pin_for_resume(&coworker.model);
-    let request = ModelRequest {
-        gateway_key: crate::spend::key_for(&state.agui, &coworker_id, &account_id).await,
-        spend_scope: Some(coworker_id.as_str().to_string()),
-        // The person who answered the card is the person this continuation is for.
-        spend_actor: Some(account_id.as_str().to_string()),
-        context_tokens: state.agui.context_for(&pin).await,
-        model: pin,
-        // As hard as the turn it continues thought, whatever the coworker says by now.
-        effort: run.effort,
-        // A resumed run carries the SAME system message as the turn it continues. It used to
-        // carry none at all, so a coworker lost both its identity and the whose-computer
-        // discipline at the moment a person had just intervened — the worst possible moment to
-        // start claiming work on the box happened on their machine.
-        system: Some(system),
-        messages: crate::agui::history::for_resume(
-            &state.agui,
-            &account_id,
-            &run_id,
-            &run,
-            &pending,
-        )
-        .await,
-        tools: Vec::new(),
-    };
-
-    let events = opengrok_harness::resume_conversation(
-        state.agui.door.as_ref(),
-        &runner,
-        &journal,
-        request,
-        opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
-        opengrok_harness::Resumption {
-            approved: opengrok_tools::ToolCall {
-                id: pending.call_id,
-                name: pending.tool,
-                arguments: pending.arguments,
-            },
-            message_seq: resumed_seq,
-            outcome,
-            // The recipes the run played before the card (#256); see `Spent::recipes_of`.
-            spent: opengrok_harness::Spent::recipes_of(&run),
-            budget: opengrok_harness::RunBudget::held_to(&limits),
-        },
-    )
-    .await;
 
     let mut text = String::new();
     for event in &events {
@@ -815,26 +667,15 @@ pub(crate) async fn resume_interrupted_run(
     // Held from the start, as every continuation holds one: the sweep's claim lapses in LEASE_MS.
     let _lease =
         crate::recovery::Lease::new(crate::recovery::hold(state.agui.clone(), run_id.clone()));
-    let Ok((run, _)) = state.agui.auth.store.load_run(&run_id).await else {
-        crate::recovery::fail_interrupted(&state.agui, &run_id, "its log could not be read").await;
-        return;
-    };
-    // Resumed into this generation by the sweep; one already moved past it is another loop's.
-    if run.generation != generation {
-        tracing::warn!(run = %run_id, "an interrupted run was carried on by another loop first");
-        return;
-    }
-    let Ok((coworker, _)) = state.agui.auth.store.load_coworker(&coworker_id).await else {
-        crate::recovery::fail_interrupted(&state.agui, &run_id, "its coworker could not be loaded")
-            .await;
-        return;
-    };
-    let limits =
-        crate::agui::routes::run_limits(&state.agui, &account_id, Some(&coworker_id), run.limits);
-    let Some(limits) = limits.await else {
-        let why = "its organization's run limits could not be read";
-        crate::recovery::fail_interrupted(&state.agui, &run_id, why).await;
-        return;
+    let at = (&run_id, generation);
+    let loaded = loaded(&state.agui, &account_id, at, Some(&coworker_id)).await;
+    let (run, _, coworker, limits) = match loaded {
+        Ok(Some(loaded)) => loaded,
+        Ok(None) => return,
+        Err(why) => {
+            crate::recovery::fail_interrupted(&state.agui, &run_id, why).await;
+            return;
+        }
     };
     // None is a coworker with no tools to offer (no computer, no plugin): it carries on talking,
     // exactly as a routine's run of it does.
@@ -854,41 +695,10 @@ pub(crate) async fn resume_interrupted_run(
     let runner =
         runner.or_else(|| (!kept.is_empty()).then(opengrok_harness::ToolRunner::local_only));
     let runner = runner.map(|r| crate::skills::onto_captured(&state.agui, &account_id, r, kept));
-    let system = match run.system_for_resume() {
-        Some(captured) => captured,
-        None => crate::persona::system_message(
-            &coworker.name,
-            &crate::persona::of(&state.agui, &coworker_id, coworker.role.clone()).await,
-            None,
-        ),
-    };
-    let journal = crate::agui::routes::StoreJournal {
-        state: state.agui.clone(),
-        thread_id: run.thread_id.clone(),
-        account_id: Some(account_id.clone()),
-        coworker_id: Some(coworker_id.clone()),
-        model: run.model.clone(),
-        effort: run.effort,
-        system: Some(system.clone()),
-        skill_id: run.skill_id.clone(),
-        offered_skills: run.offered_skills.clone(),
-        prompt: None,
-        limits: run.limits,
-        generation,
-    };
-    let pin = run.pin_for_resume(&coworker.model);
-    let request = ModelRequest {
-        gateway_key: crate::spend::key_for(&state.agui, &coworker_id, &account_id).await,
-        spend_scope: Some(coworker_id.as_str().to_string()),
-        spend_actor: Some(account_id.as_str().to_string()),
-        context_tokens: state.agui.context_for(&pin).await,
-        model: pin,
-        effort: run.effort,
-        system: Some(system),
-        messages: crate::agui::history::for_interrupted(&state.agui, &account_id, &run_id, &run)
-            .await,
-        tools: Vec::new(),
-    };
+    let asked =
+        crate::agui::history::for_interrupted(&state.agui, &account_id, &run_id, &run).await;
+    let who = (&account_id, &coworker_id);
+    let (journal, request) = carried_on(&state.agui, &run, who, &coworker, asked, generation).await;
     let events = opengrok_harness::continue_interrupted(
         state.agui.door.as_ref(),
         runner.as_ref(),
@@ -904,6 +714,163 @@ pub(crate) async fn resume_interrupted_run(
     // turn and `continue_run`: the run door's client draws the others from the stream itself,
     // and a minted one would sit pending in the transcript for good.
     emit_user_form_suspensions(&state, &coworker_id, &account_id, &events).await;
+}
+
+/// What a carry-on loads before it acts: the run as its log has it, whose coworker it is (the one
+/// named, else the run's own), that coworker, and what it may spend — its captured limits under
+/// its org's ceiling as it stands now. `Err` names what did not load.
+///
+/// `Ok(None)` IS A RUN IN A GENERATION THIS CARRY-ON WAS NOT GIVEN: the one the answer, or the
+/// sweep's resume, was given under, not the one found at load. A continuation that stalls past a
+/// lease would otherwise write under the generation the sweep resumed into, beside the sweep's own
+/// loop (`AnswerCommit` takes `loopGen` at the answer in `RunLifecycle.tla`). Another loop owns it.
+pub(crate) async fn loaded(
+    state: &AgUiState,
+    account_id: &AccountId,
+    (run_id, generation): (&RunId, u32),
+    coworker_id: Option<&CoworkerId>,
+) -> Result<Option<(Run, CoworkerId, Coworker, RunLimits)>, &'static str> {
+    let Ok((run, _)) = state.auth.store.load_run(run_id).await else {
+        return Err("its log could not be read");
+    };
+    if run.generation != generation {
+        tracing::warn!(run = %run_id, "a run was carried on by another loop first");
+        return Ok(None);
+    }
+    // The coworker whose tools these are. Without one there is nothing to carry on *as*.
+    let Some(coworker_id) = coworker_id.or(run.coworker_id.as_ref()).cloned() else {
+        return Err("it has no coworker");
+    };
+    let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await else {
+        return Err("its coworker could not be loaded");
+    };
+    let limits = crate::agui::routes::run_limits(state, account_id, Some(&coworker_id), run.limits);
+    let limits = limits.await;
+    let limits = limits.ok_or("its organization's run limits could not be read")?;
+    Ok(Some((run, coworker_id, coworker, limits)))
+}
+
+/// Carry out a person's answer to a card, and the turn after it — the answer route's
+/// (`continue_run`), a form's or the sweep's (`resume_where_it_lives`). `None` when the coworker's
+/// tools cannot be built, which each caller answers in its own way.
+///
+/// The answered call, and only it — carried on the SAME runner every other path builds (plugins,
+/// the user's machine, auto-review). The answer route once built a bare executor of its own and
+/// so resumed with no plugins and no review: a resumed call slipped every gate but the grant's.
+/// Which yes it was decides which gate it releases: a GATE approval (the machine owner's or the
+/// policy's card) is what makes `user_machine_shell` dispatch; a REVIEW approval skips the judge
+/// and releases nothing else. A refusal releases a gate it will not walk through, deliberately:
+/// `resume_conversation` never dispatches a refused call, and one place keeps that rule.
+pub(crate) async fn carry_out_answer(
+    state: &AgUiState,
+    who: (&AccountId, &CoworkerId),
+    (run_id, run, generation, limits): (&RunId, &Run, u32, RunLimits),
+    coworker: &Coworker,
+    (answered, resumed_seq, outcome): (PendingApproval, u32, opengrok_harness::ResumeOutcome),
+) -> Option<Vec<opengrok_wire::agui::Event>> {
+    use opengrok_core::run::SuspendReason::AutoReview;
+    let (account_id, coworker_id) = who;
+    let (gate, review): (&[String], &[String]) = match answered.reason {
+        AutoReview => (&[], std::slice::from_ref(&answered.call_id)),
+        _ => (std::slice::from_ref(&answered.call_id), &[]),
+    };
+    let patience = TURN_WAKE_PATIENCE;
+    let runner = tools_for_coworker(state, account_id, coworker_id, gate, review, patience).await?;
+    // A YES on a leave-box action is the person's consent to leave through the tunnel for the
+    // rest of this run: one card per run, not one per click. A no is not: this once consented on
+    // any answer, so a Deny on the tunnel card let the model's next screen action through with no
+    // card at all (21 Sep 2026). Nor is a yes to a screenshot, which never asked about the network.
+    let consented = matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
+        && answered.reason == AutoReview
+        && opengrok_tools::needs_egress_consent(&answered.tool, &answered.arguments);
+    // Every judge failure parks the run, so only its journal can count them in a row (#201).
+    let failures = opengrok_harness::judge_failure_streak(&run.emitted);
+    let runner = runner
+        .with_egress_consented(consented)
+        .with_judge_failures(failures);
+    // The skills the captured system message lists, and no others (#270).
+    let runner = crate::skills::onto_captured(state, account_id, runner, &run.offered_skills);
+    let asked = crate::agui::history::for_resume(state, account_id, run_id, run, &answered).await;
+    let (journal, request) = carried_on(state, run, who, coworker, asked, generation).await;
+    // The run keeps its id, so everything the resumption emits lands in the same log and a client
+    // replaying later sees one continuous run rather than two halves.
+    let context = opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms());
+    let resumption = opengrok_harness::Resumption {
+        approved: opengrok_tools::ToolCall {
+            id: answered.call_id,
+            name: answered.tool,
+            arguments: answered.arguments,
+        },
+        message_seq: resumed_seq,
+        outcome,
+        // The recipes the run played before the card (#256); see `Spent::recipes_of`.
+        spent: opengrok_harness::Spent::recipes_of(run),
+        budget: opengrok_harness::RunBudget::held_to(&limits),
+    };
+    let door = state.door.as_ref();
+    let resumed = opengrok_harness::resume_conversation(
+        door, &runner, &journal, request, context, resumption,
+    );
+    Some(resumed.await)
+}
+
+/// What a carry-on is asked and journaled with — an answer's (`continue_run`), a form's or the
+/// sweep's (`resume_where_it_lives`), an interrupted run's (`resume_interrupted_run`): what its
+/// start captured, never the coworker's or the account's value by now, journaled under the
+/// generation it carries on in. One spelling, so the three cannot drift apart on any of it.
+pub(crate) async fn carried_on(
+    state: &AgUiState,
+    run: &Run,
+    (account_id, coworker_id): (&AccountId, &CoworkerId),
+    coworker: &Coworker,
+    messages: Vec<opengrok_harness::ChatMessage>,
+    generation: u32,
+) -> (crate::agui::routes::StoreJournal, ModelRequest) {
+    // The system message this turn OPENED with, not a fresh composition: a role or title edited
+    // while the person answered the card must not change the coworker halfway through the turn.
+    // A run journalled before this was captured has none and composes one, as before.
+    let system = match run.system_for_resume() {
+        Some(captured) => captured,
+        None => crate::persona::system_message(
+            &coworker.name,
+            &crate::persona::of(state, coworker_id, coworker.role.clone()).await,
+            None,
+        ),
+    };
+    let journal = crate::agui::routes::StoreJournal {
+        state: state.clone(),
+        thread_id: run.thread_id.clone(),
+        account_id: Some(account_id.clone()),
+        coworker_id: Some(coworker_id.clone()),
+        model: run.model.clone(),
+        effort: run.effort,
+        inference_source: run.inference_source,
+        system: Some(system.clone()),
+        skill_id: run.skill_id.clone(),
+        offered_skills: run.offered_skills.clone(),
+        prompt: None,
+        limits: run.limits,
+        generation,
+    };
+    // Where and on what the turn started, whatever changed while it waited: its captured source,
+    // and on the gateway its captured pin (a log from before pins were stored falls back to the
+    // current one). A proxy turn never becomes a gateway one mid-run, nor the reverse. As hard as
+    // it started too, with no fallback: a log from before the effort was stored sent none.
+    let (source, captured) = (Some(run.inference_source), run.model.as_deref());
+    let route = local_proxy::route(state, Some(account_id), source, captured).await;
+    let pin = run.pin_for_resume(&coworker.model);
+    let request = crate::agui::routes::turn_request(
+        state,
+        // The person who answered the card is the person this continuation is for.
+        (Some(coworker_id), Some(account_id)),
+        (route, pin, run.effort),
+        // The SAME system message as the turn it continues. It used to carry none at all, so a
+        // coworker lost its identity and the whose-computer discipline at the moment a person had
+        // just intervened — the worst moment to claim work happened on their machine.
+        Some(system),
+        messages,
+    );
+    (journal, request.await)
 }
 
 #[cfg(test)]

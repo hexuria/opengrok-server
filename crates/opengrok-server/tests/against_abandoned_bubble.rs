@@ -106,6 +106,7 @@ async fn abandon_a_run(
             coworker_id: Some(coworker.clone()),
             model: Some("oag/cheap".to_string()),
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
