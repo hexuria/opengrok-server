@@ -351,6 +351,9 @@ async fn enrol_daemon(
     enrolled
         .await
         .map_err(|_| failed("could not enrol the machine"))?;
+    // A RE-ENROLMENT RETIRES THE OLD TOKEN'S RELAY STREAM TOO, as revoke does (review of #298):
+    // after the row, so a stream opening with the old token meanwhile fails its second check.
+    state.relay.disconnect(account, &machine_id);
     Ok(Json(serde_json::json!({ "machineId": machine_id, "token": token })).into_response())
 }
 

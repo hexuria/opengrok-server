@@ -90,6 +90,9 @@ struct State {
     asks: HashMap<String, Ask>,
     /// (request id, machine) of recent answers, oldest first.
     answered: VecDeque<(String, Machine)>,
+    /// (account, thread) of each thread whose held sends are being sent, and whether another
+    /// trigger came for it meanwhile (`draining`).
+    draining: HashMap<(String, String), bool>,
 }
 
 struct Mac {
@@ -219,11 +222,38 @@ impl RelayBroker {
         latest(&state, account).map(|((_, machine), _)| machine.clone())
     }
 
-    /// A machine's daemon token was revoked: its stream ends now, so it is sent no more turns.
-    /// Its answers were refused already (the token is checked on every POST).
+    /// A machine's daemon token was revoked, or rotated by a re-enrolment: its stream ends now,
+    /// so it is sent no more turns. Its answers were refused already (the token is checked on
+    /// every POST).
     pub fn disconnect(&self, account: &str, machine: &str) {
         let key = (account.to_string(), machine.to_string());
         self.lock().macs.remove(&key);
+    }
+
+    /// Claim the sending of `account`'s held sends on `thread` (`opengrok-server`'s
+    /// `pending::drain_held`). ONE AT A TIME PER THREAD, AND NO TRIGGER LOST TO IT: false when
+    /// one is running, which is told to go round again (`drained`), as it may be past the read
+    /// that would have seen what this trigger saw (`formal/tla/HeldSend.tla`, `ReArms`).
+    pub fn draining(&self, account: &str, thread: &str) -> bool {
+        let key = (account.to_string(), thread.to_string());
+        let mut state = self.lock();
+        let running = state
+            .draining
+            .get_mut(&key)
+            .map(|again| std::mem::replace(again, true));
+        running.is_none() && state.draining.insert(key, false).is_none()
+    }
+
+    /// The sending `draining` claimed is done: true when another trigger came meanwhile, and it
+    /// must go round again; otherwise the claim is let go.
+    pub fn drained(&self, account: &str, thread: &str) -> bool {
+        let key = (account.to_string(), thread.to_string());
+        let mut state = self.lock();
+        let again = state.draining.remove(&key) == Some(true);
+        if again {
+            state.draining.insert(key, false);
+        }
+        again
     }
 
     /// Send `frame` to the account's Mac under a fresh, unguessable id, and register where its

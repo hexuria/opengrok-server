@@ -281,3 +281,23 @@ async fn a_macs_model_list_is_kept_to_the_allowlist() {
         .await;
     assert_eq!(listing.await.unwrap(), ["gpt-6-sol", "xai/grok-4.7"]);
 }
+
+/// ONE SENDING OF A THREAD'S HELD SENDS AT A TIME, AND NO TRIGGER LOST TO IT: a second claim
+/// while one runs is refused and has the running one go round again, once; threads and accounts
+/// are claimed apart.
+#[test]
+fn a_threads_held_sends_are_sent_by_one_claim_that_goes_round_again_for_a_trigger() {
+    let broker = RelayBroker::default();
+    assert!(broker.draining("acct-a", "thr-1"));
+    assert!(broker.draining("acct-a", "thr-2"));
+    assert!(broker.draining("acct-b", "thr-1"));
+    assert!(!broker.draining("acct-a", "thr-1"), "one is running");
+    assert!(!broker.draining("acct-a", "thr-1"), "and still is");
+    assert!(
+        broker.drained("acct-a", "thr-1"),
+        "a trigger came: round again"
+    );
+    assert!(!broker.drained("acct-a", "thr-1"), "none since: let go");
+    assert!(broker.draining("acct-a", "thr-1"), "claimable again");
+    assert!(!broker.drained("acct-a", "thr-2"));
+}

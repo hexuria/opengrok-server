@@ -56,6 +56,10 @@ async fn machine(host: &HostState, headers: &HeaderMap) -> Result<(String, Strin
 async fn relay_requests(State(host): State<HostState>, headers: HeaderMap) -> Answer {
     let (account, machine) = machine(&host, &headers).await?;
     let frames = host.agui.auth.relay.connect(&account, &machine);
+    // A TOKEN RETIRED AS ITS STREAM OPENED KEEPS NO STREAM: revoke and re-enrolment close the
+    // machine's stream after its row changes, and this connect may have come after that close.
+    // Dropped here, the stream is closed to the broker before it is sent a frame.
+    self::machine(&host, &headers).await?;
     let held = crate::agui::pending::drain_held(host.clone(), AccountId::from_stored(account));
     tokio::spawn(held);
     let frames = frames.map(|frame| Ok::<_, Infallible>(Event::default().data(frame)));
@@ -78,15 +82,23 @@ async fn relay_response(
         Refused::Answered => refuse(StatusCode::CONFLICT, "that was answered already"),
         Refused::NotYours => refuse(StatusCode::UNAUTHORIZED, "not sent to this machine"),
     })?;
-    let kind = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-    let streamed = kind.is_some_and(|kind| kind.starts_with(b"text/event-stream"));
-    match answering.pipe(streamed, body.into_data_stream()).await {
+    let piped = answering.pipe(streams(&headers), body.into_data_stream());
+    match piped.await {
         Piped::Accepted => Ok(StatusCode::NO_CONTENT.into_response()),
         Piped::TooLarge => Err(refuse(
             StatusCode::PAYLOAD_TOO_LARGE,
             "that answer is too large",
         )),
     }
+}
+
+/// Whether a body is SSE by its `Content-Type`, which, as every media type, is case-insensitive
+/// (RFC 9110 §8.3.1): a Mac that says `Text/Event-Stream` is streaming all the same.
+pub(crate) fn streams(headers: &HeaderMap) -> bool {
+    const SSE: &[u8] = b"text/event-stream";
+    let kind = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
+    let head = kind.and_then(|kind| kind.get(..SSE.len()));
+    head.is_some_and(|head| head.eq_ignore_ascii_case(SSE))
 }
 
 /// The account's connected Mac and the label it was enrolled under, for `relay` on a read.

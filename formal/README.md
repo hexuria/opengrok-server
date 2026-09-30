@@ -15,7 +15,7 @@ must touch the models, and what to do with a counterexample: [`POLICY.md`](POLIC
 | `tla/JournalAppend.tla` | One journal write racing a Stop, as the store sees it: read the run, append at the next seq, lose the race with a `Conflict`. Which errors a write may retry. |
 | `tla/RecipeLease.tla` | Starting a recipe run on one bot (`start_recipe_run`, `opengrok-store/src/postgres.rs`): starters that each lock, take the insert's snapshot, insert where no live lease is visible, and commit; a landed run clears its lease. |
 | `tla/RelayCall.tla` | One model call a person's Mac carries (#292, `opengrok-harness/src/relay.rs`): the door sends `infer` down the asked machine's stream and waits; any daemon-token holder may POST answers to the call's id, as often as it likes; the door gives up at its clock or on a Stop and tells the Mac to cancel. |
-| `tla/HeldSend.tla` | A queued send the person's Mac would carry (#292, `agui/pending.rs`): the app fires it while a Mac connects and leaves; the fire's check and the row's locked drain are two steps; a Mac that opens its stream makes the server fire it too (`drain_held`); the drained turn's call then finds a Mac or not. |
+| `tla/HeldSend.tla` | A queued send the person's Mac would carry (#292, `agui/pending.rs`): the app fires it while a Mac connects and leaves; the fire's check and the row's locked drain are two steps; a Mac that opens its stream makes the server fire it too (`drain_held`), once the person's other turns on the thread have ended, one sending per thread; the drained turn's call then finds a Mac or not. |
 | `lean/Harness.lean` | The four facts that must hold for every constant, not just the ones TLC can enumerate. Lean 4 core only. |
 | `tla/*.cfg` | One per claim. A first line saying EXPECTED TO FAIL is a counterexample kept on purpose; its `\* VIOLATES:` line names the one invariant it must break, and breaking any other fails the check. |
 
@@ -40,7 +40,8 @@ stream as it does for the gateway, and the door's clocks, its cancel and a Stop 
 streaming → done`, answered, failed, timed out or stopped, with answers from the asked machine,
 the same person's other machine and another account's machine under the same id. `HeldSend` is
 the pending delivery the relay adds: a fire's check and the row's drain as two steps, the Mac
-coming and going around them, the reconnect drain racing the app.
+coming and going around them, the reconnect drain racing the app and waiting out the person's
+other turns on the thread, one sending per thread that a new trigger sends round again.
 
 **Lifecycle** (`RunLifecycle`). The aggregate is `running | awaiting | finished | failed |
 stopped`. Loop 1 is the turn; loop *k+1* continues the *k*-th answer. Each loop is `unborn →
@@ -87,6 +88,7 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | A queued send is one turn at most, the app and the reconnect drain racing | safety | `HeldSend` `DrainedOnce` |
 | A send whose fire saw no Mac stays queued | safety | `HeldSend` `NeverDrainedBlind` |
 | A Mac that comes to stay gets the held send | liveness | `HeldSend` `DrainsOnceTheMacStays` |
+| With a Mac connected and nothing running on the thread, the server is sending the held send | safety | `HeldSend` `NeverStranded` |
 | A drained send's turn finds a Mac | safety | `HeldSend` `ServedIfDrained`, which fails by nature (see 16) |
 
 ## TLA+ findings
@@ -248,7 +250,7 @@ Each trace is TLC's shortest.
     runs the call, so `FinishedRanApprovals` is not "every answer executes". A no is carried on
     as a refusal the model reads and the call never runs; a test holds that, not TLC
     (`a_refusal_whose_turn_was_interrupted_reaches_the_model_and_nothing_runs`).
-16. **The Mac relay** (#292). Three counterexamples, each fixed before the code shipped, and one
+16. **The Mac relay** (#292). Five counterexamples, each fixed before the code shipped, and one
     stated limit:
     - **A Stop before the Mac's first word failed the run** (`HarnessLoop_silentstop`,
       `SilenceAfterStopIsTheStop`). The Stop cancels a relayed call where it is, so the round
@@ -262,6 +264,15 @@ Each trace is TLC's shortest.
     - **A call given up on took a late answer** (`RelayCall_remembered`,
       `NothingTakenAfterGivingUp`): a 204 for a whole answer streamed into nothing after the Mac
       was told to cancel. A call is forgotten when the door gives up; a late answer is 404.
+    - **A turn in flight stranded the held send** (`HeldSend_busy`, `NeverStranded`), found in
+      review of #298, where the first model had left the thread's other runs out: the reconnect
+      drain gave up at a busy thread, the turn ended, the Mac stayed, and nothing on the server
+      sent the send; with the app closed it waited for good. The drain now waits the turn out
+      while the Mac stays (`WaitsOut`). Doing so made two drains of one thread possible, so one
+      sending per thread runs at a time, and **a trigger lost to the sending on its way out**
+      (`HeldSend_lost`, same invariant) is why a trigger that finds it running sends it round
+      again (`ReArms`). The same review found a thread with no run in sight (its turns hidden,
+      or none) read as busy; the model's `busy` is `thread_now`'s reading, where none is idle.
     - **Stated limit** (`HeldSend_gap`, `ServedIfDrained`): a Mac that leaves between a fire's
       check and its turn's door call makes that one turn `relay_offline`, with the words in its
       run, the check-then-act gap of finding 3. And the broker is per replica: a Mac whose
