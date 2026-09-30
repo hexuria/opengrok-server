@@ -657,6 +657,25 @@ async fn a_proxy_key_with_no_vault_to_keep_it_is_refused() {
     assert_eq!(h.set(&ada, body).await.0, 200);
 }
 
+/// The list NativeChat renders its picker from, recorded on its own: a person with a proxy
+/// stored asks once, and the answer names both sources side by side. The test below asks four
+/// times, and the corpus keeps one answer per test, which was the gateway-only first one.
+#[tokio::test]
+async fn one_model_list_names_the_gateway_and_the_proxy_side_by_side() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    h.on_the_proxy(&ada, "gateway").await;
+    let (status, both) = h.models(&ada, "").await;
+    assert_eq!(status, 200, "{both}");
+    assert_eq!(ids(&both, "gateway"), ["xai/grok-4.6", "openai/gpt-5.5"]);
+    assert_eq!(
+        ids(&both, "local_proxy"),
+        ["gpt-5.5", "gpt-6-sol--fast", "xai/grok-4.7"]
+    );
+    assert_eq!(both["localProxy"], json!({ "healthy": true }));
+}
+
 /// BOTH KINDS, WHENEVER AN ADDRESS IS STORED, whatever the setting's kind: the gateway's entries,
 /// tagged, and the proxy's allowed ones beside them; `?source=` narrows to one kind, and
 /// `localProxy.healthy` says whether the proxy answered.
