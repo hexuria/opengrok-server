@@ -7,6 +7,7 @@
     "name": "Ada",
     "model": "oag/cheap",
     "effort": "low",
+    "source": null,
     "role": null,
     "title": null,
     "avatarShape": null,

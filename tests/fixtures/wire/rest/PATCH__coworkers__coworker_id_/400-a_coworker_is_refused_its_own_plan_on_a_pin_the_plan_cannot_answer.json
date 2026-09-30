@@ -1,0 +1,8 @@
+{
+  "method": "PATCH",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001",
+  "status": 400,
+  "body": {
+    "error": "model: \"xai/grok-4.6@sub\" is not a model this server knows to be OpenAI's or xAI's, and only theirs (gpt-*, o1*, o3*, o4*, codex*, grok-*) may use your own subscription"
+  }
+}

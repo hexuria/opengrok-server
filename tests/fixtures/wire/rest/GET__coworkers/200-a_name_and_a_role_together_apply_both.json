@@ -8,6 +8,7 @@
       "name": "Greendale",
       "model": "oag/cheap",
       "effort": "inherit",
+      "source": null,
       "role": "Keep the changelog honest.",
       "title": "the study group's own dean",
       "avatarShape": null,

@@ -4,24 +4,25 @@
   "status": 200,
   "body": {
     "id": "cw_0199bb4e-0000-7000-8000-000000000001",
-    "name": "Ada",
-    "model": "oag/cheap",
+    "name": "Luna",
+    "model": "gpt-6-luna",
     "effort": "inherit",
+    "source": "local_proxy",
     "role": null,
     "title": null,
     "avatarShape": null,
     "avatarColor": null,
-    "visibility": "org",
+    "visibility": "private",
     "hiddenFromSidebar": false,
     "updatedAtMs": 1790000000000,
-    "boxId": "box-0199bb4e000070008000000000000002",
+    "boxId": "bx_source_0199bb4e000070008000000000000002",
     "isGroup": false,
     "memberIds": [],
     "mine": true,
     "canManage": true,
     "owner": {
       "id": "acct_0199bb4e-0000-7000-8000-000000000003",
-      "name": "Ann Owner"
+      "name": "Test User"
     }
   }
 }

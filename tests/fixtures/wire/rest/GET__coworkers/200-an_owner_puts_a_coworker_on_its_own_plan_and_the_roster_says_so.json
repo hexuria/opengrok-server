@@ -5,10 +5,10 @@
   "body": [
     {
       "id": "cw_0199bb4e-0000-7000-8000-000000000001",
-      "name": "New Bot",
-      "model": "oag/cheap",
+      "name": "Luna",
+      "model": "gpt-6-luna",
       "effort": "inherit",
-      "source": null,
+      "source": "local_proxy",
       "role": null,
       "title": null,
       "avatarShape": null,
@@ -16,13 +16,13 @@
       "visibility": "private",
       "hiddenFromSidebar": false,
       "updatedAtMs": 1790000000000,
-      "boxId": null,
+      "boxId": "bx_source_0199bb4e000070008000000000000002",
       "isGroup": false,
       "memberIds": [],
       "mine": true,
       "canManage": true,
       "owner": {
-        "id": "acct_0199bb4e-0000-7000-8000-000000000002",
+        "id": "acct_0199bb4e-0000-7000-8000-000000000003",
         "name": "Test User"
       }
     }
