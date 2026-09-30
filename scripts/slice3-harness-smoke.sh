@@ -61,6 +61,10 @@ ok "$frames content frames"
 
 echo "3. the message is bracketed and its pieces share one id"
 sequence=$(echo "$events" | jq -r '.type' | tr '\n' ' ')
+# The run's inference source is the one CUSTOM right after RUN_STARTED; asserted, then dropped.
+echo "$events" | jq -s -e '.[1].type == "CUSTOM" and .[1].name == "opengrok.inferenceSource"' >/dev/null \
+  || fail "expected CUSTOM opengrok.inferenceSource right after RUN_STARTED"
+sequence=${sequence/#RUN_STARTED CUSTOM /RUN_STARTED }
 # Compact CUSTOM `run-timing` is spliced before RUN_FINISHED on every run.
 case "$sequence" in
   "RUN_STARTED TEXT_MESSAGE_START "*"TEXT_MESSAGE_END RUN_FINISHED ") ;;

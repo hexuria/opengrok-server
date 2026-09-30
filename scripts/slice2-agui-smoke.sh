@@ -62,6 +62,11 @@ echo "3. the message events are properly nested"
 # fragments a model happened to emit, and would break the moment streaming got finer-grained —
 # which is exactly what happened when the stub was replaced by the real harness.
 sequence=$(echo "$events" | jq -r '.type' | tr '\n' ' ')
+# The run's inference source (`opengrok.inferenceSource`) is the one CUSTOM right after RUN_STARTED;
+# it is dropped here and asserted below, so any OTHER frame in that place still fails.
+echo "$events" | jq -s -e '.[1].type == "CUSTOM" and .[1].name == "opengrok.inferenceSource"' >/dev/null \
+  || fail "expected CUSTOM opengrok.inferenceSource right after RUN_STARTED"
+sequence=${sequence/#RUN_STARTED CUSTOM /RUN_STARTED }
 # Compact CUSTOM `run-timing` sits immediately before the closer so a consumer
 # can show a debug clock without holding the spinner (which keys off RUN_FINISHED).
 case "$sequence" in
