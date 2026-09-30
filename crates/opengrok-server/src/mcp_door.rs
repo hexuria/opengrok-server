@@ -53,6 +53,8 @@ use rmcp::transport::streamable_http_server::tower::{
 use rmcp::{ErrorData as McpError, ServerHandler};
 
 use crate::agui::routes::{BearerRefusal, principal_from_bearer, tools_for_coworker};
+/// The take without its stamp, which only tests ask for (`tests/support/seams.rs`).
+pub use crate::seams::take_mcp_allow_once;
 
 /// How long an MCP call waits for a sleeping box before trying its command anyway. The MCP client
 /// (Claude Code) has its own request timeout, so this stays well under it; a box still starting
@@ -310,23 +312,11 @@ async fn remember_mcp_allow_once_at(
     store.remember_mcp_allow_once(once, ALLOW_ONCE_TTL_MS).await
 }
 
-/// Take the pending allow-once for this coworker+tool+args, if any: `(call_id, gate)`. Matched
-/// by jsonb value (key order is not part of it — the arguments round-tripped through the card).
-/// A store error reads as "no yes": the call is judged again, which is the narrow side.
-pub async fn take_mcp_allow_once(
-    store: &opengrok_store::PgStore,
-    coworker: &CoworkerId,
-    account: Option<&str>,
-    tool: &str,
-    arguments: &serde_json::Value,
-) -> Option<(String, bool)> {
-    take_mcp_allow_once_stamped(store, coworker, account, tool, arguments)
-        .await
-        .map(|(call_id, gate, _)| (call_id, gate))
-}
-
-/// The take with the yes's original stamp, for the door: what it gives back must carry it.
-async fn take_mcp_allow_once_stamped(
+/// Take the pending allow-once for this coworker+tool+args, if any: `(call_id, gate, stamp)`, the
+/// stamp the yes was given, which whatever the door gives back must carry. Matched by jsonb value
+/// (key order is not part of it — the arguments round-tripped through the card). A store error
+/// reads as "no yes": the call is judged again, which is the narrow side.
+pub(crate) async fn take_mcp_allow_once_stamped(
     store: &opengrok_store::PgStore,
     coworker: &CoworkerId,
     account: Option<&str>,

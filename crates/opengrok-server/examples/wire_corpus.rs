@@ -165,6 +165,35 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects",
         "/ag-ui",
     ),
+    // A coworker's own source: the hire (null), the PATCH that puts its door and pin on the
+    // person's own plan together and the roster read after it; the 400s, shaped like any other
+    // refusal, for a door whose pin that plan cannot answer and for a door and pin refused as a
+    // pair; and the replays of a turn on its own plan and of a teammate's turn refused in words.
+    // Each test makes one call on each route it is kept for.
+    (
+        "an_owner_puts_a_coworker_on_its_own_plan_and_the_roster_says_so",
+        "/coworkers",
+    ),
+    (
+        "an_owner_puts_a_coworker_on_its_own_plan_and_the_roster_says_so",
+        "/coworkers/{coworker_id}",
+    ),
+    (
+        "a_coworker_is_refused_its_own_plan_on_a_pin_the_plan_cannot_answer",
+        "/coworkers/{coworker_id}",
+    ),
+    (
+        "a_door_and_a_pin_its_plan_cannot_answer_are_refused_together",
+        "/coworkers/{coworker_id}",
+    ),
+    (
+        "a_coworker_on_its_own_plan_asks_the_persons_proxy_for_its_pin",
+        "/ag-ui/threads/{thread_id}",
+    ),
+    (
+        "a_teammate_with_no_proxy_is_refused_in_words_on_a_shared_coworkers_own_plan",
+        "/ag-ui/threads/{thread_id}",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

@@ -827,14 +827,23 @@ pub(crate) async fn carried_on(
     messages: Vec<opengrok_harness::ChatMessage>,
     generation: u32,
 ) -> (crate::agui::routes::StoreJournal, ModelRequest) {
+    // Where and on what the turn started, whatever changed while it waited: its captured source
+    // and way, and on the gateway its captured pin (a log from before pins were stored falls back
+    // to the current one); never a door or pin the coworker has now. A proxy turn never becomes a
+    // gateway one mid-run, nor the reverse, and one its Mac carried goes on at its Mac; a routine's
+    // never goes on at a plan. As hard as it started, with no fallback: a log from before the
+    // effort was stored sent none.
+    let pin = run.pin_for_resume(&coworker.model);
+    let route = local_proxy::resumed(state, account_id, (run, run_id), &pin).await;
     // The system message this turn OPENED with, not a fresh composition: a role or title edited
     // while the person answered the card must not change the coworker halfway through the turn.
     // A run journalled before this was captured has none and composes one, as before.
     let system = match run.system_for_resume() {
-        Some(captured) => captured,
+        Some(opened) => opened,
         None => crate::persona::system_message(
             &coworker.name,
             &crate::persona::of(state, coworker_id, coworker.role.clone()).await,
+            route.asks(&pin),
             None,
         ),
     };
@@ -853,15 +862,6 @@ pub(crate) async fn carried_on(
         limits: run.limits,
         generation,
     };
-    // Where and on what the turn started, whatever changed while it waited: its captured source
-    // and way, and on the gateway its captured pin (a log from before pins were stored falls back
-    // to the current one). A proxy turn never becomes a gateway one mid-run, nor the reverse, and
-    // one its Mac carried goes on at its Mac. As hard as it started too, with no fallback: a log
-    // from before the effort was stored sent none.
-    let (source, captured) = (Some(run.source_for_resume()), run.model.as_deref());
-    let run_id = run_id.as_str();
-    let route = local_proxy::route(state, Some(account_id), source, captured, run_id).await;
-    let pin = run.pin_for_resume(&coworker.model);
     let request = crate::agui::routes::turn_request(
         state,
         // The person who answered the card is the person this continuation is for.

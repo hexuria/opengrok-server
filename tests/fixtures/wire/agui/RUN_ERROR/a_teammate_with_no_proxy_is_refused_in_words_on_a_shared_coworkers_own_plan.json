@@ -1,0 +1,8 @@
+{
+  "type": "RUN_ERROR",
+  "timestamp": 100,
+  "threadId": "thr-0199bb4e000070008000000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "message": "You chose your own subscription, but no proxy address is set; set one in your inference source (like http://127.0.0.1:1447), or switch this turn to the gateway.",
+  "code": "plan_unavailable"
+}

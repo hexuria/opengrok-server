@@ -65,11 +65,6 @@ impl ExecOutcome {
         }
     }
 
-    /// Did the command run to a normal completion (exit 0)?
-    pub fn succeeded(&self) -> bool {
-        self.case == "success" && self.exit_code == Some(0)
-    }
-
     /// A compact human rendering for a tool result or the direct-enqueue reply.
     pub fn render(&self) -> String {
         match self.case.as_str() {

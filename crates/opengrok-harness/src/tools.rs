@@ -77,19 +77,6 @@ impl ToolRunner {
         opengrok_tools::skill::offered_line(offers.unwrap_or_default())
     }
 
-    /// Give this turn the room's shared computer as well: `machine: "group"` on the box tools.
-    #[must_use]
-    pub fn with_group_box(mut self, box_id: opengrok_core::id::BoxId, name: &str) -> Self {
-        if let Some((executor, context)) = self.executor.as_mut() {
-            executor.set_group_box_name(name);
-            context.group_box = Some(opengrok_tools::GroupBox {
-                box_id,
-                name: name.to_string(),
-            });
-        }
-        self
-    }
-
     /// Whether running `call` would first wake the coworker's box — asked before a round so the
     /// stream can say so (`box-waking`) instead of going quiet for the wait.
     pub async fn box_needs_wake(&self, call: &ToolCall) -> bool {

@@ -1,0 +1,8 @@
+{
+  "method": "PATCH",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001",
+  "status": 400,
+  "body": {
+    "error": "model: claude-sonnet-4.5 is one of Anthropic's models, and Anthropic's terms forbid using a consumer subscription through a third-party app; pick an OpenAI or xAI model, or use the gateway"
+  }
+}

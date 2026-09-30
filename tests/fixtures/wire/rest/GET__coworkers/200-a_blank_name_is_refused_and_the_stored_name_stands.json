@@ -8,6 +8,7 @@
       "name": "New Bot",
       "model": "oag/cheap",
       "effort": "inherit",
+      "source": null,
       "role": null,
       "title": null,
       "avatarShape": null,

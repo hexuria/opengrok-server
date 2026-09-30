@@ -125,6 +125,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
         role: None,
         visibility: Default::default(),
         effort: Default::default(),
+        source: None,
     };
     store
         .append_coworker(&coworker, &account, 0, &events, &view)

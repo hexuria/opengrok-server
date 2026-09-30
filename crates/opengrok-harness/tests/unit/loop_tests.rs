@@ -4,6 +4,41 @@ use opengrok_tools::Executor;
 use opengrok_wire::agui::EventType;
 use std::sync::{Arc, Mutex};
 
+/// `run_conversation`, with a sink that sees each event as it is produced, on the default budget.
+/// Only these tests ask for it: `POST /ag-ui` streams through `run_conversation_within`, held to its
+/// org's ceiling.
+#[allow(clippy::too_many_arguments)]
+async fn run_conversation_streaming(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    journal: &dyn RunJournal,
+    request: ModelRequest,
+    thread_id: &str,
+    run_id: &str,
+    at_ms: i64,
+    sink: &dyn EventSink,
+) -> Vec<Event> {
+    let projection = Projection::new(thread_id, run_id, at_ms);
+    let carried = Carried::default();
+    let sink = Some(sink);
+    converse(
+        door, tools, journal, request, projection, run_id, sink, carried,
+    )
+    .await
+}
+
+/// One turn with no tools, every event a client should see collected. Only these tests ask for
+/// it: every route runs a turn through `run_conversation_within`.
+async fn run_turn(
+    door: &dyn ModelDoor,
+    request: ModelRequest,
+    thread_id: &str,
+    run_id: &str,
+    at_ms: i64,
+) -> Vec<Event> {
+    run_turn_with_tools(door, None, request, thread_id, run_id, at_ms).await
+}
+
 fn tool_runner() -> ToolRunner {
     tool_runner_on(
         Arc::new(crate::tools::tests_support::RecordingComputer::default()),

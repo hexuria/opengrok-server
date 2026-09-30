@@ -117,6 +117,7 @@ async fn seed_computerless_coworker(store: &PgStore, account: &AccountId) -> Cow
         role: None,
         visibility: Default::default(),
         effort: Default::default(),
+        source: None,
     };
     store
         .append_coworker(&id, account, 0, &events, &view)

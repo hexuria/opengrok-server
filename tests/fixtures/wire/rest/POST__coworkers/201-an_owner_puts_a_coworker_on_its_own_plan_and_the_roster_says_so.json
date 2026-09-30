@@ -1,0 +1,30 @@
+{
+  "method": "POST",
+  "path": "/coworkers",
+  "status": 201,
+  "body": {
+    "id": "cw_0199bb4e-0000-7000-8000-000000000001",
+    "name": "Luna",
+    "model": "xai/grok-4.6",
+    "effort": "inherit",
+    "source": null,
+    "role": null,
+    "title": null,
+    "avatarShape": null,
+    "avatarColor": null,
+    "visibility": "private",
+    "hiddenFromSidebar": false,
+    "updatedAtMs": 1790000000000,
+    "boxId": "bx_source_0199bb4e000070008000000000000002",
+    "isGroup": false,
+    "memberIds": [],
+    "mine": true,
+    "canManage": true,
+    "owner": {
+      "id": "acct_0199bb4e-0000-7000-8000-000000000003",
+      "name": "Test User"
+    },
+    "computerError": null,
+    "templateNote": null
+  }
+}

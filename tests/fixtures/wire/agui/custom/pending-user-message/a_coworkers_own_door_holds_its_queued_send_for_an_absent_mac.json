@@ -4,13 +4,13 @@
   "name": "pending-user-message",
   "value": {
     "v": 1,
-    "op": "created",
+    "op": "snapshot",
     "threadId": "thr-0199bb4e000070008000000000000001",
     "message": {
       "v": 1,
       "id": "pum_0199bb4e-0000-7000-8000-000000000002",
       "threadId": "thr-0199bb4e000070008000000000000001",
-      "content": "og-test-breaks-the-read m2",
+      "content": "then this, on my plan",
       "replyTo": null,
       "recipeId": null,
       "recipeValues": null,
@@ -20,7 +20,8 @@
       "createdAtMs": 1790000000000,
       "updatedAtMs": 1790000000000,
       "drainedAtMs": null,
-      "drainedRunId": null
+      "drainedRunId": null,
+      "heldFor": "relay_offline"
     }
   }
 }

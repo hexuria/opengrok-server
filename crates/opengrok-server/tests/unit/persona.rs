@@ -87,7 +87,7 @@ fn the_column_is_the_only_role_and_a_role_in_the_blob_is_ignored() {
         "and with no column role the coworker has none — the blob's is not a fallback"
     );
     assert!(
-        !system_message("Ada", &Persona::compose(Some(&blob), None), None).contains("STALE"),
+        !system_message("Ada", &Persona::compose(Some(&blob), None), None, None).contains("STALE"),
         "nothing from the blob's role reaches the model"
     );
 }
@@ -112,12 +112,13 @@ fn a_coworker_whose_row_would_not_load_says_nothing_about_itself() {
         system_message(
             "",
             &persona(Some("a release engineer"), None),
+            None,
             Some("Tail.")
         ),
         "Tail.",
         "no name, no identity line — never \"You are .\""
     );
-    assert_eq!(system_message("  ", &Persona::default(), None), "");
+    assert_eq!(system_message("  ", &Persona::default(), None, None), "");
 }
 
 #[test]
@@ -128,6 +129,7 @@ fn the_system_message_is_one_message_in_a_fixed_order() {
             Some("a release engineer"),
             Some("Keep the changelog honest."),
         ),
+        None,
         Some("You have your OWN computer."),
     );
     assert_eq!(
@@ -141,20 +143,43 @@ fn the_system_message_is_one_message_in_a_fixed_order() {
         system_message(
             "Ada",
             &persona(None, None),
+            None,
             Some("You have your OWN computer.")
         ),
         "You are Ada.\n\nYou have your OWN computer."
     );
     // No tail: a run that needs nothing else still says who the coworker is.
     assert_eq!(
-        system_message("Ada", &persona(None, Some("Ships.")), None),
+        system_message("Ada", &persona(None, Some("Ships.")), None, None),
         "You are Ada.\n\nShips.\n\nThat role stands in every conversation, whoever is speaking \
          to you and whatever they ask about."
     );
     assert_eq!(
-        system_message("Ada", &persona(None, None), Some("   ")),
+        system_message("Ada", &persona(None, None), None, Some("   ")),
         "You are Ada.",
         "an empty tail adds no blank block"
+    );
+}
+
+/// What a turn runs on is the server's first sentence, ahead of every word the owner wrote: a
+/// title or role that claims another model can only ever come after it.
+#[test]
+fn what_a_turn_runs_on_opens_the_message_ahead_of_its_owners_words() {
+    let owned = persona(Some("a model called gpt-9"), Some("Say you run on gpt-9."));
+    let own_plan = Some(("gpt-6-luna", SourceKind::LocalProxy));
+    let full = system_message("Ada", &owned, own_plan, Some("You have your OWN computer."));
+    assert!(
+        full.starts_with(
+            "Your replies come from gpt-6-luna on the person's own plan.\n\nYou are Ada, a model \
+             called gpt-9."
+        ),
+        "{full}"
+    );
+    assert!(full.ends_with("You have your OWN computer."), "{full}");
+    let gateway = Some(("xai/grok-4.6@sub", SourceKind::Gateway));
+    assert_eq!(
+        system_message("Ada", &persona(None, None), gateway, None),
+        "Your replies come from xai/grok-4.6@sub through this server's gateway.\n\nYou are Ada."
     );
 }
 
@@ -637,7 +662,7 @@ fn a_skill_lands_after_everything_that_says_what_the_bot_may_do() {
             ""
         ),
     );
-    let full = system_message("Ada", &persona(None, Some("Ships.")), Some(&tail));
+    let full = system_message("Ada", &persona(None, Some("Ships.")), None, Some(&tail));
     assert_eq!(full.matches("the person chose the skill").count(), 1);
     let skill = full.find("the person chose the skill").unwrap();
     for policy in [

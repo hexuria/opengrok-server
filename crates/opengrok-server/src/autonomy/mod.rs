@@ -135,9 +135,11 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
 
     // Composed once: a routine's turn is still this coworker's turn, its skills (#270) too.
     let hirer = crate::persona::caller(&state, &account_id).await;
+    let route = opengrok_harness::local_proxy::Route::for_routine(coworker.source, &coworker.model);
     let system = crate::persona::system_message(
         &coworker.name,
         &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
+        route.asks(&coworker.model),
         Some(&(crate::persona::routine_line(&hirer, chrono::Utc::now()) + &skills)),
     );
     let journal = StoreJournal {
@@ -147,15 +149,13 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         coworker_id: Some(coworker_id.clone()),
         model: Some(coworker.model.clone()),
         effort: coworker.effort,
-        // THE GATEWAY, WHATEVER ITS HIRER CHOSE FOR THEIR OWN TURNS: a consumer subscription is a
-        // person's to spend in person, and a routine fires with nobody at the keyboard.
-        inference_source: Default::default(),
+        inference_source: route.source(),
         system: Some(system.clone()),
         skill_id: None,
         offered_skills: tools.iter().flat_map(|t| t.offered_skills()).collect(),
         // The hirer's instruction is this turn's question. Journaled like a person's message, so
         // a routine that parks on a card resumes knowing what it was told to do.
-        prompt: Some(crate::agui::history::routine_prompt(&run_id, &prompt)),
+        prompt: Some(opengrok_core::run::routine_prompt(&run_id, &prompt)),
         limits,
         generation: 0,
     };
@@ -163,7 +163,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     // Nobody is talking: a coworker on its own schedule acts for whoever hired it, on its own
     // model, effort, identity and standing role — the rules `run()` holds turns to.
     let who = (Some(&coworker_id), Some(&account_id));
-    let asked = (Default::default(), coworker.model.clone(), coworker.effort);
+    let asked = (route, coworker.model.clone(), coworker.effort);
     let message = vec![ChatMessage::text("user", prompt)];
     let request =
         crate::agui::routes::turn_request(&state, who, asked, Some(system), message).await;

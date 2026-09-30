@@ -1,4 +1,5 @@
-//! Test seams: the builders only tests call, and the TXT lookup a test answers from a map.
+//! Test seams: the builders and reads only tests call, and the TXT lookup a test answers from a
+//! map.
 //!
 //! Mounted from `src/lib.rs` with `#[path]`, like `tests/support/mock_jev.rs`: they compile into
 //! the crate every integration test links, yet live beside the tests that use them — nothing the
@@ -76,6 +77,37 @@ impl crate::spend::GuardedDoor {
     pub fn with_fresh_ms(mut self, fresh_ms: i64) -> Self {
         self.fresh_ms = fresh_ms;
         self
+    }
+}
+
+/// Take the pending allow-once, as the door does, without the stamp the door gives back with it.
+/// Reached as `mcp_door::take_mcp_allow_once`.
+pub async fn take_mcp_allow_once(
+    store: &opengrok_store::PgStore,
+    coworker: &opengrok_core::id::CoworkerId,
+    account: Option<&str>,
+    tool: &str,
+    arguments: &serde_json::Value,
+) -> Option<(String, bool)> {
+    crate::mcp_door::take_mcp_allow_once_stamped(store, coworker, account, tool, arguments)
+        .await
+        .map(|(call_id, gate, _)| (call_id, gate))
+}
+
+/// A body's messages in the model's vocabulary, with no files read: what the unit tests turn a
+/// body into (`agui::routes::to_chat_messages_with`).
+#[cfg(test)]
+pub(crate) fn to_chat_messages(
+    input: &opengrok_wire::agui::RunAgentInput,
+) -> Vec<opengrok_harness::ChatMessage> {
+    let attached = crate::agui::attachments::Attached::default();
+    crate::agui::routes::to_chat_messages_with(input, &attached)
+}
+
+impl crate::local_exec::broker::ExecOutcome {
+    /// Did the command run to a normal completion (exit 0)?
+    pub fn succeeded(&self) -> bool {
+        self.case == "success" && self.exit_code == Some(0)
     }
 }
 

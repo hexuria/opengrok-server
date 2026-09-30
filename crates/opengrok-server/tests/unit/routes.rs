@@ -1,6 +1,7 @@
 //! Unit tests for `agui::routes`, kept out of the crate's source count.
 
 use super::*;
+use crate::seams::to_chat_messages;
 use opengrok_harness::MockDoor;
 use opengrok_wire::agui::{EventType, Message};
 use serde_json::json;

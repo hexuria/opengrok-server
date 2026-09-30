@@ -11,8 +11,8 @@
 //! ONE system message per run, not several. Two prompts arrive at the model as two claims about
 //! the same coworker, and when they disagree the model picks one — `computer_system_prompt`'s
 //! comment records the day that happened, where a prompt contradicting the tool list silently
-//! disabled the tool. So the identity, the standing role and the machine discipline are composed
-//! into a single string here, in that order, and every run path uses this one function.
+//! disabled the tool. So what it runs on, the identity, the standing role and the machine
+//! discipline are composed into a single string here, in that order, and every run path uses it.
 //!
 //! A SKILL IS THE LAST SEGMENT OF THAT ONE MESSAGE, AND LAST IS NOT A DETAIL. A skill body is
 //! unbounded prose a person wrote, so of everything that goes into this message it is the likeliest
@@ -25,6 +25,7 @@
 //! APPENDED after it instead and every transcribed line stays byte-identical.
 
 use opengrok_core::id::CoworkerId;
+use opengrok_core::inference::SourceKind;
 use serde_json::Value;
 
 use crate::agui::AgUiState;
@@ -368,16 +369,30 @@ pub fn computer_system_prompt(
     }
 }
 
-/// The one system message a run carries: identity, then the standing role, then whatever else
-/// the run needs the model to know — today the machine discipline. Blocks are separated by a
-/// blank line so the model reads them as distinct claims rather than one run-on instruction.
+/// The one system message a run carries: what it runs on, identity, the standing role, then
+/// whatever else the run needs the model to know — today the machine discipline. Blocks are
+/// separated by a blank line so the model reads them as distinct claims, not a run-on instruction.
 #[must_use]
-pub fn system_message(name: &str, persona: &Persona, tail: Option<&str>) -> String {
+pub fn system_message(
+    name: &str,
+    persona: &Persona,
+    asks: Option<(&str, SourceKind)>,
+    tail: Option<&str>,
+) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+    // AHEAD OF EVERY WORD ITS OWNER WROTE, the identity line's title too: the model its route asks
+    // (`Route::asks`), never the pin, and no address, key or transport.
+    if let Some((model, door)) = asks {
+        let whose = match door {
+            SourceKind::LocalProxy => "on the person's own plan",
+            SourceKind::Gateway => "through this server's gateway",
+        };
+        blocks.push(format!("Your replies come from {model} {whose}."));
+    }
     // A blank name means the coworker row could not be read; say nothing rather than "You are ."
-    let mut blocks: Vec<String> = match name.trim() {
-        "" => Vec::new(),
-        name => vec![persona.identity(name)],
-    };
+    if let Some(name) = Some(name.trim()).filter(|name| !name.is_empty()) {
+        blocks.push(persona.identity(name));
+    }
     if let Some(standing) = persona.standing() {
         blocks.push(standing);
     }

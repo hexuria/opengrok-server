@@ -1,0 +1,97 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads/sched_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+    "runs": [
+      {
+        "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+        "status": "failed",
+        "startedAtMs": 1790000000000,
+        "updatedAtMs": 1790000001000,
+        "failure": "This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule.",
+        "finishReason": null,
+        "events": [
+          {
+            "type": "RUN_STARTED",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_START",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "role": "user",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "delta": "write the weekly report",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_END",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "timestamp": 100
+          },
+          {
+            "name": "opengrok.inferenceSource",
+            "type": "CUSTOM",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "value": {
+              "kind": "local_proxy",
+              "model": "gpt-6-luna"
+            },
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "timestamp": 100
+          },
+          {
+            "name": "run-timing",
+            "type": "CUSTOM",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "value": {
+              "tools": [],
+              "budget": {
+                "idle_ms": 240000,
+                "max_rounds": 8,
+                "max_wall_ms": 900000,
+                "call_timeout_ms": 180000,
+                "max_computer_rounds": 24
+              },
+              "context": {
+                "limit": 128000,
+                "left_out": 0,
+                "estimated": [
+                  1964
+                ]
+              },
+              "model_ms": [
+                3
+              ],
+              "total_ms": 3,
+              "tool_rounds": 0,
+              "tool_wait_ms": 3,
+              "auto_review_ms": 3
+            },
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "total_ms": 3,
+            "timestamp": 100,
+            "tool_rounds": 0
+          },
+          {
+            "type": "RUN_ERROR",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "message": "This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule.",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "timestamp": 100
+          }
+        ]
+      }
+    ],
+    "hiddenRunIds": [],
+    "pendingUserMessages": [],
+    "pendingEvents": []
+  }
+}

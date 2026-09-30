@@ -220,6 +220,7 @@ async fn mark_org_visible(store: &PgStore, owner: &AccountId, id: &str) {
         role: after.role.clone(),
         visibility: after.visibility,
         effort: after.effort,
+        source: after.source,
     };
     store
         .append_coworker(&coworker_id, owner, seq, &events, &view)

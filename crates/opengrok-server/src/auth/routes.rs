@@ -236,10 +236,6 @@ fn challenge_for(verifier: &str) -> String {
 pub struct LoginDeepControlQuery {
     pub challenge: String,
     pub uuid: String,
-    #[serde(default)]
-    pub mode: Option<String>,
-    #[serde(default)]
-    pub redirect_target: Option<String>,
 }
 
 /// `GET /loginDeepControl?challenge=&uuid=&mode=login&redirectTarget=`
@@ -590,8 +586,6 @@ pub struct OAuthTokenReply {
 /// What the client POSTs to `/oauth/token` (`cursor-auth.ts:340`).
 #[derive(Debug, Deserialize)]
 pub struct OAuthTokenRequest {
-    #[serde(default)]
-    pub client_id: Option<String>,
     #[serde(default)]
     pub grant_type: Option<String>,
     pub refresh_token: String,

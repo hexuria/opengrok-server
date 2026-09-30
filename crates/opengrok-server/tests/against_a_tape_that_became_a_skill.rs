@@ -338,6 +338,7 @@ impl Harness {
             role: None,
             visibility: state.visibility,
             effort: state.effort,
+            source: state.source,
         };
         self.store
             .append_coworker(&id, account, 0, &events, &view)

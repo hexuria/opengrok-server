@@ -466,6 +466,17 @@ pub enum RunError {
 /// that keeps taking its process down with it must stop being restarted (#91).
 pub const MAX_RESUMES: u32 = 2;
 
+/// What a routine's run is journaled as asked: its instruction, as a person's message would be,
+/// under the run's own id, so it is unique and says where it came from (`Run::fired_by_routine`).
+pub fn routine_prompt(run_id: &RunId, instruction: &str) -> Vec<Value> {
+    let id = routine_prompt_id(run_id);
+    vec![serde_json::json!({"id": id, "role": "user", "content": instruction})]
+}
+
+fn routine_prompt_id(run_id: &RunId) -> String {
+    format!("{}-prompt", run_id.as_str())
+}
+
 /// A skill a turn offered `use_skill` for (#270): the id it is read by, and the name the turn's
 /// system message lists it under, which is the name a resume offers it by.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -719,6 +730,15 @@ impl Run {
             .filter(|pin| !pin.is_empty())
             .unwrap_or(current)
             .to_string()
+    }
+
+    /// Whether a routine started this run (opengrok-server `autonomy::fire`): its one question is
+    /// the routine's, journaled under the run's own id by `routine_prompt`, the only writer of
+    /// that id. A client names its own messages, so a turn could carry it only on a run of its
+    /// own, and there it only narrows where the run carries on (#304).
+    pub fn fired_by_routine(&self, run_id: &RunId) -> bool {
+        let id = routine_prompt_id(run_id);
+        matches!(self.prompt.as_deref(), Some([asked]) if asked["id"] == id.as_str())
     }
 
     pub fn decide(&self, command: RunCommand) -> Result<Vec<RunEvent>, RunError> {
