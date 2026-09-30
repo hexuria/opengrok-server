@@ -691,6 +691,9 @@ async fn resume_suspended_run(
                 && opengrok_tools::needs_egress_consent(&pending.tool, &pending.arguments),
         )
         .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
+    // The skills the captured system message lists, and no others (#270).
+    let runner =
+        crate::skills::onto_captured(&state.agui, &account_id, runner, &run.offered_skills);
     // The system message this turn OPENED with, not a fresh composition: a role or title edited
     // while the person was answering the card must not change the coworker halfway through the
     // turn. A run journalled before this was captured has none and composes one, as before.
@@ -711,6 +714,7 @@ async fn resume_suspended_run(
         effort: run.effort,
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
+        offered_skills: run.offered_skills.clone(),
         prompt: None,
         limits: run.limits,
         generation,
@@ -844,6 +848,12 @@ pub(crate) async fn resume_interrupted_run(
     )
     .await
     .map(|runner| runner.with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted)));
+    // The skills the captured system message lists, and no others (#270): with none, and no
+    // computer, it carries on talking, as before.
+    let kept = &run.offered_skills;
+    let runner =
+        runner.or_else(|| (!kept.is_empty()).then(opengrok_harness::ToolRunner::local_only));
+    let runner = runner.map(|r| crate::skills::onto_captured(&state.agui, &account_id, r, kept));
     let system = match run.system_for_resume() {
         Some(captured) => captured,
         None => crate::persona::system_message(
@@ -861,6 +871,7 @@ pub(crate) async fn resume_interrupted_run(
         effort: run.effort,
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
+        offered_skills: run.offered_skills.clone(),
         prompt: None,
         limits: run.limits,
         generation,

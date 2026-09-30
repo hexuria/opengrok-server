@@ -1,0 +1,18 @@
+{
+  "method": "PUT",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/skills",
+  "status": 200,
+  "body": {
+    "skills": [
+      {
+        "id": "skl_0199bb4e-0000-7000-8000-000000000002",
+        "name": "triage",
+        "description": "Sort incoming bugs.",
+        "scope": "mine",
+        "attached": true,
+        "enabled": true
+      }
+    ],
+    "version": 1
+  }
+}

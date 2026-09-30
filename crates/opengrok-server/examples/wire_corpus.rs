@@ -59,7 +59,13 @@ const REST_LEFT_OUT: &[&str] = &["/computer/vnc/", "/bytes", "/connections/callb
 /// and no words is START then END for the person's message (#229, nativechat#135). An escalated
 /// form's replay after its run stopped waiting, and one read back from its run's answer, have the
 /// shape of a declined one but are cases NativeChat's ledger checks by name (#143, review of #277).
+/// A turn that reads an attached skill with `use_skill` has a tool call's shapes, and NativeChat
+/// asked for one recorded (#270).
 const ALSO_KEEP: &[(&str, &str)] = &[
+    (
+        "a_turn_reads_an_attached_skill_with_use_skill_and_gets_its_body",
+        "/ag-ui/runs/{run_id}",
+    ),
     (
         "a_message_of_files_keeps_its_parts_and_is_drawn_on_replay",
         "/ag-ui/threads/{thread_id}",
@@ -128,6 +134,7 @@ fn main() {
     }
 }
 
+#[derive(Clone)]
 struct Record {
     dir: String,
     status: Option<u16>,
@@ -301,9 +308,16 @@ fn build(record_dir: &Path, out: &Path, sha: &str) {
         std::process::exit(1);
     }
     let mut chosen: BTreeMap<(String, Option<u16>, String), Record> = BTreeMap::new();
+    let mut starts: Vec<Record> = Vec::new();
     for record in records(record_dir) {
         let mut content = record.content.clone();
         normalise(&mut content);
+        if record.dir == "agui/TOOL_CALL_START" {
+            starts.push(Record {
+                content: content.clone(),
+                ..record.clone()
+            });
+        }
         let pinned = record.status.is_some()
             && ALSO_KEEP
                 .iter()
@@ -322,6 +336,37 @@ fn build(record_dir: &Path, out: &Path, sha: &str) {
             .is_none_or(|kept| (&record.test, &record.binary) < (&kept.test, &kept.binary));
         if keep {
             chosen.insert(key, Record { content, ..record });
+        }
+    }
+    // A CALL IS KEPT WITH ITS OPENING. Each frame type keeps one recording per shape, chosen
+    // test by test, so a call's result could come from one test and every TOOL_CALL_START from
+    // others: the corpus then held a result for a call it never opened, which NativeChat's
+    // ledger refuses (review of #290). Any kept frame that names a call brings that call's
+    // START from the same test with it.
+    let named: Vec<(String, String)> = chosen
+        .values()
+        .filter(|record| record.dir != "agui/TOOL_CALL_START")
+        .filter_map(|record| {
+            let id = record.content.get("toolCallId")?.as_str()?;
+            Some((record.test.clone(), id.to_string()))
+        })
+        .collect();
+    for (test, id) in named {
+        let opened = chosen.values().any(|record| {
+            record.dir == "agui/TOOL_CALL_START"
+                && record.content.get("toolCallId").and_then(Value::as_str) == Some(id.as_str())
+        });
+        if opened {
+            continue;
+        }
+        if let Some(start) = starts.iter().find(|record| {
+            record.test == test
+                && record.content.get("toolCallId").and_then(Value::as_str) == Some(id.as_str())
+        }) {
+            chosen.insert(
+                (start.dir.clone(), None, format!("opens:{id}")),
+                start.clone(),
+            );
         }
     }
     let _ = std::fs::remove_dir_all(out);

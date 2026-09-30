@@ -2,15 +2,16 @@
   "type": "CUSTOM",
   "timestamp": 100,
   "name": "run-timing",
-  "threadId": "thr-a-0199bb4e-0000-7000-8000-000000000001",
+  "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
   "runId": "0199bb4e-0000-7000-8000-000000000002",
   "value": {
     "model_ms": [
+      3,
       3
     ],
     "tools": [
       {
-        "name": "request_user_form",
+        "name": "use_skill",
         "ms": 3
       }
     ],
@@ -28,7 +29,8 @@
     "context": {
       "limit": 128000,
       "estimated": [
-        4329
+        1798,
+        2430
       ],
       "left_out": 0
     }

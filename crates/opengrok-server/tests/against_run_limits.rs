@@ -670,6 +670,7 @@ async fn a_run_carried_on_after_a_restart_keeps_the_limits_it_started_with() {
             effort: Default::default(),
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt: Some(vec![
                 json!({ "id": "m1", "role": "user", "content": "keep going" }),
             ]),

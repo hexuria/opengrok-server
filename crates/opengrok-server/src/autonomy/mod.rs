@@ -130,15 +130,15 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         crate::agui::routes::TURN_WAKE_PATIENCE,
     )
     .await;
+    let tools = crate::skills::onto_any(&state, &account_id, &coworker_id, tools).await;
+    let skills: String = tools.iter().map(|t| t.skills_line()).collect();
 
-    // Composed once: a routine's turn is still this coworker's turn.
+    // Composed once: a routine's turn is still this coworker's turn, its skills (#270) too.
+    let hirer = crate::persona::caller(&state, &account_id).await;
     let system = crate::persona::system_message(
         &coworker.name,
         &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
-        Some(&crate::persona::routine_line(
-            &crate::persona::caller(&state, &account_id).await,
-            chrono::Utc::now(),
-        )),
+        Some(&(crate::persona::routine_line(&hirer, chrono::Utc::now()) + &skills)),
     );
     let journal = StoreJournal {
         state: state.clone(),
@@ -149,6 +149,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         effort: coworker.effort,
         system: Some(system.clone()),
         skill_id: None,
+        offered_skills: tools.iter().flat_map(|t| t.offered_skills()).collect(),
         // The hirer's instruction is this turn's question. Journaled like a person's message, so
         // a routine that parks on a card resumes knowing what it was told to do.
         prompt: Some(crate::agui::history::routine_prompt(&run_id, &prompt)),

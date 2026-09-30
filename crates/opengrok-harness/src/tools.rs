@@ -8,6 +8,7 @@
 //! close. Acting on a fragment would mean running a command whose arguments are half-written, so
 //! nothing runs until the closing fragment arrives.
 
+use opengrok_tools::skill::{SkillOffer, SkillSource, USE_SKILL};
 use opengrok_tools::{Executor, ToolCall, ToolContext, ToolResult};
 use opengrok_wire::agui::{Event, EventType};
 
@@ -22,6 +23,8 @@ pub struct ToolRunner {
     /// speaking to the room): every other call is refused in words, never run elsewhere.
     executor: Option<(Executor, ToolContext)>,
     local: Vec<(serde_json::Value, LocalTool)>,
+    /// The skills `use_skill` reads this turn, and where from (#270). `None` offers no tool.
+    skills: Option<(Vec<SkillOffer>, std::sync::Arc<dyn SkillSource>)>,
 }
 
 impl ToolRunner {
@@ -29,6 +32,7 @@ impl ToolRunner {
         Self {
             executor: Some((executor, context)),
             local: Vec::new(),
+            skills: None,
         }
     }
 
@@ -37,6 +41,7 @@ impl ToolRunner {
         Self {
             executor: None,
             local: Vec::new(),
+            skills: None,
         }
     }
 
@@ -46,6 +51,30 @@ impl ToolRunner {
     pub fn with_local(mut self, schema: serde_json::Value, handler: LocalTool) -> Self {
         self.local.push((schema, handler));
         self
+    }
+
+    /// Offer `use_skill` for `offers`, read through `source` — and nothing for none, so the tool
+    /// is on offer exactly when `skills_line` lists a skill (`opengrok_tools::skill`).
+    #[must_use]
+    pub fn with_skills(
+        mut self,
+        offers: Vec<SkillOffer>,
+        source: std::sync::Arc<dyn SkillSource>,
+    ) -> Self {
+        self.skills = (!offers.is_empty()).then_some((offers, source));
+        self
+    }
+
+    /// The skills `use_skill` reads this turn, as a run captures them: its resumes offer these.
+    pub fn offered_skills(&self) -> Vec<opengrok_core::run::OfferedSkill> {
+        let offers = self.skills.iter().flat_map(|(offers, _)| offers);
+        offers.map(Into::into).collect()
+    }
+
+    /// The system message's list of the skills this runner offers, or nothing.
+    pub fn skills_line(&self) -> String {
+        let offers = self.skills.as_ref().map(|(offers, _)| offers.as_slice());
+        opengrok_tools::skill::offered_line(offers.unwrap_or_default())
     }
 
     /// Give this turn the room's shared computer as well: `machine: "group"` on the box tools.
@@ -204,6 +233,11 @@ impl ToolRunner {
             })
             .unwrap_or_default();
         schemas.extend(self.local.iter().map(|(schema, _)| schema.clone()));
+        schemas.extend(
+            self.skills
+                .as_ref()
+                .map(|(offers, _)| opengrok_tools::skill::schema(offers)),
+        );
         schemas
     }
 
@@ -213,6 +247,12 @@ impl ToolRunner {
     pub async fn run_one(&self, call: &ToolCall) -> ToolResult {
         if let Some(handler) = self.local_for(&call.name) {
             return handler(call);
+        }
+        // Before the executor, so no ceiling, grant or approval gates it, ON PURPOSE: it only reads
+        // instructions its owner attached, as the system message already lists them, and it never
+        // raises a card — no approval list may name it (the server's `set_approvals`).
+        if let Some((offers, source)) = self.skills.as_ref().filter(|_| call.name == USE_SKILL) {
+            return opengrok_tools::skill::answer(call, offers, source.as_ref()).await;
         }
         match self.executor.as_ref() {
             Some((executor, context)) => executor.execute(context, call).await,
@@ -415,146 +455,5 @@ pub mod tests_support {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::model::ModelDelta;
-    use crate::projection::Projection;
-
-    fn events_for(deltas: Vec<ModelDelta>) -> Vec<Event> {
-        let mut projection = Projection::new("t1", "r1", 1);
-        let mut events = Vec::new();
-        for delta in deltas {
-            events.extend(projection.push(delta));
-        }
-        events
-    }
-
-    #[test]
-    fn fragments_are_reassembled_into_one_call() {
-        let events = events_for(vec![
-            ModelDelta::ToolCallStart {
-                id: "c1".to_string(),
-                name: "shell".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c1".to_string(),
-                delta: "{\"command\":".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c1".to_string(),
-                delta: "\"ls -la\"}".to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c1".to_string(),
-            },
-        ]);
-        let calls = collect_tool_calls(&events);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "shell");
-        assert_eq!(calls[0].arguments["command"], "ls -la");
-    }
-
-    /// A truncated stream leaves partial JSON. Running it would be acting on half a sentence.
-    #[test]
-    fn an_unterminated_call_is_not_run() {
-        let events = events_for(vec![
-            ModelDelta::ToolCallStart {
-                id: "c1".to_string(),
-                name: "shell".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c1".to_string(),
-                delta: "{\"command\": \"rm -r".to_string(),
-            },
-        ]);
-        assert!(collect_tool_calls(&events).is_empty());
-    }
-
-    #[test]
-    fn several_calls_are_kept_apart_and_in_order() {
-        let events = events_for(vec![
-            ModelDelta::ToolCallStart {
-                id: "c1".to_string(),
-                name: "shell".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c1".to_string(),
-                delta: "{\"command\":\"one\"}".to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c1".to_string(),
-            },
-            ModelDelta::ToolCallStart {
-                id: "c2".to_string(),
-                name: "read_file".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c2".to_string(),
-                delta: "{\"path\":\"/tmp/a\"}".to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c2".to_string(),
-            },
-        ]);
-        let calls = collect_tool_calls(&events);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].arguments["command"], "one");
-        assert_eq!(calls[1].name, "read_file");
-    }
-
-    /// Unparseable arguments must still produce a call, so the executor can refuse it with a
-    /// reason. Dropping it would leave the model waiting for a result that never comes.
-    #[test]
-    fn unparseable_arguments_still_produce_a_call_to_refuse() {
-        let events = events_for(vec![
-            ModelDelta::ToolCallStart {
-                id: "c1".to_string(),
-                name: "shell".to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c1".to_string(),
-                delta: "not json at all".to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c1".to_string(),
-            },
-        ]);
-        let calls = collect_tool_calls(&events);
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].arguments.is_null());
-    }
-
-    #[test]
-    fn a_run_with_no_tool_calls_yields_none() {
-        let events = events_for(vec![ModelDelta::Text("just talking".to_string())]);
-        assert!(collect_tool_calls(&events).is_empty());
-    }
-
-    #[test]
-    fn request_user_form_arguments_drop_smuggled_values() {
-        let events = events_for(vec![
-            ModelDelta::ToolCallStart {
-                id: "c1".to_string(),
-                name: opengrok_tools::REQUEST_USER_FORM.to_string(),
-            },
-            ModelDelta::ToolCallArgs {
-                id: "c1".to_string(),
-                delta: serde_json::json!({
-                    "title": "Sign in",
-                    "fields": [{ "id": "password", "label": "Password", "type": "password" }],
-                    "values": { "password": "s3cret-should-never-land" }
-                })
-                .to_string(),
-            },
-            ModelDelta::ToolCallEnd {
-                id: "c1".to_string(),
-            },
-        ]);
-        let calls = collect_tool_calls(&events);
-        assert_eq!(calls.len(), 1);
-        let dumped = calls[0].arguments.to_string();
-        assert!(!dumped.contains("s3cret-should-never-land"), "{dumped}");
-        assert!(calls[0].arguments.get("values").is_none(), "{dumped}");
-        assert_eq!(calls[0].arguments["title"], "Sign in");
-    }
-}
+#[path = "../tests/unit/tools_tests.rs"]
+mod tests;

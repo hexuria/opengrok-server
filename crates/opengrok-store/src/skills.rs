@@ -9,6 +9,7 @@
 //! Deletion is soft, like a recipe's: a run that cited a skill has to stay able to say what it
 //! cited, and a hard delete would turn that citation into a dangling id.
 
+use opengrok_core::id::CoworkerId;
 use sqlx::Row;
 
 use crate::StoreResult;
@@ -381,5 +382,68 @@ impl PgStore {
                 })
             })
             .collect()
+    }
+
+    /// The skills a coworker's owner attached (#270), deleted ones too, and the `version` a save
+    /// against them names. An id whose row is gone is not among them; no set is none, at 0.
+    ///
+    /// THE SET AND ITS VERSION COME FROM ONE STATEMENT, so they are one snapshot: read apart, a
+    /// save landing between them paired one set with another's version, and the client's next
+    /// conditional save got a 409 for a set it had in fact seen. The rows are then read for
+    /// exactly those ids.
+    pub async fn coworker_skills(
+        &self,
+        coworker: &CoworkerId,
+    ) -> StoreResult<(Vec<SkillRow>, i64)> {
+        let set: Option<(Vec<String>, i64)> = sqlx::query_as(
+            "select skill_ids, version from coworker_skill_set where coworker_id = $1",
+        )
+        .bind(coworker.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+        let (ids, version) = set.unwrap_or_default();
+        if ids.is_empty() {
+            return Ok((Vec::new(), version));
+        }
+        let query = format!("{SKILL_SELECT} where s.id = any($1)");
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+            .bind(&ids)
+            .fetch_all(self.pool())
+            .await?;
+        let rows = rows.iter().map(skill_row).collect::<StoreResult<_>>()?;
+        Ok((rows, version))
+    }
+
+    /// Replace a coworker's attached skills with `ids`, sorted so one set is one array, only while
+    /// they are still at `expected` (any, for `None`): `Ok(None)` when they have moved on, and
+    /// nothing is written. One conditional write, as `set_ceiling`'s: the version is compared on
+    /// the locked row, so two saves from one read cannot both land, and only a change moves it. A
+    /// coworker with no row yet is at 0, and a save naming any other version is refused.
+    pub async fn set_coworker_skills(
+        &self,
+        coworker: &CoworkerId,
+        ids: &[String],
+        expected: Option<i64>,
+        at_ms: i64,
+    ) -> StoreResult<Option<i64>> {
+        let version = sqlx::query_scalar(
+            "insert into coworker_skill_set (coworker_id, skill_ids, version, updated_at_ms)
+             select $1, $2, (cardinality($2) > 0)::int, $3
+              where $4::bigint is null or $4 = 0
+                 or exists (select 1 from coworker_skill_set where coworker_id = $1)
+             on conflict (coworker_id) do update set
+               skill_ids = excluded.skill_ids, updated_at_ms = excluded.updated_at_ms,
+               version = coworker_skill_set.version
+                 + (coworker_skill_set.skill_ids <> excluded.skill_ids)::int
+             where $4 is null or coworker_skill_set.version = $4
+             returning version",
+        )
+        .bind(coworker.as_str())
+        .bind(ids)
+        .bind(at_ms)
+        .bind(expected)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(version)
     }
 }

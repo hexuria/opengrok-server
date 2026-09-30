@@ -108,6 +108,7 @@ async fn abandon_a_run(
             effort: Default::default(),
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt: None,
             limits: Default::default(),
             at_ms: now_ms(),

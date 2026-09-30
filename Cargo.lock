@@ -2284,6 +2284,7 @@ name = "opengrok-plugins"
 version = "0.1.0"
 dependencies = [
  "opengrok-core",
+ "rand 0.10.2",
  "serde",
  "serde_json",
  "tempfile",

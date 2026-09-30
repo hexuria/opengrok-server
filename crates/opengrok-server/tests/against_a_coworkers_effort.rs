@@ -609,6 +609,7 @@ async fn carried_on_after_a_restart(h: &Harness, then: Vec<RunCommand>) -> (Stri
         effort: Effort::High,
         system: None,
         skill_id: None,
+        offered_skills: Vec::new(),
         prompt: Some(vec![
             json!({ "id": "m-person", "role": "user", "content": "summarise the inbox" }),
         ]),

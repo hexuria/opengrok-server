@@ -176,6 +176,12 @@ pub enum RunEvent {
         /// written before this field (`#[serde(default)]`).
         #[serde(default)]
         skill_id: Option<String>,
+        /// The attached skills `system` lists and `use_skill` reads (#270), captured for the
+        /// reason `system` is: a resume offers exactly these, so the tool and the list it opened
+        /// with agree whatever was attached or detached while it waited. Empty on logs written
+        /// before this field, and a resume of one offers none rather than guess from prose.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        offered_skills: Vec<OfferedSkill>,
         /// The person's side of this turn: the AG-UI messages it was asked with that no earlier
         /// turn on the thread already carried, kept exactly as the client sent them so a field we
         /// do not model survives (CLAUDE.md #2). Without it a log is half a conversation — a new
@@ -337,6 +343,8 @@ pub struct Run {
     pub system: Option<String>,
     /// Captured at start. See `RunEvent::Started::skill_id`.
     pub skill_id: Option<String>,
+    /// Captured at start, and what a resume offers. See `RunEvent::Started::offered_skills`.
+    pub offered_skills: Vec<OfferedSkill>,
     /// Captured at start. See `RunEvent::Started::prompt`.
     pub prompt: Option<Vec<Value>>,
     /// Captured at start. See `RunEvent::Started::limits`.
@@ -384,6 +392,7 @@ impl Default for Run {
             effort: Effort::Inherit,
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt: None,
             limits: RunLimits::default(),
             status: RunStatus::Running,
@@ -438,6 +447,14 @@ pub enum RunError {
 /// that keeps taking its process down with it must stop being restarted (#91).
 pub const MAX_RESUMES: u32 = 2;
 
+/// A skill a turn offered `use_skill` for (#270): the id it is read by, and the name the turn's
+/// system message lists it under, which is the name a resume offers it by.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfferedSkill {
+    pub id: String,
+    pub name: String,
+}
+
 /// A person's answer whose call has not started yet: what a resume after a crash between the two
 /// must carry out, rather than have the model ask again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -459,6 +476,8 @@ pub enum RunCommand {
         system: Option<String>,
         /// See `RunEvent::Started::skill_id`.
         skill_id: Option<String>,
+        /// See `RunEvent::Started::offered_skills`.
+        offered_skills: Vec<OfferedSkill>,
         /// See `RunEvent::Started::prompt`.
         prompt: Option<Vec<Value>>,
         /// See `RunEvent::Started::limits`.
@@ -535,6 +554,7 @@ impl Run {
                 effort,
                 system,
                 skill_id,
+                offered_skills,
                 prompt,
                 limits,
                 ..
@@ -546,6 +566,7 @@ impl Run {
                 self.effort = *effort;
                 self.system.clone_from(system);
                 self.skill_id.clone_from(skill_id);
+                self.offered_skills.clone_from(offered_skills);
                 self.prompt.clone_from(prompt);
                 self.limits = *limits;
                 self.status = RunStatus::Running;
@@ -682,6 +703,7 @@ impl Run {
                 effort,
                 system,
                 skill_id,
+                offered_skills,
                 prompt,
                 limits,
                 at_ms,
@@ -692,6 +714,7 @@ impl Run {
                 effort,
                 system,
                 skill_id,
+                offered_skills,
                 prompt,
                 limits,
                 at_ms,
@@ -882,6 +905,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits: Default::default(),
                 at_ms: 1,
@@ -1250,6 +1274,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: Some("You are Ada.".to_string()),
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits: Default::default(),
                 at_ms: 1,
@@ -1269,6 +1294,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits: Default::default(),
                 at_ms: 1,
@@ -1288,6 +1314,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: Some(String::new()),
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits: Default::default(),
                 at_ms: 1,
@@ -1328,6 +1355,7 @@ mod tests {
             effort: Effort::Inherit,
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt: None,
             limits: Default::default(),
             at_ms: 1,
@@ -1426,6 +1454,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits: Default::default(),
                 at_ms: 1,
@@ -1588,6 +1617,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits: Default::default(),
                 at_ms: 1,
@@ -1787,6 +1817,7 @@ mod tests {
             effort: Effort::Inherit,
             system: None,
             skill_id: None,
+            offered_skills: Vec::new(),
             prompt: None,
             limits: Default::default(),
             at_ms: 30,
@@ -1872,6 +1903,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits: Default::default(),
                 at_ms: 1,
@@ -1958,6 +1990,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits: Default::default(),
                 at_ms: 1,
@@ -1998,6 +2031,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: None,
                 limits,
                 at_ms: 1,
@@ -2049,6 +2083,7 @@ mod tests {
                 effort: Effort::Inherit,
                 system: None,
                 skill_id: None,
+                offered_skills: Vec::new(),
                 prompt: Some(vec![asked.clone()]),
                 limits: Default::default(),
                 at_ms: 1,
