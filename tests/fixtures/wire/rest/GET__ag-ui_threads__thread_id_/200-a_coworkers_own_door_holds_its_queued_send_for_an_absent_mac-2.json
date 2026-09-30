@@ -7,10 +7,10 @@
     "runs": [
       {
         "runId": "0199bb4e-0000-7000-8000-000000000002",
-        "status": "failed",
+        "status": "finished",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
-        "failure": "You chose your own subscription, but no proxy address is set; set one in your inference source (like http://127.0.0.1:1447), or switch this turn to the gateway.",
+        "failure": null,
         "finishReason": null,
         "events": [
           {
@@ -28,7 +28,7 @@
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "messageId": "m1",
-            "delta": "hi",
+            "delta": "first",
             "timestamp": 100
           },
           {
@@ -41,11 +41,27 @@
             "type": "CUSTOM",
             "runId": "0199bb4e-0000-7000-8000-000000000002",
             "value": {
-              "via": "loopback",
-              "kind": "local_proxy",
+              "kind": "gateway",
               "model": "gpt-6-luna"
             },
             "threadId": "thr-0199bb4e000070008000000000000001",
+            "timestamp": 100
+          },
+          {
+            "role": "assistant",
+            "type": "TEXT_MESSAGE_START",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_1",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "delta": "from the gateway",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_1",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_END",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_1",
             "timestamp": 100
           },
           {
@@ -65,7 +81,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  1499
+                  3417
                 ]
               },
               "model_ms": [
@@ -82,10 +98,8 @@
             "tool_rounds": 0
           },
           {
-            "code": "plan_unavailable",
-            "type": "RUN_ERROR",
+            "type": "RUN_FINISHED",
             "runId": "0199bb4e-0000-7000-8000-000000000002",
-            "message": "You chose your own subscription, but no proxy address is set; set one in your inference source (like http://127.0.0.1:1447), or switch this turn to the gateway.",
             "threadId": "thr-0199bb4e000070008000000000000001",
             "timestamp": 100
           }
@@ -93,7 +107,53 @@
       }
     ],
     "hiddenRunIds": [],
-    "pendingUserMessages": [],
-    "pendingEvents": []
+    "pendingUserMessages": [
+      {
+        "v": 1,
+        "id": "pum_0199bb4e-0000-7000-8000-000000000003",
+        "threadId": "thr-0199bb4e000070008000000000000001",
+        "content": "then this, on my plan",
+        "replyTo": null,
+        "recipeId": null,
+        "recipeValues": null,
+        "skillId": null,
+        "clientMessageId": "m2",
+        "status": "pending",
+        "createdAtMs": 1790000002000,
+        "updatedAtMs": 1790000002000,
+        "drainedAtMs": null,
+        "drainedRunId": null,
+        "heldFor": "relay_offline"
+      }
+    ],
+    "pendingEvents": [
+      {
+        "type": "CUSTOM",
+        "timestamp": 100,
+        "name": "pending-user-message",
+        "value": {
+          "v": 1,
+          "op": "snapshot",
+          "threadId": "thr-0199bb4e000070008000000000000001",
+          "message": {
+            "v": 1,
+            "id": "pum_0199bb4e-0000-7000-8000-000000000003",
+            "threadId": "thr-0199bb4e000070008000000000000001",
+            "content": "then this, on my plan",
+            "replyTo": null,
+            "recipeId": null,
+            "recipeValues": null,
+            "skillId": null,
+            "clientMessageId": "m2",
+            "status": "pending",
+            "createdAtMs": 1790000002000,
+            "updatedAtMs": 1790000002000,
+            "drainedAtMs": null,
+            "drainedRunId": null,
+            "heldFor": "relay_offline"
+          }
+        }
+      }
+    ]
   }
 }

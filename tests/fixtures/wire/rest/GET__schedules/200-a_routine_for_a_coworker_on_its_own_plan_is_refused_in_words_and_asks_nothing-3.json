@@ -6,9 +6,9 @@
     {
       "id": "sched_0199bb4e-0000-7000-8000-000000000001",
       "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
-      "name": "Standup",
+      "name": "Weekly",
       "cron": "0 0 9 * * 1",
-      "prompt": "summarise the standup notes",
+      "prompt": "write the weekly report",
       "kind": "cron",
       "active": true,
       "nextDueMs": 1790000000000,
@@ -19,10 +19,10 @@
       },
       "lastRun": {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "finished",
+        "status": "failed",
         "startedAtMs": 1790000001000,
         "finishedAtMs": 1790000002000,
-        "summary": "Routine Standup ran: You said: summarise the standup notes. This is the mock door standing in for oag/cheap — no model was called."
+        "summary": "Routine Weekly failed: This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule"
       }
     }
   ]

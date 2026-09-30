@@ -1,57 +1,56 @@
 {
   "method": "GET",
-  "path": "/ag-ui/threads/thr-0199bb4e000070008000000000000001",
+  "path": "/ag-ui/threads/sched_0199bb4e-0000-7000-8000-000000000001",
   "status": 200,
   "body": {
-    "threadId": "thr-0199bb4e000070008000000000000001",
+    "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
     "runs": [
       {
-        "runId": "0199bb4e-0000-7000-8000-000000000002",
+        "runId": "run_0199bb4e-0000-7000-8000-000000000002",
         "status": "failed",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
-        "failure": "You chose your own subscription, but no proxy address is set; set one in your inference source (like http://127.0.0.1:1447), or switch this turn to the gateway.",
+        "failure": "This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule.",
         "finishReason": null,
         "events": [
           {
             "type": "RUN_STARTED",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
-            "threadId": "thr-0199bb4e000070008000000000000001",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_START",
-            "messageId": "m1",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
             "role": "user",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
-            "messageId": "m1",
-            "delta": "hi",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "delta": "write the weekly report",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_END",
-            "messageId": "m1",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
             "timestamp": 100
           },
           {
             "name": "opengrok.inferenceSource",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
             "value": {
-              "via": "loopback",
               "kind": "local_proxy",
               "model": "gpt-6-luna"
             },
-            "threadId": "thr-0199bb4e000070008000000000000001",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           },
           {
             "name": "run-timing",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
             "value": {
               "tools": [],
               "budget": {
@@ -65,7 +64,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  1499
+                  1964
                 ]
               },
               "model_ms": [
@@ -76,17 +75,16 @@
               "tool_wait_ms": 3,
               "auto_review_ms": 3
             },
-            "threadId": "thr-0199bb4e000070008000000000000001",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "total_ms": 3,
             "timestamp": 100,
             "tool_rounds": 0
           },
           {
-            "code": "plan_unavailable",
             "type": "RUN_ERROR",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
-            "message": "You chose your own subscription, but no proxy address is set; set one in your inference source (like http://127.0.0.1:1447), or switch this turn to the gateway.",
-            "threadId": "thr-0199bb4e000070008000000000000001",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "message": "This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule.",
+            "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           }
         ]
