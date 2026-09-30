@@ -7,6 +7,7 @@ pub mod account;
 pub mod connection;
 pub mod coworker;
 pub mod id;
+pub mod inference;
 pub mod limits;
 pub mod monitor;
 pub mod org;

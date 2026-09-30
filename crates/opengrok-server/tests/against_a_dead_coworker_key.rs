@@ -140,6 +140,7 @@ fn a_turn(coworker: &CoworkerId, payer: &AccountId) -> ModelRequest {
         system: None,
         messages: vec![ChatMessage::text("user", "ok")],
         tools: Vec::new(),
+        endpoint: None,
     }
 }
 

@@ -9,6 +9,10 @@
 //! in this crate, in a coworker's row, in a client payload, or in a log (CLAUDE.md #4) — which is
 //! also why `Debug` here is hand-written.
 //!
+//! A PERSON'S OWN PROXY is the one other address (`ModelEndpoint`, CLAUDE.md #4): the same
+//! dialect on this server's loopback, dialled with the client `local_proxy` builds, never with
+//! our key and never on the coworker's pin.
+//!
 //! ON PARSING SSE BY HAND: the wire format is `data: {json}\n\n` with a literal `data: [DONE]`
 //! sentinel, and the fragments that matter are three fields deep. A streaming JSON framework would
 //! be more machinery than the twenty lines below, and the shape is fixed by the OpenAI dialect the
@@ -20,7 +24,9 @@ use std::sync::{Arc, Mutex};
 use futures::{StreamExt, stream};
 use serde::Deserialize;
 
-use crate::model::{ChatMessage, DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
+use crate::model::{
+    ChatMessage, DeltaStream, ModelDelta, ModelDoor, ModelEndpoint, ModelError, ModelRequest,
+};
 
 /// How much of a refused key reaches the log: `oag_live_` plus seven characters, which is exactly
 /// what the gateway stores as `api_key.key_prefix` and therefore exactly what identifies the row.
@@ -43,6 +49,10 @@ pub struct GatewayDoor {
     /// `reqwest::Client::new()` panics on the same TLS or resolver failure the builder reports,
     /// so the door says the gateway cannot be reached, and says it on every call.
     http: Result<reqwest::Client, String>,
+    /// The client for a person's own proxy (`local_proxy::client`): never a redirect, never an
+    /// environment proxy, `localhost` never looked up. A second client, not the gateway's with
+    /// options: the gateway's must keep reaching whatever host an operator named.
+    proxy_http: Result<reqwest::Client, String>,
     /// The last readiness answer and when it was had. See `READY_FOR`.
     ready_seen: Mutex<Option<(std::time::Instant, Probed)>>,
 }
@@ -143,6 +153,7 @@ impl GatewayDoor {
             base_url: base_url.into(),
             key: key.into(),
             http,
+            proxy_http: crate::local_proxy::client(connect, read),
             ready_seen: Mutex::new(None),
         }
     }
@@ -599,6 +610,8 @@ fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
 
 /// The body of one chat completion request. `reasoning_effort` only when the coworker chose one:
 /// absent is how the gateway hears "the route's default", and `none` would switch reasoning off.
+/// The run's tools only when there are any: an empty `tools: []` makes some gateways reject the
+/// request, and "no tools" is a plain chat turn.
 fn chat_body(request: &ModelRequest) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": request.model,
@@ -608,7 +621,74 @@ fn chat_body(request: &ModelRequest) -> serde_json::Value {
     if let Some(effort) = request.effort.reasoning_effort() {
         body["reasoning_effort"] = effort.into();
     }
+    if !request.tools.is_empty() {
+        body["tools"] = serde_json::json!(request.tools);
+        body["tool_choice"] = serde_json::json!("auto");
+    }
     body
+}
+
+/// A person's own proxy, asked the turn (`ModelEndpoint`). The address and the model are asked
+/// again here, whoever built the request: this is the one place every proxy call passes, so
+/// neither a stored address that is not loopback nor a model the terms forbid is sent from any
+/// path — a resume, the wrap-up, a judge. No `user` pin: that is the gateway's affinity.
+async fn to_proxy(
+    http: &Result<reqwest::Client, String>,
+    endpoint: &ModelEndpoint,
+    request: &ModelRequest,
+) -> Result<DeltaStream, ModelError> {
+    let (base_url, auth) = match endpoint {
+        ModelEndpoint::Unavailable(sentence) => return Err(ModelError::Proxy(sentence.clone())),
+        ModelEndpoint::Proxy { base_url, auth } => (base_url, auth),
+    };
+    let base = crate::local_proxy::loopback_base(base_url)
+        .map_err(|why| ModelError::Proxy(format!("Your proxy's address cannot be used: {why}.")))?;
+    opengrok_core::inference::subscription_model(&request.model)
+        .map_err(|why| ModelError::Proxy(format!("This turn was not sent: {why}.")))?;
+    let http = http.as_ref().map_err(|why| {
+        ModelError::Proxy(format!("The client for your proxy could not start: {why}."))
+    })?;
+    let mut ask = http
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&chat_body(request));
+    if let Some((header, key)) = auth {
+        ask = ask.header(header.as_str(), key.as_str());
+    }
+    let response = ask.send().await.map_err(|error| {
+        if error.is_connect() {
+            ModelError::Proxy(
+                "Your proxy could not be reached, so no model was asked. Start it on this \
+                 server's machine, or switch this turn to the gateway."
+                    .to_string(),
+            )
+        } else if error.is_timeout() {
+            ModelError::Proxy("Your proxy did not answer in time.".to_string())
+        } else {
+            ModelError::Stream(error.without_url().to_string())
+        }
+    })?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        // THE UPSTREAM'S OWN WORDS, BOUNDED: they are the fix ("…not supported when using Codex
+        // with a ChatGPT account" means pick another model), and the person's own proxy has no
+        // gateway key or internal address to leak. Its envelope is the gateway's or a bare
+        // `detail`; any other body goes as its first words, unless it is a page of HTML. A 3xx
+        // lands here too: it is not followed, and where it pointed is said to nobody.
+        let body = response.text().await.unwrap_or_default();
+        let said = crate::model::gateway_message(&body).or_else(|| {
+            let body = body.trim();
+            (!body.is_empty() && !body.starts_with('<')).then(|| crate::model::bounded(body))
+        });
+        return Err(ModelError::Proxy(match (status, said) {
+            (_, Some(message)) => format!("Your proxy refused this turn ({status}): {message}"),
+            (401 | 403, None) => format!(
+                "Your proxy refused this turn's key ({status}), so no model was asked. Check the \
+                 key saved with your inference source."
+            ),
+            (_, None) => format!("Your proxy refused this turn ({status})."),
+        }));
+    }
+    Ok(deltas(response))
 }
 
 #[async_trait::async_trait]
@@ -632,6 +712,9 @@ impl ModelDoor for GatewayDoor {
     }
 
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        if let Some(endpoint) = &request.endpoint {
+            return to_proxy(&self.proxy_http, endpoint, &request).await;
+        }
         let mut payload = chat_body(&request);
         // WHICH CONVERSATION THIS IS, so the gateway can pin it to one credential and the
         // provider's prompt cache can actually hit. Omitted when the request carries no
@@ -641,15 +724,6 @@ impl ModelDoor for GatewayDoor {
             && let Some(object) = payload.as_object_mut()
         {
             object.insert("user".to_string(), serde_json::json!(pin));
-        }
-
-        // Advertise the run's tools so the model can call them. Only when there are any — an empty
-        // `tools: []` makes some gateways reject the request, and "no tools" is a plain chat turn.
-        if !request.tools.is_empty()
-            && let Some(object) = payload.as_object_mut()
-        {
-            object.insert("tools".to_string(), serde_json::json!(request.tools));
-            object.insert("tool_choice".to_string(), serde_json::json!("auto"));
         }
 
         // The coworker's own key when it has one; the deployment's otherwise. A key that could not
@@ -711,59 +785,64 @@ impl ModelDoor for GatewayDoor {
                 retry_after_s,
             });
         }
-
-        // Frames can split across chunks, so bytes are buffered and consumed line by line.
-        // Tool-call argument fragments share one parser so a later chunk without `id`
-        // still belongs to the call the first chunk named.
-        let live = Arc::new(Mutex::new(SseState::default()));
-        let body_state = live.clone();
-        let body = response.bytes_stream().flat_map(move |chunk| {
-            let events = match chunk {
-                Err(error) => vec![Err(match send_error(error) {
-                    // A body that stopped arriving is the model going quiet, not a gateway
-                    // that could not be reached: nothing about the connect failed.
-                    ModelError::Unreachable(detail) => ModelError::Stream(detail),
-                    other => other,
-                })],
-                Ok(bytes) => {
-                    let mut state = match body_state.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    state.buffer.push_str(&String::from_utf8_lossy(&bytes));
-                    let mut out = Vec::new();
-                    while let Some(index) = state.buffer.find('\n') {
-                        let line: String = state.buffer.drain(..=index).collect();
-                        match state.parser.push_line(line.trim_end()) {
-                            Ok(deltas) => out.extend(deltas.into_iter().map(Ok)),
-                            Err(error) => out.push(Err(error)),
-                        }
-                    }
-                    out
-                }
-            };
-            stream::iter(events)
-        });
-        let tail = futures::stream::once(async move {
-            let mut state = match live.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let leftover = std::mem::take(&mut state.buffer);
-            let mut out = Vec::new();
-            if !leftover.trim().is_empty() {
-                match state.parser.push_line(leftover.trim_end()) {
-                    Ok(deltas) => out.extend(deltas.into_iter().map(Ok)),
-                    Err(error) => out.push(Err(error)),
-                }
-            }
-            out.extend(state.parser.finish().into_iter().map(Ok));
-            out
-        })
-        .flat_map(stream::iter);
-
-        Ok(Box::pin(body.chain(tail)))
+        Ok(deltas(response))
     }
+}
+
+/// An answered request's body as deltas, from the gateway or a person's proxy alike: both speak
+/// the same OpenAI stream.
+fn deltas(response: reqwest::Response) -> DeltaStream {
+    // Frames can split across chunks, so bytes are buffered and consumed line by line.
+    // Tool-call argument fragments share one parser so a later chunk without `id`
+    // still belongs to the call the first chunk named.
+    let live = Arc::new(Mutex::new(SseState::default()));
+    let body_state = live.clone();
+    let body = response.bytes_stream().flat_map(move |chunk| {
+        let events = match chunk {
+            Err(error) => vec![Err(match send_error(error) {
+                // A body that stopped arriving is the model going quiet, not a gateway
+                // that could not be reached: nothing about the connect failed.
+                ModelError::Unreachable(detail) => ModelError::Stream(detail),
+                other => other,
+            })],
+            Ok(bytes) => {
+                let mut state = match body_state.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                state.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                let mut out = Vec::new();
+                while let Some(index) = state.buffer.find('\n') {
+                    let line: String = state.buffer.drain(..=index).collect();
+                    match state.parser.push_line(line.trim_end()) {
+                        Ok(deltas) => out.extend(deltas.into_iter().map(Ok)),
+                        Err(error) => out.push(Err(error)),
+                    }
+                }
+                out
+            }
+        };
+        stream::iter(events)
+    });
+    let tail = futures::stream::once(async move {
+        let mut state = match live.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let leftover = std::mem::take(&mut state.buffer);
+        let mut out = Vec::new();
+        if !leftover.trim().is_empty() {
+            match state.parser.push_line(leftover.trim_end()) {
+                Ok(deltas) => out.extend(deltas.into_iter().map(Ok)),
+                Err(error) => out.push(Err(error)),
+            }
+        }
+        out.extend(state.parser.finish().into_iter().map(Ok));
+        out
+    })
+    .flat_map(stream::iter);
+
+    Box::pin(body.chain(tail))
 }
 
 #[derive(Default)]

@@ -850,6 +850,7 @@ async fn persist_mcp_ask(
             // No loop ever runs it (`is_mcp_audit_run`): nothing to spend, no turn to think in.
             limits: opengrok_core::limits::RunLimits::default(),
             effort: Default::default(),
+            inference_source: Default::default(),
             at_ms,
         })
         .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;

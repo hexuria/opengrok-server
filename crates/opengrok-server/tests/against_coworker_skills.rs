@@ -1339,6 +1339,7 @@ async fn carried_on_after_a_restart(
         coworker_id: Some(CoworkerId::from_stored(agent.to_string())),
         model: Some("oag/cheap".to_string()),
         effort: Effort::Inherit,
+        inference_source: Default::default(),
         system: None,
         skill_id: None,
         offered_skills: offered,
@@ -1410,7 +1411,7 @@ async fn a_run_carried_on_after_a_restart_offers_the_skills_it_started_with() {
         },
     ];
     // Interrupted between steps (`resume_interrupted_run`), with an answer never carried out
-    // (`resume_suspended_run`), and a log from before the capture.
+    // (`resume_where_it_lives`), and a log from before the capture.
     let cases = [
         ("triage", true, vec![said.clone()]),
         ("sorting", true, answered),

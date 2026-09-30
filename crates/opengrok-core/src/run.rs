@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use crate::coworker::Effort;
 use crate::id::{CoworkerId, RunId};
+use crate::inference::SourceKind;
 use crate::limits::RunLimits;
 
 /// Where a run got to. A run that is `Running` with no process behind it is the interesting case:
@@ -165,6 +166,12 @@ pub enum RunEvent {
         /// before this field, which read as inherit — exactly what those turns sent.
         #[serde(default)]
         effort: Effort,
+        /// Where this turn's model calls go, captured for the reason the pin is: a run parked on
+        /// a card carries on where it started, so a request pinned for the gateway never reaches
+        /// a person's proxy mid-run, nor the reverse. Absent on logs written before this field,
+        /// which read as the gateway — the only place any turn went then.
+        #[serde(default)]
+        inference_source: SourceKind,
         /// The system message this turn opened with. A resume must not recompose it from a
         /// coworker whose role or title moved while a person was answering an approval card —
         /// the turn would change identity halfway through, at the moment somebody intervened.
@@ -339,6 +346,8 @@ pub struct Run {
     pub model: Option<String>,
     /// Captured at start, and what a resume sends. See `RunEvent::Started::effort`.
     pub effort: Effort,
+    /// Captured at start, and where a resume asks. See `RunEvent::Started::inference_source`.
+    pub inference_source: SourceKind,
     /// Captured at start. See `RunEvent::Started::system`.
     pub system: Option<String>,
     /// Captured at start. See `RunEvent::Started::skill_id`.
@@ -390,6 +399,7 @@ impl Default for Run {
             coworker_id: None,
             model: None,
             effort: Effort::Inherit,
+            inference_source: SourceKind::Gateway,
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
@@ -471,6 +481,8 @@ pub enum RunCommand {
         model: Option<String>,
         /// See `RunEvent::Started::effort`.
         effort: Effort,
+        /// See `RunEvent::Started::inference_source`.
+        inference_source: SourceKind,
         /// The composed system message this turn opens with, captured so a resume speaks with
         /// the same identity and standing role the turn began with.
         system: Option<String>,
@@ -552,6 +564,7 @@ impl Run {
                 coworker_id,
                 model,
                 effort,
+                inference_source,
                 system,
                 skill_id,
                 offered_skills,
@@ -564,6 +577,7 @@ impl Run {
                 self.coworker_id = coworker_id.clone();
                 self.model = model.clone();
                 self.effort = *effort;
+                self.inference_source = *inference_source;
                 self.system.clone_from(system);
                 self.skill_id.clone_from(skill_id);
                 self.offered_skills.clone_from(offered_skills);
@@ -701,6 +715,7 @@ impl Run {
                 coworker_id,
                 model,
                 effort,
+                inference_source,
                 system,
                 skill_id,
                 offered_skills,
@@ -712,6 +727,7 @@ impl Run {
                 coworker_id,
                 model,
                 effort,
+                inference_source,
                 system,
                 skill_id,
                 offered_skills,
@@ -903,6 +919,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1272,6 +1289,7 @@ mod tests {
                 coworker_id: None,
                 model: Some("openai/gpt-5.6-luna".to_string()),
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: Some("You are Ada.".to_string()),
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1292,6 +1310,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1312,6 +1331,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: Some(String::new()),
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1353,6 +1373,7 @@ mod tests {
             coworker_id: None,
             model: None,
             effort: Effort::Inherit,
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
@@ -1452,6 +1473,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1615,6 +1637,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1815,6 +1838,7 @@ mod tests {
             coworker_id: None,
             model: None,
             effort: Effort::Inherit,
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
@@ -1901,6 +1925,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1988,6 +2013,7 @@ mod tests {
                 coworker_id: None,
                 model: Some("openai/gpt-5.5".to_string()),
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -2029,6 +2055,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -2081,6 +2108,7 @@ mod tests {
                 coworker_id: None,
                 model: None,
                 effort: Effort::Inherit,
+                inference_source: Default::default(),
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),

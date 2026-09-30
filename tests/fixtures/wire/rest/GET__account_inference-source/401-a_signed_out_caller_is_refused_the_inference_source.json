@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/account/inference-source",
+  "status": 401,
+  "body": {
+    "error": "sign in to see your inference source"
+  }
+}

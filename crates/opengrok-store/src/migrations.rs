@@ -1143,6 +1143,8 @@ create index if not exists pending_user_message_thread_idx
 create unique index if not exists pending_user_message_client_idx
     on pending_user_message (account_id, thread_id, client_message_id)
     where client_message_id is not null;
+-- The send's own source pick, so the turn that drains it later, or on another machine, asks there.
+alter table pending_user_message add column if not exists inference_source text;
 
 -- Unused since the `credential.request` broker flow was deleted: nothing writes or reads it.
 -- Kept only so a boot does not drop rows an older build wrote. It never held a password.

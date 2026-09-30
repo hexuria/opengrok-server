@@ -1,9 +1,11 @@
 //! The model door, and what comes back through it.
 //!
-//! EVERY MODEL CALL EXITS THROUGH open-ai-gateway (CLAUDE.md #4). A coworker's pin
-//! (`xai/grok-4.6@sub`) is a route, not a key: the gateway holds the provider credentials and we
-//! hold an `oag_live_` key that says who is asking. Nothing in this crate ever sees a provider
-//! secret, and `ModelRequest` deliberately has nowhere to put one.
+//! EVERY MODEL CALL EXITS THROUGH open-ai-gateway (CLAUDE.md #4), except a person's own-subscription
+//! turn, which goes to their proxy on this server's loopback when they choose it (`ModelEndpoint`).
+//! A coworker's pin (`xai/grok-4.6@sub`) is a route, not a key: the gateway holds the provider
+//! credentials and we hold an `oag_live_` key that says who is asking; the proxy holds the person's
+//! provider sign-in itself. Nothing in this crate ever sees a provider secret, and `ModelRequest`
+//! deliberately has nowhere to put one.
 //!
 //! `ModelDelta` is provider-neutral on purpose. It is the vocabulary the projection consumes, so a
 //! second door — a recorded fixture in a test, or a provider the gateway does not route — plugs in
@@ -98,6 +100,36 @@ impl std::fmt::Debug for GatewayKey {
     }
 }
 
+/// Where ONE request goes when it is not the gateway: a person's own subscription, through the
+/// OpenAI-compatible proxy on this server's loopback (`local_proxy`). `Unavailable` is the
+/// fail-closed half, as it is for `GatewayKey`: the person chose their own subscription and it
+/// cannot be used as set, so the door refuses with this sentence rather than send the turn
+/// anywhere else — never quietly to the gateway, which would bill a key they chose not to use.
+///
+/// `auth` is the header the proxy reads its key from, and the key: the person's own, sealed in the
+/// vault, never the gateway's. Redacted `Debug`, no `Serialize`, for the reason `GatewayKey` has.
+#[derive(Clone, PartialEq, Eq)]
+pub enum ModelEndpoint {
+    Proxy {
+        base_url: String,
+        auth: Option<(String, String)>,
+    },
+    Unavailable(String),
+}
+
+impl std::fmt::Debug for ModelEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Proxy { base_url, auth } => write!(
+                f,
+                "ModelEndpoint::Proxy({base_url}, key: {})",
+                if auth.is_some() { "<redacted>" } else { "none" }
+            ),
+            Self::Unavailable(reason) => write!(f, "ModelEndpoint::Unavailable({reason:?})"),
+        }
+    }
+}
+
 /// What we ask the door for.
 #[derive(Debug, Clone, Default)]
 pub struct ModelRequest {
@@ -132,6 +164,10 @@ pub struct ModelRequest {
     /// from the gateway's catalogue or `OG_CONTEXT_TOKENS`. `None` ⇒ unknown, and the harness
     /// only counts. Never sent: the door builds its body field by field (#90).
     pub context_tokens: Option<u64>,
+    /// Not the gateway: a person's own proxy, when their turn chose it. `None` is the gateway,
+    /// which is every request but those. Filled where `gateway_key` is, and on a proxy turn
+    /// `gateway_key` is `None` and `model` is the proxy's own id, never the coworker's pin.
+    pub endpoint: Option<ModelEndpoint>,
 }
 
 /// One message of a conversation, in the OpenAI chat dialect the gateway speaks.
@@ -260,6 +296,11 @@ pub enum ModelError {
     /// transcript reads exactly as it did when there was one variant.
     #[error("{0}")]
     Held(String),
+    /// A person's own proxy refused the call or could not be reached, or their source cannot be
+    /// used as set. Already a sentence, and one that names the proxy: the gateway's sentences
+    /// would send somebody whose proxy is not running off to check a gateway key.
+    #[error("{0}")]
+    Proxy(String),
 }
 
 impl ModelError {
@@ -285,9 +326,10 @@ impl ModelError {
                 retry_after_s,
             } => refused_sentence(*status, body, *retry_after_s),
             Self::Stream(detail) => format!("The model's answer broke off: {}", bounded(detail)),
-            Self::TimedOut(sentence) | Self::SpendCap(sentence) | Self::Held(sentence) => {
-                sentence.clone()
-            }
+            Self::TimedOut(sentence)
+            | Self::SpendCap(sentence)
+            | Self::Held(sentence)
+            | Self::Proxy(sentence) => sentence.clone(),
         }
     }
 
@@ -333,14 +375,17 @@ fn error_kind(body: &str) -> String {
 }
 
 /// The gateway's own words for why, when they are words: `error.message` from the envelope, or
-/// a short plain-text body. Never JSON and never a page of HTML.
-fn gateway_message(body: &str) -> Option<String> {
+/// a short plain-text body. Never JSON and never a page of HTML. `detail` too, which is how the
+/// ChatGPT backend behind a person's proxy says it ("…not supported when using Codex with a
+/// ChatGPT account").
+pub(crate) fn gateway_message(body: &str) -> Option<String> {
     let trimmed = body.trim();
     let message = match serde_json::from_str::<serde_json::Value>(trimmed) {
         Ok(value) => value["error"]["message"]
             .as_str()
             .or_else(|| value["error"].as_str())
             .or_else(|| value["message"].as_str())
+            .or_else(|| value["detail"].as_str())
             .map(str::to_string)?,
         Err(_) if trimmed.starts_with('<') || trimmed.starts_with('{') => return None,
         Err(_) => trimmed.to_string(),

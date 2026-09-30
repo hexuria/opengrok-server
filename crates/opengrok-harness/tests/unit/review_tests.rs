@@ -171,6 +171,71 @@ async fn the_judge_asks_on_its_own_route_with_no_tools() {
     assert!(request.messages[0].content.contains("(none)"));
 }
 
+/// A JUDGE ASKS WHERE ITS TURN ASKS. Raised inside a turn a person's own subscription answers,
+/// it goes to that proxy on the turn's model with no gateway key; raised anywhere else it is the
+/// deployment's judge, on its own route and the coworker's key, as it always was.
+#[tokio::test]
+async fn a_judge_raised_on_a_proxy_turn_asks_that_proxy_and_never_the_gateway() {
+    let door = Arc::new(SpyDoor {
+        seen: Mutex::new(None),
+    });
+    let judge = ModelJudge::new(door.clone(), "oag/judge-route").for_coworker(
+        "cw_ada",
+        "acct_ada",
+        Some(GatewayKey::new("oag_live_coworker")),
+    );
+    let proxy = ModelEndpoint::Proxy {
+        base_url: "http://127.0.0.1:8080".to_string(),
+        auth: None,
+    };
+    let turn = ModelRequest {
+        model: "gpt-5.5".to_string(),
+        endpoint: Some(proxy.clone()),
+        ..ModelRequest::default()
+    };
+    let (verdict, _) = time_auto_review(judge.judge(ask()), &turn).await;
+    assert_eq!(verdict, ReviewVerdict::Block);
+    let asked = door
+        .seen
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the door was asked");
+    assert_eq!(asked.endpoint, Some(proxy));
+    assert_eq!(
+        asked.model, "gpt-5.5",
+        "the proxy's model, not the gateway route"
+    );
+    assert!(
+        asked.gateway_key.is_none(),
+        "no gateway key leaves for a proxy"
+    );
+
+    // A gateway turn's judge, and one raised outside any turn, are the deployment's.
+    let gateway_turn = ModelRequest::default();
+    let (_, _) = time_auto_review(judge.judge(ask()), &gateway_turn).await;
+    let asked = door
+        .seen
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the door was asked");
+    assert_eq!(asked.endpoint, None);
+    assert_eq!(asked.model, "oag/judge-route");
+    assert!(asked.gateway_key.is_some());
+    judge.judge(ask()).await;
+    let asked = door
+        .seen
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the door was asked");
+    assert_eq!(
+        (asked.endpoint, asked.model.as_str()),
+        (None, "oag/judge-route")
+    );
+}
+
 /// A door that never yields is a timeout, which is `Unavailable`.
 struct HangingDoor;
 #[async_trait::async_trait]

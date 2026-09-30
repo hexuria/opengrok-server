@@ -351,21 +351,6 @@ pub async fn key_for(
     }
 }
 
-/// `key_for` for the paths that may not have a coworker (a plain AG-UI run).
-pub async fn key_for_opt(
-    state: &AgUiState,
-    coworker_id: Option<&CoworkerId>,
-    actor: Option<&AccountId>,
-) -> Option<GatewayKey> {
-    match (coworker_id, actor) {
-        (Some(coworker_id), Some(actor)) => key_for(state, coworker_id, actor).await,
-        // No coworker, or nobody named: the deployment's key, unmetered. `/ag-ui` refuses an
-        // unsigned turn and bounds a coworker-less one per account (`budget::AGUI_UNSCOPED`);
-        // inventing a payer here would put a stranger's turn on somebody's pool.
-        _ => None,
-    }
-}
-
 /// Money as the gateway writes it ("12.345678", up to six decimals, no sign) in micro-dollars,
 /// so two amounts compare exactly. `None` for anything else — a limit that does not parse is
 /// refused at the door it came in through, never stored.
@@ -1104,7 +1089,9 @@ impl ModelDoor for GuardedDoor {
     }
 
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
-        let Some(scope) = request.spend_scope.clone() else {
+        // A PERSON'S OWN SUBSCRIPTION IS NOT THE GATEWAY'S TO METER: no ledger bills it, no cap
+        // holds it, and a proxy's 401 is never booked against a gateway key.
+        let (Some(scope), None) = (request.spend_scope.clone(), &request.endpoint) else {
             return self.inner.stream(request).await;
         };
         let coworker = CoworkerId::from_stored(scope);

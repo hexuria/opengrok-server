@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account/inference-source",
+  "status": 400,
+  "body": {
+    "error": "baseUrl: \"10.0.0.5\" is not this machine; give the address of the proxy on this server's own machine, with no path, like http://127.0.0.1:1447"
+  }
+}

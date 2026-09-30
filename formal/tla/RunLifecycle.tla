@@ -13,7 +13,7 @@
 EXTENDS Naturals
 
 CONSTANTS
-    LeaseOnResume,     \* continue_run / resume_suspended_run hold a recovery Lease
+    LeaseOnResume,     \* continue_run / resume_where_it_lives hold a recovery Lease
     StopBeforeApproved,\* resume_conversation asks `stopped` before running the approved call
     EndedMeansStop,    \* the journal's `stopped` answers for ANY terminal status, not only Stopped
     RetryAttaches,     \* a POST whose run already exists replays it instead of running a loop

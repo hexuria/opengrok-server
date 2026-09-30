@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/models",
+  "status": 400,
+  "body": {
+    "error": "source must be \"gateway\" or \"local_proxy\""
+  }
+}

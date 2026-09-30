@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account/inference-source",
+  "status": 503,
+  "body": {
+    "error": "this server has no vault (OG_CREDENTIAL_KEK) to keep your proxy's key in, so nothing was saved; save the setting without a key, or ask whoever runs this server to set one"
+  }
+}

@@ -42,6 +42,17 @@
         "timestamp": 100
       },
       {
+        "name": "opengrok.inferenceSource",
+        "type": "CUSTOM",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "value": {
+          "kind": "gateway",
+          "model": "oag/cheap"
+        },
+        "threadId": "thr-0199bb4e-0000-7000-8000-000000000002",
+        "timestamp": 100
+      },
+      {
         "type": "TOOL_CALL_START",
         "timestamp": 100,
         "toolCallId": "mock-call-1",

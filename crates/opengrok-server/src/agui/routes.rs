@@ -23,11 +23,12 @@ use super::provision;
 use crate::auth::AuthState;
 use opengrok_core::coworker::{CoworkerCommand, CoworkerView, Effort};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
+use opengrok_core::inference::SourceKind;
 use opengrok_core::limits::RunLimits;
 use opengrok_core::run::{OfferedSkill, RunCommand, RunStatus, RunView};
 use opengrok_harness::{
     ChatMessage, EventSink, ModelDoor, ModelRequest, RunBudget, RunContext, ToolRunner,
-    run_conversation_within,
+    local_proxy, run_conversation_within,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -991,38 +992,56 @@ pub fn router(state: AgUiState) -> Router {
 pub async fn list_models(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
 ) -> Response {
-    if account_from_bearer(&state, &headers).is_none() {
+    let Some(account) = account_from_bearer(&state, &headers) else {
         return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    }
-    let Some(catalogue) = state.auth.model_catalogue.clone() else {
+    };
+    let source = query.get("source").map(|word| serde_json::json!(word));
+    let asked = match crate::inference::named(source.as_ref(), "source") {
+        Ok(asked) => asked,
+        Err(refusal) => return *refusal,
+    };
+    let mut listing = match (asked, state.auth.model_catalogue.clone()) {
+        (Some(SourceKind::LocalProxy), _) => serde_json::json!({ "models": [], "note": null }),
         // A mock door has no gateway to ask. Say that, rather than answering [] as though the
         // gateway had told us it serves nothing.
-        return Json(serde_json::json!({
+        (_, None) => serde_json::json!({
             "models": [],
             "note": "this deployment has no gateway configured (OG_MODEL_DOOR is a mock), so a \
                      pin must be typed by hand",
-        }))
-        .into_response();
+        }),
+        (_, Some(catalogue)) => {
+            let listing = catalogue.list().await;
+            let points = crate::points::models_points(&state).await;
+            serde_json::json!({
+                "models": listing
+                    .models
+                    .iter()
+                    .map(|model| serde_json::json!({
+                        "id": model.id,
+                        // Points multipliers (`points.rs`): null on a gateway with no reference
+                        // price or older than open-ai-gateway #52; the picker shows ×N after the id.
+                        "points": crate::points::points_json(
+                            points.as_ref().and_then(|p| p.get(crate::points::base_model(&model.id))),
+                        ),
+                        "source": "gateway",
+                    }))
+                    .collect::<Vec<_>>(),
+                "note": listing.note,
+            })
+        }
     };
-    let listing = catalogue.list().await;
-    let points = crate::points::models_points(&state).await;
-    Json(serde_json::json!({
-        "models": listing
-            .models
-            .iter()
-            .map(|model| serde_json::json!({
-                "id": model.id,
-                // Points multipliers (`points.rs`): null on a gateway with no reference price
-                // or older than open-ai-gateway #52; the picker shows ×N after the id.
-                "points": crate::points::points_json(
-                    points.as_ref().and_then(|p| p.get(crate::points::base_model(&model.id))),
-                ),
-            }))
-            .collect::<Vec<_>>(),
-        "note": listing.note,
-    }))
-    .into_response()
+    // Whenever an address is stored, whatever the setting's kind: the proxy's models beside the
+    // gateway's, and `localProxy.healthy`, so a picker can say why they are missing.
+    let listing_local = asked != Some(SourceKind::Gateway);
+    if let Some((healthy, local)) = local_proxy::listed(&state, &account, listing_local).await {
+        if let Some(models) = listing["models"].as_array_mut() {
+            models.extend(local);
+        }
+        listing["localProxy"] = serde_json::json!({ "healthy": healthy });
+    }
+    Json(listing).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -2667,6 +2686,12 @@ pub async fn run(
             "a turn needs a signed-in caller; sign in and send it again"
         });
     };
+    // A source the turn names that cannot be honoured refuses before anything is charged or drained.
+    let named = input.forwarded_props.get("inferenceSource");
+    let chosen_source = match crate::inference::named(named, "inferenceSource") {
+        Ok(chosen) => chosen,
+        Err(refusal) => return *refusal,
+    };
     // A named caller with no coworker has a payer but no key of its own to meter it, so it runs
     // on the deployment's key: bounded per account instead. Charged BEFORE the queued send below
     // is drained, so a refusal here never costs the person a queued message — and refunded when
@@ -2770,13 +2795,16 @@ pub async fn run(
         return refusal;
     }
 
-    // Refuse stale sends before interrupting a parked turn or preparing any model work.
+    // Refuse stale sends before interrupting a parked turn or preparing any model work. A queued
+    // send's own source pick wins: it is what the person chose when they queued it.
+    let mut chosen_source = chosen_source;
     if let Some(account) = &account_id {
-        if let Err(refusal) =
-            crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await
-        {
-            refund_unscoped(&state, unscoped_charge.as_deref());
-            return refusal;
+        match crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await {
+            Ok(queued) => chosen_source = queued.or(chosen_source),
+            Err(refusal) => {
+                refund_unscoped(&state, unscoped_charge.as_deref());
+                return refusal;
+            }
         }
     } else if crate::agui::pending::pending_id_from(&input).is_some() {
         return unauthorized("sign in to send a queued message");
@@ -2791,8 +2819,7 @@ pub async fn run(
         input,
         account_id,
         run_coworker,
-        model,
-        effort,
+        (model, effort, chosen_source),
         coworker_name,
         coworker_role,
         unscoped_charge,
@@ -2840,8 +2867,8 @@ async fn start_claimed_turn(
     input: RunAgentInput,
     account_id: Option<opengrok_core::id::AccountId>,
     run_coworker: Option<CoworkerId>,
-    model: String,
-    effort: Effort,
+    // What the turn thinks with: the coworker's pin and effort, and the source it named.
+    (model, effort, chosen_source): (String, Effort, Option<SourceKind>),
     coworker_name: String,
     coworker_role: Option<String>,
     unscoped_charge: Option<String>,
@@ -3054,20 +3081,12 @@ async fn start_claimed_turn(
         .await;
     }
 
-    let request = ModelRequest {
-        gateway_key: crate::spend::key_for_opt(&state, run_coworker.as_ref(), account_id.as_ref())
-            .await,
-        spend_scope: run_coworker.as_ref().map(|c| c.as_str().to_string()),
-        // No coworker ⇒ no scope, and the guard lets it through on the deployment's key; `run`
-        // has already bounded that per account (`budget::AGUI_UNSCOPED`).
-        spend_actor: account_id.as_ref().map(|a| a.as_str().to_string()),
-        context_tokens: state.context_for(&model).await,
-        model,
-        effort,
-        system: system.clone(),
-        messages,
-        tools: Vec::new(),
-    };
+    // Where it asks: its own word over the account's setting (`turn_request` says what follows).
+    let route = local_proxy::route(&state, account_id.as_ref(), chosen_source, None).await;
+    let source = route.kind();
+    let who = (run_coworker.as_ref(), account_id.as_ref());
+    let thinks = (route, model, effort);
+    let request = turn_request(&state, who, thinks, system.clone(), messages).await;
 
     // The journal writes each round to Postgres before the next model call, and stamps the run's
     // owner so only they can read it back. A run that cannot be recorded fails inside the loop
@@ -3079,6 +3098,7 @@ async fn start_claimed_turn(
         coworker_id: run_coworker,
         model: Some(request.model.clone()),
         effort,
+        inference_source: source,
         system,
         skill_id: recorded_skill,
         offered_skills: tools.iter().flat_map(ToolRunner::offered_skills).collect(),
@@ -3145,6 +3165,41 @@ async fn start_claimed_turn(
     }))
 }
 
+/// A turn's request on the route it asks (`local_proxy::route`): on a person's own proxy the
+/// proxy's model and NO gateway key, not even minted late for a turn the gateway never sees; else
+/// the pin, and the key whose cap it counts against. `who` is the coworker whose spend it is and
+/// the account that pays.
+pub(crate) async fn turn_request(
+    state: &AgUiState,
+    (coworker, account): (Option<&CoworkerId>, Option<&AccountId>),
+    (route, pin, effort): (local_proxy::Route, String, Effort),
+    system: Option<String>,
+    messages: Vec<ChatMessage>,
+) -> ModelRequest {
+    let (model, endpoint) = route.asked(pin);
+    let gateway_key = match (&endpoint, coworker, account) {
+        (None, Some(coworker), Some(account)) => {
+            crate::spend::key_for(state, coworker, account).await
+        }
+        // No coworker, or nobody named: the deployment's key, unmetered. `/ag-ui` refuses an
+        // unsigned turn and bounds a coworker-less one per account (`budget::AGUI_UNSCOPED`);
+        // inventing a payer would put a stranger's turn on somebody's pool.
+        _ => None,
+    };
+    ModelRequest {
+        gateway_key,
+        spend_scope: coworker.map(|c| c.as_str().to_string()),
+        spend_actor: account.map(|a| a.as_str().to_string()),
+        context_tokens: state.context_for(&model).await,
+        model,
+        effort,
+        system,
+        messages,
+        tools: Vec::new(),
+        endpoint,
+    }
+}
+
 /// The event store, as the harness's journal.
 ///
 /// The harness owns *when* to write (before the next model call); this owns *where*. Keeping them
@@ -3163,6 +3218,8 @@ pub struct StoreJournal {
     pub model: Option<String>,
     /// How hard this turn thinks, captured with the pin and for the same reason.
     pub effort: Effort,
+    /// Where this turn asks, captured with the pin and for the same reason.
+    pub inference_source: SourceKind,
     /// The composed system message this turn opened with, captured for the same reason as the
     /// pin: a role edited while a person answered an approval card must not change the coworker
     /// halfway through the turn.
@@ -3203,7 +3260,7 @@ impl opengrok_harness::RunJournal for StoreJournal {
         events: &[Event],
         spent: &opengrok_core::run::RoundSpent,
     ) -> Result<(), opengrok_harness::JournalError> {
-        append_events(&self.state, run_id, &self.run_start(), events, spent)
+        append_events(self, run_id, events, spent)
             .await
             .map_err(|error| match error {
                 AppendError::Ended => opengrok_harness::JournalError::Ended(format!(
@@ -3330,22 +3387,6 @@ impl StoreJournal {
 }
 
 impl StoreJournal {
-    fn run_start(&self) -> RunStart<'_> {
-        RunStart {
-            thread_id: &self.thread_id,
-            account_id: self.account_id.as_ref(),
-            coworker_id: self.coworker_id.as_ref(),
-            model: self.model.as_deref(),
-            effort: self.effort,
-            system: self.system.as_deref(),
-            skill_id: self.skill_id.as_deref(),
-            offered_skills: &self.offered_skills,
-            prompt: self.prompt.as_deref(),
-            limits: self.limits,
-            generation: self.generation,
-        }
-    }
-
     /// Start `run_id` for this turn. `Ok(false)` is a run that already exists, from an earlier
     /// POST with the same id or one racing this one: not this turn's to run.
     pub async fn claim(&self, run_id: &str) -> Result<bool, opengrok_store::StoreError> {
@@ -3356,7 +3397,7 @@ impl StoreJournal {
         }
         let at_ms = now_ms();
         let started = run
-            .decide(start_command(&self.run_start(), at_ms))
+            .decide(start_command(self, at_ms))
             .map_err(|error| opengrok_store::StoreError::Corrupt(error.to_string()))?;
         for event in &started {
             run.apply(event);
@@ -3382,28 +3423,23 @@ impl StoreJournal {
     }
 }
 
-/// The `Start` a run records about itself: whose turn, and what it opened with.
-fn start_command(start: &RunStart<'_>, at_ms: i64) -> RunCommand {
+/// The `Start` a run records about itself: whose turn, and what it opened with — the journal's
+/// own fields, which are one fact and only ever travel together.
+fn start_command(start: &StoreJournal, at_ms: i64) -> RunCommand {
+    let trimmed = |text: &Option<String>| {
+        let text = text.as_deref().map(str::trim);
+        text.filter(|text| !text.is_empty()).map(str::to_string)
+    };
     RunCommand::Start {
-        thread_id: start.thread_id.to_string(),
-        coworker_id: start.coworker_id.cloned(),
-        model: start
-            .model
-            .map(str::trim)
-            .filter(|pin| !pin.is_empty())
-            .map(str::to_string),
+        thread_id: start.thread_id.clone(),
+        coworker_id: start.coworker_id.clone(),
+        model: trimmed(&start.model),
         effort: start.effort,
-        system: start
-            .system
-            .map(str::to_string)
-            .filter(|text| !text.is_empty()),
-        skill_id: start
-            .skill_id
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string),
-        offered_skills: start.offered_skills.to_vec(),
-        prompt: start.prompt.map(<[serde_json::Value]>::to_vec),
+        inference_source: start.inference_source,
+        system: start.system.clone().filter(|text| !text.is_empty()),
+        skill_id: trimmed(&start.skill_id),
+        offered_skills: start.offered_skills.clone(),
+        prompt: start.prompt.clone(),
         limits: start.limits,
         at_ms,
     }
@@ -3421,19 +3457,18 @@ const APPEND_ATTEMPTS: usize = 5;
 /// button was pressed left the log. Any other error may be a commit whose reply was lost: writing
 /// it again would log the round twice (`formal/tla/JournalAppend.tla`).
 async fn append_events(
-    state: &AgUiState,
+    start: &StoreJournal,
     run_id: &str,
-    start: &RunStart<'_>,
     events: &[Event],
     spent: &opengrok_core::run::RoundSpent,
 ) -> Result<(), AppendError> {
     for _ in 1..APPEND_ATTEMPTS {
-        match append_events_once(state, run_id, start, events, spent).await {
+        match append_events_once(start, run_id, events, spent).await {
             Err(AppendError::Store(opengrok_store::StoreError::Conflict)) => continue,
             other => return other,
         }
     }
-    append_events_once(state, run_id, start, events, spent).await
+    append_events_once(start, run_id, events, spent).await
 }
 
 /// Why a batch was not written.
@@ -3453,36 +3488,16 @@ impl From<opengrok_store::StoreError> for AppendError {
     }
 }
 
-/// What a run records about itself at its first batch. A struct rather than five more
-/// parameters: these are one fact — whose turn this is and what it opened with — and they are
-/// only ever passed together.
-struct RunStart<'a> {
-    thread_id: &'a str,
-    account_id: Option<&'a opengrok_core::id::AccountId>,
-    coworker_id: Option<&'a CoworkerId>,
-    model: Option<&'a str>,
-    effort: Effort,
-    system: Option<&'a str>,
-    skill_id: Option<&'a str>,
-    offered_skills: &'a [OfferedSkill],
-    prompt: Option<&'a [serde_json::Value]>,
-    limits: RunLimits,
-    generation: u32,
-}
-
-/// One attempt: read the run, decide what this batch appends, write it at the seq it read.
+/// One attempt: read the run, decide what this batch appends, write it at the seq it read. `start`
+/// is what the run records about itself at its first batch.
 async fn append_events_once(
-    state: &AgUiState,
+    start: &StoreJournal,
     run_id: &str,
-    start: &RunStart<'_>,
     events: &[Event],
     spent: &opengrok_core::run::RoundSpent,
 ) -> Result<(), AppendError> {
-    let RunStart {
-        thread_id,
-        account_id,
-        ..
-    } = *start;
+    let (state, thread_id, account_id) =
+        (&start.state, &start.thread_id, start.account_id.as_ref());
     if events.is_empty() {
         return Ok(());
     }
@@ -4969,146 +4984,26 @@ async fn continue_run(
     // still running (`formal/tla/RunLifecycle.tla` NoFalseFailure: TLC's trace is park,
     // answer, sweep). Held before anything is loaded, so no early return runs unleased.
     let _lease = crate::recovery::Lease::new(crate::recovery::hold(state.clone(), run_id.clone()));
-    let Ok((run, _)) = state.auth.store.load_run(&run_id).await else {
-        tracing::warn!(run = %run_id, "could not load an answered run to continue it");
-        return;
-    };
-    // THE GENERATION IS THE ONE THE ANSWER WAS GIVEN UNDER, not the one found at load. A
-    // continuation that stalls past a lease before it loads would otherwise read the generation
-    // the sweep resumed into and write under it, beside the sweep's own loop (`AnswerCommit`
-    // takes `loopGen` at the answer in `RunLifecycle.tla`).
-    if run.generation != generation {
-        tracing::warn!(run = %run_id, "an answered run was carried on by the sweep first");
-        return;
-    }
+    // EVERY EARLY RETURN LEAVES THE RUN FOR THE SWEEP: the answer is durable, and a run answered
+    // and unfinished is carried on there (#91). The coworker is the run's own.
+    let (run, coworker_id, coworker, limits) =
+        match super::resume::loaded(&state, &account_id, (&run_id, generation), None).await {
+            Ok(Some(loaded)) => loaded,
+            Ok(None) => return,
+            Err(why) => {
+                tracing::warn!(run = %run_id, why, "an answered run could not be continued");
+                return;
+            }
+        };
 
-    // The coworker whose tools these are. Without it there is nothing to continue *as*.
-    let Some(coworker_id) = run.coworker_id.clone() else {
-        tracing::warn!(run = %run_id, "an answered run has no coworker, so it cannot continue");
-        return;
-    };
-    let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await else {
-        return;
-    };
-    // What the run captured, under its org's ceiling as it stands now. Left for the sweep when
-    // the ceiling cannot be read, as every other early return here is.
-    let Some(limits) = run_limits(&state, &account_id, Some(&coworker_id), run.limits).await else {
-        return;
-    };
-
-    // The answered call, and only it — carried on the SAME runner every other path builds
-    // (plugins, the user's machine, auto-review). This path once built a bare executor of its
-    // own and so resumed with no plugins and no review: a resumed call slipped every gate but the
-    // grant's. Which yes it was decides which gate it releases.
-    //
-    // A refusal releases a gate it will not walk through, which is deliberate and is what the
-    // gateway's resume does too: `resume_conversation` never dispatches a refused call, it writes
-    // the refusal where the tool's result would have gone. Gating on the outcome here as well
-    // would be a second place to keep the same rule, and the place that already keeps it is the
-    // one that runs the call.
-    let (gate_yes, review_yes): (&[String], &[String]) = match answered.reason {
-        opengrok_core::run::SuspendReason::AutoReview => {
-            (&[], std::slice::from_ref(&answered.call_id))
-        }
-        _ => (std::slice::from_ref(&answered.call_id), &[]),
-    };
-    let Some(runner) = tools_for_coworker(
-        &state,
-        &account_id,
-        &coworker_id,
-        gate_yes,
-        review_yes,
-        TURN_WAKE_PATIENCE,
-    )
-    .await
-    else {
+    let who = (&account_id, &coworker_id);
+    let at = (&run_id, &run, generation, limits);
+    let answer = (answered, resumed_seq, outcome);
+    let carried = super::resume::carry_out_answer(&state, who, at, &coworker, answer);
+    let Some(events) = carried.await else {
         tracing::warn!(run = %run_id, "an answered run has no tools to continue with");
         return;
     };
-    // A YES on a leave-box action is the person's consent to leave through the tunnel for the
-    // rest of this run: one card per run, not one per click. A no is not: this once consented on
-    // any answer, so a Deny on the tunnel card let the model's next screen action through with
-    // no card at all (21 Sep 2026).
-    let runner = runner
-        .with_egress_consented(
-            matches!(outcome, opengrok_harness::ResumeOutcome::Approved)
-                && answered.reason == opengrok_core::run::SuspendReason::AutoReview
-                && opengrok_tools::needs_egress_consent(&answered.tool, &answered.arguments),
-        )
-        // Every judge failure parks the run, so only its journal can count them in a row (#201).
-        .with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted));
-    // The skills the captured system message lists, and no others (#270).
-    let runner = crate::skills::onto_captured(&state, &account_id, runner, &run.offered_skills);
-
-    // The system message this turn OPENED with, not a fresh composition: a role edited while the
-    // person was answering the card must not change the coworker halfway through. A run journalled
-    // before this was captured has none and composes identity+role, matching the desktop resume.
-    let system = match run.system_for_resume() {
-        Some(captured) => captured,
-        None => crate::persona::system_message(
-            &coworker.name,
-            &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
-            None,
-        ),
-    };
-
-    let journal = StoreJournal {
-        state: state.clone(),
-        thread_id: run.thread_id.clone(),
-        account_id: Some(account_id.clone()),
-        coworker_id: run.coworker_id.clone(),
-        model: run.model.clone(),
-        effort: run.effort,
-        system: Some(system.clone()),
-        skill_id: run.skill_id.clone(),
-        offered_skills: run.offered_skills.clone(),
-        prompt: None,
-        limits: run.limits,
-        generation,
-    };
-
-    // The pin the turn started on, not the coworker's current one. A coworker that was
-    // repinned while this run waited on a card must not change what the continuation thinks
-    // with. Logs written before the pin was stored fall back to the current pin. The effort
-    // is the start's too, with no fallback: a log from before it was stored sent none.
-    let pin = run.pin_for_resume(&coworker.model);
-    let request = ModelRequest {
-        gateway_key: crate::spend::key_for_opt(&state, run.coworker_id.as_ref(), Some(&account_id))
-            .await,
-        spend_scope: run.coworker_id.as_ref().map(|c| c.as_str().to_string()),
-        // The person who answered the card is the person this continuation is for.
-        spend_actor: Some(account_id.as_str().to_string()),
-        context_tokens: state.context_for(&pin).await,
-        model: pin,
-        effort: run.effort,
-        system: Some(system),
-        messages: super::history::for_resume(&state, &account_id, &run_id, &run, &answered).await,
-        tools: Vec::new(),
-    };
-
-    // The run keeps its id, so everything the resumption emits lands in the same log and a client
-    // replaying later sees one continuous run rather than two halves.
-    let events = opengrok_harness::resume_conversation(
-        state.door.as_ref(),
-        &runner,
-        &journal,
-        request,
-        opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms()),
-        opengrok_harness::Resumption {
-            approved: opengrok_tools::ToolCall {
-                id: answered.call_id,
-                name: answered.tool,
-                arguments: answered.arguments,
-            },
-            message_seq: resumed_seq,
-            outcome,
-            // The recipes the run played before the card (#256); see `Spent::recipes_of`.
-            spent: opengrok_harness::Spent::recipes_of(&run),
-            budget: RunBudget::held_to(&limits),
-        },
-    )
-    .await;
-
     tracing::info!(run = %run_id, events = events.len(), "continued an answered run");
     // The continued run may pause again — on a user form, a saved-login request — and that
     // pause needs its card in the transcript exactly as a fresh turn's does: without the

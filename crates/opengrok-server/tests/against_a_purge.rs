@@ -139,6 +139,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
             coworker_id: Some(coworker.clone()),
             model: Some("oag/cheap".to_string()),
             effort: Default::default(),
+            inference_source: Default::default(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
@@ -258,6 +259,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
                 recipe_values: None,
                 skill_id: None,
                 client_message_id: Some("msg_purge"),
+                inference_source: None,
             },
             at_ms,
         )

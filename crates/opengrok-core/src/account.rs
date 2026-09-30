@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{AccountId, SessionId};
+use crate::inference::InferenceSource;
 
 /// How long the just-rotated-away refresh hash still identifies the session.
 ///
@@ -136,6 +137,12 @@ pub enum AccountEvent {
         password_hash: String,
         at_ms: i64,
     },
+    /// Where this person's turns are answered (`/account/inference-source`), whole: the setting
+    /// replaces the one before. Whether a proxy key exists rides here; the key is in the vault.
+    InferenceSourceSet {
+        source: InferenceSource,
+        at_ms: i64,
+    },
 }
 
 impl AccountEvent {
@@ -154,6 +161,7 @@ impl AccountEvent {
             Self::Disabled { .. } => "account-disabled",
             Self::ProfileUpdated { .. } => "account-profile-updated",
             Self::PasswordChanged { .. } => "account-password-changed",
+            Self::InferenceSourceSet { .. } => "account-inference-source-set",
         }
     }
 }
@@ -185,6 +193,8 @@ pub struct Account {
     pub verified: bool,
     pub enabled: bool,
     pub avatar_url: Option<String>,
+    /// Where this person's turns are answered; the gateway until they choose.
+    pub inference_source: InferenceSource,
 }
 
 /// Current hash vs just-rotated-away hash inside [`REFRESH_GRACE_MS`].
@@ -264,6 +274,10 @@ pub enum AccountCommand {
     },
     ChangePassword {
         password_hash: String,
+        at_ms: i64,
+    },
+    SetInferenceSource {
+        source: InferenceSource,
         at_ms: i64,
     },
 }
@@ -365,6 +379,9 @@ impl Account {
             }
             AccountEvent::PasswordChanged { password_hash, .. } => {
                 self.password_hash = Some(password_hash.clone());
+            }
+            AccountEvent::InferenceSourceSet { source, .. } => {
+                self.inference_source = source.clone();
             }
         }
     }
@@ -551,6 +568,13 @@ impl Account {
                     password_hash,
                     at_ms,
                 }])
+            }
+
+            AccountCommand::SetInferenceSource { source, at_ms } => {
+                if !self.registered {
+                    return Err(AccountError::NotRegistered);
+                }
+                Ok(vec![AccountEvent::InferenceSourceSet { source, at_ms }])
             }
         }
     }

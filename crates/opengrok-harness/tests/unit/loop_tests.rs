@@ -87,6 +87,68 @@ async fn a_mock_run_is_a_well_formed_agui_run() {
     assert!(text.contains("hello"), "{text}");
 }
 
+/// Where a turn asks is said right after `RUN_STARTED`, in the opening's own write, so a replay
+/// shows which source answered each turn of a thread. A resumed segment opens nothing, and says
+/// nothing again: it asks where its start asked.
+#[tokio::test]
+async fn the_opening_says_where_the_turn_asks_in_the_same_write() {
+    let proxy = ModelRequest {
+        model: "gpt-5.5".to_string(),
+        endpoint: Some(ModelEndpoint::Proxy {
+            base_url: "http://127.0.0.1:8080".to_string(),
+            auth: Some(("X-OpenCodex-API-Key".to_string(), "k".to_string())),
+        }),
+        ..request("hello")
+    };
+    for (asked, said) in [
+        (
+            request("hello"),
+            serde_json::json!({"kind": "gateway", "model": "mock"}),
+        ),
+        (
+            proxy,
+            serde_json::json!({"kind": "local_proxy", "model": "gpt-5.5"}),
+        ),
+    ] {
+        let journal = MemoryJournal::new();
+        let events =
+            run_conversation(&MockDoor::echoing(), None, &journal, asked, "t1", "r1", 1).await;
+        assert_eq!(events[0].event_type, EventType::RunStarted);
+        assert_eq!(events[1].event_type, EventType::Custom);
+        assert_eq!(events[1].extra["name"], INFERENCE_SOURCE_NAME);
+        assert_eq!(events[1].extra["value"], said);
+        let opening = journal.batches().remove(0);
+        assert_eq!(
+            opening.iter().map(|e| e.event_type).collect::<Vec<_>>(),
+            [EventType::RunStarted, EventType::Custom],
+            "one write, the opening and where it asks"
+        );
+        assert!(
+            !format!("{events:?}").contains("\"k\""),
+            "the key is never a frame"
+        );
+    }
+
+    let events = continue_interrupted(
+        &MockDoor::echoing(),
+        None,
+        &MemoryJournal::new(),
+        request("hello"),
+        RunContext::new("t1", "r1", 1),
+        3,
+        Spent::default(),
+        RunBudget::default(),
+    )
+    .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.event_type == EventType::RunStarted
+                || event.extra.get("name") == Some(&serde_json::json!(INFERENCE_SOURCE_NAME))),
+        "a carry-on neither opens nor says it again: {events:?}"
+    );
+}
+
 /// A reply of nothing but whitespace is not a reply. With or without a computer, it used to end
 /// RUN_FINISHED with an empty bubble: the empty success (CLAUDE.md, three facts №3).
 #[tokio::test]

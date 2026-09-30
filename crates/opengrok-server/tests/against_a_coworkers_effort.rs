@@ -607,6 +607,7 @@ async fn carried_on_after_a_restart(h: &Harness, then: Vec<RunCommand>) -> (Stri
         coworker_id: Some(CoworkerId::from_stored(id.clone())),
         model: Some("oag/cheap".to_string()),
         effort: Effort::High,
+        inference_source: Default::default(),
         system: None,
         skill_id: None,
         offered_skills: Vec::new(),
@@ -671,7 +672,7 @@ async fn a_run_carried_on_after_a_restart_keeps_the_effort_it_started_with() {
 }
 
 /// And for a person's answer the sweep carries out after a restart, whose call never started: the
-/// path a submitted form takes too (`resume_suspended_run`).
+/// path a submitted form takes too (`resume_where_it_lives`).
 #[tokio::test]
 async fn an_answer_carried_out_after_a_restart_keeps_the_effort_it_started_with() {
     let database_url = database_or_skip!();

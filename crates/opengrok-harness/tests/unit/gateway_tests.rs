@@ -8,6 +8,7 @@ async fn a_door_whose_client_did_not_build_is_unreachable_not_a_panic() {
         base_url: "http://gateway.invalid".to_string(),
         key: "k".to_string(),
         http: Err("no TLS backend".to_string()),
+        proxy_http: Err("no TLS backend".to_string()),
         ready_seen: Mutex::new(None),
     };
     let error = door

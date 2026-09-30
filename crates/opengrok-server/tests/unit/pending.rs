@@ -17,6 +17,7 @@ fn row() -> PendingUserMessageRow {
         updated_at_ms: 20,
         drained_at_ms: None,
         drained_run_id: None,
+        inference_source: None,
     }
 }
 

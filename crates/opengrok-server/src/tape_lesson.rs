@@ -254,7 +254,6 @@ pub(crate) async fn lesson_from_tape(
         gateway_key: crate::spend::key_for(state, coworker, account).await,
         spend_scope: Some(coworker.as_str().to_string()),
         spend_actor: Some(account.as_str().to_string()),
-        context_tokens: None,
         model: model.to_string(),
         // Not a turn of the coworker's, so not its effort: one bounded read, at the route's own.
         effort: Default::default(),
@@ -271,6 +270,8 @@ pub(crate) async fn lesson_from_tape(
                 end_tape(&tape_marker)
             ),
         )],
+        // No context guard and no proxy: one bounded read on the gateway, never a person's turn.
+        ..ModelRequest::default()
     };
     let end = end_lesson(&lesson_marker);
     let text = match tokio::time::timeout(LESSON_TIMEOUT, collect_text(state, request, &end)).await

@@ -57,7 +57,7 @@ pub fn router(state: AgUiState) -> Router {
 /// One follow-up as NativeChat hydrates it. `v` is on every object so a client can switch on
 /// the version without wrapping.
 pub fn message_json(row: &PendingUserMessageRow) -> Value {
-    json!({
+    let mut message = json!({
         "v": PAYLOAD_V,
         "id": row.id,
         "threadId": row.thread_id,
@@ -72,7 +72,12 @@ pub fn message_json(row: &PendingUserMessageRow) -> Value {
         "updatedAtMs": row.updated_at_ms,
         "drainedAtMs": row.drained_at_ms,
         "drainedRunId": row.drained_run_id,
-    })
+    });
+    // Only when the send named one: absent is the account's setting, which is not the row's to say.
+    if let Some(source) = &row.inference_source {
+        message["inferenceSource"] = json!(source);
+    }
+    message
 }
 
 /// The AG-UI CUSTOM envelope for one mutation. `message` is omitted on `canceled` — the id is
@@ -145,6 +150,9 @@ struct WriteBody {
     recipe_values: Option<Value>,
     #[serde(default, deserialize_with = "present")]
     skill_id: Option<Value>,
+    /// The send's own source pick, as `forwardedProps.inferenceSource` names it on a live turn.
+    #[serde(default, deserialize_with = "present")]
+    inference_source: Option<Value>,
     client_message_id: Option<String>,
     /// Ignored. The path names the thread; a body that disagrees is a client bug we refuse.
     thread_id: Option<String>,
@@ -218,6 +226,29 @@ fn reply_to_ok(value: Option<&Value>) -> bool {
         value,
         None | Some(Value::Null) | Some(Value::String(_)) | Some(Value::Object(_))
     )
+}
+
+/// The options a write names, each read as the turn that fires it will read it.
+struct Options<'a> {
+    recipe_id: Option<&'a str>,
+    skill_id: Option<&'a str>,
+    /// Refused unless a wire word, as on a live turn: read as the gateway, a misspelt
+    /// `local-proxy` would bill a key the person chose not to use.
+    source: Option<&'static str>,
+}
+
+/// A create's or an edit's options, or the sentence its 400 says.
+fn options(body: &WriteBody) -> Result<Options<'_>, String> {
+    if !reply_to_ok(body.reply_to.as_ref()) {
+        return Err("replyTo is a message id, an object, or null".to_string());
+    }
+    let source = opengrok_core::inference::SourceKind::named(body.inference_source.as_ref())
+        .map_err(|why| format!("inferenceSource {why}"))?;
+    Ok(Options {
+        recipe_id: optional_string_id("recipeId", body.recipe_id.as_ref())?,
+        skill_id: optional_string_id("skillId", body.skill_id.as_ref())?,
+        source: source.map(opengrok_core::inference::SourceKind::as_str),
+    })
 }
 
 /// Signed-in owner of this thread, or the same 404 `GET /ag-ui/threads/{id}` gives for a
@@ -325,13 +356,10 @@ async fn create(
     if let Some(why) = content_ok(content) {
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
-    if !reply_to_ok(body.reply_to.as_ref()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            "replyTo is a message id, an object, or null",
-        )
-            .into_response();
-    }
+    let options = match options(&body) {
+        Ok(options) => options,
+        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
+    };
     let client_message_id = body
         .client_message_id
         .as_deref()
@@ -340,14 +368,6 @@ async fn create(
     if let Err(why) = optional_id_ok("clientMessageId", client_message_id) {
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
-    let recipe_id = match optional_string_id("recipeId", body.recipe_id.as_ref()) {
-        Ok(id) => id,
-        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
-    };
-    let skill_id = match optional_string_id("skillId", body.skill_id.as_ref()) {
-        Ok(id) => id,
-        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
-    };
     let recipe_values = body.recipe_values.as_ref().filter(|value| !value.is_null());
     let reply_to = body.reply_to.as_ref().filter(|value| !value.is_null());
     let id = PendingUserMessageId::new();
@@ -362,10 +382,11 @@ async fn create(
                 account_id: account.as_str(),
                 content,
                 reply_to,
-                recipe_id,
+                recipe_id: options.recipe_id,
                 recipe_values,
-                skill_id,
+                skill_id: options.skill_id,
                 client_message_id,
+                inference_source: options.source,
             },
             at_ms,
         )
@@ -418,58 +439,28 @@ async fn edit(
     {
         return (StatusCode::BAD_REQUEST, why).into_response();
     }
-    if !reply_to_ok(body.reply_to.as_ref()) {
-        return (
-            StatusCode::BAD_REQUEST,
-            "replyTo is a message id, an object, or null",
-        )
-            .into_response();
-    }
-    let recipe_id = match optional_string_id("recipeId", body.recipe_id.as_ref()) {
-        Ok(id) => id,
-        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
-    };
-    let skill_id = match optional_string_id("skillId", body.skill_id.as_ref()) {
-        Ok(id) => id,
+    let options = match options(&body) {
+        Ok(options) => options,
         Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
     };
     // serde: missing field vs JSON null. `replyTo: null` clears; omitting keeps.
-    let reply_to = if body.reply_to.is_some() {
-        Some(body.reply_to.as_ref().filter(|value| !value.is_null()))
-    } else {
-        None
-    };
-    let recipe_id_patch = if body.recipe_id.is_some() {
-        Some(recipe_id)
-    } else {
-        None
-    };
-    let skill_id_patch = if body.skill_id.is_some() {
-        Some(skill_id)
-    } else {
-        None
-    };
-    let recipe_values = if body.recipe_values.is_some() {
-        Some(body.recipe_values.as_ref().filter(|value| !value.is_null()))
-    } else {
-        None
+    fn given(value: &Option<Value>) -> Option<Option<&Value>> {
+        value
+            .is_some()
+            .then(|| value.as_ref().filter(|v| !v.is_null()))
+    }
+    let patch = PendingUserMessagePatch {
+        content: body.content.as_deref(),
+        reply_to: given(&body.reply_to),
+        recipe_id: body.recipe_id.is_some().then_some(options.recipe_id),
+        recipe_values: given(&body.recipe_values),
+        skill_id: body.skill_id.is_some().then_some(options.skill_id),
+        inference_source: body.inference_source.is_some().then_some(options.source),
     };
     match state
         .auth
         .store
-        .update_pending_user_message(
-            &id,
-            &account,
-            &thread_id,
-            PendingUserMessagePatch {
-                content: body.content.as_deref(),
-                reply_to,
-                recipe_id: recipe_id_patch,
-                recipe_values,
-                skill_id: skill_id_patch,
-            },
-            now_ms(),
-        )
+        .update_pending_user_message(&id, &account, &thread_id, patch, now_ms())
         .await
     {
         Ok(Some(row)) => Json(mutated("edited", &thread_id, Some(&row))).into_response(),
@@ -581,13 +572,14 @@ fn saved_id(id: Option<&str>) -> Option<&str> {
 
 /// Consume a queued send as this turn, or refuse so two machines cannot both fire it.
 ///
-/// `Ok(())` means this turn may start: we drained a row, this run already drained it (retry),
-/// or the turn was never a queued send. Anything else is a conflict the client can show.
+/// `Ok` means this turn may start: we drained a row, this run already drained it (retry), or the
+/// turn was never a queued send; it carries the row's source pick, when the send made one.
+/// Anything else is a conflict the client can show.
 pub async fn consume_for_turn(
     store: &PgStore,
     account: &AccountId,
     input: &RunAgentInput,
-) -> Result<(), Response> {
+) -> Result<Option<opengrok_core::inference::SourceKind>, Response> {
     if pending_id_from(input).is_some()
         && !input.messages.iter().any(|message| message.role == "user")
     {
@@ -618,10 +610,13 @@ pub async fn consume_for_turn(
             )
             .await
     } else {
-        return Ok(());
+        return Ok(None);
     };
     match result {
-        Ok(DrainResult::Drained(_) | DrainResult::AlreadyThisRun(_)) => Ok(()),
+        Ok(DrainResult::Drained(row) | DrainResult::AlreadyThisRun(row)) => {
+            let source = row.inference_source.as_deref();
+            Ok(source.and_then(opengrok_core::inference::SourceKind::parse))
+        }
         Ok(DrainResult::Stale(row)) => {
             // A same-run retry that changed its words is not a refresh away from sending: this
             // run already spent the row, so there is nothing left to send.
@@ -649,7 +644,7 @@ pub async fn consume_for_turn(
             )
                 .into_response())
         }
-        Ok(DrainResult::Missing) if pending_id_from(input).is_none() => Ok(()),
+        Ok(DrainResult::Missing) if pending_id_from(input).is_none() => Ok(None),
         Ok(DrainResult::Missing) => Err((
             StatusCode::CONFLICT,
             Json(json!({

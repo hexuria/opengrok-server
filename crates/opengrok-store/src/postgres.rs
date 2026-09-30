@@ -223,7 +223,8 @@ impl PgStore {
                 | AccountEvent::Enabled { .. }
                 | AccountEvent::Disabled { .. }
                 | AccountEvent::ProfileUpdated { .. }
-                | AccountEvent::PasswordChanged { .. } => {}
+                | AccountEvent::PasswordChanged { .. }
+                | AccountEvent::InferenceSourceSet { .. } => {}
             }
         }
 

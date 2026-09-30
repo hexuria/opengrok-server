@@ -34,7 +34,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::limits::RunLimits;
-use opengrok_harness::{ChatMessage, ModelRequest, RunBudget, RunContext, run_conversation_within};
+use opengrok_harness::{ChatMessage, RunBudget, RunContext, run_conversation_within};
 
 use crate::agui::routes::{AgUiState, StoreJournal};
 use crate::host_state::HostState;
@@ -147,6 +147,9 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         coworker_id: Some(coworker_id.clone()),
         model: Some(coworker.model.clone()),
         effort: coworker.effort,
+        // THE GATEWAY, WHATEVER ITS HIRER CHOSE FOR THEIR OWN TURNS: a consumer subscription is a
+        // person's to spend in person, and a routine fires with nobody at the keyboard.
+        inference_source: Default::default(),
         system: Some(system.clone()),
         skill_id: None,
         offered_skills: tools.iter().flat_map(|t| t.offered_skills()).collect(),
@@ -157,21 +160,13 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         generation: 0,
     };
 
-    let request = ModelRequest {
-        gateway_key: crate::spend::key_for(&state, &coworker_id, &account_id).await,
-        spend_scope: Some(coworker_id.as_str().to_string()),
-        // Nobody is talking: a coworker acting on its own schedule acts for whoever hired it.
-        spend_actor: Some(account_id.as_str().to_string()),
-        context_tokens: state.context_for(&coworker.model).await,
-        // The coworker's own model and effort — the rule `run()` enforces holds for runs nobody
-        // asked for.
-        model: coworker.model.clone(),
-        effort: coworker.effort,
-        // A routine's turn is still this coworker's turn: same identity, same standing role.
-        system: Some(system.clone()),
-        tools: Vec::new(),
-        messages: vec![ChatMessage::text("user", prompt)],
-    };
+    // Nobody is talking: a coworker on its own schedule acts for whoever hired it, on its own
+    // model, effort, identity and standing role — the rules `run()` holds turns to.
+    let who = (Some(&coworker_id), Some(&account_id));
+    let asked = (Default::default(), coworker.model.clone(), coworker.effort);
+    let message = vec![ChatMessage::text("user", prompt)];
+    let request =
+        crate::agui::routes::turn_request(&state, who, asked, Some(system), message).await;
 
     // Held while the run works, so the recovery sweep does not mistake a slow firing for an
     // abandoned run; dropped (or killed) when the process dies, which is when recovery should.

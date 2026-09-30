@@ -5,7 +5,8 @@
 //! `ModelDoor` as every other model call (CLAUDE.md #4) — the door is the gateway, and the route
 //! is the deployment's own (`OG_AUTO_REVIEW_MODEL`), never the coworker's: one call per tool call
 //! must be cheap and the reviewer must not be the reviewed. The KEY and spend scope are the
-//! coworker's, though, so a coworker at its cap has its judge refused on every call.
+//! coworker's, though, so a coworker at its cap has its judge refused on every call. On a turn a
+//! person's own subscription answers, the judge asks that proxy instead (`ModelJudge::judge`).
 //!
 //! TOTAL BY CONSTRUCTION. Every failure — refused or unreachable door, broken stream, timeout,
 //! empty or many-worded answer — is `ReviewVerdict::Unavailable` with its cause, logged here and
@@ -21,21 +22,30 @@ use futures::StreamExt;
 use opengrok_tools::{JudgeFailure, ReviewAsk, ReviewJudge, ReviewVerdict};
 use serde_json::Value;
 
-use crate::model::{ChatMessage, GatewayKey, ModelDelta, ModelDoor, ModelError, ModelRequest};
+use crate::model::{
+    ChatMessage, GatewayKey, ModelDelta, ModelDoor, ModelEndpoint, ModelError, ModelRequest,
+};
 use crate::timing::elapsed_ms;
 
 tokio::task_local! {
     static AUTO_REVIEW_MS: Arc<AtomicU64>;
+    /// The proxy the turn under way asks, and the model it asks for, when it is a person's own
+    /// subscription. See `ModelJudge::judge`.
+    static TURN_PROXY: Option<(ModelEndpoint, String)>;
 }
 
-/// Run `fut` with a slot the judge can add to. Same task as `ToolRunner::run_all`
+/// Run `fut` — the round's tools, as `turn` asked for them — with a slot the judge can add to,
+/// and the turn's own source for the judge to ask on. Same task as `ToolRunner::run_all`
 /// (executor does not spawn), so a concurrent turn on another task cannot mix in.
-pub(crate) async fn time_auto_review<F, T>(fut: F) -> (T, u64)
+pub(crate) async fn time_auto_review<F, T>(fut: F, turn: &ModelRequest) -> (T, u64)
 where
     F: std::future::Future<Output = T>,
 {
     let slot = Arc::new(AtomicU64::new(0));
-    let out = AUTO_REVIEW_MS.scope(Arc::clone(&slot), fut).await;
+    let proxy = turn.endpoint.clone().map(|to| (to, turn.model.clone()));
+    let out = AUTO_REVIEW_MS
+        .scope(Arc::clone(&slot), TURN_PROXY.scope(proxy, fut))
+        .await;
     (out, slot.load(Ordering::Relaxed))
 }
 
@@ -170,6 +180,8 @@ fn failure_of(error: &ModelError) -> JudgeFailure {
         ModelError::Refused { status, .. } => JudgeFailure::Refused(*status),
         ModelError::Unreachable(_) => JudgeFailure::Unreachable,
         ModelError::Stream(_) => JudgeFailure::StreamBroke,
+        // A person's own proxy that refused or is not there: the judge could not be asked.
+        ModelError::Proxy(_) => JudgeFailure::Unreachable,
         // The door's own clock (`RunBudget`) ran out before the judge's did: the same silence.
         ModelError::TimedOut(_) => JudgeFailure::TimedOut,
     }
@@ -245,7 +257,7 @@ pub fn parse_verdict(text: &str) -> ReviewVerdict {
 #[async_trait::async_trait]
 impl ReviewJudge for ModelJudge {
     async fn judge(&self, ask: ReviewAsk<'_>) -> ReviewVerdict {
-        let request = ModelRequest {
+        let mut request = ModelRequest {
             gateway_key: self.key.clone(),
             spend_scope: self.scope.clone(),
             spend_actor: self.actor.clone(),
@@ -258,8 +270,22 @@ impl ReviewJudge for ModelJudge {
             // Deliberately empty: the door then sends no tool fields at all, and the judge is a
             // plain completion that cannot call anything.
             tools: Vec::new(),
+            endpoint: None,
         };
+        // A JUDGE ASKS WHERE ITS TURN ASKS. On a person's own subscription the whole turn stays
+        // off the gateway, its safety check included: judged on the deployment's route, every
+        // reviewed call of a turn somebody chose not to bill there would bill there anyway, and
+        // a coworker at its gateway cap would card every call of a turn that spends none of it.
+        // The cost, said plainly: the proxy has one model a person chose, so there the reviewer
+        // is the turn's own model rather than a separate cheap route. Outside a turn (the MCP
+        // door) nothing is scoped, and the judge is the deployment's as before.
+        if let Ok(Some((endpoint, model))) = TURN_PROXY.try_with(Clone::clone) {
+            request.endpoint = Some(endpoint);
+            request.model = model;
+            request.gateway_key = None;
+        }
         let started = Instant::now();
+        let model = request.model.clone();
         let (verdict, detail) =
             match tokio::time::timeout(self.timeout, self.collect_text(request)).await {
                 Ok(Ok(text)) => (parse_verdict(&text), clipped(text.trim(), 80)),
@@ -276,7 +302,7 @@ impl ReviewJudge for ModelJudge {
         if let ReviewVerdict::Unavailable(cause) = verdict {
             tracing::warn!(
                 coworker = self.scope.as_deref().unwrap_or("-"),
-                model = %self.model,
+                %model,
                 call = ask.call_id,
                 ?cause,
                 %detail,
