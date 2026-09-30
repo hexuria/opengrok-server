@@ -1,0 +1,38 @@
+{
+  "method": "GET",
+  "path": "/models",
+  "status": 200,
+  "body": {
+    "models": [
+      {
+        "id": "xai/grok-4.6",
+        "points": null,
+        "source": "gateway"
+      },
+      {
+        "id": "openai/gpt-5.5",
+        "points": null,
+        "source": "gateway"
+      },
+      {
+        "id": "gpt-5.5",
+        "points": null,
+        "source": "local_proxy"
+      },
+      {
+        "id": "gpt-6-sol--fast",
+        "points": null,
+        "source": "local_proxy"
+      },
+      {
+        "id": "xai/grok-4.7",
+        "points": null,
+        "source": "local_proxy"
+      }
+    ],
+    "note": null,
+    "localProxy": {
+      "healthy": true
+    }
+  }
+}

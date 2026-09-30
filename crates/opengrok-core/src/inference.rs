@@ -88,11 +88,16 @@ const FORBIDDEN: &[(&str, &str)] = &[
     ("gemini", "Google"),
 ];
 
-/// THE ONE LIST OF WHAT A PERSON'S OWN SUBSCRIPTION MAY ANSWER: OpenAI's models (`gpt-*`,
-/// `o1*`/`o3*`/`o4*`, anything codex) and xAI's (`grok-*`), bare or as `openai/…` and `xai/…`,
-/// with or without opencodex's `--fast` tier (`gpt-6-sol--fast`, `xai/grok-4.7--fast`). Those
-/// providers sell the subscriptions opencodex signs in with. Anthropic and Google forbid using a
-/// consumer subscription through a third-party app, and are refused by name.
+/// THE ONE LIST OF WHAT A PERSON'S OWN SUBSCRIPTION MAY ANSWER: OpenAI's models and xAI's, bare
+/// or as `openai/…` and `xai/…`, with or without opencodex's `--fast` tier (`gpt-6-sol--fast`,
+/// `xai/grok-4.7--fast`). Those providers sell the subscriptions opencodex signs in with.
+/// Anthropic and Google forbid using a consumer subscription through a third-party app, and are
+/// refused by name wherever their names appear in an id: that match only ever refuses.
+///
+/// EVERY ALLOWED PATTERN IS ANCHORED. With the prefix and the tier taken off, the core STARTS with
+/// `gpt-`, `o1`, `o3`, `o4` or `codex` (OpenAI's: `gpt-5-codex` and `codex-mini-latest` alike) or
+/// `grok-` (xAI's), and a prefix must name the provider its core is from. An id that only
+/// contains an allowed word (`my-codex-thing`, `notgrok-1`) is nobody's this server knows.
 ///
 /// AN ALLOWLIST, NOT A DENYLIST: an id this does not recognise is refused, so a provider nobody
 /// has looked at cannot ride a person's subscription by being new. Asked where the setting is
@@ -110,14 +115,14 @@ pub fn subscription_model(model: &str) -> Result<(), String> {
             model.trim()
         ));
     }
-    let (provider, name) = id
+    let (provider, core) = id
         .split_once('/')
         .map_or((None, id.as_str()), |(p, n)| (Some(p), n));
-    let name = name.strip_suffix("--fast").unwrap_or(name);
-    let openai = name.starts_with("gpt-")
-        || ["o1", "o3", "o4"].iter().any(|o| name.starts_with(o))
-        || name.contains("codex");
-    let xai = name.starts_with("grok-");
+    let core = core.strip_suffix("--fast").unwrap_or(core);
+    let openai = ["gpt-", "o1", "o3", "o4", "codex"]
+        .iter()
+        .any(|start| core.starts_with(start));
+    let xai = core.starts_with("grok-");
     let recognised = match provider {
         None => openai || xai,
         Some("openai") => openai,
@@ -125,7 +130,7 @@ pub fn subscription_model(model: &str) -> Result<(), String> {
         Some(_) => false,
     };
     let plain = id.len() <= 128
-        && !name.contains('/')
+        && !core.contains('/')
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte));
@@ -134,7 +139,7 @@ pub fn subscription_model(model: &str) -> Result<(), String> {
     }
     Err(format!(
         "{:?} is not a model this server knows to be OpenAI's or xAI's, and only theirs (gpt-*, \
-         o1, o3, o4, codex, grok-*) may use your own subscription",
+         o1*, o3*, o4*, codex*, grok-*) may use your own subscription",
         model.trim()
     ))
 }

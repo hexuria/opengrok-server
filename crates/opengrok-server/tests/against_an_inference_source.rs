@@ -657,6 +657,25 @@ async fn a_proxy_key_with_no_vault_to_keep_it_is_refused() {
     assert_eq!(h.set(&ada, body).await.0, 200);
 }
 
+/// The list NativeChat renders its picker from, recorded on its own: a person with a proxy
+/// stored asks once, and the answer names both sources side by side. The test below asks four
+/// times, and the corpus keeps one answer per test, which was the gateway-only first one.
+#[tokio::test]
+async fn one_model_list_names_the_gateway_and_the_proxy_side_by_side() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    h.on_the_proxy(&ada, "gateway").await;
+    let (status, both) = h.models(&ada, "").await;
+    assert_eq!(status, 200, "{both}");
+    assert_eq!(ids(&both, "gateway"), ["xai/grok-4.6", "openai/gpt-5.5"]);
+    assert_eq!(
+        ids(&both, "local_proxy"),
+        ["gpt-5.5", "gpt-6-sol--fast", "xai/grok-4.7"]
+    );
+    assert_eq!(both["localProxy"], json!({ "healthy": true }));
+}
+
 /// BOTH KINDS, WHENEVER AN ADDRESS IS STORED, whatever the setting's kind: the gateway's entries,
 /// tagged, and the proxy's allowed ones beside them; `?source=` narrows to one kind, and
 /// `localProxy.healthy` says whether the proxy answered.
@@ -1042,4 +1061,114 @@ async fn a_queued_send_keeps_the_source_it_was_queued_with() {
         said.contains("queued"),
         "the drained words were asked: {said}"
     );
+}
+
+/// A queued send whose words start with this breaks its person's account log when it is drained.
+const BREAKS_THE_READ: &str = "og-test-breaks-the-read";
+
+/// The event a newer binary might write to an account's log, which this one cannot read, added
+/// the moment a `BREAKS_THE_READ` send is drained. AT THE DRAIN, NOT BEFORE: a turn reads its run
+/// limits from the same log first, and a log that cannot be read at all is refused there with a
+/// 503 before any source is resolved. Broken between the two reads, the source's own read is the
+/// one that fails, as a store fault between them would make it.
+async fn break_the_account_read_at_the_drain(h: &Harness) {
+    for sql in [
+        "create or replace function og_test_break_account_on_drain() returns trigger as $$
+         begin
+           if new.status = 'drained' and old.status <> 'drained'
+              and new.content like 'og-test-breaks-the-read%' then
+             insert into events (stream_id, stream_seq, event_type, payload)
+             select 'account/' || new.account_id, coalesce(max(stream_seq), 0) + 1,
+                    'account-from-the-future', '{\"type\":\"from-the-future\"}'::jsonb
+               from events where stream_id = 'account/' || new.account_id;
+           end if;
+           return new;
+         end $$ language plpgsql",
+        "drop trigger if exists og_test_break_account_on_drain on pending_user_message",
+        "create trigger og_test_break_account_on_drain after update on pending_user_message
+         for each row execute function og_test_break_account_on_drain()",
+    ] {
+        sqlx::query(sql).execute(h.store.pool()).await.expect(sql);
+    }
+}
+
+/// `who`'s account log, readable again once the drain has broken it.
+async fn heal_the_account_read(h: &Harness, who: &Person) {
+    assert!(
+        h.store.load_account(&who.id).await.is_err(),
+        "the drain broke the read"
+    );
+    sqlx::query(
+        "delete from events where stream_id = $1 and event_type = 'account-from-the-future'",
+    )
+    .bind(opengrok_store::account_stream(&who.id))
+    .execute(h.store.pool())
+    .await
+    .expect("the account readable again");
+    assert!(h.store.load_account(&who.id).await.is_ok());
+}
+
+/// A SETTING THAT CANNOT BE READ IS NEVER GUESSED AS THE GATEWAY: for a person who chose their own
+/// subscription, that would be a silent fall back onto a key they chose not to use. A queued send
+/// that names no source is refused in words when it is drained, and nothing is asked anywhere;
+/// one that names the gateway itself goes there. A live turn's source is resolved by the same
+/// `local_proxy::route`, whose own test covers the live pick.
+#[tokio::test]
+async fn a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("from the proxy")], true).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada, "Ada").await;
+    h.on_the_proxy(&ada, "local_proxy").await;
+    let thread = unique("thr");
+    let gateway = json!({ "coworkerId": coworker, "inferenceSource": "gateway" });
+    let first = json!([user("m1", "first")]);
+    assert_eq!(h.turn(&ada, &thread, first, gateway).await.0, 200);
+    let path = format!("/ag-ui/threads/{thread}/pending");
+    let mut queued = Vec::new();
+    for (id, source) in [("m2", Value::Null), ("m3", json!("gateway"))] {
+        let said = format!("{BREAKS_THE_READ} {id}");
+        let body =
+            json!({ "v": 1, "content": said, "clientMessageId": id, "inferenceSource": source });
+        let post = reqwest::Method::POST;
+        let (status, created) = h.send(Some(&ada), post, &path, Some(body)).await;
+        assert_eq!(status, 201, "{created}");
+        let row = created["pendingUserMessage"]["id"].as_str().unwrap();
+        let props = json!({ "coworkerId": coworker, "pendingId": row });
+        queued.push((json!([user(id, &said)]), props));
+    }
+    break_the_account_read_at_the_drain(&h).await;
+
+    let (messages, props) = queued[0].clone();
+    let (status, frames) = h.turn(&ada, &thread, messages, props).await;
+    assert_eq!(status, 200);
+    let end = ending(&frames);
+    assert_eq!(end["type"], "RUN_ERROR", "{frames:?}");
+    let said = end["message"].as_str().unwrap_or_default();
+    assert!(
+        said.starts_with("Your reply source could not be read"),
+        "{said}"
+    );
+    // Refused as a proxy turn with a gap is: no model asked, no gateway key minted.
+    assert_eq!(
+        sources(&frames),
+        [json!({"kind": "local_proxy", "model": ""})]
+    );
+    heal_the_account_read(&h, &ada).await;
+
+    let (messages, props) = queued[1].clone();
+    let (_, frames) = h.turn(&ada, &thread, messages, props).await;
+    assert_eq!(text_of(&frames), "from the gateway", "{frames:?}");
+    heal_the_account_read(&h, &ada).await;
+    assert_eq!(
+        (h.gateway.asked().len(), h.proxy.asked().len()),
+        (2, 0),
+        "the refused turn asked neither"
+    );
+    for sql in [
+        "drop trigger if exists og_test_break_account_on_drain on pending_user_message",
+        "drop function if exists og_test_break_account_on_drain()",
+    ] {
+        sqlx::query(sql).execute(h.store.pool()).await.expect(sql);
+    }
 }

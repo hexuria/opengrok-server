@@ -96,6 +96,12 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "an_unknown_effort_is_refused_and_nothing_in_the_patch_is_applied",
         "/coworkers/{coworker_id}",
     ),
+    // Both sources in one /models answer (#294): its shape matches a gateway-only list, so
+    // only a pin keeps the one NativeChat's picker is built from.
+    (
+        "one_model_list_names_the_gateway_and_the_proxy_side_by_side",
+        "/models",
+    ),
     // The inference source: its read, its save, its refusals and its signed-out answer share the
     // shapes of other replies and other 400s, and NativeChat asked for each by name; so did the
     // model list with both sources and with a proxy that is down, a thread's replay whose turns

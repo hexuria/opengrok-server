@@ -255,9 +255,11 @@ impl Route {
 /// loopback URL (nativechat#156, not built) — would be a new `ModelEndpoint` variant resolved
 /// here, behind the same `kind: "local_proxy"` setting, and no caller would change.
 ///
-/// A SETTING THAT CANNOT BE READ KEEPS THE GATEWAY, as a coworker that cannot be loaded keeps the
-/// deployment's model: where a turn is answered is how, not whether. A turn that named the proxy,
-/// or a run that started there, is refused instead, since that cannot be honoured.
+/// A SETTING THAT CANNOT BE READ REFUSES THE TURN, unless the turn named the gateway itself (a
+/// carry-on of a run that started there does). Guessed as the gateway, it would be a silent fall
+/// back for a person who chose their own subscription, billing a key they chose not to use. It
+/// is refused as a proxy turn with a gap is: in words, on no model, with nothing asked anywhere,
+/// no gateway key minted and no meter consulted.
 pub async fn route(
     saved: &dyn Saved,
     account: Option<&AccountId>,
@@ -267,28 +269,23 @@ pub async fn route(
     let (Some(account), false) = (account, chosen == Some(SourceKind::Gateway)) else {
         return Route::Gateway;
     };
-    let setting = saved.setting(account).await;
-    let kind = chosen.or(setting.as_ref().map(|setting| setting.kind));
-    if kind.unwrap_or_default() == SourceKind::Gateway {
-        return Route::Gateway;
-    }
-    // Empty when neither names one, which `endpoint` refuses: a proxy turn never carries the
+    // Empty when neither names one, which the door refuses: a proxy turn never carries the
     // coworker's gateway pin, even to be refused — its frame and its run's start would both name
     // a model it never asked.
-    let model = captured.map(str::to_string);
-    let model = model.or_else(|| setting.as_ref()?.local_model.clone());
-    let model = model.unwrap_or_default();
-    let endpoint = match &setting {
-        Some(setting) => {
-            let key = saved.key(account, setting.has_key).await;
-            endpoint(setting.base_url.as_deref(), &model, key)
-        }
-        None => ModelEndpoint::Unavailable(
-            "Your inference source could not be read, so the turn was not sent; try again in a \
-             moment."
-                .to_string(),
-        ),
+    let captured = captured.map(str::to_string);
+    let Some(setting) = saved.setting(account).await else {
+        let why = "Your reply source could not be read, so the turn was not sent; try again in a \
+                   moment.";
+        let endpoint = ModelEndpoint::Unavailable(why.to_string());
+        let model = captured.unwrap_or_default();
+        return Route::LocalProxy { model, endpoint };
     };
+    if chosen.unwrap_or(setting.kind) == SourceKind::Gateway {
+        return Route::Gateway;
+    }
+    let model = captured.or(setting.local_model).unwrap_or_default();
+    let key = saved.key(account, setting.has_key).await;
+    let endpoint = endpoint(setting.base_url.as_deref(), &model, key);
     Route::LocalProxy { model, endpoint }
 }
 

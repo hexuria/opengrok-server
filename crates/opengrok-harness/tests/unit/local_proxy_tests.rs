@@ -170,16 +170,22 @@ async fn a_turns_source_is_resolved_in_one_place_and_never_guessed() {
     .await;
     assert_eq!(asked(routed).0, "gpt-6-sol");
 
-    // A setting that cannot be read keeps the gateway, unless the proxy was named: then it is
-    // refused in words, on no model, and never the coworker's pin.
-    let routed = route(&Stored(None), Some(&ada), None, None).await;
-    assert_eq!(routed.kind(), SourceKind::Gateway);
-    let (model, endpoint) = asked(route(&Stored(None), Some(&ada), proxy, None).await);
-    assert_eq!(model, "");
-    assert!(
-        matches!(&endpoint, Some(ModelEndpoint::Unavailable(why)) if why.contains("could not be read")),
-        "{endpoint:?}"
-    );
+    // A SETTING THAT CANNOT BE READ IS NEVER GUESSED AS THE GATEWAY: a turn that named no source,
+    // or the proxy, is refused in words, on no model and never the coworker's pin; a carry-on on
+    // the model its run started on. Only a turn that named the gateway itself goes there.
+    for chosen in [None, proxy] {
+        let (model, endpoint) = asked(route(&Stored(None), Some(&ada), chosen, None).await);
+        assert_eq!(model, "", "{chosen:?}");
+        let refused = "Your reply source could not be read, so the turn was not sent";
+        assert!(
+            matches!(&endpoint, Some(ModelEndpoint::Unavailable(why)) if why.starts_with(refused)),
+            "{chosen:?}: {endpoint:?}"
+        );
+    }
+    let carried = route(&Stored(None), Some(&ada), proxy, Some("gpt-6-sol")).await;
+    assert_eq!(asked(carried).0, "gpt-6-sol");
+    let routed = route(&Stored(None), Some(&ada), gateway, None).await;
+    assert_eq!(asked(routed), ("xai/grok-4.6".to_string(), None), "named");
 }
 
 /// What a stand-in proxy was sent: each request's head and body, as text.

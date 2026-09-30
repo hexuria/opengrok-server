@@ -1,5 +1,5 @@
 {
-  "server_sha": "7d6e3d00158dafda55b4617903c56483ab7dcbfc",
+  "server_sha": "8426f8364b21891de6bd18188a41bbe77ec74118",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -159,23 +159,23 @@
       "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending/{id}, recorded from the test nullable_options_distinguish_omission_null_and_replacement (crates/opengrok-server/tests/against_pending_user_messages.rs); ids and times are placeholders"
     },
     {
-      "file": "agui/custom/pending-user-message/a_queued_send_keeps_the_source_it_was_queued_with.json",
-      "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_queued_send_keeps_the_source_it_was_queued_with (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+      "file": "agui/custom/pending-user-message/a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway.json",
+      "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
-      "file": "agui/custom/pending-user-message/a_legitimate_send_matches_however_its_options_are_spelled.json",
-      "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_legitimate_send_matches_however_its_options_are_spelled (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
+      "file": "agui/custom/pending-user-message/a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway-2.json",
+      "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
       "file": "agui/custom/pending-user-message/only_the_exact_reply_quote_is_accepted.json",
       "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test only_the_exact_reply_quote_is_accepted (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
     {
-      "file": "agui/custom/pending-user-message/a_legitimate_send_matches_however_its_options_are_spelled-2.json",
+      "file": "agui/custom/pending-user-message/a_legitimate_send_matches_however_its_options_are_spelled.json",
       "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_legitimate_send_matches_however_its_options_are_spelled (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
     {
-      "file": "agui/custom/pending-user-message/a_legitimate_send_matches_however_its_options_are_spelled-3.json",
+      "file": "agui/custom/pending-user-message/a_legitimate_send_matches_however_its_options_are_spelled-2.json",
       "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_legitimate_send_matches_however_its_options_are_spelled (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
     {
@@ -875,6 +875,10 @@
       "source": "GET /models, recorded from the test a_stored_proxy_that_is_unreachable_leaves_the_gateway_list_whole (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__models/200-one_model_list_names_the_gateway_and_the_proxy_side_by_side.json",
+      "source": "GET /models, recorded from the test one_model_list_names_the_gateway_and_the_proxy_side_by_side (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__models/200-the_model_list_carries_both_sources_when_a_proxy_is_stored.json",
       "source": "GET /models, recorded from the test the_model_list_carries_both_sources_when_a_proxy_is_stored (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
@@ -959,11 +963,11 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait.json",
-      "source": "GET /schedules, recorded from the test a_forms_submit_resumes_its_own_run_when_a_chat_and_a_routine_both_wait (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
+      "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
+      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-3.json",
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
@@ -1263,19 +1267,23 @@
       "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test nullable_options_distinguish_omission_null_and_replacement (crates/opengrok-server/tests/against_pending_user_messages.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_legitimate_send_matches_however_its_options_are_spelled.json",
-      "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test a_legitimate_send_matches_however_its_options_are_spelled (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
+      "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway.json",
+      "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway-2.json",
+      "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__ag-ui_threads__thread_id__pending/201-only_the_exact_reply_quote_is_accepted.json",
       "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test only_the_exact_reply_quote_is_accepted (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_legitimate_send_matches_however_its_options_are_spelled-2.json",
+      "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_legitimate_send_matches_however_its_options_are_spelled.json",
       "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test a_legitimate_send_matches_however_its_options_are_spelled (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_legitimate_send_matches_however_its_options_are_spelled-3.json",
+      "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_legitimate_send_matches_however_its_options_are_spelled-2.json",
       "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test a_legitimate_send_matches_however_its_options_are_spelled (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
     {
@@ -1715,8 +1723,8 @@
       "source": "PUT /account/inference-source, recorded from the test a_proxy_key_with_no_vault_to_keep_it_is_refused (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/PUT__account_inference-source/200-a_proxy_key_is_sealed_and_never_read_back.json",
-      "source": "PUT /account/inference-source, recorded from the test a_proxy_key_is_sealed_and_never_read_back (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+      "file": "rest/PUT__account_inference-source/200-a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway.json",
+      "source": "PUT /account/inference-source, recorded from the test a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
       "file": "rest/PUT__account_inference-source/400-a_model_whose_terms_forbid_it_is_refused_by_name.json",
