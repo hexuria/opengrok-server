@@ -108,6 +108,14 @@ impl From<SourceKind> for TurnSource {
 }
 
 impl TurnSource {
+    /// A turn's own pick (a queued send's, else its request's) over its coworker's own source,
+    /// which names a kind and never a way. THE ONE MERGE of the two, taken before any setting both
+    /// by `local_proxy::route` and by a queued send asking whether it waits for the person's Mac
+    /// (`InferenceSource::by_mac`), so they cannot disagree about where a send goes (#304 review).
+    pub fn picked(chosen: Option<Self>, coworker: Option<SourceKind>) -> Option<Self> {
+        chosen.or(coworker.map(Self::from))
+    }
+
     /// What a request names: absent or null names nothing, a wire word names a kind, and
     /// `{kind, via?}` names both. The refusal is a sentence under the field's name.
     pub fn named(value: Option<&Value>, field: &str) -> Result<Option<Self>, String> {
@@ -188,6 +196,13 @@ impl InferenceSource {
         let kind = chosen.map_or(self.kind, |chosen| chosen.kind);
         let via = chosen.and_then(|chosen| chosen.via).or(self.via);
         (kind, via.unwrap_or_default())
+    }
+
+    /// Whether a turn that named `chosen`, with a coworker whose own source is `coworker`, goes
+    /// by the person's Mac over this setting: the question a queued send asks to know whether it
+    /// waits for one (opengrok-server `pending::Held`), resolved as the turn itself is.
+    pub fn by_mac(&self, chosen: Option<TurnSource>, coworker: Option<SourceKind>) -> bool {
+        self.resolve(TurnSource::picked(chosen, coworker)) == (SourceKind::LocalProxy, Via::Mac)
     }
 }
 

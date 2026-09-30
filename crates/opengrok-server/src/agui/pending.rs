@@ -22,8 +22,7 @@ use axum::routing::{get, patch};
 use axum::{Json, Router};
 use futures::StreamExt;
 use opengrok_core::id::{AccountId, CoworkerId, PendingUserMessageId, RunId};
-use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource, Via};
-use opengrok_core::run::RunStatus;
+use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource};
 use opengrok_harness::local_proxy::Saved;
 use opengrok_store::{
     DrainKey, DrainResult, EnqueueResult, NewPendingUserMessage, PendingUserMessagePatch,
@@ -95,22 +94,22 @@ fn named(row: &PendingUserMessageRow) -> Option<TurnSource> {
     TurnSource::from_stored(row.inference_source.as_deref()?)
 }
 
-/// Whether queued sends wait for the person's Mac (`heldFor`): one still queued goes by their
-/// Mac — by its own source, else the turn's, else the account's setting — and none is connected.
-/// Read per reply and never stored: the moment a Mac is back, no send reads as held.
-pub(crate) struct Held(Option<InferenceSource>);
+/// Whether queued sends wait for the person's Mac (`heldFor`): one still queued goes by their Mac
+/// as `route` resolves it (`InferenceSource::by_mac`: its own source, else the turn's, over the
+/// coworker's own, `.1`, over the setting) and none is connected. Read per reply, never stored.
+pub(crate) struct Held(Option<InferenceSource>, Option<SourceKind>);
 
 impl Held {
-    pub(crate) async fn now(state: &AgUiState, account: &AccountId) -> Self {
-        match state.auth.relay.connected(account.as_str()) {
-            Some(_) => Self(None),
-            None => Self(state.setting(account).await),
+    pub(crate) async fn now(state: &AgUiState, who: &AccountId, own: Option<SourceKind>) -> Self {
+        match state.auth.relay.connected(who.as_str()) {
+            Some(_) => Self(None, own),
+            None => Self(state.setting(who).await, own),
         }
     }
 
     fn of(&self, row: &PendingUserMessageRow, chosen: Option<TurnSource>) -> Option<&'static str> {
-        let way = self.0.as_ref()?.resolve(named(row).or(chosen));
-        (way == (SourceKind::LocalProxy, Via::Mac) && row.status == "pending").then_some(HELD_FOR)
+        let by_mac = self.0.as_ref()?.by_mac(named(row).or(chosen), self.1);
+        (by_mac && row.status == "pending").then_some(HELD_FOR)
     }
 }
 
@@ -155,7 +154,8 @@ pub async fn thread_pending_json(
 ) -> Result<Value, String> {
     let rows = state.auth.store.pending_user_messages(thread_id, account);
     let rows = rows.await.map_err(|error| error.to_string())?;
-    let (messages, events) = snapshot(thread_id, &rows, &Held::now(state, account).await);
+    let own = thread_own(&state.auth.store, account, &rows).await;
+    let (messages, events) = snapshot(thread_id, &rows, &Held::now(state, account, own).await);
     Ok(json!({ "pendingUserMessages": messages, "pendingEvents": events }))
 }
 
@@ -294,12 +294,6 @@ fn bad(why: impl IntoResponse) -> Response {
     (StatusCode::BAD_REQUEST, why).into_response()
 }
 
-fn listed(thread_id: &str, rows: &[PendingUserMessageRow], held: &Held) -> Value {
-    let (messages, events) = snapshot(thread_id, rows, held);
-    json!({ "v": PAYLOAD_V, "threadId": thread_id, "pendingUserMessages": messages,
-            "pendingEvents": events })
-}
-
 fn mutated(op: &str, thread_id: &str, row: Option<&PendingUserMessageRow>) -> Value {
     let event = custom_event(op, thread_id, row);
     let mut body = json!({ "v": PAYLOAD_V, "threadId": thread_id, "event": event });
@@ -309,17 +303,19 @@ fn mutated(op: &str, thread_id: &str, row: Option<&PendingUserMessageRow>) -> Va
     body
 }
 
-/// `GET /ag-ui/threads/{thread_id}/pending`
+/// `GET /ag-ui/threads/{thread_id}/pending`: the queue a thread's replay carries, held alike.
 async fn list(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Path(thread_id): Path<String>,
 ) -> Result<Response, Response> {
     let account = caller_on_thread(&state, &headers, &thread_id).await?;
-    let store = &state.auth.store;
-    let rows = store.pending_user_messages(&thread_id, &account).await;
-    let held = Held::now(&state, &account).await;
-    Ok(Json(listed(&thread_id, &rows.map_err(unavailable)?, &held)).into_response())
+    let queue = thread_pending_json(&state, &thread_id, &account).await;
+    let queue = queue.map_err(unavailable)?;
+    let (messages, events) = (&queue["pendingUserMessages"], &queue["pendingEvents"]);
+    let body = json!({ "v": PAYLOAD_V, "threadId": thread_id, "pendingUserMessages": messages,
+                       "pendingEvents": events });
+    Ok(Json(body).into_response())
 }
 
 /// `POST /ag-ui/threads/{thread_id}/pending`
@@ -486,7 +482,7 @@ pub async fn consume_for_turn(
     state: &AgUiState,
     account: &AccountId,
     input: &RunAgentInput,
-    chosen: Option<TurnSource>,
+    (chosen, own): (Option<TurnSource>, Option<SourceKind>),
 ) -> Result<Option<TurnSource>, Response> {
     let pending_id = pending_id_from(input);
     if pending_id.is_some() && !input.messages.iter().any(|message| message.role == "user") {
@@ -498,7 +494,7 @@ pub async fn consume_for_turn(
         (None, Some(bubble)) => DrainKey::ClientMessageId(bubble),
         (None, None) => return Ok(None),
     };
-    let held = Held::now(state, account).await;
+    let held = Held::now(state, account, own).await;
     let fires = |row: &_| matches_turn(row, input) && held.of(row, chosen).is_none();
     let store = &state.auth.store;
     let drained =
@@ -611,9 +607,11 @@ async fn send_held(host: &HostState, account: &AccountId, thread: &str) {
             wait = (wait * 2).min(WAIT_MOST);
             continue;
         }
-        let held = Held(host.agui.setting(account).await);
         let rows = store.pending_user_messages(thread, account).await;
-        let first = rows.unwrap_or_default().into_iter().next();
+        let rows = rows.unwrap_or_default();
+        let own = thread_own(store, account, &rows).await;
+        let held = Held(host.agui.setting(account).await, own);
+        let first = rows.into_iter().next();
         let first = first.filter(|row| held.of(row, None).is_some());
         let Some(input) = first.and_then(|row| queued_turn(&row, coworker)) else {
             return;
@@ -639,9 +637,6 @@ async fn thread_now(
 ) -> Option<(bool, Option<CoworkerId>)> {
     let seen = store.runs_for_thread_owned_by(thread, account, 1).await;
     let newest = match seen.ok()?.into_iter().next() {
-        Some(run) if !RunStatus::from_stored(&run.status).is_terminal() => {
-            return Some((false, None));
-        }
         Some(run) => Some(run.id),
         None => {
             let hidden = store.hidden_runs_in_thread(thread, account).await.ok()?;
@@ -653,6 +648,17 @@ async fn thread_now(
     };
     let (run, _) = store.load_run(&newest).await.ok()?;
     Some((run.status.is_terminal(), run.coworker_id))
+}
+
+/// The own source of the coworker a queue's thread last spoke with (`thread_now`), whom a turn the
+/// server makes of a held send names; read only for a queue, so a bare replay reads nothing more.
+async fn thread_own(
+    store: &PgStore,
+    who: &AccountId,
+    queue: &[PendingUserMessageRow],
+) -> Option<SourceKind> {
+    let coworker = thread_now(store, who, &queue.first()?.thread_id).await?.1?;
+    store.load_coworker(&coworker).await.ok()?.0.source
 }
 
 /// A held send as the turn its app would have fired, read as a POST is: what `matches_turn`

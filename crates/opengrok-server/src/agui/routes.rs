@@ -1344,9 +1344,8 @@ pub async fn repin_coworker(
     for event in &events {
         after.apply(event);
     }
-    // ON ITS OWN DOOR TO A PERSON'S PLAN ITS PIN IS WHAT THE PROXY IS ASKED: a body that puts it
-    // there or repins it there leaves one a subscription may answer, or is refused before any
-    // write as a `localModel` is. Its explicit door only; a gateway pin stays free.
+    // ON ITS OWN PLAN ITS PIN IS WHAT IS ASKED: a body putting it there, or repinning it there,
+    // leaves one a subscription may answer or is refused before any write, as a `localModel` is.
     if (source.is_some() || after.model != loaded.model)
         && after.source == Some(SourceKind::LocalProxy)
         && let Err(why) = opengrok_core::inference::subscription_model(&after.model)
@@ -2829,7 +2828,8 @@ pub(crate) async fn turn(
     // Refuse stale sends before interrupting a parked turn or preparing any model work. A queued
     // send's own source pick wins: it is what the person chose when they queued it. One its Mac
     // would carry while no Mac is connected stays queued, and is answered so (`consume_for_turn`).
-    let queued = crate::agui::pending::consume_for_turn(&state, &caller, &input, chosen_source);
+    let picks = (chosen_source, own.0);
+    let queued = crate::agui::pending::consume_for_turn(&state, &caller, &input, picks);
     let chosen_source = match queued.await {
         Ok(queued) => queued.or(chosen_source),
         Err(refusal) => {

@@ -333,7 +333,7 @@ pub async fn route(
     run_id: &str,
     (source, pin): (Option<SourceKind>, Option<String>),
 ) -> Route {
-    let chosen = chosen.or(source.map(TurnSource::from));
+    let chosen = TurnSource::picked(chosen, source);
     let named_gateway = chosen.is_some_and(|chosen| chosen.kind == SourceKind::Gateway);
     let (Some(account), false) = (account, named_gateway) else {
         return Route::Gateway;

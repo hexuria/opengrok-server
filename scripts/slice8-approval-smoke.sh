@@ -61,7 +61,8 @@ ok "the run suspended, and the stream closed"
 
 echo "4. the tool result says waiting, not success"
 # A pending approval that read as success is how a model concludes its command already worked.
-result=$(echo "$events" | jq -c 'select(.type == "TOOL_CALL_RESULT")' | head -1)
+results=$(echo "$events" | jq -c 'select(.type == "TOOL_CALL_RESULT")')
+result=${results%%$'\n'*}
 [ -n "$result" ] || fail "no tool result"
 echo "$result" | jq -e '.ok == false' >/dev/null || fail "a pending approval must not read as ok: $result"
 echo "$result" | jq -e '.content | test("waiting for approval")' >/dev/null || fail "$result"
