@@ -128,7 +128,7 @@
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "messageId": "m2",
-            "delta": "then this, by my Mac",
+            "delta": "after the turn in flight",
             "timestamp": 100
           },
           {
@@ -156,7 +156,7 @@
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
-            "delta": "done by the mac",
+            "delta": "then mine",
             "messageId": "msg_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
@@ -182,7 +182,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  3415
+                  3416
                 ]
               },
               "model_ms": [
