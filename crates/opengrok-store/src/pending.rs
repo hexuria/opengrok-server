@@ -144,6 +144,22 @@ impl PgStore {
         rows.iter().map(pending_row).collect()
     }
 
+    /// Every live follow-up this account has queued, on any thread, in queue order: what a Mac
+    /// that reconnects may carry (`pending::drain_held` in the server).
+    pub async fn pending_user_messages_of(
+        &self,
+        account: &AccountId,
+    ) -> StoreResult<Vec<PendingUserMessageRow>> {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{PENDING_SELECT} where account_id = $1 and status = 'pending'
+              order by created_at_ms, id"
+        )))
+        .bind(account.as_str())
+        .fetch_all(self.pool())
+        .await?;
+        rows.iter().map(pending_row).collect()
+    }
+
     /// One row this account owns, whatever its status. `None` for another account's id.
     pub async fn pending_user_message(
         &self,
@@ -286,42 +302,9 @@ impl PgStore {
         Ok(done.rows_affected() == 1)
     }
 
-    /// Compare and consume under the same row lock; stale clients cannot fire edited sends.
+    /// Compare and consume under the same row lock; stale clients cannot fire edited sends. By
+    /// client id, a missing bubble is an ordinary, unqueued turn.
     pub async fn drain_pending_user_message(
-        &self,
-        id: &str,
-        account: &AccountId,
-        thread_id: &str,
-        run_id: &str,
-        at_ms: i64,
-        matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
-    ) -> StoreResult<DrainResult> {
-        self.checked_drain(DrainKey::Id(id), account, thread_id, run_id, at_ms, matches)
-            .await
-    }
-
-    /// A missing client bubble is an ordinary, unqueued turn.
-    pub async fn drain_pending_user_message_by_client_id(
-        &self,
-        client_message_id: &str,
-        account: &AccountId,
-        thread_id: &str,
-        run_id: &str,
-        at_ms: i64,
-        matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
-    ) -> StoreResult<DrainResult> {
-        self.checked_drain(
-            DrainKey::ClientMessageId(client_message_id),
-            account,
-            thread_id,
-            run_id,
-            at_ms,
-            matches,
-        )
-        .await
-    }
-
-    async fn checked_drain(
         &self,
         key: DrainKey<'_>,
         account: &AccountId,
@@ -375,7 +358,8 @@ impl PgStore {
 
 /// Which natural key names the row to drain. The column name is interpolated into SQL, so it
 /// comes from this closed set and never from a request.
-enum DrainKey<'a> {
+#[derive(Debug, Clone, Copy)]
+pub enum DrainKey<'a> {
     Id(&'a str),
     ClientMessageId(&'a str),
 }

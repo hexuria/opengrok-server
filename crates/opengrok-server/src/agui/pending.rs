@@ -17,16 +17,19 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch};
 use axum::{Json, Router};
-use opengrok_core::id::{AccountId, PendingUserMessageId};
+use futures::StreamExt;
+use opengrok_core::id::{AccountId, CoworkerId, PendingUserMessageId};
+use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource, Via};
+use opengrok_harness::local_proxy::Saved;
 use opengrok_store::{
-    DrainResult, EnqueueResult, NewPendingUserMessage, PendingUserMessagePatch,
-    PendingUserMessageRow, PgStore,
+    DrainKey, DrainResult, EnqueueResult, NewPendingUserMessage, PendingUserMessagePatch,
+    PendingUserMessageRow,
 };
 use opengrok_wire::agui::{Event, EventType, RunAgentInput};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::routes::{AgUiState, account_from_bearer, now_ms};
+use super::routes::{AgUiState, account_from_bearer, now_ms, unavailable};
 
 /// Payload version. Writes that name another number are refused unread so a v2 client cannot
 /// be stored as v1 by accident.
@@ -74,10 +77,52 @@ pub fn message_json(row: &PendingUserMessageRow) -> Value {
         "drainedRunId": row.drained_run_id,
     });
     // Only when the send named one: absent is the account's setting, which is not the row's to say.
+    // As it was named: the word alone, or `{kind, via}`.
     if let Some(source) = &row.inference_source {
-        message["inferenceSource"] = json!(source);
+        let named = TurnSource::from_stored(source).map(TurnSource::to_value);
+        message["inferenceSource"] = named.unwrap_or_else(|| json!(source));
     }
     message
+}
+
+/// What `heldFor` says of a queued send its person's Mac would carry while no Mac is connected.
+const HELD_FOR: &str = "relay_offline";
+
+fn named(row: &PendingUserMessageRow) -> Option<TurnSource> {
+    TurnSource::from_stored(row.inference_source.as_deref()?)
+}
+
+/// Whether queued sends wait for the person's Mac (`heldFor`): one still queued goes by their
+/// Mac — by its own source, else the turn's, else the account's setting — and none is connected.
+/// Read per reply and never stored: the moment a Mac is back, no send reads as held.
+pub(crate) struct Held(Option<InferenceSource>);
+
+impl Held {
+    pub(crate) async fn now(state: &AgUiState, account: &AccountId) -> Self {
+        match state.auth.relay.connected(account.as_str()) {
+            Some(_) => Self(None),
+            None => Self(state.setting(account).await),
+        }
+    }
+
+    fn of(&self, row: &PendingUserMessageRow, chosen: Option<TurnSource>) -> Option<&'static str> {
+        let way = self.0.as_ref()?.resolve(named(row).or(chosen));
+        (way == (SourceKind::LocalProxy, Via::Mac) && row.status == "pending").then_some(HELD_FOR)
+    }
+}
+
+/// A snapshot's rows and their CUSTOM frames, each carrying `heldFor` when it waits for a Mac.
+fn snapshot(thread: &str, rows: &[PendingUserMessageRow], held: &Held) -> (Vec<Value>, Vec<Value>) {
+    let each = |row| {
+        let mut message = message_json(row);
+        let mut event = custom_event("snapshot", thread, Some(row));
+        if let Some(why) = held.of(row, None) {
+            message["heldFor"] = json!(why);
+            event["value"]["message"]["heldFor"] = json!(why);
+        }
+        (message, event)
+    };
+    rows.iter().map(each).unzip()
 }
 
 /// The AG-UI CUSTOM envelope for one mutation. `message` is omitted on `canceled` — the id is
@@ -114,22 +159,14 @@ pub fn custom_event(op: &str, thread_id: &str, row: Option<&PendingUserMessageRo
 /// because this is the current set, not a log of mutations; an id that disappears between two
 /// GETs was canceled or drained (a new run in `runs` is how to tell drained from canceled).
 pub async fn thread_pending_json(
-    store: &PgStore,
+    state: &AgUiState,
     thread_id: &str,
     account: &AccountId,
 ) -> Result<Value, String> {
-    let rows = store
-        .pending_user_messages(thread_id, account)
-        .await
-        .map_err(|error| error.to_string())?;
-    let events: Vec<Value> = rows
-        .iter()
-        .map(|row| custom_event("snapshot", thread_id, Some(row)))
-        .collect();
-    Ok(json!({
-        "pendingUserMessages": rows.iter().map(message_json).collect::<Vec<_>>(),
-        "pendingEvents": events,
-    }))
+    let rows = state.auth.store.pending_user_messages(thread_id, account);
+    let rows = rows.await.map_err(|error| error.to_string())?;
+    let (messages, events) = snapshot(thread_id, &rows, &Held::now(state, account).await);
+    Ok(json!({ "pendingUserMessages": messages, "pendingEvents": events }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -232,9 +269,9 @@ fn reply_to_ok(value: Option<&Value>) -> bool {
 struct Options<'a> {
     recipe_id: Option<&'a str>,
     skill_id: Option<&'a str>,
-    /// Refused unless a wire word, as on a live turn: read as the gateway, a misspelt
-    /// `local-proxy` would bill a key the person chose not to use.
-    source: Option<&'static str>,
+    /// Refused unless a wire word or `{kind, via}`, as on a live turn: read as the gateway, a
+    /// misspelt `local-proxy` would bill a key the person chose not to use. As the row keeps it.
+    source: Option<String>,
 }
 
 /// A create's or an edit's options, or the sentence its 400 says.
@@ -242,12 +279,11 @@ fn options(body: &WriteBody) -> Result<Options<'_>, String> {
     if !reply_to_ok(body.reply_to.as_ref()) {
         return Err("replyTo is a message id, an object, or null".to_string());
     }
-    let source = opengrok_core::inference::SourceKind::named(body.inference_source.as_ref())
-        .map_err(|why| format!("inferenceSource {why}"))?;
+    let source = TurnSource::named(body.inference_source.as_ref(), "inferenceSource")?;
     Ok(Options {
         recipe_id: optional_string_id("recipeId", body.recipe_id.as_ref())?,
         skill_id: optional_string_id("skillId", body.skill_id.as_ref())?,
-        source: source.map(opengrok_core::inference::SourceKind::as_str),
+        source: source.map(TurnSource::stored),
     })
 }
 
@@ -258,12 +294,9 @@ async fn caller_on_thread(
     headers: &HeaderMap,
     thread_id: &str,
 ) -> Result<AccountId, Response> {
-    if !thread_id_ok(thread_id) {
-        return Err((StatusCode::NOT_FOUND, "no such thread").into_response());
-    }
-    let Some(account) = account_from_bearer(state, headers) else {
-        return Err((StatusCode::NOT_FOUND, "no such thread").into_response());
-    };
+    let none = || (StatusCode::NOT_FOUND, "no such thread").into_response();
+    let account = account_from_bearer(state, headers).filter(|_| thread_id_ok(thread_id));
+    let account = account.ok_or_else(none)?;
     match state
         .auth
         .store
@@ -271,21 +304,19 @@ async fn caller_on_thread(
         .await
     {
         Ok(true) => Ok(account),
-        Ok(false) => Err((StatusCode::NOT_FOUND, "no such thread").into_response()),
-        Err(error) => Err((StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()),
+        Ok(false) => Err(none()),
+        Err(error) => Err(unavailable(error)),
     }
 }
 
-fn listed(thread_id: &str, rows: &[PendingUserMessageRow]) -> Value {
-    json!({
-        "v": PAYLOAD_V,
-        "threadId": thread_id,
-        "pendingUserMessages": rows.iter().map(message_json).collect::<Vec<_>>(),
-        "pendingEvents": rows
-            .iter()
-            .map(|row| custom_event("snapshot", thread_id, Some(row)))
-            .collect::<Vec<_>>(),
-    })
+fn bad(why: impl IntoResponse) -> Response {
+    (StatusCode::BAD_REQUEST, why).into_response()
+}
+
+fn listed(thread_id: &str, rows: &[PendingUserMessageRow], held: &Held) -> Value {
+    let (messages, events) = snapshot(thread_id, rows, held);
+    json!({ "v": PAYLOAD_V, "threadId": thread_id, "pendingUserMessages": messages,
+            "pendingEvents": events })
 }
 
 fn mutated(op: &str, thread_id: &str, row: Option<&PendingUserMessageRow>) -> Value {
@@ -307,20 +338,12 @@ async fn list(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Path(thread_id): Path<String>,
-) -> Response {
-    let account = match caller_on_thread(&state, &headers, &thread_id).await {
-        Ok(account) => account,
-        Err(refusal) => return refusal,
-    };
-    match state
-        .auth
-        .store
-        .pending_user_messages(&thread_id, &account)
-        .await
-    {
-        Ok(rows) => Json(listed(&thread_id, &rows)).into_response(),
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
-    }
+) -> Result<Response, Response> {
+    let account = caller_on_thread(&state, &headers, &thread_id).await?;
+    let store = &state.auth.store;
+    let rows = store.pending_user_messages(&thread_id, &account).await;
+    let held = Held::now(&state, &account).await;
+    Ok(Json(listed(&thread_id, &rows.map_err(unavailable)?, &held)).into_response())
 }
 
 /// `POST /ag-ui/threads/{thread_id}/pending`
@@ -329,95 +352,55 @@ async fn create(
     headers: HeaderMap,
     Path(thread_id): Path<String>,
     Json(body): Json<WriteBody>,
-) -> Response {
-    let account = match caller_on_thread(&state, &headers, &thread_id).await {
-        Ok(account) => account,
-        Err(refusal) => return refusal,
-    };
+) -> Result<Response, Response> {
+    let account = caller_on_thread(&state, &headers, &thread_id).await?;
     if let Some(why) = version_ok(body.v) {
-        return (StatusCode::BAD_REQUEST, why).into_response();
+        return Err(bad(why));
     }
-    if let Some(named) = body.thread_id.as_deref()
-        && named != thread_id
+    if body
+        .thread_id
+        .as_ref()
+        .is_some_and(|named| *named != thread_id)
     {
-        return (
-            StatusCode::BAD_REQUEST,
-            "threadId in the body must match the path",
-        )
-            .into_response();
+        return Err(bad("threadId in the body must match the path"));
     }
-    let Some(content) = body.content.as_deref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "a pending user message needs content",
-        )
-            .into_response();
-    };
+    let content = body.content.as_deref();
+    let content = content.ok_or_else(|| bad("a pending user message needs content"))?;
     if let Some(why) = content_ok(content) {
-        return (StatusCode::BAD_REQUEST, why).into_response();
+        return Err(bad(why));
     }
-    let options = match options(&body) {
-        Ok(options) => options,
-        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
-    };
-    let client_message_id = body
-        .client_message_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty());
-    if let Err(why) = optional_id_ok("clientMessageId", client_message_id) {
-        return (StatusCode::BAD_REQUEST, why).into_response();
-    }
+    let options = options(&body).map_err(bad)?;
+    let client_message_id = body.client_message_id.as_deref().map(str::trim);
+    let client_message_id = client_message_id.filter(|id| !id.is_empty());
+    optional_id_ok("clientMessageId", client_message_id).map_err(bad)?;
     let recipe_values = body.recipe_values.as_ref().filter(|value| !value.is_null());
     let reply_to = body.reply_to.as_ref().filter(|value| !value.is_null());
     let id = PendingUserMessageId::new();
-    let at_ms = now_ms();
-    match state
-        .auth
-        .store
-        .enqueue_pending_user_message(
-            NewPendingUserMessage {
-                id: id.as_str(),
-                thread_id: &thread_id,
-                account_id: account.as_str(),
-                content,
-                reply_to,
-                recipe_id: options.recipe_id,
-                recipe_values,
-                skill_id: options.skill_id,
-                client_message_id,
-                inference_source: options.source,
-            },
-            at_ms,
-        )
-        .await
-    {
-        Ok(EnqueueResult::Created(row)) => (
-            StatusCode::CREATED,
-            Json(mutated("created", &thread_id, Some(&row))),
-        )
-            .into_response(),
-        Ok(EnqueueResult::Existing(row)) => {
-            Json(mutated("created", &thread_id, Some(&row))).into_response()
-        }
-        Ok(EnqueueResult::AlreadyConsumed(row)) => (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "v": PAYLOAD_V,
-                "error": "already-consumed",
-                "id": row.id,
-                "runId": row.drained_run_id,
-                "event": custom_event("drained", &thread_id, Some(&row)),
-            })),
-        )
-            .into_response(),
-        Err(opengrok_store::StoreError::Conflict) => (
-            StatusCode::CONFLICT,
-            "another writer got there first; retry",
-        )
-            .into_response(),
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
-    }
+    let new = NewPendingUserMessage {
+        id: id.as_str(),
+        thread_id: &thread_id,
+        account_id: account.as_str(),
+        content,
+        reply_to,
+        recipe_id: options.recipe_id,
+        recipe_values,
+        skill_id: options.skill_id,
+        client_message_id,
+        inference_source: options.source.as_deref(),
+    };
+    let created = |row| Json(mutated("created", &thread_id, Some(row)));
+    let (retry, store) = ("another writer got there first; retry", &state.auth.store);
+    Ok(
+        match store.enqueue_pending_user_message(new, now_ms()).await {
+            Ok(EnqueueResult::Created(row)) => (StatusCode::CREATED, created(&row)).into_response(),
+            Ok(EnqueueResult::Existing(row)) => created(&row).into_response(),
+            Ok(EnqueueResult::AlreadyConsumed(row)) => already_consumed(&thread_id, &row),
+            Err(opengrok_store::StoreError::Conflict) => {
+                (StatusCode::CONFLICT, retry).into_response()
+            }
+            Err(error) => unavailable(error),
+        },
+    )
 }
 
 /// `PATCH /ag-ui/threads/{thread_id}/pending/{id}`
@@ -426,23 +409,15 @@ async fn edit(
     headers: HeaderMap,
     Path((thread_id, id)): Path<(String, String)>,
     Json(body): Json<WriteBody>,
-) -> Response {
-    let account = match caller_on_thread(&state, &headers, &thread_id).await {
-        Ok(account) => account,
-        Err(refusal) => return refusal,
-    };
+) -> Result<Response, Response> {
+    let account = caller_on_thread(&state, &headers, &thread_id).await?;
     if let Some(why) = version_ok(body.v) {
-        return (StatusCode::BAD_REQUEST, why).into_response();
+        return Err(bad(why));
     }
-    if let Some(content) = body.content.as_deref()
-        && let Some(why) = content_ok(content)
-    {
-        return (StatusCode::BAD_REQUEST, why).into_response();
+    if let Some(why) = body.content.as_deref().and_then(content_ok) {
+        return Err(bad(why));
     }
-    let options = match options(&body) {
-        Ok(options) => options,
-        Err(why) => return (StatusCode::BAD_REQUEST, why).into_response(),
-    };
+    let options = options(&body).map_err(bad)?;
     // serde: missing field vs JSON null. `replyTo: null` clears; omitting keeps.
     fn given(value: &Option<Value>) -> Option<Option<&Value>> {
         value
@@ -455,18 +430,14 @@ async fn edit(
         recipe_id: body.recipe_id.is_some().then_some(options.recipe_id),
         recipe_values: given(&body.recipe_values),
         skill_id: body.skill_id.is_some().then_some(options.skill_id),
-        inference_source: body.inference_source.is_some().then_some(options.source),
+        inference_source: given(&body.inference_source).map(|_| options.source.as_deref()),
     };
-    match state
-        .auth
-        .store
-        .update_pending_user_message(&id, &account, &thread_id, patch, now_ms())
-        .await
-    {
-        Ok(Some(row)) => Json(mutated("edited", &thread_id, Some(&row))).into_response(),
-        Ok(None) => (StatusCode::NOT_FOUND, "no such pending user message").into_response(),
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
-    }
+    let store = &state.auth.store;
+    let edited = store.update_pending_user_message(&id, &account, &thread_id, patch, now_ms());
+    Ok(match edited.await.map_err(unavailable)? {
+        Some(row) => Json(mutated("edited", &thread_id, Some(&row))).into_response(),
+        None => (StatusCode::NOT_FOUND, "no such pending user message").into_response(),
+    })
 }
 
 /// `DELETE /ag-ui/threads/{thread_id}/pending/{id}` — idempotent. A drained, cancelled, or
@@ -476,20 +447,14 @@ async fn cancel(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Path((thread_id, id)): Path<(String, String)>,
-) -> Response {
-    let account = match caller_on_thread(&state, &headers, &thread_id).await {
-        Ok(account) => account,
-        Err(refusal) => return refusal,
-    };
-    match state
-        .auth
-        .store
+) -> Result<Response, Response> {
+    let account = caller_on_thread(&state, &headers, &thread_id).await?;
+    let store = &state.auth.store;
+    let gone = store
         .delete_pending_user_message(&id, &account, &thread_id)
-        .await
-    {
-        Ok(_) => (StatusCode::OK, Json(mutated("canceled", &thread_id, None))).into_response(),
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
-    }
+        .await;
+    gone.map_err(unavailable)?;
+    Ok((StatusCode::OK, Json(mutated("canceled", &thread_id, None))).into_response())
 }
 
 /// What `POST /ag-ui` named as the queued send it is firing, if anything.
@@ -574,48 +539,44 @@ fn saved_id(id: Option<&str>) -> Option<&str> {
 ///
 /// `Ok` means this turn may start: we drained a row, this run already drained it (retry), or the
 /// turn was never a queued send; it carries the row's source pick, when the send made one.
-/// Anything else is a conflict the client can show.
+/// Anything else is a conflict the client can show — or a send held for its Mac.
+///
+/// A SEND ITS MAC WOULD CARRY STAYS QUEUED WHILE NO MAC IS CONNECTED: drained, it could only fail
+/// `relay_offline`, or go a way the person did not choose. The drain's own check leaves it; it is
+/// answered 202 as it now is (`heldFor`), and the server sends it once the Mac is back.
 pub async fn consume_for_turn(
-    store: &PgStore,
+    state: &AgUiState,
     account: &AccountId,
     input: &RunAgentInput,
-) -> Result<Option<opengrok_core::inference::SourceKind>, Response> {
-    if pending_id_from(input).is_some()
-        && !input.messages.iter().any(|message| message.role == "user")
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "a queued send needs a user message",
-        )
-            .into_response());
+    chosen: Option<TurnSource>,
+) -> Result<Option<TurnSource>, Response> {
+    let pending_id = pending_id_from(input);
+    if pending_id.is_some() && !input.messages.iter().any(|message| message.role == "user") {
+        return Err(bad("a queued send needs a user message"));
     }
-    let thread_id = input.thread_id.as_str();
-    let run_id = input.run_id.as_str();
-    let at_ms = now_ms();
-    let result = if let Some(pending_id) = pending_id_from(input) {
-        store
-            .drain_pending_user_message(&pending_id, account, thread_id, run_id, at_ms, |row| {
-                matches_turn(row, input)
-            })
-            .await
-    } else if let Some(client_message_id) = last_user_message_id(input) {
-        store
-            .drain_pending_user_message_by_client_id(
-                client_message_id,
-                account,
-                thread_id,
-                run_id,
-                at_ms,
-                |row| matches_turn(row, input),
-            )
-            .await
-    } else {
-        return Ok(None);
+    let (thread_id, run_id) = (input.thread_id.as_str(), input.run_id.as_str());
+    let key = match (&pending_id, last_user_message_id(input)) {
+        (Some(id), _) => DrainKey::Id(id),
+        (None, Some(bubble)) => DrainKey::ClientMessageId(bubble),
+        (None, None) => return Ok(None),
     };
-    match result {
-        Ok(DrainResult::Drained(row) | DrainResult::AlreadyThisRun(row)) => {
-            let source = row.inference_source.as_deref();
-            Ok(source.and_then(opengrok_core::inference::SourceKind::parse))
+    let held = Held::now(state, account).await;
+    let fires = |row: &_| matches_turn(row, input) && held.of(row, chosen).is_none();
+    let store = &state.auth.store;
+    let drained =
+        store.drain_pending_user_message(key, account, thread_id, run_id, now_ms(), fires);
+    match drained.await {
+        Ok(DrainResult::Drained(row) | DrainResult::AlreadyThisRun(row)) => Ok(named(&row)),
+        Ok(DrainResult::Stale(row))
+            if held.of(&row, chosen).is_some() && matches_turn(&row, input) =>
+        {
+            let mut event = custom_event("edited", thread_id, Some(&row));
+            event["value"]["message"]["heldFor"] = json!(HELD_FOR);
+            let why = "Your Mac isn't connected, so this message stays queued and goes when it \
+                       reconnects.";
+            let body = json!({ "v": PAYLOAD_V, "id": row.id, "heldFor": HELD_FOR, "message": why,
+                               "event": event });
+            Err((StatusCode::ACCEPTED, Json(body)).into_response())
         }
         Ok(DrainResult::Stale(row)) => {
             // A same-run retry that changed its words is not a refresh away from sending: this
@@ -631,43 +592,116 @@ pub async fn consume_for_turn(
                     "This run already sent this queued message with different words.",
                 )
             };
-            Err((
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "v": PAYLOAD_V,
-                    "error": "stale-pending-message",
-                    "id": row.id,
-                    "runId": row.drained_run_id,
-                    "message": message,
-                    "event": custom_event(op, thread_id, Some(&row)),
-                })),
-            )
-                .into_response())
-        }
-        Ok(DrainResult::Missing) if pending_id_from(input).is_none() => Ok(None),
-        Ok(DrainResult::Missing) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({
+            Err(conflict(json!({
                 "v": PAYLOAD_V,
-                "error": "not-pending",
-                "id": pending_id_from(input),
-                "event": custom_event("canceled", thread_id, None),
-            })),
-        )
-            .into_response()),
-        Ok(DrainResult::AlreadyConsumed(row)) => Err((
-            StatusCode::CONFLICT,
-            Json(json!({
-                "v": PAYLOAD_V,
-                "error": "already-consumed",
+                "error": "stale-pending-message",
                 "id": row.id,
                 "runId": row.drained_run_id,
-                "event": custom_event("drained", thread_id, Some(&row)),
-            })),
-        )
-            .into_response()),
-        Err(error) => Err((StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()),
+                "message": message,
+                "event": custom_event(op, thread_id, Some(&row)),
+            })))
+        }
+        Ok(DrainResult::Missing) if pending_id.is_none() => Ok(None),
+        Ok(DrainResult::Missing) => Err(conflict(json!({
+            "v": PAYLOAD_V,
+            "error": "not-pending",
+            "id": pending_id,
+            "event": custom_event("canceled", thread_id, None),
+        }))),
+        Ok(DrainResult::AlreadyConsumed(row)) => Err(already_consumed(thread_id, &row)),
+        Err(error) => Err(unavailable(error)),
     }
+}
+
+fn conflict(body: Value) -> Response {
+    (StatusCode::CONFLICT, Json(body)).into_response()
+}
+
+/// The 409 for a send a turn already fired: NativeChat puts its bubble right from `event`.
+fn already_consumed(thread_id: &str, row: &PendingUserMessageRow) -> Response {
+    conflict(json!({
+        "v": PAYLOAD_V,
+        "error": "already-consumed",
+        "id": row.id,
+        "runId": row.drained_run_id,
+        "event": custom_event("drained", thread_id, Some(row)),
+    }))
+}
+
+/// THE RECONNECT TRIGGER. A person's Mac opened its relay stream: each thread whose queue begins
+/// with sends held for it sends them now, oldest first, one turn at a time, as the person's own
+/// (`routes::turn`). Their app fires a send when the run before it ends; one held for an absent
+/// Mac had no such moment, and would wait for good (CLAUDE.md #5). A thread stops at a run in
+/// flight, which fires its own queue, and at a send that starts no turn (held again, changed).
+pub(crate) async fn drain_held(host: crate::host_state::HostState, account: AccountId) {
+    let held = Held(host.agui.setting(&account).await);
+    let Ok(rows) = host
+        .agui
+        .auth
+        .store
+        .pending_user_messages_of(&account)
+        .await
+    else {
+        return;
+    };
+    let mut threads: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+    for row in rows {
+        threads.entry(row.thread_id.clone()).or_default().push(row);
+    }
+    let sends = threads
+        .into_values()
+        .map(|queue| send_held(&host, &account, &held, queue));
+    futures::future::join_all(sends).await;
+}
+
+/// One thread's queue, while its oldest send is held, each once the turn before it has ended.
+async fn send_held(
+    host: &crate::host_state::HostState,
+    account: &AccountId,
+    held: &Held,
+    queue: Vec<PendingUserMessageRow>,
+) {
+    let store = &host.agui.auth.store;
+    for row in queue.iter().take_while(|row| held.of(row, None).is_some()) {
+        let newest = store
+            .runs_for_thread_owned_by(&row.thread_id, account, 1)
+            .await;
+        let Some(newest) = newest.ok().and_then(|runs| runs.into_iter().next()) else {
+            return;
+        };
+        let idle = opengrok_core::run::RunStatus::from_stored(&newest.status).is_terminal();
+        let (true, Ok((run, _))) = (idle, store.load_run(&newest.id).await) else {
+            return;
+        };
+        let (who, input) = (
+            (Some(account.clone()), None),
+            queued_turn(row, run.coworker_id),
+        );
+        let Some(input) = input else {
+            return;
+        };
+        let answered = super::routes::turn(host.clone(), who, input).await;
+        let kind = answered.headers().get(axum::http::header::CONTENT_TYPE);
+        if !kind.is_some_and(|kind| kind.as_bytes().starts_with(b"text/event-stream")) {
+            return;
+        }
+        let mut frames = answered.into_body().into_data_stream();
+        while frames.next().await.is_some() {}
+    }
+}
+
+/// A held send as the turn its app would have fired, read as a POST is: what `matches_turn`
+/// holds a drain to, and the coworker the thread last spoke with.
+fn queued_turn(row: &PendingUserMessageRow, coworker: Option<CoworkerId>) -> Option<RunAgentInput> {
+    let bubble = row.client_message_id.as_deref().unwrap_or(&row.id);
+    let message = json!({ "id": bubble, "role": "user", "content": row.content,
+                          "replyTo": row.reply_to });
+    let props = json!({ "pendingId": row.id, "coworkerId": coworker, "recipe": row.recipe_id,
+                        "recipeValues": row.recipe_values, "skill": row.skill_id });
+    let run_id = uuid::Uuid::now_v7().to_string();
+    let body = json!({ "threadId": row.thread_id, "runId": run_id, "messages": [message],
+                       "forwardedProps": props });
+    serde_json::from_value(body).ok()
 }
 
 #[cfg(test)]

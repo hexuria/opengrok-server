@@ -100,6 +100,14 @@ async fn the_opening_says_where_the_turn_asks_in_the_same_write() {
         }),
         ..request("hello")
     };
+    let mac = ModelRequest {
+        endpoint: Some(ModelEndpoint::Relay(crate::relay::RelayTo {
+            broker: std::sync::Arc::default(),
+            account: "acct-1".to_string(),
+            run_id: "r1".to_string(),
+        })),
+        ..proxy.clone()
+    };
     for (asked, said) in [
         (
             request("hello"),
@@ -107,7 +115,11 @@ async fn the_opening_says_where_the_turn_asks_in_the_same_write() {
         ),
         (
             proxy,
-            serde_json::json!({"kind": "local_proxy", "model": "gpt-5.5"}),
+            serde_json::json!({"kind": "local_proxy", "via": "loopback", "model": "gpt-5.5"}),
+        ),
+        (
+            mac,
+            serde_json::json!({"kind": "local_proxy", "via": "mac", "model": "gpt-5.5"}),
         ),
     ] {
         let journal = MemoryJournal::new();

@@ -217,25 +217,18 @@ pub async fn load_policy(
     account_id: &str,
     machine_id: &str,
 ) -> LocalExecPolicy {
-    let mode = store
-        .local_exec_mode(account_id, machine_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|mode| LocalExecMode::from_stored(&mode))
-        .unwrap_or_default();
+    let mode = store.local_exec_mode(account_id, machine_id).await;
+    let mode = mode.ok().flatten();
     let allow = store
         .local_exec_rules(account_id, machine_id, "allow")
-        .await
-        .unwrap_or_default();
-    let deny = store
-        .local_exec_rules(account_id, machine_id, "deny")
-        .await
-        .unwrap_or_default();
+        .await;
+    let deny = store.local_exec_rules(account_id, machine_id, "deny").await;
     LocalExecPolicy {
-        mode,
-        allow,
-        deny,
+        mode: mode
+            .as_deref()
+            .map_or_else(Default::default, LocalExecMode::from_stored),
+        allow: allow.unwrap_or_default(),
+        deny: deny.unwrap_or_default(),
         session_allow: Vec::new(),
     }
 }
@@ -318,16 +311,24 @@ struct EnrolBody {
     machine_id: Option<String>,
 }
 
+/// A write this API could not make: a 500 that says which.
+fn failed(what: &'static str) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, what).into_response()
+}
+
+/// A write that landed, or the 500 saying which one did not.
+fn written<E>(result: Result<(), E>, failed_to: &'static str) -> Response {
+    let done = || StatusCode::NO_CONTENT.into_response();
+    result.map_or_else(|_| failed(failed_to), |()| done())
+}
+
 /// `POST /local-exec/daemon` — enrol this account's machine and mint its daemon token (shown ONCE).
 async fn enrol_daemon(
     State(state): State<AuthState>,
     headers: HeaderMap,
     Json(body): Json<EnrolBody>,
-) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
     let machine_id = body
         .machine_id
         .filter(|id| !id.trim().is_empty())
@@ -341,32 +342,16 @@ async fn enrol_daemon(
         // Ten years — revocation is the row, not the clock.
         exp: now_ms() / 1000 + 10 * 365 * 24 * 60 * 60,
     };
-    let Ok(token) = state.minter.mint_claims(&claims) else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not mint the daemon token",
-        )
-            .into_response();
-    };
-    if state
+    let minted = state.minter.mint_claims(&claims);
+    let token = minted.map_err(|_| failed("could not mint the daemon token"))?;
+    let (account, label) = (account_id.as_str(), body.label.trim());
+    let enrolled = state
         .store
-        .enrol_daemon(
-            account_id.as_str(),
-            &machine_id,
-            body.label.trim(),
-            &jti,
-            now_ms(),
-        )
+        .enrol_daemon(account, &machine_id, label, &jti, now_ms());
+    enrolled
         .await
-        .is_err()
-    {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not enrol the machine",
-        )
-            .into_response();
-    }
-    Json(serde_json::json!({ "machineId": machine_id, "token": token })).into_response()
+        .map_err(|_| failed("could not enrol the machine"))?;
+    Ok(Json(serde_json::json!({ "machineId": machine_id, "token": token })).into_response())
 }
 
 /// `DELETE /local-exec/daemon/{machine_id}` — revoke a machine's daemon token. Sign-in is untouched.
@@ -374,34 +359,25 @@ async fn revoke_daemon(
     State(state): State<AuthState>,
     headers: HeaderMap,
     axum::extract::Path(machine_id): axum::extract::Path<String>,
-) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
-    match state
-        .store
-        .revoke_daemon(account_id.as_str(), &machine_id)
-        .await
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not revoke").into_response(),
-    }
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
+    let revoked = state.store.revoke_daemon(account_id.as_str(), &machine_id);
+    revoked.await.map_err(|_| failed("could not revoke"))?;
+    // Its relay stream too (#292): a stream opened before the revoke would still be sent the
+    // person's turns, though no answer from it would be taken.
+    state.relay.disconnect(account_id.as_str(), &machine_id);
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// `GET /local-exec/daemon` — the account's enrolled machines.
-async fn list_daemons(State(state): State<AuthState>, headers: HeaderMap) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
-    let listed = state
-        .store
-        .list_daemons(account_id.as_str())
-        .await
-        .unwrap_or_default();
+async fn list_daemons(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
+    let listed = state.store.list_daemons(account_id.as_str()).await;
     let mut machines = Vec::new();
-    for (machine_id, label, enrolled_at_ms, revoked) in listed {
+    for (machine_id, label, enrolled_at_ms, revoked) in listed.unwrap_or_default() {
         let connected = !revoked && state.local_exec.has_provider(&machine_id).await;
         machines.push(serde_json::json!({
             "machineId": machine_id,
@@ -411,21 +387,18 @@ async fn list_daemons(State(state): State<AuthState>, headers: HeaderMap) -> Res
             "connected": connected,
         }));
     }
-    Json(serde_json::json!({ "machines": machines })).into_response()
+    Ok(Json(serde_json::json!({ "machines": machines })).into_response())
 }
 
 /// `GET /local-exec/audit` — the account's recent reverse-exec commands and outcomes.
-async fn audit_log(State(state): State<AuthState>, headers: HeaderMap) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
-    let entries = state
-        .store
-        .local_exec_audit_log(account_id.as_str(), 200)
-        .await
-        .unwrap_or_default();
-    Json(serde_json::json!({ "entries": entries })).into_response()
+async fn audit_log(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
+    let entries = state.store.local_exec_audit_log(account_id.as_str(), 200);
+    let entries = entries.await.unwrap_or_default();
+    Ok(Json(serde_json::json!({ "entries": entries })).into_response())
 }
 
 /// Resolve the (account, machine) of a presented DAEMON token, or `None`. Verifies the signature and
@@ -465,13 +438,10 @@ async fn get_policy(
     State(state): State<AuthState>,
     headers: HeaderMap,
     Query(query): Query<MachineQuery>,
-) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
     let policy = load_policy(&state.store, account_id.as_str(), &query.machine).await;
-    Json(policy_listing(&query.machine, &policy)).into_response()
+    Ok(Json(policy_listing(&query.machine, &policy)).into_response())
 }
 
 /// The body of `GET /local-exec/policy`. An allow row the gate can never match (stored before
@@ -508,22 +478,16 @@ async fn set_mode(
     State(state): State<AuthState>,
     headers: HeaderMap,
     Json(body): Json<SetMode>,
-) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
     if !VALID_MODES.contains(&body.mode.as_str()) {
-        return (StatusCode::UNPROCESSABLE_ENTITY, "unknown mode").into_response();
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "unknown mode").into_response());
     }
-    match state
+    let (account, machine) = (account_id.as_str(), &body.machine_id);
+    let set = state
         .store
-        .set_local_exec_mode(account_id.as_str(), &body.machine_id, &body.mode, now_ms())
-        .await
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not set the mode").into_response(),
-    }
+        .set_local_exec_mode(account, machine, &body.mode, now_ms());
+    Ok(written(set.await, "could not set the mode"))
 }
 
 #[derive(serde::Deserialize)]
@@ -539,36 +503,21 @@ async fn add_rule(
     State(state): State<AuthState>,
     headers: HeaderMap,
     Json(body): Json<RuleBody>,
-) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
     let pattern = body.pattern.trim();
+    let refused = |why| (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
     if !VALID_KINDS.contains(&body.kind.as_str()) || pattern.is_empty() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "kind must be allow|deny and pattern non-empty",
-        )
-            .into_response();
+        return Err(refused("kind must be allow|deny and pattern non-empty"));
     }
     if let Some(why) = standing_rule_refusal(&body.kind, pattern) {
-        return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
+        return Err(refused(why));
     }
-    match state
+    let (account, machine) = (account_id.as_str(), &body.machine_id);
+    let added = state
         .store
-        .add_local_exec_rule(
-            account_id.as_str(),
-            &body.machine_id,
-            &body.kind,
-            pattern,
-            now_ms(),
-        )
-        .await
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "could not add the rule").into_response(),
-    }
+        .add_local_exec_rule(account, machine, &body.kind, pattern, now_ms());
+    Ok(written(added.await, "could not add the rule"))
 }
 
 /// `DELETE /local-exec/policy/rule` — remove an allow or deny rule.
@@ -576,28 +525,13 @@ async fn remove_rule(
     State(state): State<AuthState>,
     headers: HeaderMap,
     Json(body): Json<RuleBody>,
-) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
-    match state
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
+    let (account, machine, kind) = (account_id.as_str(), &body.machine_id, &body.kind);
+    let removed = state
         .store
-        .remove_local_exec_rule(
-            account_id.as_str(),
-            &body.machine_id,
-            &body.kind,
-            &body.pattern,
-        )
-        .await
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not remove the rule",
-        )
-            .into_response(),
-    }
+        .remove_local_exec_rule(account, machine, kind, &body.pattern);
+    Ok(written(removed.await, "could not remove the rule"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -820,27 +754,24 @@ async fn run_direct(
     State(state): State<AuthState>,
     headers: HeaderMap,
     Json(body): Json<RunBody>,
-) -> Response {
-    let (account_id, ..) = match crate::account_api::caller(&state, &headers).await {
-        Ok(caller) => caller,
-        Err(refusal) => return refusal,
-    };
+) -> Result<Response, Response> {
+    let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
     let command = body.command.trim();
     if command.is_empty() {
-        return (StatusCode::UNPROCESSABLE_ENTITY, "command is required").into_response();
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "command is required").into_response());
     }
     let approval_id = uuid::Uuid::now_v7().to_string();
-    match enqueue_and_wait(
+    let (account, machine) = (account_id.as_str(), &body.machine_id);
+    let ran = enqueue_and_wait(
         &state,
-        account_id.as_str(),
-        &body.machine_id,
+        account,
+        machine,
         command,
         Origin::User,
         &approval_id,
         false,
-    )
-    .await
-    {
+    );
+    Ok(match ran.await {
         EnqueueResult::Ran(outcome) => Json(serde_json::json!({
             "outcome": outcome.case,
             "exitCode": outcome.exit_code,
@@ -852,12 +783,8 @@ async fn run_direct(
         .into_response(),
         EnqueueResult::Refused(reason) => (StatusCode::FORBIDDEN, reason).into_response(),
         // A user's own command never hits `Ask`; treat an unexpected one as a server fault.
-        EnqueueResult::NeedsApproval => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "a direct command unexpectedly needed approval",
-        )
-            .into_response(),
-    }
+        EnqueueResult::NeedsApproval => failed("a direct command unexpectedly needed approval"),
+    })
 }
 
 /// `GET /local-exec/requests` — the daemon opens this ONCE and holds it. The server registers the
@@ -911,6 +838,7 @@ async fn post_responses(
     // POST can carry several results, and a backlog after a retry. A `client` frame carries one
     // command's `ExecClientMessage` in `message`; everything else is acknowledged. The result is
     // resolved against THIS machine (the broker rejects a mismatch), not the untrusted `providerId`.
+    let (broker, machine) = (&state.local_exec, machine_id.as_str());
     if let Some(frames) = body.get("frames").and_then(|value| value.as_array()) {
         for frame in frames {
             let kind = frame.get("kind").and_then(|value| value.as_str());
@@ -919,57 +847,39 @@ async fn post_responses(
             match (kind, request_id, message) {
                 // A command's result. The STREAMING shell sends `shellStream` chunks then a
                 // terminal event; a non-streaming `shellResult` is handled directly.
-                (Some("client"), Some(request_id), Some(message)) => {
+                (Some("client"), Some(id), Some(message)) => {
                     if message.get("shellResult").is_some() {
                         let outcome = wire::outcome_from_client_message(message);
-                        state
-                            .local_exec
-                            .resolve(&machine_id, request_id, outcome)
-                            .await;
+                        broker.resolve(machine, id, outcome).await;
                     } else if let Some(action) = wire::stream_action(message) {
-                        use wire::StreamAction;
+                        use wire::StreamAction::{Exit, Ignore, Stderr, Stdout, Terminal};
                         match action {
-                            StreamAction::Stdout(chunk) => {
-                                state
-                                    .local_exec
-                                    .accumulate(&machine_id, request_id, false, &chunk)
-                                    .await;
-                            }
-                            StreamAction::Stderr(chunk) => {
-                                state
-                                    .local_exec
-                                    .accumulate(&machine_id, request_id, true, &chunk)
-                                    .await;
-                            }
-                            StreamAction::Exit(code) => {
+                            Stdout(out) => broker.accumulate(machine, id, false, &out).await,
+                            Stderr(err) => broker.accumulate(machine, id, true, &err).await,
+                            Exit(code) => {
                                 let case = if code == 0 { "success" } else { "failure" };
-                                state
-                                    .local_exec
-                                    .finish_stream(&machine_id, request_id, case, Some(code), "")
+                                broker
+                                    .finish_stream(machine, id, case, Some(code), "")
                                     .await;
                             }
-                            StreamAction::Terminal { case, detail } => {
-                                state
-                                    .local_exec
-                                    .finish_stream(&machine_id, request_id, &case, None, &detail)
-                                    .await;
+                            Terminal { case, detail } => {
+                                broker
+                                    .finish_stream(machine, id, &case, None, &detail)
+                                    .await
                             }
-                            StreamAction::Ignore => {}
+                            Ignore => {}
                         }
                     }
                 }
                 // A control frame: a `throw` means the machine refused or errored the command
                 // (e.g. its local tools are on "ask" and there was no matching local approval).
                 // resolve the waiter with that reason instead of letting it hang to the timeout.
-                (Some("control"), Some(request_id), Some(message)) => {
+                (Some("control"), Some(id), Some(message)) => {
                     if let Some(thrown) = message.get("throw") {
-                        let reason = thrown
-                            .get("error")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("the machine refused or errored the command");
-                        state
-                            .local_exec
-                            .resolve(&machine_id, request_id, ExecOutcome::malformed(reason))
+                        let reason = thrown.get("error").and_then(|value| value.as_str());
+                        let reason = reason.unwrap_or("the machine refused or errored the command");
+                        broker
+                            .resolve(machine, id, ExecOutcome::malformed(reason))
                             .await;
                     }
                     // streamClose / heartbeat carry no result — nothing to resolve.
@@ -1003,14 +913,12 @@ pub async fn enabled_machine(
         if revoked {
             continue;
         }
-        let mode = store
-            .local_exec_mode(account_id, &machine_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|mode| LocalExecMode::from_stored(&mode))
-            .unwrap_or_default();
-        if mode != LocalExecMode::Never {
+        let mode = store.local_exec_mode(account_id, &machine_id).await;
+        let mode = mode.ok().flatten();
+        if mode
+            .as_deref()
+            .is_some_and(|mode| LocalExecMode::from_stored(mode) != LocalExecMode::Never)
+        {
             // The label rides along so prompts can name the ACTUAL enrolled computer
             // ("Uriah's-MacBook-Pro.local") instead of guessing at an OS or hardware name.
             return Some((machine_id, label));

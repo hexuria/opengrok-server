@@ -84,6 +84,7 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
     let app = app.merge(jev::routes::router(state.clone()));
     let app = app
         .merge(local_exec::router(state.auth.clone()))
+        .merge(inference::relay_router(host.clone()))
         .merge(auto_review::router(state.auth.clone()))
         .merge(computers::router(state.clone()))
         .nest("/mcp", mcp_door::router(host))

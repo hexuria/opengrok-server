@@ -1,13 +1,14 @@
 //! Where a person's turns are answered: open-ai-gateway, or their own subscription (CLAUDE.md #4).
 //!
-//! The own-subscription door is an OpenAI-compatible proxy (opencodex) listening on the loopback
-//! of the machine THIS SERVER runs on; it holds the person's provider sign-in itself, so no
-//! provider credential ever reaches us. Only that machine can reach it, which is why a base URL
-//! is loopback or nothing (`opengrok_harness::local_proxy`): it serves a person only where server
-//! and proxy share a machine. A remote deployment needs a relay — NativeChat carrying the call,
-//! as local-exec does — not a wider address here.
+//! The own-subscription door is an OpenAI-compatible proxy (opencodex) that holds the person's
+//! provider sign-in itself, so no provider credential ever reaches us. It is reached one of two
+//! ways (`Via`): on the loopback of the machine THIS SERVER runs on, which is why a base URL is
+//! loopback or nothing (`opengrok_harness::local_proxy`), or through the person's own Mac, which
+//! holds a relay stream open to this server and carries the call to its own opencodex
+//! (`opengrok_harness::relay`, #292) — never a wider address here.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Where a turn's model calls go. The gateway is the default and is exactly what every turn did
 /// before a person could choose, so an account that never set one, and a run logged before this
@@ -53,6 +54,100 @@ impl SourceKind {
     }
 }
 
+/// Which way a person's own subscription is reached: the proxy on this server's loopback, or
+/// their own Mac carrying the call over the relay stream it holds (#292). The words are the ones
+/// agreed with NativeChat. Its third, `helper`, is not built (#293), and is refused by name
+/// rather than read as either: a turn sent a way the person did not choose is a re-route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Via {
+    #[default]
+    Loopback,
+    Mac,
+}
+
+impl Via {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Loopback => "loopback",
+            Self::Mac => "mac",
+        }
+    }
+
+    /// A via a request names: absent, null or `""` names none, which is the account's default.
+    /// Otherwise the wire word exactly, as `SourceKind::parse` reads a kind.
+    pub fn named(value: Option<&Value>) -> Result<Option<Self>, &'static str> {
+        match value {
+            None | Some(Value::Null) => Ok(None),
+            Some(word) => match word.as_str() {
+                Some("") => Ok(None),
+                Some("loopback") => Ok(Some(Self::Loopback)),
+                Some("mac") => Ok(Some(Self::Mac)),
+                Some("helper") => {
+                    Err("\"helper\" is not built yet (#293); use \"loopback\" or \"mac\"")
+                }
+                _ => Err("must be \"loopback\" or \"mac\""),
+            },
+        }
+    }
+}
+
+/// Where one turn asks, as a request names it (`forwardedProps.inferenceSource`, a queued send)
+/// or a run captured it: the kind, and on the proxy which way. `None` via is the account's
+/// default when a request names it, and the loopback on a run logged before the relay existed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TurnSource {
+    pub kind: SourceKind,
+    pub via: Option<Via>,
+}
+
+impl From<SourceKind> for TurnSource {
+    fn from(kind: SourceKind) -> Self {
+        Self { kind, via: None }
+    }
+}
+
+impl TurnSource {
+    /// What a request names: absent or null names nothing, a wire word names a kind, and
+    /// `{kind, via?}` names both. The refusal is a sentence under the field's name.
+    pub fn named(value: Option<&Value>, field: &str) -> Result<Option<Self>, String> {
+        let Some(Value::Object(object)) = value else {
+            let kind = SourceKind::named(value).map_err(|why| format!("{field} {why}"))?;
+            return Ok(kind.map(Self::from));
+        };
+        let kind = SourceKind::named(object.get("kind"))
+            .map_err(|why| format!("{field}.kind {why}"))?
+            .ok_or_else(|| format!("{field}.kind must be \"gateway\" or \"local_proxy\""))?;
+        let via = Via::named(object.get("via")).map_err(|why| format!("{field}.via {why}"))?;
+        Ok(Some(Self { kind, via }))
+    }
+
+    /// As a reply echoes it: the word alone when no via was named, else `{kind, via}`.
+    pub fn to_value(self) -> Value {
+        match self.via {
+            None => Value::from(self.kind.as_str()),
+            Some(via) => serde_json::json!({ "kind": self.kind.as_str(), "via": via.as_str() }),
+        }
+    }
+
+    /// As a queued send's row keeps it: `local_proxy`, or `local_proxy:mac` with a via. A column
+    /// of plain words before the relay, which still read as themselves.
+    pub fn stored(self) -> String {
+        match self.via {
+            None => self.kind.as_str().to_string(),
+            Some(via) => format!("{}:{}", self.kind.as_str(), via.as_str()),
+        }
+    }
+
+    pub fn from_stored(text: &str) -> Option<Self> {
+        let (kind, via) = text.split_once(':').unwrap_or((text, ""));
+        Some(Self {
+            kind: SourceKind::parse(kind)?,
+            via: Via::named(Some(&Value::from(via))).ok()?,
+        })
+    }
+}
+
 /// A person's setting, as their account records it. The proxy's own key is NOT here: the log is
 /// durable and exportable, so it records that a key exists and the vault holds what it is, the
 /// bargain `connection.rs` makes for a token.
@@ -69,6 +164,14 @@ pub struct InferenceSource {
     /// Whether a key for the proxy is sealed in the vault.
     #[serde(default)]
     pub has_key: bool,
+    /// The way a proxy turn goes when it names none; `None` is the loopback, where every turn
+    /// went before the relay. Absent from the log until someone sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<Via>,
+    /// The model the person's Mac is asked for, apart from `local_model`: the Mac's opencodex is
+    /// not the loopback's, and need not serve the same ids. Held to `subscription_model` too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_model: Option<String>,
 }
 
 impl InferenceSource {
@@ -76,6 +179,15 @@ impl InferenceSource {
     /// who picked a source for this message meant this message.
     pub fn for_turn(&self, chosen: Option<SourceKind>) -> SourceKind {
         chosen.unwrap_or(self.kind)
+    }
+
+    /// Where a turn that named `chosen` goes over this setting: its kind, and on the proxy which
+    /// way. The turn's own words win, each of the two on its own; an omitted via is this
+    /// setting's default, and the loopback when there is none.
+    pub fn resolve(&self, chosen: Option<TurnSource>) -> (SourceKind, Via) {
+        let kind = chosen.map_or(self.kind, |chosen| chosen.kind);
+        let via = chosen.and_then(|chosen| chosen.via).or(self.via);
+        (kind, via.unwrap_or_default())
     }
 }
 

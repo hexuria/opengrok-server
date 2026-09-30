@@ -38,6 +38,8 @@ pub struct Projection {
     finished: bool,
     /// Said on `RUN_FINISHED` when the run was not simply done (#244).
     finish_reason: Option<opengrok_core::run::FinishReason>,
+    /// Said beside the message on `RUN_ERROR`, when the failure has a code (`ModelError::code`).
+    fail_code: Option<&'static str>,
     /// Distinguishes the messages of one run from each other.
     message_seq: u32,
 }
@@ -69,6 +71,7 @@ impl Projection {
             started: false,
             finished: false,
             finish_reason: None,
+            fail_code: None,
             message_seq: 0,
         }
     }
@@ -320,6 +323,12 @@ impl Projection {
         self.finish_reason = Some(reason);
     }
 
+    /// The `RUN_ERROR` this projection fails with will carry `code` beside its message, as AG-UI's
+    /// `RunErrorEvent` does: a client says which of a relay's failures it was (`relay_offline`…).
+    pub fn failing_with(&mut self, code: Option<&'static str>) {
+        self.fail_code = code;
+    }
+
     /// One frame before the first box-bound tool of a turn starts a sleeping box, so a client
     /// can say "waking the computer" for the wait instead of "working". Closes an open message
     /// first, like every other frame that is not text.
@@ -377,12 +386,15 @@ impl Projection {
         }
         events.extend(self.close_open());
         self.finished = true;
-        events.push(
-            self.event(EventType::RunError)
-                .with("threadId", self.thread_id.clone())
-                .with("runId", self.run_id.clone())
-                .with("message", message.into()),
-        );
+        let mut failed = self
+            .event(EventType::RunError)
+            .with("threadId", self.thread_id.clone())
+            .with("runId", self.run_id.clone())
+            .with("message", message.into());
+        if let Some(code) = self.fail_code {
+            failed = failed.with("code", code);
+        }
+        events.push(failed);
         events
     }
 

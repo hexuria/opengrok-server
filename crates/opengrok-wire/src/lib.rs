@@ -13,6 +13,7 @@
 //!   3. `activity` — the live stream while a coworker is working.
 //!   4. `agui` — the AG-UI protocol openbot speaks. A published spec, not a reconstruction; see
 //!      that module's note on why its rules differ from the three above.
+//!   5. `relay` — what the server asks a person's own Mac to carry to its opencodex (#292).
 //!
 //! Provenance: shapes derived from the client's own recovered surface in
 //! `opengrok/source/host/gateway-protocol.ts`, `source/shared/transcript.ts` and
@@ -22,6 +23,7 @@
 pub mod activity;
 pub mod agui;
 pub mod command;
+pub mod relay;
 pub mod transcript;
 
 pub use activity::{ActivityTransition, ActivityUpdate, AgentActivity, StreamFrame};

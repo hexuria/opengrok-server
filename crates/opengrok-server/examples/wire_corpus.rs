@@ -9,7 +9,8 @@
 //! THE LAYOUT IS NATIVECHAT'S, not ours to tidy (non-negotiable #1): `agui/<TYPE>/<slug>.json`,
 //! `agui/custom/<name>/<slug>.json`, `rest/<METHOD>_<route with / { } as _>/<status>-<slug>.json`
 //! holding `{method, path, status, body}`, and `MANIFEST.json` with `server_sha`, `recorded_by`,
-//! `emits`, `entries` and `unrecorded` (nativechat `src/opengrok/conformance.rs`).
+//! `emits`, `entries` and `unrecorded` (nativechat `src/opengrok/conformance.rs`). The Mac relay's
+//! stream frames are `relay/<type>/<slug>.json` (#292), new with it.
 //!
 //! One file per distinct SHAPE (keys and value types), named after the lexicographically first
 //! test that produced it, so a re-recording names the same shape the same way. Ids and clocks
@@ -47,6 +48,9 @@ const REST_PREFIXES: &[&str] = &[
     "/connectors",
     // The model picker, whose entries say which source serves them (the inference source).
     "/models",
+    // The Mac relay (#292): the answers a person's Mac posts. Its stream's frames are kept apart,
+    // under `relay/<type>/` (see `frame`): they are not AG-UI, and the Mac, not the chat, reads them.
+    "/inference-relay",
 ];
 
 /// Routes under those prefixes that are not JSON NativeChat reads: the screen proxy serves noVNC's
@@ -141,6 +145,25 @@ const ALSO_KEEP: &[(&str, &str)] = &[
     (
         "a_queued_send_keeps_the_source_it_was_queued_with",
         "/ag-ui/threads/{thread_id}/pending",
+    ),
+    // The Mac relay (#292): a setting read with a Mac connected, the picker with the Mac's models
+    // and `relayConnected`, a queued send held for an absent Mac on its snapshot and in the 202 its
+    // fire is answered with — each the shape of one already kept, and asked for by name.
+    (
+        "a_person_chooses_their_mac_and_reads_the_relay_back",
+        "/account/inference-source",
+    ),
+    (
+        "the_model_list_carries_the_macs_models_and_says_it_is_connected",
+        "/models",
+    ),
+    (
+        "a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects",
+        "/ag-ui/threads/{thread_id}/pending",
+    ),
+    (
+        "a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects",
+        "/ag-ui",
     ),
 ];
 
@@ -265,7 +288,9 @@ fn records(record_dir: &Path) -> Vec<Record> {
 
 fn frame(frame: &Value, test: &str, binary: &str, route: &str) -> Option<Record> {
     let kind = frame.get("type")?.as_str()?;
-    let dir = if kind == "CUSTOM" {
+    let dir = if route.starts_with("/inference-relay") {
+        format!("relay/{kind}")
+    } else if kind == "CUSTOM" {
         format!("agui/custom/{}", frame.get("name")?.as_str()?)
     } else {
         format!("agui/{kind}")
@@ -324,11 +349,14 @@ fn shape(value: &Value) -> String {
         Value::Object(object) => {
             // `role` is kept as its value: a person's `TEXT_MESSAGE_START` and the coworker's have
             // the same keys, and NativeChat reads the two differently (a person's files-only
-            // message is START then END, with no words).
+            // message is START then END, with no words). So is a `RUN_ERROR`'s `code`: the relay's
+            // three (#292) share one shape, and NativeChat says a different thing for each.
+            let failed = object.get("type").and_then(Value::as_str) == Some("RUN_ERROR");
             let fields: BTreeMap<&String, String> = object
                 .iter()
                 .map(|(key, child)| match (key.as_str(), child.as_str()) {
                     ("role", Some(role)) => (key, format!("role={role}")),
+                    ("code", Some(code)) if failed => (key, format!("code={code}")),
                     _ => (key, shape(child)),
                 })
                 .collect();

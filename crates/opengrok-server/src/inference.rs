@@ -1,27 +1,101 @@
-//! `/account/inference-source`: where a person's turns are answered, and the two reads a turn
-//! makes to find out (`local_proxy::Saved`). The setting is the account's
+//! `/account/inference-source`: where a person's turns are answered, and the reads a turn makes
+//! to find out (`local_proxy::Saved`). The setting is the account's
 //! (`AccountEvent::InferenceSourceSet`); the proxy's key is sealed in the vault and never leaves
 //! this process in a reply or a log. The rules are `opengrok_harness::local_proxy` and
-//! `opengrok_core::inference`. IT WORKS ONLY WHERE THE PROXY RUNS ON THE SERVER'S OWN MACHINE: a
-//! remote deployment needs a relay (NativeChat carrying the call, as local-exec does).
+//! `opengrok_core::inference`. By the loopback it works only where the proxy runs on the
+//! server's own machine; anywhere else the person's own Mac carries the call, on the two
+//! `/inference-relay` routes below (`opengrok_harness::relay`, #292).
 
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use std::convert::Infallible;
+
+use axum::extract::{Path, State};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::{Json, Router, routing::get};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures::StreamExt;
 use opengrok_core::account::AccountCommand;
 use opengrok_core::id::AccountId;
-use opengrok_core::inference::{InferenceSource, SourceKind};
+use opengrok_core::inference::{InferenceSource, TurnSource};
 use opengrok_harness::local_proxy::{self, KeyChange};
+use opengrok_harness::relay::{Piped, Refused};
 use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
+use crate::host_state::HostState;
 
 pub fn router(state: AgUiState) -> Router {
     let route = get(get_source).put(put_source);
     Router::new()
         .route("/account/inference-source", route)
         .with_state(state)
+}
+
+/// The Mac relay's routes. They take the daemon token local-exec enrols a machine with, and
+/// nothing else: it names the account and the machine, which only ever serves that account.
+pub fn relay_router(host: HostState) -> Router {
+    let answer = post(relay_response);
+    Router::new()
+        .route("/inference-relay/requests", get(relay_requests))
+        .route("/inference-relay/responses/{request_id}", answer)
+        .with_state(host)
+}
+
+type Answer = Result<Response, Response>;
+
+/// The account and machine a daemon token names, or the 401 a relay route answers without one.
+async fn machine(host: &HostState, headers: &HeaderMap) -> Result<(String, String), Response> {
+    let named = crate::local_exec::daemon_from_bearer(&host.agui.auth, headers).await;
+    named.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED, "enrol this machine first"))
+}
+
+/// `GET /inference-relay/requests` — a person's Mac holds this open to carry their turns
+/// (`RelayFrame`). Opening it is the Mac saying it can: sends held for it go now (`drain_held`).
+async fn relay_requests(State(host): State<HostState>, headers: HeaderMap) -> Answer {
+    let (account, machine) = machine(&host, &headers).await?;
+    let frames = host.agui.auth.relay.connect(&account, &machine);
+    let held = crate::agui::pending::drain_held(host.clone(), AccountId::from_stored(account));
+    tokio::spawn(held);
+    let frames = frames.map(|frame| Ok::<_, Infallible>(Event::default().data(frame)));
+    Ok(Sse::new(frames).into_response())
+}
+
+/// `POST /inference-relay/responses/{request_id}` — the answer to one frame, from the machine it
+/// went to: opencodex's SSE, piped into the run as it arrives, or JSON (a model list, `{error}`).
+/// 204; 404 for an id nothing waits on; 409 answered already; 401; 413 past `MAX_ANSWER_BYTES`.
+async fn relay_response(
+    State(host): State<HostState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    body: axum::body::Body,
+) -> Answer {
+    let (account, machine) = machine(&host, &headers).await?;
+    let answering = host.agui.auth.relay.answer(&account, &machine, &request_id);
+    let answering = answering.map_err(|refused| match refused {
+        Refused::Unknown => refuse(StatusCode::NOT_FOUND, "nothing waits on that id"),
+        Refused::Answered => refuse(StatusCode::CONFLICT, "that was answered already"),
+        Refused::NotYours => refuse(StatusCode::UNAUTHORIZED, "not sent to this machine"),
+    })?;
+    let kind = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
+    let streamed = kind.is_some_and(|kind| kind.starts_with(b"text/event-stream"));
+    match answering.pipe(streamed, body.into_data_stream()).await {
+        Piped::Accepted => Ok(StatusCode::NO_CONTENT.into_response()),
+        Piped::TooLarge => Err(refuse(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "that answer is too large",
+        )),
+    }
+}
+
+/// The account's connected Mac and the label it was enrolled under, for `relay` on a read.
+async fn mac(state: &AgUiState, account: &AccountId) -> Option<(String, Option<String>)> {
+    let machine = state.auth.relay.connected(account.as_str())?;
+    let enrolled = state.auth.store.list_daemons(account.as_str()).await;
+    let mut rows = enrolled.unwrap_or_default().into_iter();
+    let label = rows.find_map(|(id, label, ..)| (id == machine).then_some(label));
+    Some((machine, label.filter(|label| !label.is_empty())))
 }
 
 /// Where the proxy's key is sealed. The vault binds this id into the ciphertext, so it is part of
@@ -34,9 +108,8 @@ fn key_id(account: &AccountId) -> String {
 pub(crate) fn named(
     value: Option<&Value>,
     field: &str,
-) -> Result<Option<SourceKind>, Box<Response>> {
-    let refused = |why| Box::new(refuse(StatusCode::BAD_REQUEST, format!("{field} {why}")));
-    SourceKind::named(value).map_err(refused)
+) -> Result<Option<TurnSource>, Box<Response>> {
+    TurnSource::named(value, field).map_err(|why| Box::new(refuse(StatusCode::BAD_REQUEST, why)))
 }
 
 fn refuse(status: StatusCode, sentence: impl Into<String>) -> Response {
@@ -79,27 +152,33 @@ impl local_proxy::Saved for AgUiState {
             }
         }
     }
+
+    fn relay(&self) -> std::sync::Arc<opengrok_harness::relay::RelayBroker> {
+        self.auth.relay.clone()
+    }
 }
 
 /// `GET /account/inference-source` — the signed-in person's own setting (`local_proxy::described`).
 async fn get_source(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
     match crate::account_api::caller(&state.auth, &headers).await {
-        Ok((_, account, _)) => {
-            Json(local_proxy::described(&account.inference_source).await).into_response()
-        }
+        Ok((id, account, _)) => described(&state, &id, &account.inference_source).await,
         Err(refusal) => signed_out(refusal),
     }
 }
 
-/// `PUT /account/inference-source` — `{kind, baseUrl?, localModel?, apiKey?}` (what each does is
-/// `local_proxy::apply`), answered as `GET` answers.
+async fn described(state: &AgUiState, id: &AccountId, source: &InferenceSource) -> Response {
+    Json(local_proxy::described(source, mac(state, id).await).await).into_response()
+}
+
+/// `PUT /account/inference-source` — `{kind, via?, baseUrl?, localModel?, apiKey?, relay?}` (what
+/// each does is `local_proxy::apply`), answered as `GET` answers.
 async fn put_source(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
     match save(&state, &headers, &body).await {
-        Ok(saved) => Json(local_proxy::described(&saved).await).into_response(),
+        Ok((id, saved)) => described(&state, &id, &saved).await,
         Err(refusal) => refusal,
     }
 }
@@ -108,7 +187,7 @@ async fn save(
     state: &AgUiState,
     headers: &HeaderMap,
     body: &Value,
-) -> Result<InferenceSource, Response> {
+) -> Result<(AccountId, InferenceSource), Response> {
     let caller = crate::account_api::caller(&state.auth, headers).await;
     let (id, account, seq) = caller.map_err(signed_out)?;
     let (source, key) = local_proxy::apply(&account.inference_source, body)
@@ -128,7 +207,7 @@ async fn save(
     {
         tracing::warn!(%error, "a cleared proxy key could not be dropped");
     }
-    Ok(after.inference_source)
+    Ok((id, after.inference_source))
 }
 
 /// Seal the proxy's key before the setting says there is one. With no vault there is nowhere to

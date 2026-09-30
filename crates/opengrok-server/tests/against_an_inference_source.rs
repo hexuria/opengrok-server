@@ -455,8 +455,10 @@ async fn a_person_is_on_the_gateway_until_they_choose_their_own_subscription() {
     assert_eq!(status, 200, "{read}");
     assert_eq!(
         read,
-        json!({"kind": "gateway", "baseUrl": null, "localModel": null, "healthy": false,
-               "hasApiKey": false}),
+        json!({"kind": "gateway", "via": "loopback", "baseUrl": null, "localModel": null,
+               "healthy": false, "hasApiKey": false,
+               "relay": {"connected": false, "machineId": null, "machineLabel": null,
+                         "localModel": null}}),
         "the default, whole: never a 404 and never an empty body"
     );
 }
@@ -470,8 +472,10 @@ async fn a_person_saves_their_own_proxy_and_reads_it_back_healthy() {
                        "localModel": "gpt-5.5" });
     let (status, saved) = h.set(&ada, body).await;
     assert_eq!(status, 200, "{saved}");
-    let expected = json!({"kind": "local_proxy", "baseUrl": h.proxy_url, "localModel": "gpt-5.5",
-                          "healthy": true, "hasApiKey": false});
+    let expected = json!({"kind": "local_proxy", "via": "loopback", "baseUrl": h.proxy_url,
+                          "localModel": "gpt-5.5", "healthy": true, "hasApiKey": false,
+                          "relay": {"connected": false, "machineId": null, "machineLabel": null,
+                                    "localModel": null}});
     assert_eq!(
         saved, expected,
         "the PUT answers as GET does, its trailing slash gone"
@@ -673,7 +677,10 @@ async fn one_model_list_names_the_gateway_and_the_proxy_side_by_side() {
         ids(&both, "local_proxy"),
         ["gpt-5.5", "gpt-6-sol--fast", "xai/grok-4.7"]
     );
-    assert_eq!(both["localProxy"], json!({ "healthy": true }));
+    assert_eq!(
+        both["localProxy"],
+        json!({ "healthy": true, "relayConnected": false })
+    );
 }
 
 /// BOTH KINDS, WHENEVER AN ADDRESS IS STORED, whatever the setting's kind: the gateway's entries,
@@ -701,7 +708,10 @@ async fn the_model_list_carries_both_sources_when_a_proxy_is_stored() {
         ["gpt-5.5", "gpt-6-sol--fast", "xai/grok-4.7"],
         "Anthropic, Google and the unrecognised are never offered: {both}"
     );
-    assert_eq!(both["localProxy"], json!({ "healthy": true }));
+    assert_eq!(
+        both["localProxy"],
+        json!({ "healthy": true, "relayConnected": false })
+    );
     let entry = both["models"]
         .as_array()
         .unwrap()
@@ -710,7 +720,7 @@ async fn the_model_list_carries_both_sources_when_a_proxy_is_stored() {
         .cloned();
     assert_eq!(
         entry,
-        Some(json!({"id": "gpt-5.5", "points": null, "source": "local_proxy"})),
+        Some(json!({"id": "gpt-5.5", "points": null, "source": "local_proxy", "via": "loopback"})),
         "the gateway's entry shape, and its source"
     );
 
@@ -747,7 +757,10 @@ async fn a_stored_proxy_that_is_unreachable_leaves_the_gateway_list_whole() {
         Some(2),
         "{listing}"
     );
-    assert_eq!(listing["localProxy"], json!({ "healthy": false }));
+    assert_eq!(
+        listing["localProxy"],
+        json!({ "healthy": false, "relayConnected": false })
+    );
     assert_eq!(h.read(&ada).await.1["healthy"], false);
 }
 
@@ -791,7 +804,7 @@ async fn a_thread_moves_from_the_gateway_to_the_persons_own_proxy_and_keeps_its_
     assert_eq!(frames[1]["name"], "opengrok.inferenceSource", "{frames:?}");
     assert_eq!(
         sources(&frames),
-        [json!({"kind": "local_proxy", "model": "gpt-5.5"})]
+        [json!({"kind": "local_proxy", "via": "loopback", "model": "gpt-5.5"})]
     );
     assert_eq!(text_of(&frames), "from the proxy");
     assert_eq!(ending(&frames)["type"], "RUN_FINISHED", "{frames:?}");
@@ -835,7 +848,7 @@ async fn a_thread_moves_from_the_gateway_to_the_persons_own_proxy_and_keeps_its_
         journaled,
         [
             vec![json!({"kind": "gateway", "model": "xai/grok-4.6"})],
-            vec![json!({"kind": "local_proxy", "model": "gpt-5.5"})],
+            vec![json!({"kind": "local_proxy", "via": "loopback", "model": "gpt-5.5"})],
         ]
     );
     let second_run = RunId::from_stored(runs[1]["runId"].as_str().unwrap().to_string());
@@ -894,9 +907,13 @@ async fn a_turn_that_names_the_proxy_with_nothing_set_ends_in_words() {
     assert_eq!(end["type"], "RUN_ERROR", "{frames:?}");
     let said = end["message"].as_str().unwrap_or_default();
     assert!(said.contains("no proxy address is set"), "{said}");
+    assert!(
+        end.get("code").is_none(),
+        "a proxy's gap has no relay code: {end}"
+    );
     assert_eq!(
         sources(&frames),
-        [json!({"kind": "local_proxy", "model": ""})]
+        [json!({"kind": "local_proxy", "via": "loopback", "model": ""})]
     );
 
     let body = json!({ "kind": "local_proxy", "baseUrl": h.proxy_url });
@@ -970,7 +987,7 @@ async fn a_run_answered_after_the_source_changed_keeps_the_source_it_started_wit
     assert_eq!(asked[1].1["model"], "gpt-5.5");
     assert_eq!(
         sources(&run.emitted),
-        [json!({"kind": "local_proxy", "model": "gpt-5.5"})],
+        [json!({"kind": "local_proxy", "via": "loopback", "model": "gpt-5.5"})],
         "said once, at the start; a carry-on does not say it again"
     );
 }
@@ -1051,7 +1068,7 @@ async fn a_queued_send_keeps_the_source_it_was_queued_with() {
     assert_eq!(status, 200);
     assert_eq!(
         sources(&frames),
-        [json!({"kind": "local_proxy", "model": "gpt-5.5"})],
+        [json!({"kind": "local_proxy", "via": "loopback", "model": "gpt-5.5"})],
         "{frames:?}"
     );
     assert_eq!(text_of(&frames), "from the proxy");

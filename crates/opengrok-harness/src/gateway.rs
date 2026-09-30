@@ -11,7 +11,8 @@
 //!
 //! A PERSON'S OWN PROXY is the one other address (`ModelEndpoint`, CLAUDE.md #4): the same
 //! dialect on this server's loopback, dialled with the client `local_proxy` builds, never with
-//! our key and never on the coworker's pin.
+//! our key and never on the coworker's pin — or the same body handed to their own Mac to carry
+//! (`relay`), with no address and no key at all.
 //!
 //! ON PARSING SSE BY HAND: the wire format is `data: {json}\n\n` with a literal `data: [DONE]`
 //! sentinel, and the fragments that matter are three fields deep. A streaming JSON framework would
@@ -612,7 +613,7 @@ fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
 /// absent is how the gateway hears "the route's default", and `none` would switch reasoning off.
 /// The run's tools only when there are any: an empty `tools: []` makes some gateways reject the
 /// request, and "no tools" is a plain chat turn.
-fn chat_body(request: &ModelRequest) -> serde_json::Value {
+pub(crate) fn chat_body(request: &ModelRequest) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": request.model,
         "stream": true,
@@ -634,13 +635,9 @@ fn chat_body(request: &ModelRequest) -> serde_json::Value {
 /// path — a resume, the wrap-up, a judge. No `user` pin: that is the gateway's affinity.
 async fn to_proxy(
     http: &Result<reqwest::Client, String>,
-    endpoint: &ModelEndpoint,
+    (base_url, auth): (&str, &Option<(String, String)>),
     request: &ModelRequest,
 ) -> Result<DeltaStream, ModelError> {
-    let (base_url, auth) = match endpoint {
-        ModelEndpoint::Unavailable(sentence) => return Err(ModelError::Proxy(sentence.clone())),
-        ModelEndpoint::Proxy { base_url, auth } => (base_url, auth),
-    };
     let base = crate::local_proxy::loopback_base(base_url)
         .map_err(|why| ModelError::Proxy(format!("Your proxy's address cannot be used: {why}.")))?;
     opengrok_core::inference::subscription_model(&request.model)
@@ -712,8 +709,15 @@ impl ModelDoor for GatewayDoor {
     }
 
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
-        if let Some(endpoint) = &request.endpoint {
-            return to_proxy(&self.proxy_http, endpoint, &request).await;
+        match &request.endpoint {
+            None => {}
+            Some(ModelEndpoint::Proxy { base_url, auth }) => {
+                return to_proxy(&self.proxy_http, (base_url, auth), &request).await;
+            }
+            Some(ModelEndpoint::Relay(to)) => return to.broker.stream(to, &request).await,
+            Some(ModelEndpoint::Unavailable { why, .. }) => {
+                return Err(ModelError::Proxy(why.clone()));
+            }
         }
         let mut payload = chat_body(&request);
         // WHICH CONVERSATION THIS IS, so the gateway can pin it to one credential and the
@@ -792,25 +796,39 @@ impl ModelDoor for GatewayDoor {
 /// An answered request's body as deltas, from the gateway or a person's proxy alike: both speak
 /// the same OpenAI stream.
 fn deltas(response: reqwest::Response) -> DeltaStream {
+    deltas_from(response.bytes_stream().map(|chunk| {
+        chunk.map_err(|error| match send_error(error) {
+            // A body that stopped arriving is the model going quiet, not a gateway
+            // that could not be reached: nothing about the connect failed.
+            ModelError::Unreachable(detail) => ModelError::Stream(detail),
+            other => other,
+        })
+    }))
+}
+
+/// An OpenAI stream's bytes as deltas, however they arrive: an HTTP body, or the body a person's
+/// Mac relays (`relay`), which is opencodex's own and so the same dialect.
+pub(crate) fn deltas_from<S, B>(body: S) -> DeltaStream
+where
+    S: futures::Stream<Item = Result<B, ModelError>> + Send + 'static,
+    B: AsRef<[u8]> + Send + 'static,
+{
     // Frames can split across chunks, so bytes are buffered and consumed line by line.
     // Tool-call argument fragments share one parser so a later chunk without `id`
     // still belongs to the call the first chunk named.
     let live = Arc::new(Mutex::new(SseState::default()));
     let body_state = live.clone();
-    let body = response.bytes_stream().flat_map(move |chunk| {
+    let body = body.flat_map(move |chunk| {
         let events = match chunk {
-            Err(error) => vec![Err(match send_error(error) {
-                // A body that stopped arriving is the model going quiet, not a gateway
-                // that could not be reached: nothing about the connect failed.
-                ModelError::Unreachable(detail) => ModelError::Stream(detail),
-                other => other,
-            })],
+            Err(error) => vec![Err(error)],
             Ok(bytes) => {
                 let mut state = match body_state.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                state.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                state
+                    .buffer
+                    .push_str(&String::from_utf8_lossy(bytes.as_ref()));
                 let mut out = Vec::new();
                 while let Some(index) = state.buffer.find('\n') {
                     let line: String = state.buffer.drain(..=index).collect();

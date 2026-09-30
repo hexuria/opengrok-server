@@ -79,6 +79,8 @@ model that stops matching fails the gate. That mapping is the part a person has 
 | `RunLifecycle` aggregate, loops, sweep, claim | `opengrok-core/src/run.rs`, `agui/routes.rs` claim, `opengrok-server/src/recovery.rs` |
 | `JournalAppend` read/append/Conflict | `append_events` / `append_run` in `opengrok-store` |
 | `RecipeLease` lock, snapshot, insert, commit, land | `start_recipe_run` / `record_recipe_run` in `opengrok-store/src/postgres.rs` |
+| `RelayCall` post, deliver, ends, give up | `RelayBroker::answer`, `Answering::pipe`, `Call::bytes`, `RelayBroker::stop` in `opengrok-harness/src/relay.rs` |
+| `HeldSend` check, drain, trigger, ask | `Held::now` + `consume_for_turn`, `drain_held` in `opengrok-server/src/agui/pending.rs`; `RelayBroker::ask` |
 | Lean `Ending`, `Answer`, `Budget`, `Close` | the same, for every constant |
 | `run_properties.rs` | `Run::decide` + `apply`, against `ExactlyOneEnding`, `ended_is_stable`, `ApprovedAtMostOnce` |
 

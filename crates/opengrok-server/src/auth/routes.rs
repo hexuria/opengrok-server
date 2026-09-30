@@ -58,6 +58,8 @@ pub struct AuthState {
     /// a caller waiting for one command's result. One per replica, shared by the `/local-exec/*`
     /// routes.
     pub local_exec: Arc<crate::local_exec::LocalExecBroker>,
+    /// The Mac relay's broker (#292, `/inference-relay/*`): the same machines, carrying turns.
+    pub relay: Arc<opengrok_harness::relay::RelayBroker>,
     /// The other door's key desk: open-ai-gateway's admin API, for minting an org member a key.
     /// Resolved ONCE at boot rather than per request — the environment is not a per-request input,
     /// and a seam a test can substitute is worth more than a `std::env` read in a handler.
@@ -127,6 +129,7 @@ impl AuthState {
             resend_endpoint: super::resend::ENDPOINT.to_string(),
             public_url: String::new(),
             local_exec: Arc::new(crate::local_exec::LocalExecBroker::new()),
+            relay: Arc::default(),
             gateway_admin: crate::gateway_admin::GatewayAdmin::from_env(),
             model_catalogue: crate::models::ModelCatalogue::from_env().map(std::sync::Arc::new),
             context_tokens: crate::models::context_setting_from_env(),
