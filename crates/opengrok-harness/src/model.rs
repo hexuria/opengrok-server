@@ -1,7 +1,8 @@
 //! The model door, and what comes back through it.
 //!
 //! EVERY MODEL CALL EXITS THROUGH open-ai-gateway (CLAUDE.md #4), except a person's own-subscription
-//! turn, which goes to their proxy on this server's loopback when they choose it (`ModelEndpoint`).
+//! turn, which goes to their proxy on this server's loopback, or is relayed through their own Mac,
+//! when they choose it (`ModelEndpoint`).
 //! A coworker's pin (`xai/grok-4.6@sub`) is a route, not a key: the gateway holds the provider
 //! credentials and we hold an `oag_live_` key that says who is asking; the proxy holds the person's
 //! provider sign-in itself. Nothing in this crate ever sees a provider secret, and `ModelRequest`
@@ -101,10 +102,12 @@ impl std::fmt::Debug for GatewayKey {
 }
 
 /// Where ONE request goes when it is not the gateway: a person's own subscription, through the
-/// OpenAI-compatible proxy on this server's loopback (`local_proxy`). `Unavailable` is the
-/// fail-closed half, as it is for `GatewayKey`: the person chose their own subscription and it
-/// cannot be used as set, so the door refuses with this sentence rather than send the turn
-/// anywhere else — never quietly to the gateway, which would bill a key they chose not to use.
+/// OpenAI-compatible proxy on this server's loopback (`local_proxy`), or through their own Mac
+/// (`relay`). `Unavailable` is the fail-closed half, as it is for `GatewayKey`: the person chose
+/// their own subscription and it cannot be used as set, so the door refuses with this sentence
+/// rather than send the turn anywhere else — never quietly to the gateway, which would bill a key
+/// they chose not to use, nor the other way to their subscription. `via` is the way it would have
+/// gone, when that is known, for the turn's frame to say.
 ///
 /// `auth` is the header the proxy reads its key from, and the key: the person's own, sealed in the
 /// vault, never the gateway's. Redacted `Debug`, no `Serialize`, for the reason `GatewayKey` has.
@@ -114,7 +117,23 @@ pub enum ModelEndpoint {
         base_url: String,
         auth: Option<(String, String)>,
     },
-    Unavailable(String),
+    Relay(crate::relay::RelayTo),
+    Unavailable {
+        why: String,
+        via: Option<opengrok_core::inference::Via>,
+    },
+}
+
+impl ModelEndpoint {
+    /// The way a turn on this endpoint goes, for its `opengrok.inferenceSource` frame.
+    pub fn via(&self) -> Option<opengrok_core::inference::Via> {
+        use opengrok_core::inference::Via;
+        match self {
+            Self::Proxy { .. } => Some(Via::Loopback),
+            Self::Relay(_) => Some(Via::Mac),
+            Self::Unavailable { via, .. } => *via,
+        }
+    }
 }
 
 impl std::fmt::Debug for ModelEndpoint {
@@ -125,7 +144,8 @@ impl std::fmt::Debug for ModelEndpoint {
                 "ModelEndpoint::Proxy({base_url}, key: {})",
                 if auth.is_some() { "<redacted>" } else { "none" }
             ),
-            Self::Unavailable(reason) => write!(f, "ModelEndpoint::Unavailable({reason:?})"),
+            Self::Relay(to) => write!(f, "ModelEndpoint::Relay({to:?})"),
+            Self::Unavailable { why, .. } => write!(f, "ModelEndpoint::Unavailable({why:?})"),
         }
     }
 }
@@ -301,9 +321,25 @@ pub enum ModelError {
     /// would send somebody whose proxy is not running off to check a gateway key.
     #[error("{0}")]
     Proxy(String),
+    /// The person's own Mac could not carry the call (`relay`): none is connected, it went quiet,
+    /// or its plan refused. Already a sentence; `code` rides the run's `RUN_ERROR` beside it
+    /// (`relay_offline`, `relay_timeout`, `relay_failed`), so a client can say which.
+    #[error("{sentence}")]
+    Relay {
+        code: &'static str,
+        sentence: String,
+    },
 }
 
 impl ModelError {
+    /// The code a `RUN_ERROR` carries beside the sentence, when the failure has one.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::Relay { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
     /// The sentence a person is shown when a turn ends on this error.
     ///
     /// NEVER THE GATEWAY'S BODY. A 429, a 503 or a context overflow reached the chat as
@@ -329,7 +365,8 @@ impl ModelError {
             Self::TimedOut(sentence)
             | Self::SpendCap(sentence)
             | Self::Held(sentence)
-            | Self::Proxy(sentence) => sentence.clone(),
+            | Self::Proxy(sentence)
+            | Self::Relay { sentence, .. } => sentence.clone(),
         }
     }
 

@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account/inference-source",
+  "status": 400,
+  "body": {
+    "error": "via \"helper\" is not built yet (#293); use \"loopback\" or \"mac\""
+  }
+}

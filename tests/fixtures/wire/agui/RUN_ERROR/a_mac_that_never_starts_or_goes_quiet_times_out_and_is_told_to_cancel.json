@@ -1,0 +1,8 @@
+{
+  "type": "RUN_ERROR",
+  "timestamp": 100,
+  "threadId": "thr-0199bb4e000070008000000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "message": "Your Mac did not start answering within 4 seconds, so the turn stopped there; it was told to cancel.",
+  "code": "relay_timeout"
+}

@@ -10,6 +10,7 @@ fn run_with(events: Vec<serde_json::Value>) -> Run {
         model: None,
         effort: Default::default(),
         inference_source: Default::default(),
+        inference_via: None,
         system: None,
         skill_id: None,
         offered_skills: Vec::new(),

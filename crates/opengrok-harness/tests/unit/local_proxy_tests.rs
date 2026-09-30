@@ -81,7 +81,10 @@ fn anything_but_this_machine_is_refused_with_a_sentence() {
 #[test]
 fn a_setting_with_a_gap_is_a_refusal_that_names_the_gap() {
     let unavailable = |endpoint: ModelEndpoint| match endpoint {
-        ModelEndpoint::Unavailable(sentence) => sentence,
+        ModelEndpoint::Unavailable {
+            why,
+            via: Some(Via::Loopback),
+        } => why,
         dialled => format!("a gap must not dial, and this one does: {dialled:?}"),
     };
     let base = Some("http://127.0.0.1:8080");
@@ -116,7 +119,11 @@ fn a_setting_with_a_gap_is_a_refusal_that_names_the_gap() {
 }
 
 /// A person's saved setting, or none when it cannot be read; its key is always `k`.
-struct Stored(Option<InferenceSource>);
+struct Stored(Option<InferenceSource>, Arc<crate::relay::RelayBroker>);
+
+fn stored(setting: Option<InferenceSource>) -> Stored {
+    Stored(setting, Arc::default())
+}
 
 #[async_trait::async_trait]
 impl Saved for Stored {
@@ -125,6 +132,9 @@ impl Saved for Stored {
     }
     async fn key(&self, _: &AccountId, saved: bool) -> Result<Option<String>, String> {
         Ok(saved.then(|| "k".to_string()))
+    }
+    fn relay(&self) -> Arc<crate::relay::RelayBroker> {
+        self.1.clone()
     }
 }
 
@@ -138,6 +148,7 @@ async fn a_turns_source_is_resolved_in_one_place_and_never_guessed() {
         base_url: Some("http://127.0.0.1:8080".to_string()),
         local_model: Some("gpt-5.5".to_string()),
         has_key: true,
+        ..Default::default()
     };
     let on_gateway = InferenceSource {
         kind: SourceKind::Gateway,
@@ -148,24 +159,45 @@ async fn a_turns_source_is_resolved_in_one_place_and_never_guessed() {
         base_url: "http://127.0.0.1:8080".to_string(),
         auth: Some((KEY_HEADER.to_string(), "k".to_string())),
     });
-    let (proxy, gateway) = (Some(SourceKind::LocalProxy), Some(SourceKind::Gateway));
+    let proxy = Some(TurnSource::from(SourceKind::LocalProxy));
+    let gateway = Some(TurnSource::from(SourceKind::Gateway));
 
     // The account's setting when the turn names none; the turn's own word either way.
-    let routed = route(&Stored(Some(on_proxy.clone())), Some(&ada), None, None).await;
+    let routed = route(
+        &stored(Some(on_proxy.clone())),
+        Some(&ada),
+        None,
+        None,
+        "r1",
+    )
+    .await;
     assert_eq!(routed.kind(), SourceKind::LocalProxy);
+    assert_eq!(
+        routed.source().via,
+        Some(Via::Loopback),
+        "a loopback turn says so"
+    );
     assert_eq!(asked(routed), ("gpt-5.5".to_string(), dialled.clone()));
-    let routed = route(&Stored(Some(on_gateway)), Some(&ada), proxy, None).await;
+    let routed = route(&stored(Some(on_gateway)), Some(&ada), proxy, None, "r1").await;
     assert_eq!(asked(routed), ("gpt-5.5".to_string(), dialled));
-    let routed = route(&Stored(Some(on_proxy.clone())), Some(&ada), gateway, None).await;
+    let routed = route(
+        &stored(Some(on_proxy.clone())),
+        Some(&ada),
+        gateway,
+        None,
+        "r1",
+    )
+    .await;
     assert_eq!(routed.kind(), SourceKind::Gateway);
     assert_eq!(asked(routed), ("xai/grok-4.6".to_string(), None), "the pin");
 
     // A carry-on asks on the model its run started on, not the setting's latest.
     let routed = route(
-        &Stored(Some(on_proxy)),
+        &stored(Some(on_proxy)),
         Some(&ada),
         proxy,
         Some("gpt-6-sol"),
+        "r1",
     )
     .await;
     assert_eq!(asked(routed).0, "gpt-6-sol");
@@ -174,18 +206,91 @@ async fn a_turns_source_is_resolved_in_one_place_and_never_guessed() {
     // or the proxy, is refused in words, on no model and never the coworker's pin; a carry-on on
     // the model its run started on. Only a turn that named the gateway itself goes there.
     for chosen in [None, proxy] {
-        let (model, endpoint) = asked(route(&Stored(None), Some(&ada), chosen, None).await);
+        let (model, endpoint) = asked(route(&stored(None), Some(&ada), chosen, None, "r1").await);
         assert_eq!(model, "", "{chosen:?}");
         let refused = "Your reply source could not be read, so the turn was not sent";
         assert!(
-            matches!(&endpoint, Some(ModelEndpoint::Unavailable(why)) if why.starts_with(refused)),
+            matches!(&endpoint, Some(ModelEndpoint::Unavailable { why, .. }) if why.starts_with(refused)),
             "{chosen:?}: {endpoint:?}"
         );
     }
-    let carried = route(&Stored(None), Some(&ada), proxy, Some("gpt-6-sol")).await;
+    let carried = route(&stored(None), Some(&ada), proxy, Some("gpt-6-sol"), "r1").await;
     assert_eq!(asked(carried).0, "gpt-6-sol");
-    let routed = route(&Stored(None), Some(&ada), gateway, None).await;
+    let routed = route(&stored(None), Some(&ada), gateway, None, "r1").await;
     assert_eq!(asked(routed), ("xai/grok-4.6".to_string(), None), "named");
+}
+
+/// THE MAC IS A WAY, NOT A SOURCE: `via: "mac"` over the same `local_proxy` kind resolves to the
+/// account's relay for this run, on the Mac's own model, and never the loopback's address, model
+/// or key. The turn's own way beats the setting's, as its kind does, and a carry-on keeps the way
+/// its run captured. No model for the Mac is a refusal in words, never the loopback's model.
+#[tokio::test]
+async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
+    let ada = AccountId::new();
+    let by_mac = InferenceSource {
+        kind: SourceKind::LocalProxy,
+        base_url: Some("http://127.0.0.1:8080".to_string()),
+        local_model: Some("gpt-5.5".to_string()),
+        has_key: true,
+        via: Some(Via::Mac),
+        relay_model: Some("gpt-6-sol".to_string()),
+    };
+    let saved = stored(Some(by_mac.clone()));
+    let relayed = |run: &str| {
+        Some(ModelEndpoint::Relay(crate::relay::RelayTo {
+            broker: saved.1.clone(),
+            account: ada.as_str().to_string(),
+            run_id: run.to_string(),
+        }))
+    };
+    let routed = route(&saved, Some(&ada), None, None, "r1").await;
+    assert_eq!(routed.source().via, Some(Via::Mac));
+    let (model, endpoint) = routed.asked("xai/grok-4.6".to_string());
+    assert_eq!((model.as_str(), endpoint), ("gpt-6-sol", relayed("r1")));
+
+    let loopback = TurnSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Loopback),
+    };
+    let (model, endpoint) = route(&saved, Some(&ada), Some(loopback), None, "r2")
+        .await
+        .asked(String::new());
+    assert_eq!(model, "gpt-5.5", "the turn's own way wins");
+    assert!(
+        matches!(endpoint, Some(ModelEndpoint::Proxy { .. })),
+        "{endpoint:?}"
+    );
+
+    let mac = TurnSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Mac),
+    };
+    let on_loopback = stored(Some(InferenceSource {
+        via: None,
+        ..by_mac.clone()
+    }));
+    let (model, endpoint) = route(&on_loopback, Some(&ada), Some(mac), Some("gpt-5.5"), "r3")
+        .await
+        .asked(String::new());
+    assert_eq!(model, "gpt-5.5", "a carry-on on the model it started on");
+    assert!(
+        matches!(endpoint, Some(ModelEndpoint::Relay(_))),
+        "{endpoint:?}"
+    );
+
+    let no_model = stored(Some(InferenceSource {
+        relay_model: None,
+        ..by_mac
+    }));
+    let (model, endpoint) = route(&no_model, Some(&ada), None, None, "r4")
+        .await
+        .asked(String::new());
+    assert_eq!(model, "", "never the loopback's model");
+    assert!(
+        matches!(&endpoint, Some(ModelEndpoint::Unavailable { why, via: Some(Via::Mac) })
+            if why.starts_with("Choose a model for your Mac first")),
+        "{endpoint:?}"
+    );
 }
 
 /// What a stand-in proxy was sent: each request's head and body, as text.
@@ -349,9 +454,10 @@ async fn the_door_refuses_a_request_its_setting_should_never_have_allowed() {
     let error = said(
         &door,
         ModelRequest {
-            endpoint: Some(ModelEndpoint::Unavailable(
-                "no proxy address is set".to_string(),
-            )),
+            endpoint: Some(ModelEndpoint::Unavailable {
+                why: "no proxy address is set".to_string(),
+                via: Some(Via::Loopback),
+            }),
             ..to_the_proxy(&elsewhere, None, "gpt-5.5")
         },
     )

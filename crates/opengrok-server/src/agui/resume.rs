@@ -697,8 +697,8 @@ pub(crate) async fn resume_interrupted_run(
     let runner = runner.map(|r| crate::skills::onto_captured(&state.agui, &account_id, r, kept));
     let asked =
         crate::agui::history::for_interrupted(&state.agui, &account_id, &run_id, &run).await;
-    let who = (&account_id, &coworker_id);
-    let (journal, request) = carried_on(&state.agui, &run, who, &coworker, asked, generation).await;
+    let (at, who) = ((&run_id, &run), (&account_id, &coworker_id));
+    let (journal, request) = carried_on(&state.agui, at, who, &coworker, asked, generation).await;
     let events = opengrok_harness::continue_interrupted(
         state.agui.door.as_ref(),
         runner.as_ref(),
@@ -791,7 +791,8 @@ pub(crate) async fn carry_out_answer(
     // The skills the captured system message lists, and no others (#270).
     let runner = crate::skills::onto_captured(state, account_id, runner, &run.offered_skills);
     let asked = crate::agui::history::for_resume(state, account_id, run_id, run, &answered).await;
-    let (journal, request) = carried_on(state, run, who, coworker, asked, generation).await;
+    let (journal, request) =
+        carried_on(state, (run_id, run), who, coworker, asked, generation).await;
     // The run keeps its id, so everything the resumption emits lands in the same log and a client
     // replaying later sees one continuous run rather than two halves.
     let context = opengrok_harness::RunContext::new(&run.thread_id, run_id.as_str(), now_ms());
@@ -820,7 +821,7 @@ pub(crate) async fn carry_out_answer(
 /// generation it carries on in. One spelling, so the three cannot drift apart on any of it.
 pub(crate) async fn carried_on(
     state: &AgUiState,
-    run: &Run,
+    (run_id, run): (&RunId, &Run),
     (account_id, coworker_id): (&AccountId, &CoworkerId),
     coworker: &Coworker,
     messages: Vec<opengrok_harness::ChatMessage>,
@@ -844,7 +845,7 @@ pub(crate) async fn carried_on(
         coworker_id: Some(coworker_id.clone()),
         model: run.model.clone(),
         effort: run.effort,
-        inference_source: run.inference_source,
+        inference_source: run.source_for_resume(),
         system: Some(system.clone()),
         skill_id: run.skill_id.clone(),
         offered_skills: run.offered_skills.clone(),
@@ -852,12 +853,14 @@ pub(crate) async fn carried_on(
         limits: run.limits,
         generation,
     };
-    // Where and on what the turn started, whatever changed while it waited: its captured source,
-    // and on the gateway its captured pin (a log from before pins were stored falls back to the
-    // current one). A proxy turn never becomes a gateway one mid-run, nor the reverse. As hard as
-    // it started too, with no fallback: a log from before the effort was stored sent none.
-    let (source, captured) = (Some(run.inference_source), run.model.as_deref());
-    let route = local_proxy::route(state, Some(account_id), source, captured).await;
+    // Where and on what the turn started, whatever changed while it waited: its captured source
+    // and way, and on the gateway its captured pin (a log from before pins were stored falls back
+    // to the current one). A proxy turn never becomes a gateway one mid-run, nor the reverse, and
+    // one its Mac carried goes on at its Mac. As hard as it started too, with no fallback: a log
+    // from before the effort was stored sent none.
+    let (source, captured) = (Some(run.source_for_resume()), run.model.as_deref());
+    let run_id = run_id.as_str();
+    let route = local_proxy::route(state, Some(account_id), source, captured, run_id).await;
     let pin = run.pin_for_resume(&coworker.model);
     let request = crate::agui::routes::turn_request(
         state,

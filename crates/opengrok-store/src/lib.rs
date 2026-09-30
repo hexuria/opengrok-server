@@ -37,7 +37,7 @@ pub use gateway::{
     RefreshTokenRow,
 };
 pub use pending::{
-    DrainResult, EnqueueResult, NewPendingUserMessage, PendingUserMessagePatch,
+    DrainKey, DrainResult, EnqueueResult, NewPendingUserMessage, PendingUserMessagePatch,
     PendingUserMessageRow,
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};

@@ -23,7 +23,7 @@ use super::provision;
 use crate::auth::AuthState;
 use opengrok_core::coworker::{CoworkerCommand, CoworkerView, Effort};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
-use opengrok_core::inference::SourceKind;
+use opengrok_core::inference::{SourceKind, TurnSource};
 use opengrok_core::limits::RunLimits;
 use opengrok_core::run::{OfferedSkill, RunCommand, RunStatus, RunView};
 use opengrok_harness::{
@@ -999,7 +999,7 @@ pub async fn list_models(
     };
     let source = query.get("source").map(|word| serde_json::json!(word));
     let asked = match crate::inference::named(source.as_ref(), "source") {
-        Ok(asked) => asked,
+        Ok(asked) => asked.map(|asked| asked.kind),
         Err(refusal) => return *refusal,
     };
     let mut listing = match (asked, state.auth.model_catalogue.clone()) {
@@ -1032,14 +1032,14 @@ pub async fn list_models(
             })
         }
     };
-    // Whenever an address is stored, whatever the setting's kind: the proxy's models beside the
-    // gateway's, and `localProxy.healthy`, so a picker can say why they are missing.
+    // Whenever an address is stored or a Mac is there to ask, whatever the setting's kind: their
+    // models beside the gateway's, and `localProxy`, so a picker can say why they are missing.
     let listing_local = asked != Some(SourceKind::Gateway);
-    if let Some((healthy, local)) = local_proxy::listed(&state, &account, listing_local).await {
+    if let Some((said, local)) = local_proxy::listed(&state, &account, listing_local).await {
         if let Some(models) = listing["models"].as_array_mut() {
             models.extend(local);
         }
-        listing["localProxy"] = serde_json::json!({ "healthy": healthy });
+        listing["localProxy"] = said;
     }
     Json(listing).into_response()
 }
@@ -2647,18 +2647,29 @@ pub async fn run(
     // `HostState` so a UserForm CUSTOM can mint the card and stamp `entryId` before the
     // SSE frame is sent; the rest of the turn still reads `agui` the same way every other
     // AG-UI path does.
-    let state = gateway.agui.clone();
+    //
     // Who is asking. Established first, because the permission check, the run's ownership and the
     // model it thinks with all depend on it.
     //
     // Layer 1, every turn: may this principal talk to this coworker at all?
-    let (account_id, key_coworker) = match principal_from_bearer(&state, &headers).await {
+    let (account_id, key_coworker) = match principal_from_bearer(&gateway.agui, &headers).await {
         Ok(Some((account, coworker))) => (Some(account), coworker),
         Ok(None) => (None, None),
         // A bad bearer refuses; downgrading to anonymous would make revocation invisible and a
         // stale key look like success.
         Err(refusal) => return unauthorized(refusal.sentence()),
     };
+    turn(gateway, (account_id, key_coworker), input).await
+}
+
+/// A turn for whoever the bearer named: `run` for a client's POST, and the server itself for a
+/// queued send it delivers once the person's Mac is back (`pending::drain_held`).
+pub(crate) async fn turn(
+    gateway: crate::host_state::HostState,
+    (account_id, key_coworker): (Option<AccountId>, Option<CoworkerId>),
+    input: RunAgentInput,
+) -> Response {
+    let state = gateway.agui.clone();
     // A BOT KEY NAMES THE COWORKER. barok-works registers a Bot with an endpoint and a header —
     // it has no forwardedProps to send — so the key itself carries which coworker the Bot IS.
     // An explicit forwardedProps still wins: a client that says what it means is believed.
@@ -2741,20 +2752,13 @@ pub async fn run(
             Ok(policy) => policy,
             Err(error) => {
                 tracing::error!(%error, coworker = %coworker_id.as_str(), "the run door could not read the policy; the turn is refused");
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "the permission check could not be read right now, so nothing ran; send it \
-                     again in a moment",
-                )
-                    .into_response();
+                let why = "the permission check could not be read right now, so nothing ran; \
+                           send it again in a moment";
+                return (StatusCode::SERVICE_UNAVAILABLE, why).into_response();
             }
         };
-        let decision = opengrok_policy::decide(
-            account_id,
-            &coworker_id,
-            opengrok_policy::Action::UseCoworker,
-            &policy,
-        );
+        let using = opengrok_policy::Action::UseCoworker;
+        let decision = opengrok_policy::decide(account_id, &coworker_id, using, &policy);
         if let Some(reason) = decision.reason() {
             return refuse_use(&state, account_id, &coworker_id, reason).await;
         }
@@ -2796,19 +2800,16 @@ pub async fn run(
     }
 
     // Refuse stale sends before interrupting a parked turn or preparing any model work. A queued
-    // send's own source pick wins: it is what the person chose when they queued it.
-    let mut chosen_source = chosen_source;
-    if let Some(account) = &account_id {
-        match crate::agui::pending::consume_for_turn(&state.auth.store, account, &input).await {
-            Ok(queued) => chosen_source = queued.or(chosen_source),
-            Err(refusal) => {
-                refund_unscoped(&state, unscoped_charge.as_deref());
-                return refusal;
-            }
+    // send's own source pick wins: it is what the person chose when they queued it. One its Mac
+    // would carry while no Mac is connected stays queued, and is answered so (`consume_for_turn`).
+    let queued = crate::agui::pending::consume_for_turn(&state, &caller, &input, chosen_source);
+    let chosen_source = match queued.await {
+        Ok(queued) => queued.or(chosen_source),
+        Err(refusal) => {
+            refund_unscoped(&state, unscoped_charge.as_deref());
+            return refusal;
         }
-    } else if crate::agui::pending::pending_id_from(&input).is_some() {
-        return unauthorized("sign in to send a queued message");
-    }
+    };
 
     // PAST THE CLAIM, A HANG-UP MUST NOT CANCEL THE TURN. The queued send is drained now, and the
     // setup below waits on a box wake, the store and the door. Run inline, a client that timed
@@ -2825,17 +2826,14 @@ pub async fn run(
         unscoped_charge,
         limits,
     ));
-    match turn.await {
-        Ok(response) => response,
-        Err(error) => {
-            tracing::error!(%error, "a claimed turn's setup did not finish");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "this turn could not be started",
-            )
-                .into_response()
-        }
-    }
+    turn.await.unwrap_or_else(|error| {
+        tracing::error!(%error, "a claimed turn's setup did not finish");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "this turn could not be started",
+        )
+            .into_response()
+    })
 }
 
 /// The 401 every refusal of an unnamed or unrecognised caller answers with: `{"error": …}`, the
@@ -2843,20 +2841,20 @@ pub async fn run(
 /// read first (`docs/known-gaps.md` §2), so the sentence reaches the person rather than "failed
 /// (401)".
 fn unauthorized(sentence: &str) -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({ "error": sentence })),
-    )
-        .into_response()
+    let said = Json(serde_json::json!({ "error": sentence }));
+    (StatusCode::UNAUTHORIZED, said).into_response()
+}
+
+/// A store that did not answer: a 503 with its words.
+pub(crate) fn unavailable(error: impl std::fmt::Display) -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
 }
 
 /// Give back an `AGUI_UNSCOPED` hit taken for a POST that started no turn.
 fn refund_unscoped(state: &AgUiState, charge: Option<&str>) {
     if let Some(charge) = charge {
-        state
-            .auth
-            .budgets
-            .refund(&crate::auth::budget::AGUI_UNSCOPED, charge);
+        let budgets = &state.auth.budgets;
+        budgets.refund(&crate::auth::budget::AGUI_UNSCOPED, charge);
     }
 }
 
@@ -2868,7 +2866,7 @@ async fn start_claimed_turn(
     account_id: Option<opengrok_core::id::AccountId>,
     run_coworker: Option<CoworkerId>,
     // What the turn thinks with: the coworker's pin and effort, and the source it named.
-    (model, effort, chosen_source): (String, Effort, Option<SourceKind>),
+    (model, effort, chosen_source): (String, Effort, Option<TurnSource>),
     coworker_name: String,
     coworker_role: Option<String>,
     unscoped_charge: Option<String>,
@@ -2901,29 +2899,19 @@ async fn start_claimed_turn(
     // Read once. The tool runner needs it to bind the run, and the system prompt needs it to say
     // so; reading it twice would let the two disagree about what the person chose.
     let chosen = chosen_recipe_from(&input);
-    let tools = match &account_id {
-        Some(account_id) => match &run_coworker {
-            Some(coworker_id) => {
-                let runner = tools_for_coworker(
-                    &state,
-                    account_id,
-                    coworker_id,
-                    &[],
-                    &[],
-                    TURN_WAKE_PATIENCE,
-                )
-                .await;
-                match (runner, chosen.clone()) {
-                    (Some(runner), Some((recipe, values))) => {
-                        Some(runner.with_chosen_recipe(recipe, values))
-                    }
-                    (runner, _) => runner,
+    // No bearer, no identity, and therefore no computer tools.
+    let tools = match (&account_id, &run_coworker) {
+        (Some(account), Some(coworker)) => {
+            let patience = TURN_WAKE_PATIENCE;
+            let runner = tools_for_coworker(&state, account, coworker, &[], &[], patience).await;
+            match (runner, chosen.clone()) {
+                (Some(runner), Some((recipe, values))) => {
+                    Some(runner.with_chosen_recipe(recipe, values))
                 }
+                (runner, _) => runner,
             }
-            None => None,
-        },
-        // No bearer, no identity, and therefore no computer tools.
-        None => None,
+        }
+        _ => None,
     };
     // bar_chart / form are painted by the client from TOOL_CALL frames. Offer them on
     // every AG-UI turn, including coworkers with no computer, so a chart request is a
@@ -3082,8 +3070,9 @@ async fn start_claimed_turn(
     }
 
     // Where it asks: its own word over the account's setting (`turn_request` says what follows).
-    let route = local_proxy::route(&state, account_id.as_ref(), chosen_source, None).await;
-    let source = route.kind();
+    let run = &input.run_id;
+    let route = local_proxy::route(&state, account_id.as_ref(), chosen_source, None, run).await;
+    let source = route.source();
     let who = (run_coworker.as_ref(), account_id.as_ref());
     let thinks = (route, model, effort);
     let request = turn_request(&state, who, thinks, system.clone(), messages).await;
@@ -3218,8 +3207,8 @@ pub struct StoreJournal {
     pub model: Option<String>,
     /// How hard this turn thinks, captured with the pin and for the same reason.
     pub effort: Effort,
-    /// Where this turn asks, captured with the pin and for the same reason.
-    pub inference_source: SourceKind,
+    /// Where this turn asks, and on the proxy which way, captured with the pin for its reason.
+    pub inference_source: TurnSource,
     /// The composed system message this turn opened with, captured for the same reason as the
     /// pin: a role edited while a person answered an approval card must not change the coworker
     /// halfway through the turn.
@@ -4069,42 +4058,28 @@ pub async fn replay_thread(
 
     // Owner-filtered in the query, so "not yours" and "no such thread" arrive here as the same
     // empty answer and cannot be told apart even by accident.
-    let newest_first = match state
-        .auth
-        .store
+    let store = &state.auth.store;
+    let newest_first = match store
         .runs_for_thread_owned_by(&thread_id, &account_id, limit)
         .await
     {
         Ok(runs) => runs,
-        Err(error) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
-        }
+        Err(error) => return unavailable(error),
     };
     // The turns this account hid, named rather than silently missing: a client keeps its own
     // copy of a thread, and a name it is not told stays on its screen. Asked before the empty
     // check, because a thread whose every turn was hidden is exactly the one whose client most
     // needs to hear which names to put away — and it is also the answer that would otherwise
     // read as "no such thread" and leave that client painting from its cache for good.
-    let hidden = match state
-        .auth
-        .store
-        .hidden_runs_in_thread(&thread_id, &account_id)
-        .await
-    {
+    let hidden = match store.hidden_runs_in_thread(&thread_id, &account_id).await {
         Ok(hidden) => hidden,
-        Err(error) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
-        }
+        Err(error) => return unavailable(error),
     };
-    let pending =
-        match crate::agui::pending::thread_pending_json(&state.auth.store, &thread_id, &account_id)
-            .await
-        {
-            Ok(pending) => pending,
-            Err(error) => {
-                return (StatusCode::SERVICE_UNAVAILABLE, error).into_response();
-            }
-        };
+    let pending = crate::agui::pending::thread_pending_json(&state, &thread_id, &account_id);
+    let pending = match pending.await {
+        Ok(pending) => pending,
+        Err(error) => return unavailable(error),
+    };
     if newest_first.is_empty() && hidden.is_empty() {
         return (StatusCode::NOT_FOUND, "no such thread").into_response();
     }
@@ -4121,9 +4096,7 @@ pub async fn replay_thread(
     for summary in newest_first.into_iter().rev() {
         let (run, _) = match state.auth.store.load_run(&summary.id).await {
             Ok(loaded) => loaded,
-            Err(error) => {
-                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
-            }
+            Err(error) => return unavailable(error),
         };
         // A run the log has no start for never took its turn, so it has nothing to contribute to a
         // transcript. `replay_run` answers `404` when one is asked about by id; a history simply
@@ -4657,17 +4630,13 @@ pub async fn stop_run(
     match state.auth.store.run_owned_by(&run_id, &account_id).await {
         Ok(true) => {}
         Ok(false) => return (StatusCode::NOT_FOUND, "no such run").into_response(),
-        Err(error) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
-        }
+        Err(error) => return unavailable(error),
     }
 
     for _ in 0..STOP_ATTEMPTS {
         let (mut run, seq) = match state.auth.store.load_run(&run_id).await {
             Ok(loaded) => loaded,
-            Err(error) => {
-                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
-            }
+            Err(error) => return unavailable(error),
         };
         // A run the log has no start for never took a turn, so there is nothing to stop and
         // nothing to say about it — the same answer `replay_run` gives, for the same reason.
@@ -4710,14 +4679,15 @@ pub async fn stop_run(
             event_count: run.emitted.len() as i64,
             updated_at_ms: at_ms,
         };
-        match state
-            .auth
-            .store
+        let store = &state.auth.store;
+        match store
             .append_run(&run_id, seq, &events, &view, Some(&account_id))
             .await
         {
             Ok(_) => {
                 tracing::info!(run = %run_id, by = %account_id, "a run was stopped");
+                // A call its person's Mac is carrying is cancelled there, now (`relay`).
+                state.auth.relay.stop(run_id.as_str());
                 let closed = close_cards(&host, &account_id, &run).await;
                 return stopped_answer(&run_id, was, on_a_form, closed);
             }
@@ -4725,17 +4695,11 @@ pub async fn stop_run(
             // against what is actually there: either the run is now ended, and the next pass
             // answers with that, or the turn simply journaled a round and this stop still stands.
             Err(opengrok_store::StoreError::Conflict) => continue,
-            Err(error) => {
-                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
-            }
+            Err(error) => return unavailable(error),
         }
     }
 
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        "that run is being written to faster than it can be stopped; try again",
-    )
-        .into_response()
+    unavailable("that run is being written to faster than it can be stopped; try again")
 }
 
 /// Settle the cards a stop leaves with nothing waiting on them. Once, after the stop is in the

@@ -22,7 +22,7 @@ use serde_json::Value;
 
 use crate::coworker::Effort;
 use crate::id::{CoworkerId, RunId};
-use crate::inference::SourceKind;
+use crate::inference::{SourceKind, TurnSource, Via};
 use crate::limits::RunLimits;
 
 /// Where a run got to. A run that is `Running` with no process behind it is the interesting case:
@@ -172,6 +172,12 @@ pub enum RunEvent {
         /// which read as the gateway — the only place any turn went then.
         #[serde(default)]
         inference_source: SourceKind,
+        /// Which way a proxy turn went (#292), captured for the same reason: a turn its person's
+        /// Mac was answering carries on at their Mac, never at the loopback, nor the reverse.
+        /// Absent on a gateway turn, and on logs written before the relay, whose proxy turns all
+        /// went by the loopback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inference_via: Option<Via>,
         /// The system message this turn opened with. A resume must not recompose it from a
         /// coworker whose role or title moved while a person was answering an approval card —
         /// the turn would change identity halfway through, at the moment somebody intervened.
@@ -348,6 +354,8 @@ pub struct Run {
     pub effort: Effort,
     /// Captured at start, and where a resume asks. See `RunEvent::Started::inference_source`.
     pub inference_source: SourceKind,
+    /// Captured at start. See `RunEvent::Started::inference_via`.
+    pub inference_via: Option<Via>,
     /// Captured at start. See `RunEvent::Started::system`.
     pub system: Option<String>,
     /// Captured at start. See `RunEvent::Started::skill_id`.
@@ -400,6 +408,7 @@ impl Default for Run {
             model: None,
             effort: Effort::Inherit,
             inference_source: SourceKind::Gateway,
+            inference_via: None,
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
@@ -481,8 +490,9 @@ pub enum RunCommand {
         model: Option<String>,
         /// See `RunEvent::Started::effort`.
         effort: Effort,
-        /// See `RunEvent::Started::inference_source`.
-        inference_source: SourceKind,
+        /// See `RunEvent::Started::inference_source` and `inference_via`: the via is kept only
+        /// on the proxy, where it says something.
+        inference_source: TurnSource,
         /// The composed system message this turn opens with, captured so a resume speaks with
         /// the same identity and standing role the turn began with.
         system: Option<String>,
@@ -565,6 +575,7 @@ impl Run {
                 model,
                 effort,
                 inference_source,
+                inference_via,
                 system,
                 skill_id,
                 offered_skills,
@@ -578,6 +589,7 @@ impl Run {
                 self.model = model.clone();
                 self.effort = *effort;
                 self.inference_source = *inference_source;
+                self.inference_via = *inference_via;
                 self.system.clone_from(system);
                 self.skill_id.clone_from(skill_id);
                 self.offered_skills.clone_from(offered_skills);
@@ -688,6 +700,17 @@ impl Run {
         self.system.clone().filter(|text| !text.is_empty())
     }
 
+    /// Where a resume asks: where the run started, its via included. A proxy run logged before
+    /// the relay went by the loopback, the only way there was, and is never read as the account's
+    /// default by now — which may be the Mac.
+    pub fn source_for_resume(&self) -> TurnSource {
+        let proxy = self.inference_source == SourceKind::LocalProxy;
+        TurnSource {
+            kind: self.inference_source,
+            via: proxy.then(|| self.inference_via.unwrap_or_default()),
+        }
+    }
+
     /// The pin a resume must think with. A captured start pin wins; a log written before
     /// pins were stored falls back to the coworker's current one (the old behaviour).
     pub fn pin_for_resume(&self, current: &str) -> String {
@@ -727,7 +750,10 @@ impl Run {
                 coworker_id,
                 model,
                 effort,
-                inference_source,
+                inference_source: inference_source.kind,
+                inference_via: inference_source
+                    .via
+                    .filter(|_| inference_source.kind == SourceKind::LocalProxy),
                 system,
                 skill_id,
                 offered_skills,
@@ -1374,6 +1400,7 @@ mod tests {
             model: None,
             effort: Effort::Inherit,
             inference_source: Default::default(),
+            inference_via: None,
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
@@ -1474,6 +1501,7 @@ mod tests {
                 model: None,
                 effort: Effort::Inherit,
                 inference_source: Default::default(),
+                inference_via: None,
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1638,6 +1666,7 @@ mod tests {
                 model: None,
                 effort: Effort::Inherit,
                 inference_source: Default::default(),
+                inference_via: None,
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),
@@ -1926,6 +1955,7 @@ mod tests {
                 model: None,
                 effort: Effort::Inherit,
                 inference_source: Default::default(),
+                inference_via: None,
                 system: None,
                 skill_id: None,
                 offered_skills: Vec::new(),

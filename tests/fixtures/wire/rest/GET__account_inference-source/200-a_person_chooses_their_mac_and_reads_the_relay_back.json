@@ -1,0 +1,19 @@
+{
+  "method": "GET",
+  "path": "/account/inference-source",
+  "status": 200,
+  "body": {
+    "kind": "local_proxy",
+    "via": "mac",
+    "baseUrl": null,
+    "localModel": null,
+    "healthy": false,
+    "hasApiKey": false,
+    "relay": {
+      "connected": true,
+      "machineId": "mac_0199bb4e000070008000000000000001",
+      "machineLabel": "Ada's MacBook",
+      "localModel": "gpt-6-sol"
+    }
+  }
+}

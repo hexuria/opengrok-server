@@ -141,6 +141,7 @@
             "type": "CUSTOM",
             "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
+              "via": "loopback",
               "kind": "local_proxy",
               "model": "gpt-5.5"
             },

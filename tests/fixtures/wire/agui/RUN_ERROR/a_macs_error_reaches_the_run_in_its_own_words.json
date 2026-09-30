@@ -1,0 +1,8 @@
+{
+  "type": "RUN_ERROR",
+  "timestamp": 100,
+  "threadId": "thr-0199bb4e000070008000000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "message": "You have reached your plan's usage limit; it resets at 14:00.",
+  "code": "relay_failed"
+}

@@ -3,23 +3,23 @@
 //! things asked of a proxy outside a turn — is it up, and what does it serve.
 //!
 //! ONLY THIS MACHINE. The proxy holds the person's provider sign-in and listens on loopback, so
-//! it serves a person only where it runs beside the server. A remote deployment needs a relay —
-//! NativeChat carrying the call, as local-exec does — not a wider address here: every other host
-//! is somebody else's, and a URL a person may type would make this server a tunnel into its own
-//! network.
+//! it serves a person only where it runs beside the server. Anywhere else their own Mac carries
+//! the call (`via: "mac"`, `relay`), not a wider address here: every other host is somebody
+//! else's, and a URL a person may type would make this server a tunnel into its own network.
 //!
 //! NOTHING HERE FOLLOWS A REDIRECT, READS A PROXY SETTING OR ASKS DNS. A loopback address that
 //! answers 302 to another host, an `HTTP_PROXY` in the server's environment, or a resolver that
 //! maps `localhost` elsewhere would each carry the person's prompt, and their key, off the machine.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opengrok_core::id::AccountId;
-use opengrok_core::inference::{InferenceSource, SourceKind, subscription_model};
+use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource, Via, subscription_model};
 
 use crate::model::ModelEndpoint;
+use crate::relay::{RelayBroker, RelayTo};
 
 /// The only header opencodex reads a key from on a non-loopback bind; `Authorization: Bearer` is
 /// refused there (opencodex 2.22.0). On loopback it asks for none.
@@ -130,14 +130,20 @@ pub async fn models(base: &str, key: Option<&str>) -> Result<Vec<String>, String
         .json()
         .await
         .map_err(|_| "your proxy's list of models could not be read".to_string())?;
-    Ok(body["data"]
+    Ok(allowed_ids(&body))
+}
+
+/// The ids an opencodex `/v1/models` body lists that a person's subscription may use, wherever
+/// the list came from: this machine's proxy, or the one on their Mac (`relay`).
+pub(crate) fn allowed_ids(body: &serde_json::Value) -> Vec<String> {
+    body["data"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(|model| model["id"].as_str())
         .filter(|id| subscription_model(id).is_ok())
         .map(str::to_string)
-        .collect())
+        .collect()
 }
 
 /// What saving a setting does to the proxy's key. No `Debug`: `Set` holds the key.
@@ -149,42 +155,62 @@ pub enum KeyChange {
 
 /// The setting a `PUT /account/inference-source` body asks for over `current`, and what it does
 /// to the key, or the sentence it is refused with. A field absent keeps what is saved; `null` or
-/// blank clears it. EVERY RULE IS ASKED HERE, BEFORE ANYTHING IS WRITTEN: an address that is not
-/// this machine, or a model the terms forbid, beside a fresh key saves neither. The key goes out
-/// in a header, so it is printable and bounded or refused now, not at a turn.
+/// blank clears it, and so for `via` and `relay.localModel`. EVERY RULE IS ASKED HERE, BEFORE
+/// ANYTHING IS WRITTEN: an address that is not this machine, or a model the terms forbid, beside
+/// a fresh key saves neither. The key goes out in a header, so it is printable and bounded or
+/// refused now, not at a turn.
 pub fn apply(
     current: &InferenceSource,
     body: &serde_json::Value,
 ) -> Result<(InferenceSource, KeyChange), String> {
-    let text = |field: &str| -> Result<Option<Option<String>>, String> {
-        match body.get(field) {
-            None => Ok(None),
-            Some(serde_json::Value::Null) => Ok(Some(None)),
-            Some(serde_json::Value::String(text)) => Ok(Some(
-                Some(text.trim().to_string()).filter(|t| !t.is_empty()),
-            )),
-            Some(_) => Err(format!("{field} must be a string or null")),
-        }
+    let text =
+        |object: &serde_json::Value, field: &str| -> Result<Option<Option<String>>, String> {
+            match object.get(field) {
+                None => Ok(None),
+                Some(serde_json::Value::Null) => Ok(Some(None)),
+                Some(serde_json::Value::String(text)) => Ok(Some(
+                    Some(text.trim().to_string()).filter(|t| !t.is_empty()),
+                )),
+                Some(_) => Err(format!("{field} must be a string or null")),
+            }
+        };
+    let model = |model: Option<String>, field: &str| match model.as_deref().map(subscription_model)
+    {
+        Some(Err(why)) => Err(format!("{field}: {why}")),
+        _ => Ok(model),
     };
     let mut source = current.clone();
     source.kind = SourceKind::named(body.get("kind"))
         .ok()
         .flatten()
         .ok_or("kind must be \"gateway\" or \"local_proxy\"")?;
-    if let Some(base) = text("baseUrl")? {
+    if let Some(base) = text(body, "baseUrl")? {
         source.base_url = base
             .as_deref()
             .map(loopback_base)
             .transpose()
             .map_err(|why| format!("baseUrl: {why}"))?;
     }
-    if let Some(model) = text("localModel")? {
-        if let Some(Err(why)) = model.as_deref().map(subscription_model) {
-            return Err(format!("localModel: {why}"));
-        }
-        source.local_model = model;
+    if let Some(chosen) = text(body, "localModel")? {
+        source.local_model = model(chosen, "localModel")?;
     }
-    let key = match text("apiKey")? {
+    if let Some(via) = body.get("via") {
+        source.via = Via::named(Some(via)).map_err(|why| format!("via {why}"))?;
+    }
+    // THE MAC'S MODEL IS ITS OWN, held to the same allowlist: the Mac's opencodex is not this
+    // machine's, and need not serve the ids the loopback's does.
+    match body.get("relay") {
+        None => {}
+        Some(serde_json::Value::Null) => source.relay_model = None,
+        Some(relay @ serde_json::Value::Object(_)) => {
+            let chosen = text(relay, "localModel").map_err(|why| format!("relay.{why}"))?;
+            if let Some(chosen) = chosen {
+                source.relay_model = model(chosen, "relay.localModel")?;
+            }
+        }
+        Some(_) => return Err("relay must be an object or null".to_string()),
+    }
+    let key = match text(body, "apiKey")? {
         None => KeyChange::Keep,
         Some(None) => KeyChange::Clear,
         Some(Some(key)) if key.len() <= 512 && key.bytes().all(|b| b.is_ascii_graphic()) => {
@@ -200,14 +226,17 @@ pub fn apply(
     Ok((source, key))
 }
 
-/// The two reads the server makes for a person's source: their setting, and their proxy's key. A
-/// trait so what decides where a turn asks lives here, beside what dials it, and the server reads.
+/// The reads the server makes for a person's source: their setting, their proxy's key, and the
+/// relay their Mac holds. A trait so what decides where a turn asks lives here, beside what dials
+/// it, and the server reads.
 #[async_trait::async_trait]
 pub trait Saved: Send + Sync {
     /// The account's setting; `None` when it cannot be read.
     async fn setting(&self, account: &AccountId) -> Option<InferenceSource>;
     /// The proxy's key when `saved` says there is one, or why it cannot be opened.
     async fn key(&self, account: &AccountId, saved: bool) -> Result<Option<String>, String>;
+    /// The broker holding this process's Macs' streams.
+    fn relay(&self) -> Arc<RelayBroker>;
 }
 
 /// Where a turn's calls go, as `route` resolves it. On a person's own subscription, the model it
@@ -233,6 +262,17 @@ impl Route {
         }
     }
 
+    /// The kind with the way it goes, as a run captures them.
+    pub fn source(&self) -> TurnSource {
+        match self {
+            Self::Gateway => SourceKind::Gateway.into(),
+            Self::LocalProxy { endpoint, .. } => TurnSource {
+                kind: SourceKind::LocalProxy,
+                via: endpoint.via(),
+            },
+        }
+    }
+
     /// The model a turn's request asks for, and where: on the gateway, the coworker's `pin` and
     /// no endpoint, which is the gateway.
     pub fn asked(self, pin: String) -> (String, Option<ModelEndpoint>) {
@@ -246,14 +286,15 @@ impl Route {
 /// THE ONE PLACE A TURN'S SOURCE IS RESOLVED, for every path that asks a model for a person: a
 /// fresh turn, whose `chosen` is its own pick (a drained queued send's, else its
 /// `forwardedProps.inferenceSource`) over the account's setting; a carry-on after a card or a
-/// restart, whose `chosen` is the kind its run captured; and, through that turn's request, its
-/// judge and its wrap-up. On the proxy the model is `captured` — the one the run started on — else
-/// the setting's. The address and key are the setting's as it stands: they say where the proxy
-/// lives now, not what the turn chose.
+/// restart, whose `chosen` is the kind and the way its run captured; and, through that turn's
+/// request, its judge and its wrap-up. On the proxy the model is `captured` — the one the run
+/// started on — else the setting's for that way. The address and key are the setting's as it
+/// stands: they say where the proxy lives now, not what the turn chose.
 ///
-/// A RELAY TRANSPORT — the person's Mac carrying the call over a connection it holds instead of a
-/// loopback URL (nativechat#156, not built) — would be a new `ModelEndpoint` variant resolved
-/// here, behind the same `kind: "local_proxy"` setting, and no caller would change.
+/// THE RELAY IS A WAY, NOT A SOURCE: `via: "mac"` behind the same `kind: "local_proxy"`, resolved
+/// here to `ModelEndpoint::Relay` for the account's Mac and `run_id`, whose `infer` frames name
+/// it. No caller changed for it. A Mac is picked per call, so none being connected is the door's
+/// `relay_offline`, in words, and never a turn sent the other way or to the gateway.
 ///
 /// A SETTING THAT CANNOT BE READ REFUSES THE TURN, unless the turn named the gateway itself (a
 /// carry-on of a run that started there does). Guessed as the gateway, it would be a silent fall
@@ -263,10 +304,12 @@ impl Route {
 pub async fn route(
     saved: &dyn Saved,
     account: Option<&AccountId>,
-    chosen: Option<SourceKind>,
+    chosen: Option<TurnSource>,
     captured: Option<&str>,
+    run_id: &str,
 ) -> Route {
-    let (Some(account), false) = (account, chosen == Some(SourceKind::Gateway)) else {
+    let named_gateway = chosen.is_some_and(|chosen| chosen.kind == SourceKind::Gateway);
+    let (Some(account), false) = (account, named_gateway) else {
         return Route::Gateway;
     };
     // Empty when neither names one, which the door refuses: a proxy turn never carries the
@@ -276,87 +319,155 @@ pub async fn route(
     let Some(setting) = saved.setting(account).await else {
         let why = "Your reply source could not be read, so the turn was not sent; try again in a \
                    moment.";
-        let endpoint = ModelEndpoint::Unavailable(why.to_string());
+        let via = chosen.and_then(|chosen| chosen.via);
+        let endpoint = ModelEndpoint::Unavailable {
+            why: why.to_string(),
+            via,
+        };
         let model = captured.unwrap_or_default();
         return Route::LocalProxy { model, endpoint };
     };
-    if chosen.unwrap_or(setting.kind) == SourceKind::Gateway {
-        return Route::Gateway;
-    }
+    let base = match setting.resolve(chosen) {
+        (SourceKind::Gateway, _) => return Route::Gateway,
+        (SourceKind::LocalProxy, Via::Loopback) => setting.base_url.as_deref(),
+        (SourceKind::LocalProxy, Via::Mac) => {
+            let model = captured.or(setting.relay_model).unwrap_or_default();
+            let endpoint = if model.is_empty() {
+                refused(
+                    "Choose a model for your Mac first: your inference source names none for it, \
+                     so the turn was not sent. Pick one your Mac's opencodex serves",
+                    Via::Mac,
+                )
+            } else {
+                ModelEndpoint::Relay(RelayTo {
+                    broker: saved.relay(),
+                    account: account.as_str().to_string(),
+                    run_id: run_id.to_string(),
+                })
+            };
+            return Route::LocalProxy { model, endpoint };
+        }
+    };
     let model = captured.or(setting.local_model).unwrap_or_default();
     let key = saved.key(account, setting.has_key).await;
-    let endpoint = endpoint(setting.base_url.as_deref(), &model, key);
+    let endpoint = endpoint(base, &model, key);
     Route::LocalProxy { model, endpoint }
 }
 
-/// What `GET /models` says of the person's own proxy, whatever their setting's kind: `None` when
-/// no address is stored; else whether it answers `/healthz`, and — when `listing` and it does —
-/// its models, in the gateway's entry shape plus `source`. A proxy that is down lists nothing,
-/// and says so as `healthy: false` beside the gateway's list, never as an error over it.
+/// What `GET /models` says of the person's own subscription, whatever their setting's kind:
+/// `localProxy` — whether their proxy answers `/healthz` and whether their Mac holds its relay —
+/// and, when `listing`, the models each serves, in the gateway's entry shape plus `source` and
+/// `via`. `None` when there is nothing to say: no address stored, no Mac connected, and the Mac
+/// not the setting's way. A proxy that is down or a Mac that is away lists nothing, and says so
+/// beside the gateway's list, never as an error over it.
 pub async fn listed(
     saved: &dyn Saved,
     account: &AccountId,
     listing: bool,
-) -> Option<(bool, Vec<serde_json::Value>)> {
+) -> Option<(serde_json::Value, Vec<serde_json::Value>)> {
     let setting = saved.setting(account).await?;
-    let base = setting.base_url?;
-    let up = healthy(&base).await;
+    let relay = saved.relay();
+    let mac = relay.connected(account.as_str());
+    let by_mac = setting.via == Some(Via::Mac);
+    if setting.base_url.is_none() && mac.is_none() && !by_mac {
+        return None;
+    }
+    let up = match &setting.base_url {
+        Some(base) => healthy(base).await,
+        None => false,
+    };
     let key = if up && listing {
         saved.key(account, setting.has_key).await.ok()
     } else {
         None
     };
-    let ids = match key {
-        Some(key) => models(&base, key.as_deref()).await.unwrap_or_default(),
-        None => Vec::new(),
+    let loopback = match (key, &setting.base_url) {
+        (Some(key), Some(base)) => models(base, key.as_deref()).await.unwrap_or_default(),
+        _ => Vec::new(),
     };
-    let entry = |id| serde_json::json!({ "id": id, "points": null, "source": "local_proxy" });
-    Some((up, ids.into_iter().map(entry).collect()))
+    let from_mac = match (listing, &mac) {
+        (true, Some(_)) => relay.models(account.as_str()).await,
+        _ => Vec::new(),
+    };
+    let entry = |via: Via| {
+        move |id| {
+            serde_json::json!({ "id": id, "points": null, "source": "local_proxy",
+                                      "via": via.as_str() })
+        }
+    };
+    let mut entries: Vec<_> = loopback.into_iter().map(entry(Via::Loopback)).collect();
+    entries.extend(from_mac.into_iter().map(entry(Via::Mac)));
+    let said = serde_json::json!({ "healthy": up, "relayConnected": mac.is_some() });
+    Some((said, entries))
 }
 
 /// The setting as `GET` and `PUT /account/inference-source` answer with it — the other half of
 /// `apply`. Never the key, only whether there is one; `healthy` is a live `/healthz` on every read,
-/// whatever the kind, and false with no address.
-pub async fn described(source: &InferenceSource) -> serde_json::Value {
+/// whatever the kind, and false with no address. `mac` is the account's connected Mac and its
+/// enrolled label, for `relay`: an account with none reads `connected: false` and nulls, whole.
+pub async fn described(
+    source: &InferenceSource,
+    mac: Option<(String, Option<String>)>,
+) -> serde_json::Value {
     let healthy = match &source.base_url {
         Some(base) => healthy(base).await,
         None => false,
     };
+    let (machine_id, machine_label) = mac.map_or((None, None), |(id, label)| (Some(id), label));
     serde_json::json!({
         "kind": source.kind.as_str(),
+        "via": source.via.unwrap_or_default().as_str(),
         "baseUrl": source.base_url,
         "localModel": source.local_model,
         "healthy": healthy,
         "hasApiKey": source.has_key,
+        "relay": {
+            "connected": machine_id.is_some(),
+            "machineId": machine_id,
+            "machineLabel": machine_label,
+            "localModel": source.relay_model,
+        },
     })
 }
 
-/// Where a turn on a person's own subscription goes, from their setting: `base` as saved,
-/// `model` the id it asks for, `key` the proxy's key as the vault gave it. Every gap is a refusal
-/// the door says, never a fall back to the gateway. Built only by `route`.
+/// A turn its setting cannot send the way it goes, refused in words at the door.
+fn refused(why: &str, via: Via) -> ModelEndpoint {
+    ModelEndpoint::Unavailable {
+        why: format!("{why}, or switch this turn to the gateway."),
+        via: Some(via),
+    }
+}
+
+/// Where a turn on a person's own subscription goes by the loopback, from their setting: `base`
+/// as saved, `model` the id it asks for, `key` the proxy's key as the vault gave it. Every gap is
+/// a refusal the door says, never a fall back to the gateway. Built only by `route`.
 fn endpoint(base: Option<&str>, model: &str, key: Result<Option<String>, String>) -> ModelEndpoint {
-    let switch = "or switch this turn to the gateway";
     let Some(base) = base.filter(|base| !base.is_empty()) else {
-        return ModelEndpoint::Unavailable(format!(
+        return refused(
             "You chose your own subscription, but no proxy address is set; set one in your \
-             inference source (like http://127.0.0.1:8080), {switch}."
-        ));
+             inference source (like http://127.0.0.1:8080)",
+            Via::Loopback,
+        );
     };
     if model.is_empty() {
-        return ModelEndpoint::Unavailable(format!(
+        return refused(
             "Choose a model for your own subscription first: your inference source names none, \
-             so the turn was not sent. Pick one your proxy serves, {switch}."
-        ));
+             so the turn was not sent. Pick one your proxy serves",
+            Via::Loopback,
+        );
     }
     match key {
         Ok(key) => ModelEndpoint::Proxy {
             base_url: base.to_string(),
             auth: key.map(|key| (KEY_HEADER.to_string(), key)),
         },
-        Err(why) => ModelEndpoint::Unavailable(format!(
-            "Your proxy's key could not be opened ({why}), so the turn was not sent; save the key \
-             again, {switch}."
-        )),
+        Err(why) => refused(
+            &format!(
+                "Your proxy's key could not be opened ({why}), so the turn was not sent; save \
+                 the key again"
+            ),
+            Via::Loopback,
+        ),
     }
 }
 

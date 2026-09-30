@@ -19,6 +19,7 @@ pub mod local_proxy;
 pub mod mock;
 pub mod model;
 pub mod projection;
+pub mod relay;
 pub mod review;
 mod timing;
 pub mod tools;
@@ -41,9 +42,10 @@ use std::collections::HashSet;
 
 use opengrok_wire::agui::Event;
 
-/// The CUSTOM frame right after `RUN_STARTED` that says where the turn asks: `{kind, model}`,
-/// `kind` the wire word of `opengrok_core::inference::SourceKind`. Journaled with the opening,
-/// so a replay says which turns of a thread a person's own subscription answered.
+/// The CUSTOM frame right after `RUN_STARTED` that says where the turn asks: `{kind, via?,
+/// model}`, `kind` the wire word of `opengrok_core::inference::SourceKind` and `via` its way on the
+/// proxy (`loopback` or `mac`). Journaled with the opening, so a replay says which turns of a
+/// thread a person's own subscription answered, and how it was reached.
 pub const INFERENCE_SOURCE_NAME: &str = "opengrok.inferenceSource";
 
 /// Run one turn and collect every event a client should see.
@@ -1324,7 +1326,11 @@ async fn converse_raw(
             Some(_) => SourceKind::LocalProxy,
             None => SourceKind::Gateway,
         };
-        let said = serde_json::json!({ "kind": kind.as_str(), "model": request.model });
+        let said = match request.endpoint.as_ref().and_then(ModelEndpoint::via) {
+            Some(via) => serde_json::json!({ "kind": kind.as_str(), "via": via.as_str(),
+                                             "model": request.model }),
+            None => serde_json::json!({ "kind": kind.as_str(), "model": request.model }),
+        };
         opening.push(projection.custom(INFERENCE_SOURCE_NAME, said));
     }
     let opened_ok = journal.record(run_id, &opening).await;
@@ -1370,8 +1376,9 @@ async fn converse_raw(
             Ok(stream) => Some(stream),
             Err(error) => {
                 timing.record_model(timing::elapsed_ms(model_started));
-                // The detail for the log; the person gets the sentence (#185).
+                // The detail for the log; the person gets the sentence (#185), and its code.
                 tracing::warn!(%error, run_id, "the model door did not open");
+                projection.failing_with(error.code());
                 end_run!(round_events, Ending::Fail(error.sentence()));
             }
         };
@@ -1475,6 +1482,7 @@ async fn converse_raw(
                             .await;
                         }
                         tracing::warn!(%error, run_id, "the model stream broke");
+                        projection.failing_with(error.code());
                         end_run!(round_events, Ending::Fail(error.sentence()));
                     }
                 }
@@ -2021,8 +2029,14 @@ async fn converse_raw(
         // the client cannot tell it from a coworker with nothing to say, and every one of them
         // invented its own placeholder. A run that already failed keeps its own message — `fail`
         // and `finish` are both no-ops once the run has ended.
+        //
+        // UNLESS A STOP ENDED THE STREAM. A call a person's Mac carries is cancelled by the Stop
+        // itself (`relay`), and its stream ends then, before a word if the Mac had not started:
+        // that silence is the Stop's, and failing it would be an ending the log refuses.
         let ending = if any_delta {
             Ending::Finish(None)
+        } else if journal.stopped(run_id).await {
+            Ending::Stop
         } else {
             Ending::Fail("the model returned no text".to_string())
         };

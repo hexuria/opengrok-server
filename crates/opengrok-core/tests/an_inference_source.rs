@@ -4,7 +4,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use opengrok_core::account::{Account, AccountCommand, AccountError, Plan};
-use opengrok_core::inference::{InferenceSource, SourceKind, subscription_model};
+use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource, Via, subscription_model};
 use opengrok_core::run::{Run, RunCommand, RunEvent};
 use serde_json::json;
 
@@ -213,6 +213,8 @@ fn an_account_keeps_the_setting_it_was_given_and_starts_on_the_gateway() {
         base_url: Some("http://127.0.0.1:18080".to_string()),
         local_model: Some("gpt-5.5".to_string()),
         has_key: true,
+        via: Some(Via::Mac),
+        relay_model: Some("gpt-6-sol".to_string()),
     };
     let events = account
         .decide(AccountCommand::SetInferenceSource {
@@ -255,7 +257,7 @@ fn a_run_keeps_the_source_it_started_on_and_old_logs_read_as_the_gateway() {
             coworker_id: None,
             model: Some("gpt-5.5".to_string()),
             effort: Default::default(),
-            inference_source: SourceKind::LocalProxy,
+            inference_source: SourceKind::LocalProxy.into(),
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
@@ -277,4 +279,149 @@ fn a_run_keeps_the_source_it_started_on_and_old_logs_read_as_the_gateway() {
     }))
     .unwrap();
     assert_eq!(Run::replay([&old]).inference_source, SourceKind::Gateway);
+}
+
+/// A RELAYED RUN CARRIES ON AT THE MAC (#292): the way it went is captured with its kind, and a
+/// resume asks there, whatever the account's default by then. A proxy run logged before the relay
+/// went by the loopback, the only way there was, so it resumes there and never at a Mac the
+/// account has since made its default; a gateway run names no way at all.
+#[test]
+fn a_run_keeps_the_way_it_went_and_an_old_proxy_log_went_by_the_loopback() {
+    let start = |source: TurnSource| {
+        let mut run = Run::default();
+        let events = run
+            .decide(RunCommand::Start {
+                thread_id: "t1".to_string(),
+                coworker_id: None,
+                model: Some("gpt-5.5".to_string()),
+                effort: Default::default(),
+                inference_source: source,
+                system: None,
+                skill_id: None,
+                offered_skills: Vec::new(),
+                prompt: None,
+                limits: Default::default(),
+                at_ms: 1,
+            })
+            .unwrap();
+        let logged: Vec<serde_json::Value> = events
+            .iter()
+            .map(|event| serde_json::to_value(event).unwrap())
+            .collect();
+        for event in &logged {
+            run.apply(&serde_json::from_value(event.clone()).unwrap());
+        }
+        (run, logged)
+    };
+    let mac = TurnSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Mac),
+    };
+    let (run, logged) = start(mac);
+    assert_eq!(run.inference_via, Some(Via::Mac));
+    assert_eq!(logged[0]["inference_via"], "mac", "{logged:?}");
+    assert_eq!(run.source_for_resume(), mac);
+
+    let loopback = TurnSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Loopback),
+    };
+    assert_eq!(start(loopback).0.source_for_resume(), loopback);
+    // A via named on a gateway turn says nothing, and is not kept.
+    let (run, logged) = start(TurnSource {
+        kind: SourceKind::Gateway,
+        via: Some(Via::Mac),
+    });
+    assert!(logged[0].get("inference_via").is_none(), "{logged:?}");
+    assert_eq!(run.source_for_resume(), SourceKind::Gateway.into());
+
+    let old: RunEvent = serde_json::from_value(json!({
+        "type": "started", "thread_id": "t1", "coworker_id": null,
+        "model": "gpt-5.5", "inference_source": "local_proxy", "at_ms": 1
+    }))
+    .unwrap();
+    assert_eq!(Run::replay([&old]).source_for_resume(), loopback);
+}
+
+/// What a turn or a queued send may name: the kind as a word, or `{kind, via}`. An omitted via is
+/// the account's default; `helper` is refused by name until it is built (#293), and anything else
+/// is refused rather than read as either way.
+#[test]
+fn a_turn_names_its_source_as_a_word_or_with_the_way_it_goes() {
+    let named = |value: serde_json::Value| TurnSource::named(Some(&value), "inferenceSource");
+    let mac = TurnSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Mac),
+    };
+    let loopback = TurnSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Loopback),
+    };
+    let proxy: TurnSource = SourceKind::LocalProxy.into();
+    assert_eq!(named(json!("local_proxy")), Ok(Some(proxy)));
+    assert_eq!(
+        named(json!({"kind": "local_proxy", "via": "mac"})),
+        Ok(Some(mac))
+    );
+    assert_eq!(named(json!({"kind": "local_proxy"})), Ok(Some(proxy)));
+    assert_eq!(
+        named(json!({"kind": "local_proxy", "via": ""})),
+        Ok(Some(proxy))
+    );
+    assert_eq!(
+        named(json!({"kind": "gateway", "via": null})),
+        Ok(Some(SourceKind::Gateway.into()))
+    );
+    assert_eq!(TurnSource::named(None, "inferenceSource"), Ok(None));
+    assert_eq!(named(json!(null)), Ok(None));
+    let helper = named(json!({"kind": "local_proxy", "via": "helper"})).unwrap_err();
+    assert!(
+        helper.starts_with("inferenceSource.via \"helper\" is not built yet"),
+        "{helper}"
+    );
+    for refused in [
+        json!({"kind": "local-proxy", "via": "mac"}),
+        json!({"via": "mac"}),
+        json!({"kind": "local_proxy", "via": "Mac"}),
+        json!({"kind": "local_proxy", "via": 1}),
+        json!(7),
+    ] {
+        let why = named(refused.clone()).unwrap_err();
+        assert!(why.starts_with("inferenceSource"), "{refused}: {why}");
+    }
+    assert_eq!(
+        named(json!("local-proxy")).unwrap_err(),
+        "inferenceSource must be \"gateway\" or \"local_proxy\"",
+        "the word alone is refused as it always was"
+    );
+
+    // A queued send keeps what it named, and a row from before the relay reads as its word.
+    for source in [SourceKind::Gateway.into(), proxy, mac, loopback] {
+        assert_eq!(TurnSource::from_stored(&source.stored()), Some(source));
+        assert_eq!(named(source.to_value()), Ok(Some(source)));
+    }
+    assert_eq!(proxy.to_value(), json!("local_proxy"));
+    assert_eq!(TurnSource::from_stored("local_proxy:helper"), None);
+    assert_eq!(TurnSource::from_stored("proxy"), None);
+
+    // Each word wins on its own over the setting: the kind, and the way.
+    let setting = InferenceSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Mac),
+        ..Default::default()
+    };
+    assert_eq!(setting.resolve(None), (SourceKind::LocalProxy, Via::Mac));
+    assert_eq!(
+        setting.resolve(Some(loopback)),
+        (SourceKind::LocalProxy, Via::Loopback)
+    );
+    assert_eq!(
+        setting.resolve(Some(proxy)),
+        (SourceKind::LocalProxy, Via::Mac)
+    );
+    assert_eq!(
+        InferenceSource::default().resolve(Some(proxy)),
+        (SourceKind::LocalProxy, Via::Loopback),
+        "no default way is the loopback"
+    );
 }

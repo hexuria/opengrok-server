@@ -24,8 +24,10 @@ CONSTANTS MaxRounds,       \* MAX_ROUNDS
           OneWriteClose,   \* FIX: every exit writes the round it ends on and its ending in ONE write
           WriteBeforeEmit, \* FIX: an ending reaches the client only once the log holds it
           EndedRefusesPark,\* FIX: a park whose write finds the run ended writes nothing and ends stopped
-          WrapUp           \* FIX (#93): a spent budget or wall clock makes one last call, no tools, and
+          WrapUp,          \* FIX (#93): a spent budget or wall clock makes one last call, no tools, and
                            \* finishes with its words; the cap's RUN_ERROR only if that call fails
+          SilenceYields    \* FIX (#292): a round that said nothing asks `stopped` before it fails: a
+                           \* call the person's Mac carries ends silent when a Stop cancels it
 
 ForBound == MaxRounds + MaxComputer   \* lib.rs:813 `for _round in 0..(MAX_ROUNDS + MAX_COMPUTER_ROUNDS)`
 
@@ -143,7 +145,11 @@ Call ==
            [] r = "planFlood"   -> Close("split", "failed") /\ anyDelta' = TRUE /\ UNCHANGED <<batch, outcome>>
            \* lib.rs:1573-1604 — no tools asked for: last round either way.
            [] r = "words"       -> Finish /\ anyDelta' = TRUE /\ UNCHANGED <<batch, outcome>>
-           [] r = "nothing"     -> (IF anyDelta THEN Finish ELSE EndWith("failed"))
+           \* lib.rs "the model returned no text": an ending of its own, "failedQuiet", so a
+           \* property can tell it from the other failures. With SilenceYields it asks the
+           \* journal first, and a Stop recorded by then is how the run ends.
+           [] r = "nothing"     -> (IF anyDelta \/ (SilenceYields /\ stop)
+                                      THEN Finish ELSE EndWith("failedQuiet"))
                                    /\ UNCHANGED <<anyDelta, batch, outcome>>
            [] r = "tools"       -> \E b \in Batches, o \in Outcomes :
                                       pc' = "check2" /\ anyDelta' = TRUE /\ batch' = b /\ outcome' = o
@@ -281,8 +287,8 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(Step)
 
 TypeOK ==
     /\ pc \in {"open", "top", "call", "check2", "run", "judge", "park", "wrap", "done"}
-    /\ ending \in {"none", "finished", "failed", "stopped", "parked", "fellOut"}
-    /\ told \in {"none", "finished", "failed", "stopped", "parked", "unrecorded"}
+    /\ ending \in {"none", "finished", "failed", "failedQuiet", "stopped", "parked", "fellOut"}
+    /\ told \in {"none", "finished", "failed", "failedQuiet", "stopped", "parked", "unrecorded"}
     /\ terminals \in 0..1
 
 ExactlyOneEnding      == (pc = "done") => (terminals = 1)
@@ -304,6 +310,10 @@ ToldIsTrue            == (pc = "done" /\ told \notin {"unrecorded", "none"}) => 
 RoundNeverWithoutEnding == ~orphan
 \* A Stop that is recorded before the run ends makes the run end as stopped.
 StopIsHonoured        == (pc = "done" /\ stop) => ending \notin {"finished", "parked"}
+\* A model call that said nothing, after a Stop, is the Stop's silence: a relayed call the Stop
+\* cancelled (#292). Failed "no text", the ending is one the log refuses, and the client is told
+\* the run could not be recorded instead of that it stopped.
+SilenceAfterStopIsTheStop == (pc = "done" /\ stop) => ending /= "failedQuiet"
 
 
 Terminates == <>(pc = "done")
