@@ -101,6 +101,36 @@ fn an_unrecognised_model_is_refused_and_the_refusal_names_what_is_allowed() {
     }
 }
 
+/// EVERY ALLOWED PATTERN IS ANCHORED: an id that only CONTAINS an allowed word is not OpenAI's or
+/// xAI's, prefixed, fast or not. Refused as unrecognised, or by name where it names a provider
+/// whose terms forbid it.
+#[test]
+fn an_id_that_only_contains_an_allowed_word_is_refused() {
+    for id in [
+        "my-codex-thing",
+        "notgrok-1",
+        "my-codex-thing--fast",
+        "openai/my-codex-thing",
+        "xai/notgrok-1",
+        "xgpt-5.5",
+        "turbo-o3",
+        "xai/codex-mini-latest",
+    ] {
+        let why = subscription_model(id).expect_err(id);
+        assert!(
+            why.contains("is not a model this server knows"),
+            "{id}: {why}"
+        );
+    }
+    for (id, provider) in [("claude-codex", "Anthropic"), ("gemini-gpt-4", "Google")] {
+        let why = subscription_model(id).expect_err(id);
+        assert!(
+            why.contains(&format!("{provider}'s terms forbid")),
+            "{id}: {why}"
+        );
+    }
+}
+
 /// The turn's own word wins over the account's setting; without one, the account's stands.
 #[test]
 fn a_turns_own_source_beats_the_accounts() {
