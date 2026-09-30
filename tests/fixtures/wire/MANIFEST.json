@@ -1,5 +1,5 @@
 {
-  "server_sha": "f56bbde6799e08f785022f93c2fe3f1a017279ff",
+  "server_sha": "c3f95218992ed90d615490ae151bcca015270a58",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -53,6 +53,18 @@
     {
       "file": "agui/REASONING_MESSAGE_START/a_turn_that_thinks_and_uses_a_tool_streams_every_step.json",
       "source": "streamed or replayed by /ag-ui, recorded from the test a_turn_that_thinks_and_uses_a_tool_streams_every_step (crates/opengrok-server/tests/the_frames_a_turn_streams.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/RUN_ERROR/a_macs_error_reaches_the_run_in_its_own_words.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_macs_error_reaches_the_run_in_its_own_words (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/RUN_ERROR/with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_nothing.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_nothing (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/RUN_ERROR/a_mac_that_never_starts_or_goes_quiet_times_out_and_is_told_to_cancel.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_mac_that_never_starts_or_goes_quiet_times_out_and_is_told_to_cancel (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "agui/RUN_ERROR/a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words.json",
@@ -139,6 +151,10 @@
       "source": "streamed or replayed by /ag-ui/threads/{thread_id}, recorded from the test an_agui_only_turn_still_mints_a_user_form_entry_id (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
+      "file": "agui/custom/opengrok.inferenceSource/a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "agui/custom/opengrok.inferenceSource/a_body_that_writes_its_own_end_cannot_leave_the_fence_use_skill_puts_round_it.json",
       "source": "streamed or replayed by /ag-ui, recorded from the test a_body_that_writes_its_own_end_cannot_leave_the_fence_use_skill_puts_round_it (crates/opengrok-server/tests/against_coworker_skills.rs); ids and times are placeholders"
     },
@@ -159,8 +175,16 @@
       "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending/{id}, recorded from the test nullable_options_distinguish_omission_null_and_replacement (crates/opengrok-server/tests/against_pending_user_messages.rs); ids and times are placeholders"
     },
     {
+      "file": "agui/custom/pending-user-message/a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects.json",
+      "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "agui/custom/pending-user-message/a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway.json",
       "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/custom/pending-user-message/a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects-2.json",
+      "source": "streamed or replayed by /ag-ui/threads/{thread_id}/pending, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "agui/custom/pending-user-message/a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway-2.json",
@@ -255,12 +279,16 @@
       "source": "streamed or replayed by /ag-ui, recorded from the test a_card_a_stop_left_open_does_not_hold_the_screen_after_a_restart (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
+      "file": "agui/custom/run-stopped/stopping_a_run_mid_relay_cancels_the_call_on_the_mac.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test stopping_a_run_mid_relay_cancels_the_call_on_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "agui/custom/run-timing/with_the_guard_off_nothing_is_left_out.json",
       "source": "streamed or replayed by /ag-ui, recorded from the test with_the_guard_off_nothing_is_left_out (crates/opengrok-server/tests/against_a_long_thread.rs); ids and times are placeholders"
     },
     {
-      "file": "agui/custom/run-timing/a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words.json",
-      "source": "streamed or replayed by /ag-ui, recorded from the test a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words (crates/opengrok-server/tests/against_spend_caps.rs); ids and times are placeholders"
+      "file": "agui/custom/run-timing/a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "agui/custom/run-timing/a_chat_run_ends_at_the_org_ceiling.json",
@@ -301,6 +329,38 @@
     {
       "file": "agui/custom/user-form/a_handed_back_form_replays_as_handed_back_and_leaves_the_approvals_queue.json",
       "source": "streamed or replayed by /ag-ui/runs/{run_id}, recorded from the test a_handed_back_form_replays_as_handed_back_and_leaves_the_approvals_queue (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "relay/cancel/a_mac_that_never_starts_or_goes_quiet_times_out_and_is_told_to_cancel.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_mac_that_never_starts_or_goes_quiet_times_out_and_is_told_to_cancel (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "relay/infer/a_run_carried_on_after_a_card_keeps_asking_the_mac.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_run_carried_on_after_a_card_keeps_asking_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "relay/infer/a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "relay/infer/a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "relay/models/the_model_list_carries_the_macs_models_and_says_it_is_connected.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test the_model_list_carries_the_macs_models_and_says_it_is_connected (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "relay/ping/a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "relay/ready/a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "relay/replaced/a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/DELETE__ag-ui_threads__thread_id__pending__id_/200-cancel_then_enqueue_the_same_bubble_is_a_new_pending_row.json",
@@ -361,6 +421,10 @@
     {
       "file": "rest/GET__account_inference-source/200-a_model_whose_terms_forbid_it_is_refused_by_name.json",
       "source": "GET /account/inference-source, recorded from the test a_model_whose_terms_forbid_it_is_refused_by_name (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__account_inference-source/200-a_person_chooses_their_mac_and_reads_the_relay_back.json",
+      "source": "GET /account/inference-source, recorded from the test a_person_chooses_their_mac_and_reads_the_relay_back (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__account_inference-source/200-a_person_is_on_the_gateway_until_they_choose_their_own_subscription.json",
@@ -459,6 +523,10 @@
       "source": "GET /ag-ui/runs/{run_id}, recorded from the test stacked_user_forms_in_one_completion_each_get_an_entry_id (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__ag-ui_runs__run_id_/200-with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_nothing.json",
+      "source": "GET /ag-ui/runs/{run_id}, recorded from the test with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_nothing (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__ag-ui_runs__run_id_/200-a_run_that_reached_its_limit_finishes_and_says_so.json",
       "source": "GET /ag-ui/runs/{run_id}, recorded from the test a_run_that_reached_its_limit_finishes_and_says_so (crates/opengrok-server/tests/against_a_run_at_its_limit.rs); ids and times are placeholders"
     },
@@ -535,12 +603,24 @@
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_routine_that_asks_for_a_login_says_it_is_waiting_and_its_card_can_be_submitted (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__ag-ui_threads__thread_id_/200-with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_nothing.json",
+      "source": "GET /ag-ui/threads/{thread_id}, recorded from the test with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_nothing (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__ag-ui_threads__thread_id_/200-a_run_that_reached_its_limit_finishes_and_says_so.json",
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_run_that_reached_its_limit_finishes_and_says_so (crates/opengrok-server/tests/against_a_run_at_its_limit.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects.json",
+      "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__ag-ui_threads__thread_id_/200-a_fired_routine_reports_its_last_run_on_its_row.json",
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects-2.json",
+      "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__ag-ui_threads__thread_id_/200-a_hidden_turn_is_withheld_from_every_client_and_still_kept.json",
@@ -577,6 +657,10 @@
     {
       "file": "rest/GET__ag-ui_threads__thread_id_/404-a_thread_hidden_to_the_last_turn_still_names_what_it_withheld.json",
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_thread_hidden_to_the_last_turn_still_names_what_it_withheld (crates/opengrok-server/tests/against_a_whole_thread.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__ag-ui_threads__thread_id__pending/200-a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects.json",
+      "source": "GET /ag-ui/threads/{thread_id}/pending, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__ag-ui_threads__thread_id__pending/200-a_queued_send_keeps_the_source_it_was_queued_with.json",
@@ -859,6 +943,10 @@
       "source": "GET /coworkers/{coworker_id}/usage, recorded from the test a_capped_coworker_thinks_on_its_own_key_until_its_points_run_out_in_plain_words (crates/opengrok-server/tests/against_spend_caps.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__inference-relay_requests/401-a_macs_stream_opens_with_ready_pings_and_is_replaced_by_its_next.json",
+      "source": "GET /inference-relay/requests, recorded from the test a_macs_stream_opens_with_ready_pings_and_is_replaced_by_its_next (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__local-exec_audit/200-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
       "source": "GET /local-exec/audit, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
     },
@@ -881,6 +969,10 @@
     {
       "file": "rest/GET__models/200-the_model_list_carries_both_sources_when_a_proxy_is_stored.json",
       "source": "GET /models, recorded from the test the_model_list_carries_both_sources_when_a_proxy_is_stored (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__models/200-the_model_list_carries_the_macs_models_and_says_it_is_connected.json",
+      "source": "GET /models, recorded from the test the_model_list_carries_the_macs_models_and_says_it_is_connected (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__models/200-the_catalogue_lists_the_gateways_routes_and_never_its_key.json",
@@ -971,10 +1063,6 @@
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
-      "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
-    },
-    {
       "file": "rest/GET__schedules/200-a_retired_coworker_can_neither_take_nor_run_a_routine.json",
       "source": "GET /schedules, recorded from the test a_retired_coworker_can_neither_take_nor_run_a_routine (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
@@ -983,7 +1071,7 @@
       "source": "GET /schedules, recorded from the test a_routine_above_the_ceiling_is_refused_naming_it (crates/opengrok-server/tests/against_run_limits.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-2.json",
+      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
@@ -991,7 +1079,7 @@
       "source": "GET /schedules, recorded from the test an_edited_routine_runs_now_with_its_new_prompt (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-3.json",
+      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-2.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
@@ -1159,6 +1247,10 @@
       "source": "PATCH /schedules/{id}, recorded from the test a_routine_above_the_ceiling_is_refused_naming_it (crates/opengrok-server/tests/against_run_limits.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/POST__ag-ui/202-a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects.json",
+      "source": "POST /ag-ui, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/POST__ag-ui/400-stale_options_and_changed_same_run_retries_are_refused.json",
       "source": "POST /ag-ui, recorded from the test stale_options_and_changed_same_run_retries_are_refused (crates/opengrok-server/tests/against_stale_pending_messages.rs); ids and times are placeholders"
     },
@@ -1249,6 +1341,10 @@
     {
       "file": "rest/POST__ag-ui_threads__thread_id__pending/200-enqueue_edit_cancel_and_hydrate_are_per_account.json",
       "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test enqueue_edit_cancel_and_hydrate_are_per_account (crates/opengrok-server/tests/against_pending_user_messages.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects.json",
+      "source": "POST /ag-ui/threads/{thread_id}/pending, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__ag-ui_threads__thread_id__pending/201-a_queued_send_keeps_the_source_it_was_queued_with.json",
@@ -1455,8 +1551,8 @@
       "source": "POST /coworkers, recorded from the test a_limit_that_did_not_land_at_hire_is_said_in_the_reply (crates/opengrok-server/tests/against_templates.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/POST__coworkers/201-a_caller_that_prefers_not_to_wait_gets_the_run_id_at_once.json",
-      "source": "POST /coworkers, recorded from the test a_caller_that_prefers_not_to_wait_gets_the_run_id_at_once (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
+      "file": "rest/POST__coworkers/201-a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "POST /coworkers, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__coworkers/404-a_member_hires_from_the_admins_template_and_gets_what_it_says.json",
@@ -1487,8 +1583,24 @@
       "source": "POST /coworkers/{coworker_id}/keys, recorded from the test an_org_visible_coworker_is_on_a_members_roster_and_answers_them (crates/opengrok-server/tests/against_visibility.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/POST__local-exec_daemon/200-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
-      "source": "POST /local-exec/daemon, recorded from the test the_desktop_enrols_sets_its_policy_and_reads_it_back (crates/opengrok-server/tests/the_local_exec_routes_over_http.rs); ids and times are placeholders"
+      "file": "rest/POST__inference-relay_responses__request_id_/204-a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "POST /inference-relay/responses/{request_id}, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__inference-relay_responses__request_id_/401-an_answer_is_refused_from_another_machine_twice_or_for_no_request.json",
+      "source": "POST /inference-relay/responses/{request_id}, recorded from the test an_answer_is_refused_from_another_machine_twice_or_for_no_request (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__inference-relay_responses__request_id_/404-a_mac_that_never_starts_or_goes_quiet_times_out_and_is_told_to_cancel.json",
+      "source": "POST /inference-relay/responses/{request_id}, recorded from the test a_mac_that_never_starts_or_goes_quiet_times_out_and_is_told_to_cancel (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__inference-relay_responses__request_id_/409-an_answer_is_refused_from_another_machine_twice_or_for_no_request.json",
+      "source": "POST /inference-relay/responses/{request_id}, recorded from the test an_answer_is_refused_from_another_machine_twice_or_for_no_request (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__local-exec_daemon/200-a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "POST /local-exec/daemon, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__local-exec_policy_rule/204-the_desktop_enrols_sets_its_policy_and_reads_it_back.json",
@@ -1715,8 +1827,16 @@
       "source": "POST /skills/from-tape, recorded from the test a_lesson_over_the_cap_is_refused_rather_than_cut (crates/opengrok-server/tests/against_a_tape_that_became_a_skill.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/PUT__account_inference-source/200-a_person_chooses_their_mac_and_reads_the_relay_back.json",
+      "source": "PUT /account/inference-source, recorded from the test a_person_chooses_their_mac_and_reads_the_relay_back (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/PUT__account_inference-source/200-a_person_saves_their_own_proxy_and_reads_it_back_healthy.json",
       "source": "PUT /account/inference-source, recorded from the test a_person_saves_their_own_proxy_and_reads_it_back_healthy (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/PUT__account_inference-source/200-the_model_list_carries_the_macs_models_and_says_it_is_connected.json",
+      "source": "PUT /account/inference-source, recorded from the test the_model_list_carries_the_macs_models_and_says_it_is_connected (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/PUT__account_inference-source/200-a_proxy_key_with_no_vault_to_keep_it_is_refused.json",
@@ -1727,8 +1847,20 @@
       "source": "PUT /account/inference-source, recorded from the test a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_the_gateway (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/PUT__account_inference-source/200-a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
+      "source": "PUT /account/inference-source, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/PUT__account_inference-source/200-a_run_carried_on_after_a_card_keeps_asking_the_mac.json",
+      "source": "PUT /account/inference-source, recorded from the test a_run_carried_on_after_a_card_keeps_asking_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/PUT__account_inference-source/400-a_model_whose_terms_forbid_it_is_refused_by_name.json",
       "source": "PUT /account/inference-source, recorded from the test a_model_whose_terms_forbid_it_is_refused_by_name (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/PUT__account_inference-source/400-a_person_chooses_their_mac_and_reads_the_relay_back.json",
+      "source": "PUT /account/inference-source, recorded from the test a_person_chooses_their_mac_and_reads_the_relay_back (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/PUT__account_inference-source/400-an_address_off_this_machine_is_refused_whatever_the_kind.json",
@@ -1867,7 +1999,5 @@
       "source": "PUT /skills/{id}, recorded from the test a_deleted_skill_leaves_the_list_and_stops_taking_writes (crates/opengrok-server/tests/against_another_persons_skill.rs); ids and times are placeholders"
     }
   ],
-  "unrecorded": [
-    "run-stopped"
-  ]
+  "unrecorded": []
 }

@@ -4,9 +4,16 @@
   "status": 200,
   "body": {
     "kind": "local_proxy",
+    "via": "loopback",
     "baseUrl": "http://127.0.0.1:1447",
     "localModel": null,
     "healthy": true,
-    "hasApiKey": false
+    "hasApiKey": false,
+    "relay": {
+      "connected": false,
+      "machineId": null,
+      "machineLabel": null,
+      "localModel": null
+    }
   }
 }

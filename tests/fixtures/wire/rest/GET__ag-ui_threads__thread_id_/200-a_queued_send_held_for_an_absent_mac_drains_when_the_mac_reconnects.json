@@ -28,7 +28,7 @@
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "messageId": "m1",
-            "delta": "what is the first answer?",
+            "delta": "first",
             "timestamp": 100
           },
           {
@@ -81,7 +81,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  3401
+                  3394
                 ]
               },
               "model_ms": [
@@ -128,7 +128,7 @@
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "messageId": "m2",
-            "delta": "and the second?",
+            "delta": "then this, by my Mac",
             "timestamp": 100
           },
           {
@@ -141,7 +141,7 @@
             "type": "CUSTOM",
             "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
-              "via": "loopback",
+              "via": "mac",
               "kind": "local_proxy",
               "model": "gpt-5.5"
             },
@@ -156,7 +156,7 @@
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
-            "delta": "from the proxy",
+            "delta": "done by the mac",
             "messageId": "msg_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
@@ -182,7 +182,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  3420
+                  3415
                 ]
               },
               "model_ms": [

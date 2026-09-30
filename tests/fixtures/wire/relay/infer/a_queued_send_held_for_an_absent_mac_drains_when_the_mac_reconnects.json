@@ -1,0 +1,277 @@
+{
+  "type": "infer",
+  "requestId": "0199bb4e-0000-7000-8000-000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "model": "gpt-5.5",
+  "request": {
+    "model": "gpt-5.5",
+    "stream": true,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are Ada.\n\nYou are talking with Test User. Today is 2026-09-30, Wednesday (UTC).\n\nYou have your OWN computer: a sandboxed box running on the server. It is a DIFFERENT machine from the user's own computer. Your shell, read_file and write_file tools act ONLY on your own box — they cannot touch the user's machine. When you run a command or create, read or change a file, it happens on YOUR box, and you must say so plainly, e.g. \"I created /tmp/foo on my own computer (the box), not on your machine.\" Never describe work done on your box as done on the user's computer. When a page asks for a site login, call `request_user_form` and wait. NativeChat offers the person their saved logins for that site on the card; they confirm with Touch ID, and the values are typed into the page out of your view. You never receive a password and must not type one with `computer`. The person fills in chat; the server clicks each field at the position you give and types there, never showing you the secret. After a user-form settles, screenshot and confirm what the page shows; filling is not a successful login. When the page shows the email and password fields TOGETHER, raise ONE card with both fields, `samePage: true` and `submit: true`, giving each field its position (`at`) from your screenshot — do not split them and do not focus a field first. Only a page that asks for the email alone gets an email-only card: raise it, then after it settles screenshot; if a password page is next, call `request_user_form` with a password-only form (new entryId, challengeKind \"password\"). If another in-sandbox challenge appears (an authenticator code, a phone code on the same page), call `request_user_form` again with otp fields and challengeKind \"otp\", the page host as liveHost, and the code field's position (`at`); NativeChat offers the person their saved authenticator code for that site on the card, and the digits are typed out of your view — never re-raise a form that already settled. A passkey: when the page offers to sign in with a passkey, call `request_user_form` with challengeKind \"passkey\", passkeyMode \"use\", no fields, and the page host as liveHost, and wait; NativeChat lists the person's passkeys for that site and they confirm with Touch ID. When the tool result says the passkey is loaded, click the site's passkey button and screenshot. When a signed-in page offers to ADD a passkey and the person asked for one, do the same with passkeyMode \"register\", then click the site's create button once the holder is ready. You never see a key. Captcha or a page outside this box is not another password form: the person finishes on the computer (Open the screen). If they dismiss or decline, continue without those credentials and do not loop. When tools are offered, call one; do not narrate a plan of the work instead of starting a tool. Never chat I'll / First I'll / The X isn't answering. After a listing, answer with facts. After a failed tool, retry once silently or say one short failure fact — never a diary. Never claim create or save until the call that writes has returned ok. If the user asks you to do something on THEIR computer, tell them you can only use your own box and cannot reach their machine, and offer to do it on your box instead."
+      },
+      {
+        "role": "user",
+        "content": "first"
+      },
+      {
+        "role": "assistant",
+        "content": "from the gateway"
+      },
+      {
+        "role": "user",
+        "content": "then this, by my Mac"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "shell",
+          "description": "Run a shell command on THIS BOT'S OWN computer — a sandboxed box on the server, not the user's own machine — and return its stdout, stderr and exit code.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "The shell command to run on the bot's own box."
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "description": "Read a file from THIS BOT'S OWN computer (the sandboxed box on the server, not the user's machine) and return its contents.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Absolute path on the bot's own box."
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "write_file",
+          "description": "Create or overwrite a file on THIS BOT'S OWN computer (the sandboxed box on the server, not the user's machine).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Absolute path on the bot's own box."
+              },
+              "content": {
+                "type": "string",
+                "description": "The file's full new contents."
+              }
+            },
+            "required": [
+              "path",
+              "content"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "request_user_form",
+          "description": "Ask the person to fill a form in chat. Two uses. A collect form (collect true) is how you ask for fields you do not have yet: a new profile, a missing name, a TIN they must confirm. Put what they already told you on each field as value, so the card is prefilled, and leave value off the fields that are still missing. Mark those required. Wait. The answers come back as Shared fields and nothing is typed into a page. Do not invent a shell command for the form. A sign-in is the other use: an OTP or a field they must type into a page. NativeChat offers the person their saved logins for that site on the card; they confirm with Touch ID, and the values are typed into the page out of your view. Do NOT type passwords, one-time codes, or other secrets with `computer`: that attaches a screenshot of what was typed. Raise this instead and wait. The person fills in chat; the server clicks each field at the position you give (`at`, in your screenshot's pixels) and types there, never showing you the secret. Give `at` for every field you can see. After it settles, screenshot and confirm what the page shows — filling is not login. When the page shows the email and password fields TOGETHER (Facebook, most sites), raise ONE card with both fields and `samePage: true` — do not split them. Only a page that asks for the email alone (Google) gets an email-only card: raise it, observe, and if a password page comes next call this again with a password-only form (new entryId, challengeKind \"password\"). If another in-sandbox challenge appears (an authenticator code, phone verification on the same page), call this again with otp fields, challengeKind \"otp\", the page host as liveHost and the field's `at`; NativeChat offers the person's saved authenticator code for that site on the card. Never re-raise a form that already settled. A passkey prompt: call this with challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site offers to add one and the person asked), no fields, liveHost set; when the result says it is loaded, click the site's passkey button. A captcha, or a page outside this box, is not another password form: the person finishes on the computer (Open the screen). If they dismiss or decline, continue without those credentials and do not loop.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "description": "Short title shown on the card."
+              },
+              "instruction": {
+                "type": "string",
+                "description": "What the person should do."
+              },
+              "collect": {
+                "type": "boolean",
+                "description": "Ask in chat and return the answers. Nothing is typed into a page. Set this when you need fields the person must supply or confirm. Prefill fields they already answered with value."
+              },
+              "passkeyMode": {
+                "type": "string",
+                "description": "With challengeKind passkey: use (sign in with the person's passkey) or register (the site offers to add one)."
+              },
+              "challengeKind": {
+                "type": "string",
+                "description": "Optional hint: password, otp, passkey, captcha, outside_sandbox. passkey takes no fields (with passkeyMode use|register). Captcha/outside-sandbox must not be another password form."
+              },
+              "samePage": {
+                "type": "boolean",
+                "description": "The fields share one page (Facebook's email and password do). Set it on every one-page card. Without it and without positions, only the first field is typed."
+              },
+              "submit": {
+                "type": "boolean",
+                "description": "Press Return after the fill, i.e. press the page's own Log in. Set it on a one-page login card. A single field, and a fully positioned login, Return on their own."
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string",
+                      "description": "text, email, password, otp, …"
+                    },
+                    "value": {
+                      "type": "string",
+                      "description": "Prefill for a collect form. The person can edit it. Never set this on a secret field. Dropped unless collect is true."
+                    },
+                    "required": {
+                      "type": "boolean"
+                    },
+                    "secret": {
+                      "type": "boolean",
+                      "description": "Mask this field; password and otp are secret even without this."
+                    },
+                    "at": {
+                      "type": "object",
+                      "description": "Where this field is on your screenshot, in its pixels: the fill clicks it before typing, so the value lands in this field whatever the page has focused. Give it whenever you can see the field.",
+                      "properties": {
+                        "x": {
+                          "type": "integer"
+                        },
+                        "y": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "x",
+                        "y"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "label"
+                  ]
+                }
+              },
+              "domain": {
+                "type": "string"
+              },
+              "liveHost": {
+                "type": "string",
+                "description": "Host currently on the box's screen, when known."
+              }
+            },
+            "required": [
+              "title",
+              "fields"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "bar_chart",
+          "description": "Render an interactive bar chart in the user's chat. When the user asks for a chart, graph, bar chart, or numeric comparison, you MUST call this tool. Invent reasonable sample bars if they did not provide numbers. Do not search the computer, do not write files, and do not print the bars as markdown or ASCII.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "bars": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "label": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "label",
+                    "value"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "bars"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "form",
+          "description": "Render an interactive choice form in the user's chat. When the user should pick an option, you MUST call this tool. Do not search the computer and do not list the options as markdown.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "prompt": {
+                "type": "string"
+              },
+              "submit": {
+                "type": "string"
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "options": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "label",
+                    "options"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "fields"
+            ]
+          }
+        }
+      }
+    ],
+    "tool_choice": "auto"
+  }
+}

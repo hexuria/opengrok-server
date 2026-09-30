@@ -8,12 +8,12 @@
     "baseUrl": "http://127.0.0.1:1447",
     "localModel": "gpt-5.5",
     "healthy": true,
-    "hasApiKey": false,
+    "hasApiKey": true,
     "relay": {
-      "connected": false,
-      "machineId": null,
-      "machineLabel": null,
-      "localModel": null
+      "connected": true,
+      "machineId": "mac_0199bb4e000070008000000000000001",
+      "machineLabel": "Ada's MacBook",
+      "localModel": "gpt-5.5"
     }
   }
 }

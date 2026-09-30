@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/inference-relay/requests",
+  "status": 401,
+  "body": {
+    "error": "enrol this machine first"
+  }
+}
