@@ -47,8 +47,8 @@ pub struct ProviderConfig {
     pub extra_authorize_params: BTreeMap<String, String>,
 }
 
-// `ProviderConfig::google` and `::github`: only tests build a provider in code, so they are kept
-// beside the tests like `tests/unit/*`.
+// `ProviderConfig::google` and `::github`, and `Pkce::new`: only tests build a provider or a PKCE
+// pair in code, so they are kept beside the tests like `tests/unit/*`.
 #[path = "../../tests/support/provider_presets.rs"]
 mod presets;
 
@@ -83,21 +83,6 @@ pub const STATE_TTL_SECONDS: i64 = 600;
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
-}
-
-impl Pkce {
-    /// S256, which is the only method worth using; `plain` exists in the spec and defeats the point.
-    pub fn new(verifier: impl Into<String>) -> Self {
-        use base64::Engine;
-        use sha2::{Digest, Sha256};
-
-        let verifier = verifier.into();
-        let digest = Sha256::digest(verifier.as_bytes());
-        Self {
-            challenge: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest),
-            verifier,
-        }
-    }
 }
 
 /// Build the URL a person is sent to.

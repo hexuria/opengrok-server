@@ -232,8 +232,6 @@ pub async fn kind_for_new(state: &AgUiState, org_id: Option<&str>) -> &'static s
 pub struct Provisioned {
     /// The `ComputerAssigned` events to persist alongside the hire (empty when none/failed).
     pub events: Vec<CoworkerEvent>,
-    /// The account's box id, for the coworker view (`None` when none/failed).
-    pub box_id: Option<BoxId>,
     /// Why the box could not be given, as (code, message) — never fatal to the hire. `code` is one
     /// of the seven stable codes; `message` is the human-readable reason.
     pub error: Option<(String, String)>,
@@ -255,7 +253,6 @@ async fn record_error(
         .await;
     Provisioned {
         events: Vec::new(),
-        box_id: None,
         error: Some((code.to_string(), message.to_string())),
     }
 }
@@ -550,7 +547,6 @@ pub async fn ensure_computer_for(
     }
     Provisioned {
         events,
-        box_id: Some(box_id),
         error: None,
     }
 }
@@ -803,12 +799,8 @@ fn stamp_share_scope(screen: &mut Value, scope: &str, scope_id: &str) {
 /// 2026), and host-settings, which read it, said the tunnel was off for a box whose guest said
 /// it was on.
 pub struct ScopedBox {
-    pub scope: &'static str,
-    pub scope_id: String,
     pub box_id: String,
     pub kind: String,
-    pub stopped: bool,
-    pub org_id: Option<String>,
     pub computer: Arc<dyn Computer>,
 }
 
@@ -825,12 +817,8 @@ pub async fn scoped_box_for(
         .await
         .computer?;
     Some(ScopedBox {
-        scope: row.scope,
-        scope_id: row.scope_id,
         box_id: row.box_id,
         kind: row.kind,
-        stopped: row.stopped,
-        org_id: row.org_id,
         computer,
     })
 }
@@ -844,7 +832,6 @@ pub struct ScopedBoxRow {
     pub scope_id: String,
     pub box_id: String,
     pub kind: String,
-    pub stopped: bool,
     pub org_id: Option<String>,
 }
 
@@ -854,7 +841,7 @@ pub async fn scoped_box_row_for(
     coworker_id: &CoworkerId,
 ) -> Option<ScopedBoxRow> {
     let (_, org_id, scope, scope_id, _) = scope_of(state, account_id, coworker_id.as_str()).await;
-    let (box_id, kind, stopped) = state
+    let (box_id, kind, _) = state
         .auth
         .store
         .scoped_computer_full(scope, &scope_id)
@@ -866,7 +853,6 @@ pub async fn scoped_box_row_for(
         scope_id,
         box_id,
         kind,
-        stopped,
         org_id,
     })
 }

@@ -20,7 +20,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use opengrok_box::{BoxResult, CommandOutput, Computer, StartedCommand};
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
-use opengrok_core::id::{AccountId, RunId};
+use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::inference::SourceKind;
 use opengrok_core::run::RunStatus;
 use opengrok_harness::GatewayDoor;
@@ -47,6 +47,10 @@ const KEK: &str = "q7Q8b3yEc2w9Y1n4b5HkX0p6sT9eVbWzR2uJmLcDfAg=";
 const DEPLOYMENT_KEY: &str = "oag_live_deployment_key_for_tests";
 const PROXY_KEY: &str = "proxy-key-never-shown";
 const ROUTE: &str = "/account/inference-source";
+/// A gateway-style route no subscription may answer.
+const GATEWAY_PIN: &str = "xai/grok-4.6@sub";
+/// A model the person's own plan serves, as a coworker on its own door is pinned to.
+const PLAN_PIN: &str = "gpt-6-luna";
 
 fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::now_v7().simple())
@@ -197,6 +201,16 @@ struct Harness {
 /// The server, with a gateway stand-in behind its door and its catalogue, and a proxy stand-in
 /// answering `proxy_replies`. `vault` is whether it can keep a proxy's key.
 async fn harness(database_url: &str, proxy_replies: Vec<String>, vault: bool) -> Harness {
+    harness_on(database_url, proxy_replies, vault, None).await
+}
+
+/// The same, with `door` behind the server in place of the gateway stand-in's.
+async fn harness_on(
+    database_url: &str,
+    proxy_replies: Vec<String>,
+    vault: bool,
+    door: Option<Arc<dyn opengrok_harness::ModelDoor>>,
+) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(database_url)
@@ -222,8 +236,8 @@ async fn harness(database_url: &str, proxy_replies: Vec<String>, vault: bool) ->
     let auth = AuthState::new(store.clone(), minter.clone(), "owner@og.local".to_string())
         .with_model_catalogue(Some(Arc::new(catalogue)))
         .with_gateway_admin(None);
-    let door = GatewayDoor::new(&gateway_url, DEPLOYMENT_KEY);
-    let door = opengrok_server::spend::GuardedDoor::new(Arc::new(door), store.clone(), None);
+    let door = door.unwrap_or_else(|| Arc::new(GatewayDoor::new(&gateway_url, DEPLOYMENT_KEY)));
+    let door = opengrok_server::spend::GuardedDoor::new(door, store.clone(), None);
     let agui = AgUiState {
         auth,
         door: Arc::new(door),
@@ -260,6 +274,11 @@ async fn harness(database_url: &str, proxy_replies: Vec<String>, vault: bool) ->
 
 impl Harness {
     async fn person(&self) -> Person {
+        self.member_of(None).await
+    }
+
+    /// A person in `org`, or in none.
+    async fn member_of(&self, org: Option<&str>) -> Person {
         let id = AccountId::new();
         let email = format!("{}@og.local", unique("source"));
         let at_ms = now_ms();
@@ -269,7 +288,7 @@ impl Harness {
                 password_hash: "x".to_string(),
                 first_name: "Test".to_string(),
                 last_name: "User".to_string(),
-                org_id: String::new(),
+                org_id: org.unwrap_or_default().to_string(),
                 plan: Plan::Ultra,
                 verified: true,
                 enabled: true,
@@ -285,7 +304,7 @@ impl Harness {
             password_hash: Some("x".to_string()),
             first_name: "Test".to_string(),
             last_name: "User".to_string(),
-            org_id: None,
+            org_id: org.map(str::to_string),
             verified: true,
             enabled: true,
             avatar_url: None,
@@ -396,6 +415,22 @@ impl Harness {
             .await;
         assert_eq!(status, 200, "{body}");
         body
+    }
+
+    async fn patch(&self, who: &Person, coworker: &str, body: Value) -> (u16, Value) {
+        let path = format!("/coworkers/{coworker}");
+        self.send(Some(who), reqwest::Method::PATCH, &path, Some(body))
+            .await
+    }
+
+    /// `coworker`'s row on `who`'s roster.
+    async fn listed(&self, who: &Person, coworker: &str) -> Value {
+        let get = reqwest::Method::GET;
+        let (status, roster) = self.send(Some(who), get, "/coworkers", None).await;
+        assert_eq!(status, 200, "{roster}");
+        let rows = roster.as_array().cloned().unwrap_or_default();
+        let row = rows.into_iter().find(|row| row["id"] == coworker);
+        row.unwrap_or_else(|| panic!("{coworker} is on the roster: {roster}"))
     }
 }
 
@@ -1188,4 +1223,341 @@ async fn a_drained_send_whose_setting_cannot_be_read_is_refused_unless_it_named_
     ] {
         sqlx::query(sql).execute(h.store.pool()).await.expect(sql);
     }
+}
+
+/// A COWORKER'S OWN SOURCE is null until its owner sets one, on every row that spells a coworker
+/// (the hire, a PATCH, the roster), and never a missing key: an app tells a server from before
+/// per-coworker doors by the key being absent. Null hands it back to the person's own setting,
+/// and a word that is neither door is refused with nothing in the body applied.
+#[tokio::test]
+async fn a_coworkers_own_source_is_null_until_set_and_null_clears_it() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let body = Some(json!({ "name": "Luna" }));
+    let (status, hired) = h
+        .send(Some(&ada), reqwest::Method::POST, "/coworkers", body)
+        .await;
+    assert_eq!(status, 201, "{hired}");
+    assert_eq!(hired.get("source"), Some(&Value::Null), "{hired}");
+    let coworker = hired["id"].as_str().unwrap().to_string();
+    let listed = h.listed(&ada, &coworker).await;
+    assert_eq!(listed.get("source"), Some(&Value::Null), "{listed}");
+
+    let (status, row) = h
+        .patch(&ada, &coworker, json!({ "source": "gateway" }))
+        .await;
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(row["source"], "gateway");
+    assert_eq!(
+        row["model"], "xai/grok-4.6",
+        "a gateway door keeps its free pin"
+    );
+    let (status, row) = h.patch(&ada, &coworker, json!({ "source": null })).await;
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row.get("source"),
+        Some(&Value::Null),
+        "null clears it: {row}"
+    );
+    assert_eq!(h.listed(&ada, &coworker).await["source"], Value::Null);
+
+    for word in [json!("local-proxy"), json!("proxy"), json!(7)] {
+        let body = json!({ "source": word, "name": "Renamed" });
+        let (status, refused) = h.patch(&ada, &coworker, body).await;
+        assert_eq!(status, 400, "{word}: {refused}");
+        let why = "source must be \"gateway\" or \"local_proxy\"";
+        assert_eq!(refused, json!({ "error": why }));
+    }
+    let listed = h.listed(&ada, &coworker).await;
+    assert_eq!(
+        listed["name"], "Luna",
+        "a refused body applies nothing: {listed}"
+    );
+}
+
+/// Its owner puts a coworker on the person's own plan and pins it to a model the plan serves, the
+/// door and the pin in ONE PATCH, judged as the pair they make. The roster lists it as the PATCH
+/// answered it. Recorded for NativeChat: the hire (null), the PATCH and the roster read after it.
+#[tokio::test]
+async fn an_owner_puts_a_coworker_on_its_own_plan_and_the_roster_says_so() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada, "Luna").await;
+    let body = json!({ "source": "local_proxy", "model": PLAN_PIN });
+    let (status, row) = h.patch(&ada, &coworker, body).await;
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(row["source"], "local_proxy", "{row}");
+    assert_eq!(row["model"], PLAN_PIN, "{row}");
+    assert_eq!(
+        h.listed(&ada, &coworker).await,
+        row,
+        "the roster's row is the PATCH's"
+    );
+}
+
+/// ON ITS OWN PLAN A COWORKER ASKS FOR ITS PIN, so a body that leaves it there on a gateway route
+/// is refused in the words the account's `localModel` is refused in, and none of it applies.
+#[tokio::test]
+async fn a_coworker_is_refused_its_own_plan_on_a_pin_the_plan_cannot_answer() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let body = Some(json!({ "name": "Luna", "model": GATEWAY_PIN }));
+    let post = reqwest::Method::POST;
+    let (status, hired) = h.send(Some(&ada), post, "/coworkers", body).await;
+    assert_eq!(status, 201, "{hired}");
+    let coworker = hired["id"].as_str().unwrap().to_string();
+    let body = json!({ "source": "local_proxy", "name": "Renamed" });
+    let (status, refused) = h.patch(&ada, &coworker, body).await;
+    assert_eq!(status, 400, "{refused}");
+    let why = opengrok_core::inference::subscription_model(GATEWAY_PIN).unwrap_err();
+    assert_eq!(refused, json!({ "error": format!("model: {why}") }));
+    let listed = h.listed(&ada, &coworker).await;
+    assert_eq!(listed["source"], Value::Null, "{listed}");
+    assert_eq!(listed["name"], "Luna", "{listed}");
+    assert_eq!(listed["model"], GATEWAY_PIN, "{listed}");
+}
+
+/// A DOOR AND A PIN SENT TOGETHER ARE JUDGED AS THE PAIR THEY MAKE, and a pair the plan cannot
+/// answer changes neither: the coworker keeps the door and the pin it had.
+#[tokio::test]
+async fn a_door_and_a_pin_its_plan_cannot_answer_are_refused_together() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada, "Luna").await;
+    let body = json!({ "source": "local_proxy", "model": "claude-sonnet-4.5" });
+    let (status, refused) = h.patch(&ada, &coworker, body).await;
+    assert_eq!(status, 400, "{refused}");
+    let why = opengrok_core::inference::subscription_model("claude-sonnet-4.5").unwrap_err();
+    assert_eq!(refused, json!({ "error": format!("model: {why}") }));
+    let listed = h.listed(&ada, &coworker).await;
+    assert_eq!(
+        listed["source"],
+        Value::Null,
+        "the door did not move: {listed}"
+    );
+    assert_eq!(listed["model"], "xai/grok-4.6", "nor the pin: {listed}");
+}
+
+/// The check is on the coworker's EXPLICIT door, after the whole body: one that follows the
+/// person's own setting is not judged even when that setting is the proxy; a door and a pin sent
+/// together are judged together; a repin on its own plan is judged; on the gateway a pin is free.
+#[tokio::test]
+async fn a_coworkers_own_plan_is_judged_on_its_explicit_door_after_the_whole_body() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    h.on_the_proxy(&ada, "local_proxy").await;
+    let coworker = h.hire(&ada, "Luna").await;
+    let (status, row) = h
+        .patch(&ada, &coworker, json!({ "model": "oag/cheap" }))
+        .await;
+    assert_eq!(status, 200, "no door of its own, no check: {row}");
+
+    let body = json!({ "source": "local_proxy", "model": "xai/grok-4.7--fast" });
+    let (status, row) = h.patch(&ada, &coworker, body).await;
+    assert_eq!(status, 200, "the new pin is what is judged: {row}");
+    let body = json!({ "model": "claude-sonnet-4.5" });
+    let (status, refused) = h.patch(&ada, &coworker, body).await;
+    assert_eq!(status, 400, "{refused}");
+    let why = refused["error"].as_str().unwrap_or_default();
+    assert!(
+        why.starts_with("model: ") && why.contains("Anthropic's terms forbid"),
+        "{why}"
+    );
+    assert_eq!(
+        h.listed(&ada, &coworker).await["model"],
+        "xai/grok-4.7--fast"
+    );
+
+    let body = json!({ "source": "gateway", "model": "claude-sonnet-4.5" });
+    let (status, row) = h.patch(&ada, &coworker, body).await;
+    assert_eq!(status, 200, "{row}");
+    assert_eq!(
+        row["model"], "claude-sonnet-4.5",
+        "free on the gateway: {row}"
+    );
+}
+
+/// A COWORKER ON ITS OWN PLAN ASKS THE PERSON'S PROXY FOR ITS PIN while the person's own setting
+/// stays on the gateway: the proxy is asked for the pin, not the setting's `localModel`, with the
+/// person's key, and the gateway is asked nothing. Its replay says where it asked.
+#[tokio::test]
+async fn a_coworker_on_its_own_plan_asks_the_persons_proxy_for_its_pin() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("from the proxy")], true).await;
+    let ada = h.person().await;
+    let body = json!({ "kind": "gateway", "baseUrl": h.proxy_url, "localModel": "gpt-5.5",
+                       "apiKey": PROXY_KEY });
+    assert_eq!(h.set(&ada, body).await.0, 200);
+    let coworker = h.hire(&ada, "Luna").await;
+    let body = json!({ "source": "local_proxy", "model": PLAN_PIN });
+    assert_eq!(h.patch(&ada, &coworker, body).await.0, 200);
+
+    let thread = unique("thr");
+    let props = json!({ "coworkerId": coworker });
+    let (status, frames) = h
+        .turn(&ada, &thread, json!([user("m1", "hi")]), props)
+        .await;
+    assert_eq!(status, 200);
+    let on_its_plan = json!({"kind": "local_proxy", "via": "loopback", "model": PLAN_PIN});
+    let on_its_plan = std::slice::from_ref(&on_its_plan);
+    assert_eq!(sources(&frames), on_its_plan, "{frames:?}");
+    assert_eq!(text_of(&frames), "from the proxy");
+    assert_eq!(h.gateway.asked().len(), 0, "never the gateway");
+    let asked = h.proxy.asked();
+    assert_eq!(asked.len(), 1);
+    let (headers, body) = &asked[0];
+    assert_eq!(
+        body["model"], PLAN_PIN,
+        "its pin, not the setting's gpt-5.5"
+    );
+    let key = headers.get("x-opencodex-api-key");
+    assert_eq!(key.and_then(|v| v.to_str().ok()), Some(PROXY_KEY));
+    let told = "Your replies come from gpt-6-luna on the person's own plan.";
+    assert!(conversation(body).contains(told), "{body}");
+
+    let replay = h.replay(&ada, &thread).await;
+    let events = replay["runs"][0]["events"].as_array().cloned();
+    assert_eq!(
+        sources(&events.unwrap_or_default()),
+        on_its_plan,
+        "{replay}"
+    );
+}
+
+/// OFF ITS OWN PLAN A COWORKER'S PIN IS NEVER ASKED OF THE PROXY, even one a subscription may
+/// answer. A default hire (source null, pinned `xai/grok-4.6`) on an account set to its own proxy
+/// asks for the person's `localModel`, as before coworkers had doors; so does one on the gateway
+/// door whose turn picks the proxy itself.
+#[tokio::test]
+async fn a_coworker_off_its_own_plan_asks_the_proxy_for_the_persons_model_not_its_pin() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("from the proxy")], true).await;
+    let ada = h.person().await;
+    h.on_the_proxy(&ada, "local_proxy").await;
+    let coworker = h.hire(&ada, "Luna").await;
+    let listed = h.listed(&ada, &coworker).await;
+    assert_eq!(listed["source"], Value::Null, "{listed}");
+    assert_eq!(listed["model"], "xai/grok-4.6", "{listed}");
+    let hi = || json!([user("m1", "hi")]);
+    let persons = json!({"kind": "local_proxy", "via": "loopback", "model": "gpt-5.5"});
+
+    let props = json!({ "coworkerId": coworker });
+    let (_, frames) = h.turn(&ada, &unique("thr"), hi(), props).await;
+    assert_eq!(
+        sources(&frames),
+        std::slice::from_ref(&persons),
+        "{frames:?}"
+    );
+
+    let body = json!({ "source": "gateway" });
+    assert_eq!(h.patch(&ada, &coworker, body).await.0, 200);
+    let props = json!({ "coworkerId": coworker, "inferenceSource": "local_proxy" });
+    let (_, frames) = h.turn(&ada, &unique("thr"), hi(), props).await;
+    assert_eq!(
+        sources(&frames),
+        std::slice::from_ref(&persons),
+        "{frames:?}"
+    );
+
+    let asked: Vec<Value> = h
+        .proxy
+        .asked()
+        .iter()
+        .map(|(_, b)| b["model"].clone())
+        .collect();
+    assert_eq!(asked, [json!("gpt-5.5"), json!("gpt-5.5")], "never its pin");
+    assert_eq!(h.gateway.asked().len(), 0);
+}
+
+/// THE PLAN IS ALWAYS THE DRIVING PERSON'S. A coworker its owner shared and put on its own plan,
+/// driven by a teammate with no proxy of their own, is refused in words: never the gateway, and
+/// never the owner's proxy, though the owner has one. Its door stays the owner's to move.
+#[tokio::test]
+async fn a_teammate_with_no_proxy_is_refused_in_words_on_a_shared_coworkers_own_plan() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("from the proxy")], true).await;
+    let org = unique("org");
+    let owner = h.member_of(Some(&org)).await;
+    let teammate = h.member_of(Some(&org)).await;
+    h.on_the_proxy(&owner, "local_proxy").await;
+    let coworker = h.hire(&owner, "Luna").await;
+    let body = json!({ "visibility": "org", "source": "local_proxy", "model": PLAN_PIN });
+    assert_eq!(h.patch(&owner, &coworker, body).await.0, 200);
+    let every = opengrok_policy::ToolSet::All;
+    let shared = CoworkerId::from_stored(coworker.clone());
+    let none = opengrok_policy::ToolSet::None;
+    h.store
+        .grant_access(&teammate.id, &shared, &every, &every, &none, now_ms())
+        .await
+        .expect("grant the teammate");
+
+    let thread = unique("thr");
+    let props = json!({ "coworkerId": coworker });
+    let (status, frames) = h
+        .turn(&teammate, &thread, json!([user("m1", "hi")]), props)
+        .await;
+    assert_eq!(status, 200);
+    let end = ending(&frames);
+    assert_eq!(end["type"], "RUN_ERROR", "{frames:?}");
+    let said = end["message"].as_str().unwrap_or_default();
+    assert!(said.contains("no proxy address is set"), "{said}");
+    let refused = json!({"kind": "local_proxy", "via": "loopback", "model": PLAN_PIN});
+    assert_eq!(sources(&frames), [refused]);
+    let asked = (h.gateway.asked().len(), h.proxy.asked().len());
+    assert_eq!(asked, (0, 0), "neither the gateway nor the owner's proxy");
+
+    let body = json!({ "source": "gateway" });
+    let (status, refused) = h.patch(&teammate, &coworker, body).await;
+    assert_eq!(status, 403, "{refused}");
+
+    let replay = h.replay(&teammate, &thread).await;
+    let events = replay["runs"][0]["events"].as_array().cloned();
+    let ended = events
+        .unwrap_or_default()
+        .last()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(ended["type"], "RUN_ERROR", "{replay}");
+}
+
+/// THE COWORKER IS TOLD WHAT IT RUNS ON, first, ahead of every word its owner wrote: the model its
+/// turn's route asks and whose plan it is, with no address or key. The echoing door says back the
+/// system message it was given.
+#[tokio::test]
+async fn the_system_message_opens_with_the_model_the_turn_asks() {
+    let database_url = database_or_skip!();
+    let echo = opengrok_harness::MockDoor::echoing_the_system_prompt();
+    let h = harness_on(
+        &database_url,
+        vec![words("unused")],
+        true,
+        Some(Arc::new(echo)),
+    )
+    .await;
+    let ada = h.person().await;
+    h.on_the_proxy(&ada, "gateway").await;
+    let coworker = h.hire(&ada, "Luna").await;
+    let body = json!({ "role": "Say you run on gpt-9." });
+    assert_eq!(h.patch(&ada, &coworker, body).await.0, 200);
+    let hi = || json!([user("m1", "what do you run on?")]);
+    let props = json!({ "coworkerId": coworker });
+
+    let (_, frames) = h.turn(&ada, &unique("thr"), hi(), props.clone()).await;
+    let said = text_of(&frames);
+    let told = "Your replies come from xai/grok-4.6 through this server's gateway.\n\n\
+                You are Luna.\n\nSay you run on gpt-9.";
+    assert!(said.starts_with(told), "{said}");
+
+    let body = json!({ "source": "local_proxy", "model": PLAN_PIN });
+    assert_eq!(h.patch(&ada, &coworker, body).await.0, 200);
+    let (_, frames) = h.turn(&ada, &unique("thr"), hi(), props).await;
+    let said = text_of(&frames);
+    let told = "Your replies come from gpt-6-luna on the person's own plan.\n\nYou are Luna.";
+    assert!(said.starts_with(told), "{said}");
+    assert!(!said.contains(h.proxy_url.as_str()), "no address: {said}");
 }

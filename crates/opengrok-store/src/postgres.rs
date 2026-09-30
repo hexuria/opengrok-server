@@ -16,6 +16,7 @@ use opengrok_core::account::{Account, AccountEvent, AccountView, Plan};
 use opengrok_core::connection::{Connection, ConnectionEvent, ConnectionView, Owner};
 use opengrok_core::coworker::{Coworker, CoworkerEvent, CoworkerView};
 use opengrok_core::id::{AccountId, BoxId, CoworkerId, RunId};
+use opengrok_core::inference::SourceKind;
 use opengrok_core::run::{Run, RunEvent, RunStatus, RunView};
 use sqlx::{PgPool, Row};
 
@@ -473,30 +474,6 @@ impl PgStore {
         }
     }
 
-    /// Is this run readable by this account?
-    ///
-    /// LAYER 4 (`docs/PLAN.md` §4.5): whose records may this call touch. A run holds a whole
-    /// conversation, so "anyone with the id may read it" would make a run id a password — and run
-    /// ids appear in client URLs and logs. An unowned run is readable by nobody: `NULL` here means
-    /// "no session started it", which must not read as "everybody's".
-    /// The runs journaled under one thread, newest first — a routine's run history for the
-    /// desktop's pane (every firing of one schedule shares the schedule's id as its thread).
-    pub async fn runs_for_thread(
-        &self,
-        thread_id: &str,
-        limit: i64,
-    ) -> StoreResult<Vec<ThreadRun>> {
-        let rows = sqlx::query(
-            "select id, status, started_at_ms, updated_at_ms from run_view
-             where thread_id = $1 order by updated_at_ms desc limit $2",
-        )
-        .bind(thread_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(thread_run_from_row).collect()
-    }
-
     /// Hide a run from every client of the account that owns it.
     ///
     /// Nothing is destroyed: the run, its frames and the coworker's memory of the turn are
@@ -552,8 +529,8 @@ impl PgStore {
     /// holds a whole conversation, and thread ids travel in client URLs and logs. A run with no
     /// owner is readable by nobody, so `account_id is null` fails this test rather than passing it.
     ///
-    /// Ordered by when each run BEGAN, unlike `runs_for_thread` above, which orders by when a run
-    /// last moved because the routines pane wants the latest firing at the top. A transcript is
+    /// Ordered by when each run BEGAN, unlike the tests' `runs_for_thread` (`test_only.rs`), which
+    /// orders by when a run last moved, the latest firing at the top. A transcript is
     /// the order the turns were taken in: a long run still emitting frames would otherwise sort
     /// ahead of turns taken after it started, and the conversation would rearrange itself as it
     /// streamed. Run ids are UUIDv7 and therefore already in start order, which makes them the
@@ -679,6 +656,12 @@ impl PgStore {
             .map(AccountId::from_stored))
     }
 
+    /// Is this run readable by this account?
+    ///
+    /// LAYER 4 (`docs/PLAN.md` §4.5): whose records may this call touch. A run holds a whole
+    /// conversation, so "anyone with the id may read it" would make a run id a password — and run
+    /// ids appear in client URLs and logs. An unowned run is readable by nobody: `NULL` here means
+    /// "no session started it", which must not read as "everybody's".
     pub async fn run_owned_by(&self, id: &RunId, account: &AccountId) -> StoreResult<bool> {
         let row = sqlx::query("select account_id from run_view where id = $1")
             .bind(id.as_str())
@@ -872,8 +855,8 @@ impl PgStore {
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         sqlx::query(
             "insert into coworker_view (id, account_id, name, model, box_id, retired,
-                updated_at_ms, members, role, visibility, effort)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                updated_at_ms, members, role, visibility, effort, source)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              on conflict (id) do update set
                name = excluded.name,
                model = excluded.model,
@@ -883,7 +866,8 @@ impl PgStore {
                members = excluded.members,
                role = excluded.role,
                visibility = excluded.visibility,
-               effort = excluded.effort",
+               effort = excluded.effort,
+               source = excluded.source",
         )
         .bind(view.id.as_str())
         .bind(account_id.as_str())
@@ -896,6 +880,7 @@ impl PgStore {
         .bind(&view.role)
         .bind(view.visibility.as_str())
         .bind(view.effort.as_str())
+        .bind(view.source.map(SourceKind::as_str))
         .execute(&mut *tx)
         .await?;
 
@@ -956,7 +941,7 @@ impl PgStore {
     ) -> StoreResult<Vec<(CoworkerView, RosterOwner)>> {
         let rows = sqlx::query(
             "select c.id, c.name, c.model, c.box_id, c.retired, c.updated_at_ms, c.members,
-                    c.role, c.visibility, c.effort,
+                    c.role, c.visibility, c.effort, c.source,
                     c.account_id as owner_id, coalesce(owner.first_name, '') as owner_first,
                     coalesce(owner.last_name, '') as owner_last, owner.org_id as owner_org
              from coworker_view c
@@ -998,7 +983,8 @@ impl PgStore {
     /// roster: a coworker an org-mate shared is `roster_for`'s, never this.
     pub async fn coworkers_for(&self, account_id: &AccountId) -> StoreResult<Vec<CoworkerView>> {
         let rows = sqlx::query(
-            "select id, name, model, box_id, retired, updated_at_ms, members, role, visibility, effort
+            "select id, name, model, box_id, retired, updated_at_ms, members, role, visibility,
+                    effort, source
              from coworker_view
              where account_id = $1 and retired = false
              order by updated_at_ms desc",
@@ -2661,6 +2647,10 @@ fn coworker_view_row(row: &sqlx::postgres::PgRow) -> StoreResult<CoworkerView> {
         // An unrecognised word reads as inherit: no `reasoning_effort` sent, the route's default.
         effort: opengrok_core::coworker::Effort::parse(&row.try_get::<String, _>("effort")?)
             .unwrap_or_default(),
+        // An unrecognised word reads as none, the driving person's own setting, never a guess.
+        source: row
+            .try_get::<Option<&str>, _>("source")?
+            .and_then(SourceKind::parse),
     })
 }
 

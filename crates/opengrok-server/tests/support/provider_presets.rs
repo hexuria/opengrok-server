@@ -1,11 +1,27 @@
-//! Google and GitHub as a provider is built in code. Every caller is a test: a deployment's
-//! providers come from the `OG_CONNECTORS` file, never from here. Mounted from
-//! `connections/oauth.rs`, so the tests reach them as `ProviderConfig::google` and
-//! `ProviderConfig::github`, as before; a server path that builds a provider takes them back.
+//! Google and GitHub as a provider is built in code, and a PKCE pair. Every caller is a test: a
+//! deployment's providers come from the `OG_CONNECTORS` file, never from here, and no sign-in it
+//! starts sends a PKCE pair yet. Mounted from `connections/oauth.rs`, so the tests reach them as
+//! `ProviderConfig::google`, `ProviderConfig::github` and `Pkce::new`, as before; a server path
+//! that builds one takes it back.
 
 use std::collections::BTreeMap;
 
-use super::ProviderConfig;
+use super::{Pkce, ProviderConfig};
+
+impl Pkce {
+    /// S256, which is the only method worth using; `plain` exists in the spec and defeats the point.
+    pub fn new(verifier: impl Into<String>) -> Self {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+
+        let verifier = verifier.into();
+        let digest = Sha256::digest(verifier.as_bytes());
+        Self {
+            challenge: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest),
+            verifier,
+        }
+    }
+}
 
 impl ProviderConfig {
     /// Google, with the parameters that actually produce a refresh token.

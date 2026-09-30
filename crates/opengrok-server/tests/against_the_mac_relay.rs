@@ -1556,3 +1556,52 @@ async fn a_run_carried_on_after_a_card_keeps_asking_the_mac() {
     );
     assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
 }
+
+/// A COWORKER'S PIN GOES TO THE MAC ONLY ON ITS OWN PLAN. With the person's turns by their Mac, a
+/// coworker whose own source is `local_proxy` asks the Mac for its pin and is told so first in its
+/// system message; one that follows the person's setting (a default hire, pinned `xai/grok-4.6`)
+/// asks the Mac for `relay.localModel`, whatever it is pinned to.
+#[tokio::test]
+async fn a_coworker_on_its_own_plan_asks_the_mac_for_its_pin_and_one_off_it_the_setting() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    h.by_the_mac(&ada).await;
+    let mut mac = h.mac(&ada, "Ada's MacBook").await;
+    let own = h.hire(&ada, "Luna").await;
+    let body = Some(json!({ "source": "local_proxy", "model": "gpt-6-luna" }));
+    let patch = reqwest::Method::PATCH;
+    let path = format!("/coworkers/{own}");
+    let (status, row) = h.send(Some(&ada.token), patch, &path, body).await;
+    assert_eq!(status, 200, "{row}");
+    let off = h.hire(&ada, "Ada").await;
+
+    for (coworker, model) in [(&own, "gpt-6-luna"), (&off, "gpt-5.5")] {
+        let props = json!({ "coworkerId": coworker });
+        let hello = json!([user("m1", "what do you run on?")]);
+        let turn = h.turn(&ada, &unique("thr"), &run_id(), hello, props);
+        let infer = mac.next().await;
+        assert_eq!(infer["type"], "infer", "{infer}");
+        assert_eq!(infer["model"], model, "{infer}");
+        let told = format!("Your replies come from {model} on the person's own plan.");
+        let system = infer["request"]["messages"][0]["content"].as_str();
+        assert!(
+            system.is_some_and(|said| said.starts_with(&told)),
+            "{infer}"
+        );
+        let id = infer["requestId"].as_str().unwrap();
+        let answered = sse(&words("from the mac"));
+        let (status, _) = h
+            .answer(&mac.token, id, "text/event-stream", answered)
+            .await;
+        assert_eq!(status, 204);
+        let (_, frames) = turn.await.unwrap();
+        let by_mac = json!({"kind": "local_proxy", "via": "mac", "model": model});
+        assert_eq!(
+            sources(&frames),
+            std::slice::from_ref(&by_mac),
+            "{frames:?}"
+        );
+    }
+    assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
+}

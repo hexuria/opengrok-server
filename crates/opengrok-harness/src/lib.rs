@@ -506,33 +506,6 @@ pub async fn run_conversation(
     .await
 }
 
-/// `run_conversation`, with a sink that sees each event as it is produced, on the server's own
-/// budget. `POST /ag-ui` streams through `run_conversation_within`, held to its org's ceiling.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_conversation_streaming(
-    door: &dyn ModelDoor,
-    tools: Option<&ToolRunner>,
-    journal: &dyn RunJournal,
-    request: ModelRequest,
-    thread_id: &str,
-    run_id: &str,
-    at_ms: i64,
-    sink: &dyn EventSink,
-) -> Vec<Event> {
-    let projection = Projection::new(thread_id, run_id, at_ms);
-    converse(
-        door,
-        tools,
-        journal,
-        request,
-        projection,
-        run_id,
-        Some(sink),
-        Carried::default(),
-    )
-    .await
-}
-
 /// `run_conversation`, held to `budget` rather than the default, with an optional live sink.
 ///
 /// EVERY RUN THE SERVER STARTS COMES THROUGH HERE, chats and routines alike, held to what its

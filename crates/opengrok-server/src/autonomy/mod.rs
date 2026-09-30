@@ -138,6 +138,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     let system = crate::persona::system_message(
         &coworker.name,
         &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
+        opengrok_harness::local_proxy::Route::Gateway.asks(&coworker.model),
         Some(&(crate::persona::routine_line(&hirer, chrono::Utc::now()) + &skills)),
     );
     let journal = StoreJournal {

@@ -5,7 +5,7 @@
 
 use sqlx::Row as _;
 
-use super::{PgStore, RecipeRunRow, recipe_run_row};
+use super::{PgStore, RecipeRunRow, ThreadRun, recipe_run_row, thread_run_from_row};
 use crate::StoreResult;
 
 impl PgStore {
@@ -36,6 +36,25 @@ impl PgStore {
                 .await?;
         row.map(|row| row.try_get("template_id").map_err(Into::into))
             .transpose()
+    }
+
+    /// The runs journaled under one thread, newest first by when each last moved, whoever owns
+    /// them — a routine's firings, as a test counts them. What a person reads is
+    /// `runs_for_thread_owned_by`, which filters by owner and orders by when each began.
+    pub async fn runs_for_thread(
+        &self,
+        thread_id: &str,
+        limit: i64,
+    ) -> StoreResult<Vec<ThreadRun>> {
+        let rows = sqlx::query(
+            "select id, status, started_at_ms, updated_at_ms from run_view
+             where thread_id = $1 order by updated_at_ms desc limit $2",
+        )
+        .bind(thread_id)
+        .bind(limit)
+        .fetch_all(self.pool())
+        .await?;
+        rows.into_iter().map(thread_run_from_row).collect()
     }
 
     /// Withdraw a grant. The row stays, so the log still says a grant existed and when it stopped.

@@ -17,4 +17,4 @@ pub mod screen_proxy;
 pub mod site_logins;
 pub mod user_form;
 
-pub use routes::{AgUiState, router, run_router, to_chat_messages};
+pub use routes::{AgUiState, router, run_router};

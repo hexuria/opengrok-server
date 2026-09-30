@@ -186,7 +186,7 @@ pub struct ModelRequest {
     pub context_tokens: Option<u64>,
     /// Not the gateway: a person's own proxy, when their turn chose it. `None` is the gateway,
     /// which is every request but those. Filled where `gateway_key` is, and on a proxy turn
-    /// `gateway_key` is `None` and `model` is the proxy's own id, never the coworker's pin.
+    /// `gateway_key` is `None` and `model` is the proxy's own id, never a gateway pin.
     pub endpoint: Option<ModelEndpoint>,
 }
 

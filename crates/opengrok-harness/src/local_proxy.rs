@@ -281,41 +281,65 @@ impl Route {
             Self::LocalProxy { model, endpoint } => (model, Some(endpoint)),
         }
     }
+
+    /// What `asked` will ask and through which door, for the sentence a turn's system message
+    /// opens with (opengrok-server `persona::system_message`). `None` when it asks nothing, a
+    /// proxy turn refused in words: a model named there would be one no model call ever makes.
+    pub fn asks<'a>(&'a self, pin: &'a str) -> Option<(&'a str, SourceKind)> {
+        match self {
+            Self::Gateway => Some((pin, SourceKind::Gateway)),
+            Self::LocalProxy {
+                endpoint: ModelEndpoint::Unavailable { .. },
+                ..
+            } => None,
+            Self::LocalProxy { model, .. } => Some((model, SourceKind::LocalProxy)),
+        }
+    }
 }
 
 /// THE ONE PLACE A TURN'S SOURCE IS RESOLVED, for every path that asks a model for a person: a
 /// fresh turn, whose `chosen` is its own pick (a drained queued send's, else its
-/// `forwardedProps.inferenceSource`) over the account's setting; a carry-on after a card or a
-/// restart, whose `chosen` is the kind and the way its run captured; and, through that turn's
-/// request, its judge and its wrap-up. On the proxy the model is `captured` — the one the run
-/// started on — else the setting's for that way. The address and key are the setting's as it
-/// stands: they say where the proxy lives now, not what the turn chose.
+/// `forwardedProps.inferenceSource`) over its coworker's own `source`, over the account's setting;
+/// a carry-on after a card or a restart, whose `chosen` is the kind and the way its run captured;
+/// and, through that turn's request, its judge and its wrap-up. On the proxy the model is
+/// `captured` — the one the run started on — else the coworker's `pin`, but ONLY when its own
+/// `source` is `local_proxy` (its owner picked a plan model for it) and a subscription may answer
+/// it, else the setting's for that way (`localModel`, or `relay.localModel` by the Mac). A
+/// coworker whose `source` is none or the gateway, on the proxy through the setting or the turn's
+/// own pick, asks the setting's model whatever it is pinned to: every default hire is pinned
+/// `xai/grok-4.6`, and that is a gateway route, not a choice of plan model. The address and key
+/// are the setting's as it stands: they say where the proxy lives now, not what the turn chose.
+///
+/// THE PLAN IS `account`'S, the person driving the turn, whoever owns the coworker: a coworker's
+/// `source` names a door, not whose subscription pays nor which way it goes, which the person's
+/// setting says. A teammate with no proxy set is refused in words on a coworker whose owner has
+/// one, never sent to the gateway or to the owner's proxy or Mac.
 ///
 /// THE RELAY IS A WAY, NOT A SOURCE: `via: "mac"` behind the same `kind: "local_proxy"`, resolved
 /// here to `ModelEndpoint::Relay` for the account's Mac and `run_id`, whose `infer` frames name
 /// it. No caller changed for it. A Mac is picked per call, so none being connected is the door's
 /// `relay_offline`, in words, and never a turn sent the other way or to the gateway.
 ///
-/// A SETTING THAT CANNOT BE READ REFUSES THE TURN, unless the turn named the gateway itself (a
-/// carry-on of a run that started there does). Guessed as the gateway, it would be a silent fall
-/// back for a person who chose their own subscription, billing a key they chose not to use. It
-/// is refused as a proxy turn with a gap is: in words, on no model, with nothing asked anywhere,
-/// no gateway key minted and no meter consulted.
+/// A SETTING THAT CANNOT BE READ REFUSES THE TURN, unless the turn or its coworker named the
+/// gateway (a carry-on of a run that started there does). Guessed as the gateway, it would be a
+/// silent fall back for a person who chose their own subscription, billing a key they chose not to
+/// use. It is refused as a proxy turn with a gap is: in words, with nothing asked anywhere, no
+/// gateway key minted and no meter consulted.
 pub async fn route(
     saved: &dyn Saved,
     account: Option<&AccountId>,
     chosen: Option<TurnSource>,
     captured: Option<&str>,
     run_id: &str,
+    (source, pin): (Option<SourceKind>, Option<String>),
 ) -> Route {
+    let chosen = chosen.or(source.map(TurnSource::from));
     let named_gateway = chosen.is_some_and(|chosen| chosen.kind == SourceKind::Gateway);
     let (Some(account), false) = (account, named_gateway) else {
         return Route::Gateway;
     };
-    // Empty when neither names one, which the door refuses: a proxy turn never carries the
-    // coworker's gateway pin, even to be refused — its frame and its run's start would both name
-    // a model it never asked.
-    let captured = captured.map(str::to_string);
+    // Empty when none names one, which the door refuses.
+    let captured = ahead_of_the_setting(captured, (source, pin));
     let Some(setting) = saved.setting(account).await else {
         let why = "Your reply source could not be read, so the turn was not sent; try again in a \
                    moment.";
@@ -352,6 +376,22 @@ pub async fn route(
     let key = saved.key(account, setting.has_key).await;
     let endpoint = endpoint(base, &model, key);
     Route::LocalProxy { model, endpoint }
+}
+
+/// The model a proxy turn asks ahead of any setting's, whichever way it goes: the one its run
+/// `captured`, else the coworker's `pin` when its own `source` is `local_proxy` and a person's
+/// subscription may answer it. Off its own plan a pin is never asked, even one the allowlist
+/// takes: it was chosen as a gateway route, and the person chose their setting's model for their
+/// proxy and their Mac. On it, a pin the allowlist no longer takes falls through to the setting's
+/// model; a proxy turn never carries a gateway pin, even to be refused, since its frame and its
+/// run's start would name a model it never asked.
+fn ahead_of_the_setting(
+    captured: Option<&str>,
+    (source, pin): (Option<SourceKind>, Option<String>),
+) -> Option<String> {
+    let on_its_plan = source == Some(SourceKind::LocalProxy);
+    let pin = pin.filter(|pin| on_its_plan && subscription_model(pin).is_ok());
+    captured.map(str::to_string).or(pin)
 }
 
 /// What `GET /models` says of the person's own subscription, whatever their setting's kind:

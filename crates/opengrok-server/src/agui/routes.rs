@@ -1198,6 +1198,12 @@ pub async fn repin_coworker(
             }
         },
     };
+    // Absent leaves its door, null hands it back to the person's own setting, any other word 400s.
+    let source = body.get("source").map(|word| SourceKind::named(Some(word)));
+    let source = match source.transpose() {
+        Ok(source) => source,
+        Err(why) => return refuse(format!("source {why}")),
+    };
     let hidden = match body.get("hiddenFromSidebar") {
         None => None,
         Some(serde_json::Value::Null) => None,
@@ -1230,13 +1236,14 @@ pub async fn repin_coworker(
     let manages = name.is_some()
         || model.is_some()
         || effort.is_some()
+        || source.is_some()
         || role.is_some()
         || visibility.is_some()
         || !decoration.is_empty();
     if !manages && hidden.is_none() {
         return refuse(
             "nothing to change: send a name, a model, a role, a title, an avatar shape or \
-             colour, a visibility, an effort, hiddenFromSidebar, or several"
+             colour, a visibility, an effort, a source, hiddenFromSidebar, or several"
                 .to_string(),
         );
     }
@@ -1301,6 +1308,12 @@ pub async fn repin_coworker(
             Err(error) => return refuse(error.to_string()),
         }
     }
+    if let Some(source) = source {
+        match loaded.decide(CoworkerCommand::SetSource { source, at_ms }) {
+            Ok(more) => events.extend(more),
+            Err(error) => return refuse(error.to_string()),
+        }
+    }
     if let Some(role) = role {
         match loaded.decide(CoworkerCommand::SetRole { role, at_ms }) {
             Ok(more) => events.extend(more),
@@ -1330,6 +1343,15 @@ pub async fn repin_coworker(
     let mut after = loaded.clone();
     for event in &events {
         after.apply(event);
+    }
+    // ON ITS OWN DOOR TO A PERSON'S PLAN ITS PIN IS WHAT THE PROXY IS ASKED: a body that puts it
+    // there or repins it there leaves one a subscription may answer, or is refused before any
+    // write as a `localModel` is. Its explicit door only; a gateway pin stays free.
+    if (source.is_some() || after.model != loaded.model)
+        && after.source == Some(SourceKind::LocalProxy)
+        && let Err(why) = opengrok_core::inference::subscription_model(&after.model)
+    {
+        return refuse(format!("model: {why}"));
     }
     // The stored stamp when nothing is appended (a decoration- or hide-only PATCH): the
     // projection is only rewritten with events, and a reply stamped `now` over an unchanged
@@ -1482,6 +1504,8 @@ pub(crate) fn coworker_row(
         "name": view.name,
         "model": view.model,
         "effort": view.effort.as_str(),
+        // Null is the person's own setting; never left out, as an app reads that as an older server.
+        "source": view.source.map(SourceKind::as_str),
         "role": view.role,
         "title": decorated("title"),
         "avatarShape": decorated("avatarShape"),
@@ -2735,6 +2759,8 @@ pub(crate) async fn turn(
     // The deployment's model is the default, not the answer: a named coworker overrides it below.
     let mut model = state.model.clone();
     let mut effort = Effort::Inherit;
+    // Its own door and pin, only once a coworker loads: never the deployment's model as a pin.
+    let mut own = (None, None);
     let mut coworker_name = String::new();
     let mut coworker_role: Option<String> = None;
 
@@ -2776,6 +2802,7 @@ pub(crate) async fn turn(
         if let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await {
             model = coworker.model.clone();
             effort = coworker.effort;
+            own = (coworker.source, Some(coworker.model));
             coworker_name = coworker.name;
             coworker_role = coworker.role;
         }
@@ -2821,6 +2848,7 @@ pub(crate) async fn turn(
         account_id,
         run_coworker,
         (model, effort, chosen_source),
+        own,
         coworker_name,
         coworker_role,
         unscoped_charge,
@@ -2867,6 +2895,7 @@ async fn start_claimed_turn(
     run_coworker: Option<CoworkerId>,
     // What the turn thinks with: the coworker's pin and effort, and the source it named.
     (model, effort, chosen_source): (String, Effort, Option<TurnSource>),
+    own: (Option<SourceKind>, Option<String>),
     coworker_name: String,
     coworker_role: Option<String>,
     unscoped_charge: Option<String>,
@@ -2924,6 +2953,10 @@ async fn start_claimed_turn(
         }
         _ => tools,
     });
+
+    // Where it asks (`turn_request` says what follows), before the system message that names it.
+    let (run, account) = (&input.run_id, account_id.as_ref());
+    let route = local_proxy::route(&state, account, chosen_source, None, run, own).await;
 
     // Who this coworker is, plus whose computer its tools touch. Desktop `sendPrompt` already
     // composes this; AG-UI used to send `system: None`, so a Description saved as the standing
@@ -2989,6 +3022,7 @@ async fn start_claimed_turn(
             let text = crate::persona::system_message(
                 &coworker_name,
                 &persona,
+                route.asks(&model),
                 Some(&format!(
                     "{speaker}\n\n{}{}{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
@@ -3069,9 +3103,6 @@ async fn start_claimed_turn(
         .await;
     }
 
-    // Where it asks: its own word over the account's setting (`turn_request` says what follows).
-    let run = &input.run_id;
-    let route = local_proxy::route(&state, account_id.as_ref(), chosen_source, None, run).await;
     let source = route.source();
     let who = (run_coworker.as_ref(), account_id.as_ref());
     let thinks = (route, model, effort);
@@ -5322,16 +5353,12 @@ pub(super) fn with_reply_context(
     }
 }
 
-/// AG-UI messages to the model's vocabulary.
+/// AG-UI messages to the model's vocabulary, with the files this turn's messages carry already
+/// read (#229).
 ///
 /// Roles the model door does not understand are dropped rather than passed through: a provider
 /// that rejects an unknown role fails the whole turn, and AG-UI carries roles (`developer`) that
 /// have no place in a chat completion.
-pub fn to_chat_messages(input: &RunAgentInput) -> Vec<ChatMessage> {
-    to_chat_messages_with(input, &super::attachments::Attached::default())
-}
-
-/// `to_chat_messages`, with the files this turn's messages carry already read (#229).
 pub(crate) fn to_chat_messages_with(
     input: &RunAgentInput,
     attached: &super::attachments::Attached,

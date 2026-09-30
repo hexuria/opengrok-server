@@ -13,6 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::id::{BoxId, CoworkerId};
+use crate::inference::SourceKind;
 
 /// How a coworker's computer is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +164,12 @@ pub enum CoworkerEvent {
         effort: Effort,
         at_ms: i64,
     },
+    /// Which door this coworker's turns go through changed; `None` is the driving person's own
+    /// setting. Its own event for the reason `Repinned` is.
+    SourceSet {
+        source: Option<SourceKind>,
+        at_ms: i64,
+    },
     /// A computer became this coworker's.
     ComputerAssigned {
         box_id: BoxId,
@@ -201,6 +208,7 @@ impl CoworkerEvent {
             Self::Renamed { .. } => "coworker-renamed",
             Self::Repinned { .. } => "coworker-repinned",
             Self::EffortSet { .. } => "coworker-effort-set",
+            Self::SourceSet { .. } => "coworker-source-set",
             Self::RoleSet { .. } => "coworker-role-set",
             Self::VisibilitySet { .. } => "coworker-visibility-set",
             Self::ComputerAssigned { .. } => "computer-assigned",
@@ -232,6 +240,12 @@ pub struct Coworker {
     /// How hard it thinks: sent to the gateway on every turn, so on the aggregate for the reason
     /// the role is. A run captures it at its start (`RunEvent::Started::effort`).
     pub effort: Effort,
+    /// Its own door, under the turn's word and over the driving person's setting
+    /// (`opengrok_harness::local_proxy::route`). The plan behind `LocalProxy` is always the driving
+    /// person's, never its owner's; set here, the pin is the model that plan is asked for, and
+    /// anywhere else the person's own `localModel` is. A run captures the door its turn resolved
+    /// to (`RunEvent::Started::inference_source`), never this.
+    pub source: Option<SourceKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -293,6 +307,11 @@ pub enum CoworkerCommand {
         effort: Effort,
         at_ms: i64,
     },
+    /// Set its own door; `None` goes back to the driving person's setting.
+    SetSource {
+        source: Option<SourceKind>,
+        at_ms: i64,
+    },
     AssignComputer {
         box_id: BoxId,
         mode: BoxMode,
@@ -337,6 +356,7 @@ impl Coworker {
             CoworkerEvent::Renamed { name, .. } => self.name = name.clone(),
             CoworkerEvent::Repinned { model, .. } => self.model = model.clone(),
             CoworkerEvent::EffortSet { effort, .. } => self.effort = *effort,
+            CoworkerEvent::SourceSet { source, .. } => self.source = *source,
             CoworkerEvent::RoleSet { role, .. } => self.role.clone_from(role),
             CoworkerEvent::VisibilitySet { visibility, .. } => self.visibility = *visibility,
             CoworkerEvent::ComputerAssigned { box_id, mode, .. } => {
@@ -432,6 +452,11 @@ impl Coworker {
             CoworkerCommand::SetEffort { effort, at_ms } => {
                 self.alive()?;
                 Ok(vec![CoworkerEvent::EffortSet { effort, at_ms }])
+            }
+
+            CoworkerCommand::SetSource { source, at_ms } => {
+                self.alive()?;
+                Ok(vec![CoworkerEvent::SourceSet { source, at_ms }])
             }
 
             CoworkerCommand::Rename { name, at_ms } => {
@@ -544,6 +569,9 @@ pub struct CoworkerView {
     /// How hard it thinks, on the row so the roster carries it; inherit on a row from before.
     #[serde(default)]
     pub effort: Effort,
+    /// Its own door, on the row so the roster carries it; none on a row from before.
+    #[serde(default)]
+    pub source: Option<SourceKind>,
 }
 
 impl CoworkerView {
@@ -563,6 +591,7 @@ impl CoworkerView {
             role: coworker.role.clone(),
             visibility: coworker.visibility,
             effort: coworker.effort,
+            source: coworker.source,
         }
     }
 }

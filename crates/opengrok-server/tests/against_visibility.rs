@@ -253,6 +253,7 @@ impl Harness {
             role: after.role.clone(),
             visibility: after.visibility,
             effort: after.effort,
+            source: after.source,
         };
         self.store
             .append_coworker(&coworker_id, &owner.id, seq, &events, &view)
