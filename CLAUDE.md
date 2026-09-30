@@ -46,11 +46,12 @@ The Grok Bot desktop client, its two doors and the facts that went with them wer
 3. **No vendored generated protobuf stubs, ever.** Generated stubs are never vendored; wire shapes
    are transcribed with a provenance comment naming their source.
 4. **Every model call exits through open-ai-gateway, except a person's own-subscription turns.**
-   Those go to that person's OpenAI-compatible proxy on this server's loopback when they choose it
-   (`/account/inference-source`; OpenAI and xAI models only, and only where the proxy runs on the
-   server's own machine). A coworker's pin (`xai/grok-4.6@sub`) is a route, not a key. Provider
-   credentials still never touch a coworker's row, a client payload, or a log: the gateway holds
-   them, or the person's proxy does, and the proxy's own key is sealed in the vault.
+   Those go to that person's OpenAI-compatible proxy when they choose it
+   (`/account/inference-source`; OpenAI and xAI models only): on this server's loopback, or
+   relayed through that person's own enrolled Mac to the proxy on it — never anyone else's. A
+   coworker's pin (`xai/grok-4.6@sub`) is a route, not a key. Provider credentials still never
+   touch a coworker's row, a client payload, or a log: the gateway holds them, or the person's
+   proxy does, and the proxy's own key is sealed in the vault.
 5. **Nothing that matters lives in a client.** If losing a tab, a process or a machine loses work,
    the design is wrong. Queues are rows; runs resume; delivery is the server's job. *This is the bug
    that created this project — see `docs/research/lessons-opensesame.md` §4.*
