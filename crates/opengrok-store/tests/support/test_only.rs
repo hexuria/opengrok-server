@@ -196,6 +196,42 @@ impl PgStore {
         .await?;
         Ok(row.is_some())
     }
+
+    /// Revoke a bot key, if the caller owns it: the key's row alone. The route revokes a key with
+    /// its refresh tokens in one transaction (`revoke_bot_key_with_refresh`); a test that only
+    /// needs a revoked key revokes it here.
+    pub async fn revoke_bot_key(
+        &self,
+        account: &opengrok_core::id::AccountId,
+        jti: &str,
+    ) -> StoreResult<bool> {
+        let done = sqlx::query(
+            "update bot_key_view set revoked = true where jti = $1 and account_id = $2",
+        )
+        .bind(jti)
+        .bind(account.as_str())
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected() == 1)
+    }
+
+    /// One queued send this account owns, whatever its status. `None` for another account's id.
+    /// A route reads a thread's queue (`pending_user_messages`); a test reads one row back.
+    pub async fn pending_user_message(
+        &self,
+        id: &str,
+        account: &opengrok_core::id::AccountId,
+    ) -> StoreResult<Option<crate::PendingUserMessageRow>> {
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "{} where id = $1 and account_id = $2",
+            crate::pending::PENDING_SELECT
+        )))
+        .bind(id)
+        .bind(account.as_str())
+        .fetch_optional(self.pool())
+        .await?;
+        row.as_ref().map(crate::pending::pending_row).transpose()
+    }
 }
 
 impl crate::vault::Vault {

@@ -733,22 +733,6 @@ impl PgStore {
         .await?;
         Ok(done.rows_affected() == 1)
     }
-
-    /// Revoke, if the caller owns it. Answers whether anything changed — the 404-vs-204 fact.
-    pub async fn revoke_bot_key(
-        &self,
-        account: &opengrok_core::id::AccountId,
-        jti: &str,
-    ) -> StoreResult<bool> {
-        let done = sqlx::query(
-            "update bot_key_view set revoked = true where jti = $1 and account_id = $2",
-        )
-        .bind(jti)
-        .bind(account.as_str())
-        .execute(self.pool())
-        .await?;
-        Ok(done.rows_affected() == 1)
-    }
 }
 
 /// An OAuth client registered against the MCP door's authorization server (RFC 7591). Public:

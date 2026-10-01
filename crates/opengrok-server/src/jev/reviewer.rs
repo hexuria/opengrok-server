@@ -37,14 +37,6 @@ use typesafe_sdk::{JsonContent, Question};
 
 use super::{Ask, JevDoor, JevError, Judgement};
 
-/// How sure Jev has to be before a span is masked.
-///
-/// The default leans towards masking: a stand-in that turned out to be
-/// unnecessary costs a slightly odd-looking word in the prompt, and a miss
-/// costs the thing this exists to prevent. Raise it when a coworker's work is
-/// mostly code, where capitalised words are types rather than people.
-pub const DEFAULT_THRESHOLD: f64 = 0.55;
-
 /// The labels Jev picks between, and what each one means for a span.
 const LABELS: &[(&str, &str)] = &[
     (

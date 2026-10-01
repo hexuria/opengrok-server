@@ -67,9 +67,33 @@ fn pending_id_prefers_the_short_name() {
         }),
         extra: Default::default(),
     };
-    assert_eq!(pending_id_from(&input).as_deref(), Some("pum_a"));
+    assert_eq!(named_id(&input, PENDING_ID), Some("pum_a"));
     input.forwarded_props = json!({ "pendingUserMessageId": "pum_b" });
-    assert_eq!(pending_id_from(&input).as_deref(), Some("pum_b"));
+    assert_eq!(named_id(&input, PENDING_ID), Some("pum_b"));
     input.forwarded_props = json!({ "pendingId": "" });
-    assert_eq!(pending_id_from(&input), None);
+    assert_eq!(named_id(&input, PENDING_ID), None);
+}
+
+/// #300: a `retryOf` that is not a string, or has no id in it, is no retry at all.
+#[test]
+fn a_retry_names_a_run_only_as_a_string_with_an_id_in_it() {
+    let mut input: RunAgentInput =
+        serde_json::from_value(json!({ "threadId": "t", "runId": "r" })).unwrap();
+    for (props, named) in [
+        (json!({ "retryOf": " run_a " }), Some("run_a")),
+        (json!({ "retryOf": "" }), None),
+        (json!({ "retryOf": "  " }), None),
+        (json!({ "retryOf": 7 }), None),
+        (json!({ "retryOf": { "runId": "run_a" } }), None),
+        (json!({ "retryOf": null }), None),
+        (json!({}), None),
+    ] {
+        input.forwarded_props = props;
+        assert_eq!(
+            named_id(&input, &["retryOf"]),
+            named,
+            "{}",
+            input.forwarded_props
+        );
+    }
 }

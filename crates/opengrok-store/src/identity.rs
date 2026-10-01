@@ -8,7 +8,7 @@
 
 use opengrok_core::id::{AccountId, OrgId};
 use opengrok_core::limits::RunLimits;
-use opengrok_core::org::{InviteState, Org, OrgEvent, OrgView};
+use opengrok_core::org::{InviteState, Org, OrgEvent};
 use sqlx::Row;
 
 use crate::postgres::PgStore;
@@ -169,30 +169,6 @@ impl PgStore {
             .map(|row| row.try_get::<String, _>("org_id"))
             .transpose()?
             .map(OrgId::from_stored))
-    }
-
-    /// An org's projection — for the admin surfaces and tests.
-    pub async fn org_view(&self, id: &OrgId) -> StoreResult<Option<OrgView>> {
-        let row = sqlx::query(
-            "select id, name, admin_id, domains, pending_domains, updated_at_ms
-             from org_view where id = $1",
-        )
-        .bind(id.as_str())
-        .fetch_optional(self.pool())
-        .await?;
-        row.map(|row| {
-            Ok(OrgView {
-                id: OrgId::from_stored(row.try_get::<String, _>("id")?),
-                name: row.try_get("name")?,
-                admin: AccountId::from_stored(row.try_get::<String, _>("admin_id")?),
-                domains: serde_json::from_value(row.try_get("domains")?)
-                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-                pending_domains: serde_json::from_value(row.try_get("pending_domains")?)
-                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
-                updated_at_ms: row.try_get("updated_at_ms")?,
-            })
-        })
-        .transpose()
     }
 
     /// A convenience the smoke and the admin CLI both want: the state of one invite code.
