@@ -350,6 +350,7 @@ async fn a_refusal_with_no_local_vm_takes_nothing_over() {
         account.as_str(),
         None,
         &forbidden(),
+        Some("bx_ascii_old"),
     )
     .await;
 
@@ -383,6 +384,7 @@ async fn a_self_hosted_takeover_keeps_the_fallback_and_says_so() {
         h.account.as_str(),
         None,
         &forbidden(),
+        Some("bx_ascii_old"),
     )
     .await
     .expect("a self-hosted server with Docker keeps the fallback");

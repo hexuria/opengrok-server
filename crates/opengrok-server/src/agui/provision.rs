@@ -151,6 +151,11 @@ pub async fn provider_for(
 /// THE SWAP IS STAMPED on the account's `computerError`, with the upstream code. It moves the
 /// coworker from its desktop to a different, often headless, machine: files seem to vanish and
 /// screen tools disappear, and until this stamp nothing said why.
+///
+/// `replacing` is the refused box when the scope has one: the Local VM takes its place only while
+/// it is still the scope's, as two turns refused at once each made one. Answers the scope's box
+/// afterwards, which is another request's when that one got there first.
+#[allow(clippy::too_many_arguments)]
 pub async fn take_over_with_local_docker(
     state: &AgUiState,
     account_id: &AccountId,
@@ -158,6 +163,7 @@ pub async fn take_over_with_local_docker(
     scope_id: &str,
     org_id: Option<&str>,
     refused: &opengrok_box::BoxError,
+    replacing: Option<&str>,
 ) -> Option<(Arc<dyn Computer>, String)> {
     let Some(computer) = provider_for(state, org_id, "local-docker").await else {
         tracing::warn!(scope, scope_id, %refused, "computer: the provider refused and this server runs no Local VM to fall back on");
@@ -167,10 +173,13 @@ pub async fn take_over_with_local_docker(
     let box_id = computer.create(None).await.ok()?;
     let at_ms = chrono::Utc::now().timestamp_millis();
     let store = &state.auth.store;
-    store
-        .set_scoped_computer(scope, scope_id, &box_id, "local-docker", org_id, at_ms)
-        .await
-        .ok()?;
+    let claimed = claim(
+        state, &*computer, scope, scope_id, replacing, &box_id, org_id,
+    );
+    let (kept, kind) = claimed.await.ok()??;
+    if kept != box_id {
+        return Some((provider_for(state, org_id, &kind).await?, kept));
+    }
     let why = format!("{FELL_BACK} ({refused})");
     // The stamp is the only thing that tells the person the box changed; a lost one is logged
     // rather than failing a takeover that already happened.
@@ -187,6 +196,34 @@ pub async fn take_over_with_local_docker(
 /// What the stamp says after a takeover. The pane shows it beside the new box.
 pub const FELL_BACK: &str = "box.ascii.dev refused this computer, so it now runs as a Local VM \
 on this server — files on the old computer are not on this one";
+
+/// Record a box this request just made on `provider` as the scope's computer
+/// (`claim_scoped_computer`), and answer the scope's box afterwards. A box that did not become it,
+/// because another request recorded one first or the record failed, is destroyed on the provider
+/// that made it: left running, it was billed with nothing tracking or idle-stopping it (#302).
+async fn claim(
+    state: &AgUiState,
+    provider: &dyn Computer,
+    scope: &str,
+    scope_id: &str,
+    replacing: Option<&str>,
+    box_id: &str,
+    org_id: Option<&str>,
+) -> opengrok_store::StoreResult<Option<(String, String)>> {
+    let (kind, at_ms) = (provider.kind(), chrono::Utc::now().timestamp_millis());
+    let store = &state.auth.store;
+    let kept = store
+        .claim_scoped_computer(scope, scope_id, replacing, box_id, kind, org_id, at_ms)
+        .await;
+    if !matches!(&kept, Ok(Some((kept, _))) if kept == box_id) {
+        let destroyed = provider
+            .destroy(box_id)
+            .await
+            .map_err(|error| error.to_string());
+        tracing::warn!(scope, scope_id, box_id, kept = ?kept, destroyed = ?destroyed, "computer: the scope's box is not the one made here, so it was destroyed");
+    }
+    kept
+}
 
 /// Local VM (server-host Docker) is a SELF-HOST / dev convenience only. A hosted, multi-tenant
 /// deployment (`OG_HOSTED=1`) must never run untrusted bot containers on the API host — a container
@@ -377,9 +414,8 @@ pub async fn warm_scope_for_account(state: &AgUiState, account_id: &AccountId) {
         ("per-account", _) | ("per-org", None) => ("account", account_id.as_str().to_string()),
         _ => return,
     };
-    let at_ms = chrono::Utc::now().timestamp_millis();
-    match ensure_scope_box(state, org_id.as_deref(), scope, &scope_id, at_ms).await {
-        Ok(box_id) => tracing::info!(
+    match ensure_scope_box(state, None, org_id.as_deref(), scope, &scope_id).await {
+        Ok((box_id, _)) => tracing::info!(
             scope,
             scope_id,
             box_id,
@@ -417,103 +453,11 @@ pub async fn ensure_computer_for(
         coworker_id.as_str(),
         coworker.is_group(),
     );
-
-    // A recorded box whose container no longer exists is healed here rather than reported: the
-    // row is cleared and the scope gets a new box below, so a bot whose computer vanished comes
-    // back with one instead of a black screen forever.
-    let recorded = match store.scoped_computer(scope, &scope_id).await {
-        Ok(Some((box_id, kind))) => {
-            if box_is_gone(state, org_id.as_deref(), &kind, &box_id).await {
-                tracing::warn!(scope, scope_id = %scope_id, box_id, "computer: the recorded box is gone; provisioning a new one");
-                let _ = store.clear_scoped_computer(scope, &scope_id).await;
-                Ok(None)
-            } else {
-                Ok(Some(box_id))
-            }
-        }
-        Ok(None) => Ok(None),
-        Err(error) => Err(error),
-    };
-    let mut fell_back = false;
-    let box_id = match recorded {
-        Ok(Some(box_id)) => box_id,
-        Ok(None) => {
-            let kind = kind_for_new(state, org_id.as_deref()).await;
-            let Some(provider) = provider_for(state, org_id.as_deref(), kind).await else {
-                let code = if kind == "none" {
-                    "no_org_key"
-                } else {
-                    "not_supported"
-                };
-                return record_error(
-                    state,
-                    account_id,
-                    code,
-                    "no computer is configured for your organization — an admin must set up box.ascii.dev on the dashboard",
-                    at_ms,
-                )
-                .await;
-            };
-            // NAME THE PROVIDER CALL. Until 6 Sep 2026 a create left no trace at all: the only
-            // record was the error row it wrote on failure, so "did we ask box.ascii.dev today,
-            // and what did it say" had no answer and an hours-old row got read as live. One line
-            // before, one after, with the upstream code — the same gap as a request line that
-            // logged only `auth_len`.
-            tracing::info!(scope, scope_id = %scope_id, kind, "computer: asking the provider for a box");
-            match provider.create(None).await {
-                Ok(box_id) => {
-                    tracing::info!(scope, scope_id = %scope_id, kind, box_id = %box_id, "computer: the provider gave us a box");
-                    if let Err(error) = store
-                        .set_scoped_computer(
-                            scope,
-                            &scope_id,
-                            &box_id,
-                            kind,
-                            org_id.as_deref(),
-                            at_ms,
-                        )
-                        .await
-                    {
-                        return record_error(
-                            state,
-                            account_id,
-                            "unknown",
-                            &error.to_string(),
-                            at_ms,
-                        )
-                        .await;
-                    }
-                    box_id
-                }
-                Err(error) => {
-                    if kind == "ascii"
-                        && let Some((_, docker_id)) = take_over_with_local_docker(
-                            state,
-                            account_id,
-                            scope,
-                            &scope_id,
-                            org_id.as_deref(),
-                            &error,
-                        )
-                        .await
-                    {
-                        fell_back = true;
-                        docker_id
-                    } else {
-                        return record_error(
-                            state,
-                            account_id,
-                            error.code(),
-                            &error.to_string(),
-                            at_ms,
-                        )
-                        .await;
-                    }
-                }
-            }
-        }
-        Err(error) => {
-            return record_error(state, account_id, "unknown", &error.to_string(), at_ms).await;
+    let ensured = ensure_scope_box(state, Some(account_id), org_id.as_deref(), scope, &scope_id);
+    let (box_id, fell_back) = match ensured.await {
+        Ok(ensured) => ensured,
+        Err((code, message)) => {
+            return record_error(state, account_id, &code, &message, at_ms).await;
         }
     };
 
@@ -551,21 +495,32 @@ pub async fn ensure_computer_for(
     }
 }
 
-/// Ensure a scope's box EXISTS (create + record if absent), with no coworker assignment. This is the
-/// eager-provisioning primitive: warm the one shared org box the moment an admin selects per-org, so
-/// it is ready before anyone's first bot. Returns the box id, or `(code, message)` when it could not
-/// be provisioned (e.g. the org has no key). Idempotent — an already-provisioned scope returns its
-/// existing box.
+/// A scope's box, made and claimed when it has none: THE ONE PATH that gives an empty scope a box,
+/// so the claim that keeps two first requests from each keeping one (#302) holds for a hire, `POST
+/// …/computer`, a reset's re-provision and both warm-ups. Idempotent: a scope with a box answers
+/// it. With `account_id`, box.ascii.dev refusing the create is taken over by a Local VM, stamped
+/// on that account. Answers the box and whether it is a takeover's, or `(code, message)`.
 pub async fn ensure_scope_box(
     state: &AgUiState,
+    account_id: Option<&AccountId>,
     org_id: Option<&str>,
     scope: &str,
     scope_id: &str,
-    at_ms: i64,
-) -> Result<String, (String, String)> {
+) -> Result<(String, bool), (String, String)> {
     let store = &state.auth.store;
-    if let Ok(Some((box_id, _kind))) = store.scoped_computer(scope, scope_id).await {
-        return Ok(box_id);
+    // A recorded box whose container no longer exists is healed here rather than reported: the
+    // row is cleared and the scope gets a new box below, so a bot whose computer vanished comes
+    // back with one instead of a black screen forever.
+    match store.scoped_computer_full(scope, scope_id).await {
+        Ok(Some((box_id, kind, _))) => {
+            if !box_is_gone(state, org_id, &kind, &box_id).await {
+                return Ok((box_id, false));
+            }
+            tracing::warn!(scope, scope_id = %scope_id, box_id, "computer: the recorded box is gone; provisioning a new one");
+            let _ = store.clear_scoped_computer(scope, scope_id, &box_id).await;
+        }
+        Ok(None) => {}
+        Err(error) => return Err(("unknown".to_string(), error.to_string())),
     }
     let kind = kind_for_new(state, org_id).await;
     let Some(provider) = provider_for(state, org_id, kind).await else {
@@ -574,66 +529,72 @@ pub async fn ensure_scope_box(
         } else {
             "not_supported"
         };
-        return Err((
-            code.to_string(),
-            "no computer is configured for your organization — set up box.ascii.dev first"
-                .to_string(),
-        ));
+        // A member is told who can fix it; an admin warming per-org is that person.
+        let fix = match account_id {
+            Some(_) => "an admin must set up box.ascii.dev on the dashboard",
+            None => "set up box.ascii.dev first",
+        };
+        let message = format!("no computer is configured for your organization — {fix}");
+        return Err((code.to_string(), message));
     };
+    // NAME THE PROVIDER CALL. Until 6 Sep 2026 a create left no trace at all: the only record
+    // was the error row it wrote on failure, so "did we ask box.ascii.dev today, and what did it
+    // say" had no answer and an hours-old row got read as live. One line before, one after, with
+    // the upstream code — the same gap as a request line that logged only `auth_len`.
     tracing::info!(
         scope,
         scope_id,
         kind,
         "computer: asking the provider for a box"
     );
-    match provider.create(None).await {
+    let error = match provider.create(None).await {
         Ok(box_id) => {
             tracing::info!(scope, scope_id, kind, box_id = %box_id, "computer: the provider gave us a box");
-            match store
-                .set_scoped_computer(scope, scope_id, &box_id, kind, org_id, at_ms)
+            let claimed = claim(state, &*provider, scope, scope_id, None, &box_id, org_id);
+            return match claimed.await {
+                Ok(Some((kept, _))) => Ok((kept, false)),
+                Ok(None) => Err(("unknown".into(), "the computer was not recorded".into())),
+                Err(error) => Err(("unknown".into(), error.to_string())),
+            };
+        }
+        Err(error) => error,
+    };
+    // The upstream refusal, in full, at WARN. This is the line whose absence meant a
+    // `quota_exceeded` from hours earlier could not be told from one from a second ago.
+    tracing::warn!(scope, scope_id, kind, code = %error.code(), %error, "computer: the provider refused");
+    if kind == "ascii"
+        && let Some(account_id) = account_id
+        && let Some((_, taken)) =
+            take_over_with_local_docker(state, account_id, scope, scope_id, org_id, &error, None)
                 .await
-            {
-                Ok(()) => Ok(box_id),
-                Err(error) => Err(("unknown".to_string(), error.to_string())),
-            }
-        }
-        Err(error) => {
-            // The upstream refusal, in full, at WARN. This is the line whose absence meant a
-            // `quota_exceeded` from hours earlier could not be told from one from a second ago.
-            tracing::warn!(scope, scope_id, kind, code = %error.code(), %error, "computer: the provider refused");
-            Err((error.code().to_string(), error.to_string()))
-        }
+    {
+        return Ok((taken, true));
     }
+    Err((error.code().to_string(), error.to_string()))
 }
 
-/// Destroy a scope's box (best-effort, on the provider that made it) and clear its mapping.
-async fn destroy_and_clear(
-    state: &AgUiState,
-    org_id: Option<&str>,
-    scope: &str,
-    scope_id: &str,
-    box_id: &str,
-    kind: &str,
-) {
+/// Destroy a scope's box (best-effort, on the provider that made it) and forget it: only that
+/// box, as one another request recorded meanwhile is the scope's live one (#302).
+async fn destroy_and_clear(state: &AgUiState, org_id: Option<&str>, scope: &str, scope_id: &str) {
+    let store = &state.auth.store;
+    let Ok(Some((box_id, kind, _))) = store.scoped_computer_full(scope, scope_id).await else {
+        return;
+    };
     // A Local VM recorded before this server stopped serving them (OG_HOSTED=1 set later, or a
     // switch to box.ascii.dev) is still a container on this host; removing it is the one Docker
     // call such a server still makes, so teardown does not strand it running and unmanaged.
-    let provider = match provider_for(state, org_id, kind).await {
+    let provider = match provider_for(state, org_id, &kind).await {
         None if kind == "local-docker" => {
             Some(Arc::new(opengrok_box::DockerComputer::new()) as Arc<dyn Computer>)
         }
         provider => provider,
     };
     if let Some(provider) = provider
-        && let Err(error) = provider.destroy(box_id).await
+        && let Err(error) = provider.destroy(&box_id).await
     {
-        tracing::warn!(%error, box_id, "could not destroy a box on teardown; clearing the mapping anyway");
+        tracing::warn!(%error, box_id, "could not destroy a scope's box; forgetting it anyway");
     }
-    let _ = state
-        .auth
-        .store
-        .clear_scoped_computer(scope, scope_id)
-        .await;
+    let _ = store.clear_scoped_computer(scope, scope_id, &box_id).await;
 }
 
 /// Tear down a deleted coworker's computer according to its account's mode. per-bot: destroy the
@@ -647,64 +608,22 @@ pub async fn teardown_computer_for(
 ) {
     let store = &state.auth.store;
     let (mode, org_id) = resolve_mode(state, account_id).await;
-    // A group's box is nobody else's; it goes when the group does.
-    if let Ok((coworker, _)) = store.load_coworker(coworker_id).await
-        && coworker.is_group()
-    {
-        if let Ok(Some((box_id, kind))) = store.scoped_computer("group", coworker_id.as_str()).await
-        {
-            destroy_and_clear(
-                state,
-                org_id.as_deref(),
-                "group",
-                coworker_id.as_str(),
-                &box_id,
-                &kind,
-            )
-            .await;
-        }
-        return;
-    }
-    match mode.as_str() {
-        "per-bot" => {
-            if let Ok(Some((box_id, kind))) =
-                store.scoped_computer("bot", coworker_id.as_str()).await
-            {
-                destroy_and_clear(
-                    state,
-                    org_id.as_deref(),
-                    "bot",
-                    coworker_id.as_str(),
-                    &box_id,
-                    &kind,
-                )
-                .await;
-            }
-        }
+    let group = store
+        .load_coworker(coworker_id)
+        .await
+        .is_ok_and(|(coworker, _)| coworker.is_group());
+    let (scope, scope_id) = match mode.as_str() {
+        // A group's box is nobody else's; it goes when the group does.
+        _ if group => ("group", coworker_id.as_str()),
+        "per-bot" => ("bot", coworker_id.as_str()),
         // The org box is shared org-wide; a single member's delete must not pull it out from under
         // everyone. Its lifetime is idle-stop and admin action, not agent deletion.
-        "per-org" => {}
-        _ => {
-            let empty = store
-                .coworkers_for(account_id)
-                .await
-                .map(|rows| rows.is_empty())
-                .unwrap_or(false);
-            if empty
-                && let Ok(Some((box_id, kind))) =
-                    store.scoped_computer("account", account_id.as_str()).await
-            {
-                destroy_and_clear(
-                    state,
-                    org_id.as_deref(),
-                    "account",
-                    account_id.as_str(),
-                    &box_id,
-                    &kind,
-                )
-                .await;
-            }
-        }
+        "per-org" => return,
+        _ => ("account", account_id.as_str()),
+    };
+    let rows = store.coworkers_for(account_id);
+    if scope != "account" || rows.await.is_ok_and(|rows| rows.is_empty()) {
+        destroy_and_clear(state, org_id.as_deref(), scope, scope_id).await;
     }
 }
 
@@ -855,6 +774,30 @@ pub async fn scoped_box_row_for(
         kind,
         org_id,
     })
+}
+
+/// The box each of `viewer`'s own coworkers given one is on now: its scope's record, as a turn
+/// finds it. The id on a coworker's row is the box it was FIRST given, as the aggregate never
+/// reassigns one; after a reset it names a destroyed box, and the roster showed one account's
+/// coworkers on different computers (#302). A store that cannot answer leaves that id.
+pub async fn live_boxes(
+    state: &AgUiState,
+    viewer: &AccountId,
+    views: &[&opengrok_core::coworker::CoworkerView],
+) -> std::collections::HashMap<CoworkerId, String> {
+    let (mode, org) = resolve_mode(state, viewer).await;
+    let mut live = std::collections::HashMap::new();
+    for view in views {
+        let Some(first) = &view.box_id else { continue };
+        let (owner, group) = (viewer.as_str(), !view.members.is_empty());
+        let (scope, id, _) = scope_for(&mode, owner, org.as_deref(), view.id.as_str(), group);
+        let now = match state.auth.store.scoped_computer_full(scope, &id).await {
+            Ok(row) => row.map(|(box_id, ..)| box_id),
+            Err(_) => Some(first.to_string()),
+        };
+        live.extend(now.map(|box_id| (view.id.clone(), box_id)));
+    }
+    live
 }
 
 /// Live screen NativeChat paints. Same facts as gateway `getForeverBoxStatus`, on the AG-UI
@@ -1152,18 +1095,14 @@ pub async fn update_scope_box(
         }
     };
     let at_ms = chrono::Utc::now().timestamp_millis();
-    if let Err(error) = store
-        .set_scoped_computer(
-            scope,
-            &scope_id,
-            &new_box_id,
-            &kind,
-            org_id.as_deref(),
-            at_ms,
-        )
-        .await
-    {
-        return fail(format!("the new computer could not be recorded: {error}")).await;
+    // Only in place of the box it rebuilt: a reset or takeover meanwhile owns the scope now.
+    let (org, old) = (org_id.as_deref(), Some(old_box_id.as_str()));
+    match claim(&state, &*provider, scope, &scope_id, old, &new_box_id, org).await {
+        Ok(Some((kept, _))) if kept == new_box_id => {}
+        Ok(_) => return fail("the computer was replaced while it was being updated".into()).await,
+        Err(error) => {
+            return fail(format!("the new computer could not be recorded: {error}")).await;
+        }
     }
     tracing::info!(scope, scope_id = %scope_id, old = %old_box_id, new = %new_box_id, "computer: rebuilt on the newest image");
 
@@ -1190,15 +1129,14 @@ pub async fn begin_update_for_coworker(
     coworker_id: &CoworkerId,
 ) -> Result<(), (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
-    let (_mode, org_id, scope, scope_id, _) =
-        scope_of(state, account_id, coworker_id.as_str()).await;
-    let store = &state.auth.store;
-    if !matches!(store.scoped_computer(scope, &scope_id).await, Ok(Some(_))) {
+    let Some(row) = scoped_box_row_for(state, account_id, coworker_id).await else {
         return Err((
             StatusCode::NOT_FOUND,
             "this coworker has no computer to update".into(),
         ));
-    }
+    };
+    let (org_id, scope, scope_id) = (row.org_id, row.scope, row.scope_id);
+    let store = &state.auth.store;
     let now = chrono::Utc::now().timestamp_millis();
     if let Ok(Some((phase, _started, updated_at_ms, _))) = store.box_update(scope, &scope_id).await
         && phase != UPDATE_FAILED
@@ -1227,14 +1165,10 @@ pub async fn reset_for_coworker(
 ) -> Result<(), (String, String)> {
     let (_mode, org_id, scope, scope_id, _) =
         scope_of(state, account_id, coworker_id.as_str()).await;
-    let store = &state.auth.store;
-    if let Ok(Some((box_id, kind, _))) = store.scoped_computer_full(scope, &scope_id).await
-        && let Some(provider) = provider_for(state, org_id.as_deref(), &kind).await
-    {
-        let _ = provider.destroy(&box_id).await;
-    }
-    let _ = store.clear_scoped_computer(scope, &scope_id).await;
-    let _ = store.clear_box_update(scope, &scope_id).await;
+    // The fresh box is claimed like any first one, so a request that found the scope empty in
+    // this gap and made its own ends on one box with this reset (#302).
+    destroy_and_clear(state, org_id.as_deref(), scope, &scope_id).await;
+    let _ = state.auth.store.clear_box_update(scope, &scope_id).await;
     reprovision_coworker(state, account_id, coworker_id).await
 }
 
@@ -1274,25 +1208,10 @@ pub async fn wake_coworker_computer(
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) {
-    let (_mode, org_id, scope, scope_id, _) =
-        scope_of(state, account_id, coworker_id.as_str()).await;
-    let Ok(Some((box_id, kind, _stopped))) = state
-        .auth
-        .store
-        .scoped_computer_full(scope, &scope_id)
-        .await
-    else {
-        return;
-    };
-    let Some(provider) = lookup_provider(state, org_id.as_deref(), &kind)
-        .await
-        .computer
-    else {
-        return;
-    };
-    let _ = provider
-        .wake(&box_id, std::time::Duration::from_secs(90))
-        .await;
+    if let Some(scoped) = scoped_box_for(state, account_id, coworker_id).await {
+        let patience = std::time::Duration::from_secs(90);
+        let _ = scoped.computer.wake(&scoped.box_id, patience).await;
+    }
 }
 
 /// How long a box may sit idle before the sweep stops it (disk kept, billing paused). Read from
@@ -1365,6 +1284,75 @@ pub async fn idle_stop_once(state: &AgUiState, before_ms: i64) -> usize {
         }
     }
     stopped
+}
+
+/// Whether the boot repair destroys what it finds: only when `OG_REPAIR_STRAY_BOXES` is exactly
+/// `destroy`. A destroy takes a box's files with it, so a first boot on a real database reports.
+pub fn repair_destroys(setting: Option<&str>) -> bool {
+    setting == Some("destroy")
+}
+
+/// The boxes #302's race left running, and nothing else: a box no computer row records, every
+/// coworker naming it on a SHARED box of an account or org scope whose row names another. A box
+/// recorded only on coworker rows is not one: from `817ec33` to `5c0d141` (29-31 Aug 2026) a
+/// hire's box, dedicated or named by the client, was recorded nowhere else, and no
+/// `account_computer` row was carried into `scoped_computer`. Each is asked of its scope's
+/// provider and, while that provider still has it, logged at warn, and destroyed only when
+/// `destroy` (`repair_destroys`). Answers the boxes still there.
+pub async fn repair_stray_boxes(state: &AgUiState, destroy: bool) -> Vec<String> {
+    let unrecorded = state.auth.store.unrecorded_coworker_boxes().await;
+    let unrecorded = unrecorded.unwrap_or_else(|error| {
+        tracing::warn!(%error, "computer: could not look for boxes no record names");
+        Vec::new()
+    });
+    let mut found = Vec::new();
+    for namers in unrecorded.chunk_by(|one, two| one.0 == two.0) {
+        let box_id = &namers[0].0;
+        let mut row = None;
+        for (_, coworker, account) in namers {
+            row = shaped_like_302(state, account, coworker, box_id).await;
+            if row.is_none() {
+                break;
+            }
+        }
+        let Some(row) = row else { continue };
+        let Some(provider) = provider_for(state, row.org_id.as_deref(), &row.kind).await else {
+            continue;
+        };
+        match provider.state(box_id).await.as_deref() {
+            Ok("absent") => continue,
+            Ok(_) => found.push(box_id.clone()),
+            Err(error) => {
+                tracing::warn!(box_id, %error, "computer: could not ask after a box no record names");
+                continue;
+            }
+        }
+        let (scope, scope_id, kept) = (row.scope, &row.scope_id, &row.box_id);
+        if !destroy {
+            tracing::warn!(box_id, scope, scope_id, kept = %kept, "computer: a box no record names is running; OG_REPAIR_STRAY_BOXES=destroy destroys it");
+        } else if let Err(error) = provider.destroy(box_id).await {
+            tracing::warn!(box_id, scope, scope_id, %error, "computer: a box no record names could not be destroyed");
+        } else {
+            tracing::warn!(box_id, scope, scope_id, kept = %kept, "computer: destroyed a box no record names");
+        }
+    }
+    found
+}
+
+/// The scope row of a coworker standing where #302 left one: on a SHARED box of an account or org
+/// scope whose row names a box other than `stray`. Any other coworker is `None`.
+async fn shaped_like_302(
+    state: &AgUiState,
+    account: &str,
+    coworker: &str,
+    stray: &str,
+) -> Option<ScopedBoxRow> {
+    let coworker = CoworkerId::from_stored(coworker.to_string());
+    let (loaded, _) = state.auth.store.load_coworker(&coworker).await.ok()?;
+    let account = AccountId::from_stored(account.to_string());
+    let row = scoped_box_row_for(state, &account, &coworker).await?;
+    let shared = loaded.box_mode() == Some(BoxMode::Shared);
+    (shared && matches!(row.scope, "account" | "org") && row.box_id != stray).then_some(row)
 }
 
 #[cfg(test)]

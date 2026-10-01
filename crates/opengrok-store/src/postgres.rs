@@ -2249,56 +2249,47 @@ impl PgStore {
 
     // ---- A computer keyed by the scope that shares it (org / account / bot) ----
 
-    pub async fn scoped_computer(
-        &self,
-        scope: &str,
-        scope_id: &str,
-    ) -> StoreResult<Option<(String, String)>> {
-        let row = sqlx::query(
-            "select box_id, kind from scoped_computer where scope = $1 and scope_id = $2",
-        )
-        .bind(scope)
-        .bind(scope_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| {
-            Ok((
-                row.try_get::<String, _>("box_id")?,
-                row.try_get::<String, _>("kind")?,
-            ))
-        })
-        .transpose()
-    }
-
+    /// Record `box_id`, just made for this scope, as its computer: in place of `replacing` while
+    /// the scope still names that box, else only into a scope with none. Answers the scope's box
+    /// afterwards, another request's when that one got there first. NEVER AN UPSERT (#302): the
+    /// later of two first creates overwrote the earlier, which ran on untracked and billed. A
+    /// no-op `do update`, as `do nothing` answers a conflict with no row to say who won.
     #[allow(clippy::too_many_arguments)]
-    pub async fn set_scoped_computer(
+    pub async fn claim_scoped_computer(
         &self,
         scope: &str,
         scope_id: &str,
+        replacing: Option<&str>,
         box_id: &str,
         kind: &str,
         org_id: Option<&str>,
         at_ms: i64,
-    ) -> StoreResult<()> {
-        sqlx::query(
+    ) -> StoreResult<Option<(String, String)>> {
+        let sql = if replacing.is_some() {
+            "update scoped_computer set box_id = $3, kind = $4, org_id = $5, last_used_at_ms = $6,
+               updated_at_ms = $6 where scope = $1 and scope_id = $2 and box_id = $7 returning box_id, kind"
+        } else {
             "insert into scoped_computer (scope, scope_id, box_id, kind, org_id, last_used_at_ms, updated_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $6)
-             on conflict (scope, scope_id) do update set
-               box_id = excluded.box_id, kind = excluded.kind, org_id = excluded.org_id,
-               last_used_at_ms = excluded.last_used_at_ms, updated_at_ms = excluded.updated_at_ms",
-        )
-        .bind(scope)
-        .bind(scope_id)
-        .bind(box_id)
-        .bind(kind)
-        .bind(org_id)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+             values ($1, $2, $3, $4, $5, $6, $6) on conflict (scope, scope_id)
+             do update set box_id = scoped_computer.box_id returning box_id, kind"
+        };
+        let mut query = sqlx::query_as(sql)
+            .bind(scope)
+            .bind(scope_id)
+            .bind(box_id)
+            .bind(kind)
+            .bind(org_id)
+            .bind(at_ms);
+        if let Some(replacing) = replacing {
+            query = query.bind(replacing);
+        }
+        if let Some(kept) = query.fetch_optional(&self.pool).await? {
+            return Ok(Some(kept));
+        }
+        let now = self.scoped_computer_full(scope, scope_id).await?;
+        Ok(now.map(|(box_id, kind, _)| (box_id, kind)))
     }
 
-    /// A scoped computer with its idle state — (box_id, kind, stopped).
     /// Every recorded box of one provider kind, for an admin's "update all" and its counts.
     pub async fn scoped_computers_of_kind(
         &self,
@@ -2403,6 +2394,7 @@ impl PgStore {
         Ok(())
     }
 
+    /// A scoped computer with its idle state — (box_id, kind, stopped).
     pub async fn scoped_computer_full(
         &self,
         scope: &str,
@@ -2479,13 +2471,38 @@ impl PgStore {
             .collect()
     }
 
-    pub async fn clear_scoped_computer(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
-        sqlx::query("delete from scoped_computer where scope = $1 and scope_id = $2")
-            .bind(scope)
-            .bind(scope_id)
-            .execute(&self.pool)
-            .await?;
+    /// Forget the scope's box only while it is `box_id`: a box recorded since the caller read the
+    /// row is the live one, and forgetting it left that box running untracked (#302).
+    pub async fn clear_scoped_computer(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        box_id: &str,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "delete from scoped_computer where scope = $1 and scope_id = $2 and box_id = $3",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(box_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
+    }
+
+    /// Every coworker row (box, coworker, account) naming a box no computer row records, by box.
+    /// One snapshot: a box is recorded before a coworker is given it and a replaced record is
+    /// never written again, so none of these is about to be recorded.
+    pub async fn unrecorded_coworker_boxes(&self) -> StoreResult<Vec<(String, String, String)>> {
+        Ok(sqlx::query_as(
+            "select c.box_id, c.id, c.account_id from coworker_view c
+              where c.box_id is not null
+                and not exists (select 1 from scoped_computer s where s.box_id = c.box_id)
+                and not exists (select 1 from account_computer a where a.box_id = c.box_id)
+              order by c.box_id",
+        )
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     // ---- The account's last computer-provisioning error ----

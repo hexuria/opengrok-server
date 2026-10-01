@@ -380,16 +380,9 @@ async fn set_mode(
     // per-account / per-bot stay lazy at first-need — idle-stop makes an eager per-seat box no
     // cheaper than a lazy one (it would just be stopped unused), so eager there buys nothing.
     let warmed = if body.mode == "per-org" {
-        match crate::agui::provision::ensure_scope_box(
-            &state,
-            Some(org_id.as_str()),
-            "org",
-            org_id.as_str(),
-            now_ms(),
-        )
-        .await
-        {
-            Ok(box_id) => json!({ "provisioned": true, "boxId": box_id }),
+        let org = org_id.as_str();
+        match crate::agui::provision::ensure_scope_box(&state, None, Some(org), "org", org).await {
+            Ok((box_id, _)) => json!({ "provisioned": true, "boxId": box_id }),
             // Non-fatal: the mode is set; the box just could not warm yet (e.g. no org key). The
             // first bot will try again, and the reason is surfaced for the admin.
             Err((code, message)) => json!({

@@ -308,6 +308,17 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(opengrok_server::agui::provision::idle_stop_forever(
         state.clone(),
     ));
+    // The boxes the old upsert left running with nothing tracking them (#302): reported once per
+    // boot, destroyed only with OG_REPAIR_STRAY_BOXES=destroy. Off the boot path, as each one is a
+    // call to its provider.
+    tokio::spawn({
+        let state = state.clone();
+        let setting = std::env::var("OG_REPAIR_STRAY_BOXES").ok();
+        async move {
+            use opengrok_server::agui::provision::{repair_destroys, repair_stray_boxes};
+            repair_stray_boxes(&state, repair_destroys(setting.as_deref())).await;
+        }
+    });
 
     // What the surviving doors share beyond `AgUiState`: the host settings record, this
     // process's start time (`/health`), and the address a client is handed for this host.

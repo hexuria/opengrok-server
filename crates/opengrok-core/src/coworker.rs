@@ -403,7 +403,10 @@ impl Coworker {
         Ok(seen)
     }
 
-    /// The computer a run must use. Read from here, never from a request.
+    /// The box this coworker was FIRST given, so whether it has a computer at all: a run gates its
+    /// tools on this, never on a request. Not the box it runs on. A shared box is reset, updated
+    /// or taken over under the scope that shares it, and every reader finds the live one through
+    /// that scope's record (`provision::scoped_box_for`, #302).
     pub fn computer(&self) -> Option<&BoxId> {
         self.box_id.as_ref()
     }
@@ -552,6 +555,7 @@ pub struct CoworkerView {
     pub id: CoworkerId,
     pub name: String,
     pub model: String,
+    /// `Coworker::computer`: the box it was first given, not the one it runs on (#302).
     pub box_id: Option<BoxId>,
     pub retired: bool,
     /// The client's sort key — see `research/client-grok-bot.md` §8.1.
