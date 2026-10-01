@@ -7,6 +7,7 @@
 //! account the caller has already authenticated, never one that arrived in a body.
 
 use opengrok_core::id::AccountId;
+use opengrok_core::run::RunStatus;
 use serde_json::Value;
 use sqlx::Row;
 
@@ -36,9 +37,9 @@ pub struct PendingUserMessageRow {
 }
 
 /// Every column: `pending_row` reads each by name, so a column added later cannot shift another.
-const PENDING_SELECT: &str = "select * from pending_user_message";
+pub(crate) const PENDING_SELECT: &str = "select * from pending_user_message";
 
-fn pending_row(row: &sqlx::postgres::PgRow) -> StoreResult<PendingUserMessageRow> {
+pub(crate) fn pending_row(row: &sqlx::postgres::PgRow) -> StoreResult<PendingUserMessageRow> {
     Ok(PendingUserMessageRow {
         id: row.try_get("id")?,
         thread_id: row.try_get("thread_id")?,
@@ -97,12 +98,14 @@ pub enum EnqueueResult {
 /// run id: the first request already consumed it, and starting the turn again is the existing
 /// AG-UI retry, not a second fire of the queue. `Stale` is a send whose words or options differ
 /// from the row it names, whether still pending or drained by this run; the row is untouched.
+/// `Retried` is a send taken from a run that has ended by a new run that answers it again (#300).
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrainResult {
     Drained(PendingUserMessageRow),
     AlreadyThisRun(PendingUserMessageRow),
     AlreadyConsumed(PendingUserMessageRow),
     Stale(PendingUserMessageRow),
+    Retried(PendingUserMessageRow),
     Missing,
 }
 
@@ -158,22 +161,6 @@ impl PgStore {
         .fetch_all(self.pool())
         .await?;
         rows.iter().map(pending_row).collect()
-    }
-
-    /// One row this account owns, whatever its status. `None` for another account's id.
-    pub async fn pending_user_message(
-        &self,
-        id: &str,
-        account: &AccountId,
-    ) -> StoreResult<Option<PendingUserMessageRow>> {
-        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{PENDING_SELECT} where id = $1 and account_id = $2"
-        )))
-        .bind(id)
-        .bind(account.as_str())
-        .fetch_optional(self.pool())
-        .await?;
-        row.as_ref().map(pending_row).transpose()
     }
 
     /// Insert, or return the row the client message id already names.
@@ -304,12 +291,18 @@ impl PgStore {
 
     /// Compare and consume under the same row lock; stale clients cannot fire edited sends. By
     /// client id, a missing bubble is an ordinary, unqueued turn.
+    ///
+    /// `retry_of` is the run whose reply this turn retries (#300). A send that run consumed is
+    /// taken by `run_id` instead when the run is `account`'s, on this thread and over, its words
+    /// not compared, as a retry of a send never queued has nothing to compare them with. UNDER
+    /// THE SAME LOCK, so of two retries of one reply the second finds the first's run on the row,
+    /// not `retry_of`, and is refused.
     pub async fn drain_pending_user_message(
         &self,
         key: DrainKey<'_>,
         account: &AccountId,
         thread_id: &str,
-        run_id: &str,
+        (run_id, retry_of): (&str, Option<&str>),
         at_ms: i64,
         matches: impl FnOnce(&PendingUserMessageRow) -> bool + Send,
     ) -> StoreResult<DrainResult> {
@@ -327,8 +320,17 @@ impl PgStore {
         .bind(thread_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let outcome = match current.as_ref().map(pending_row).transpose()? {
+        let current = current.as_ref().map(pending_row).transpose()?;
+        let consumed = current.as_ref().filter(|row| row.status != "pending");
+        let retried = match consumed.and_then(|row| row.drained_run_id.as_deref()) {
+            Some(by) if retry_of == Some(by) => ended_here(&mut tx, by, account, thread_id).await?,
+            _ => false,
+        };
+        let outcome = match current {
             None => DrainResult::Missing,
+            Some(row) if retried => {
+                DrainResult::Retried(drain_into(&mut tx, &row.id, run_id, at_ms).await?)
+            }
             Some(row)
                 if row.status != "pending" && row.drained_run_id.as_deref() != Some(run_id) =>
             {
@@ -336,24 +338,51 @@ impl PgStore {
             }
             Some(row) if !matches(&row) => DrainResult::Stale(row),
             Some(row) if row.status != "pending" => DrainResult::AlreadyThisRun(row),
-            Some(row) => {
-                let drained = sqlx::query(
-                    "update pending_user_message
-                        set status = 'drained', updated_at_ms = $2, drained_at_ms = $2,
-                            drained_run_id = $3
-                      where id = $1 returning *",
-                )
-                .bind(&row.id)
-                .bind(at_ms)
-                .bind(run_id)
-                .fetch_one(&mut *tx)
-                .await?;
-                DrainResult::Drained(pending_row(&drained)?)
-            }
+            Some(row) => DrainResult::Drained(drain_into(&mut tx, &row.id, run_id, at_ms).await?),
         };
         tx.commit().await?;
         Ok(outcome)
     }
+}
+
+/// Make a send `run_id`'s, in the transaction holding its row. A retry moves `drained_at_ms` with
+/// `drained_run_id`: the row names the run answering it now, which the next retry must name.
+async fn drain_into(
+    tx: &mut sqlx::PgConnection,
+    id: &str,
+    run_id: &str,
+    at_ms: i64,
+) -> StoreResult<PendingUserMessageRow> {
+    let drained = sqlx::query(
+        "update pending_user_message
+            set status = 'drained', updated_at_ms = $2, drained_at_ms = $2, drained_run_id = $3
+          where id = $1 returning *",
+    )
+    .bind(id)
+    .bind(at_ms)
+    .bind(run_id)
+    .fetch_one(tx)
+    .await?;
+    pending_row(&drained)
+}
+
+/// Whether `run` is `account`'s, on `thread_id`, and over: the only run a retry takes a send from
+/// (#300), since one still going may yet answer it. Its projection is written with its log.
+async fn ended_here(
+    tx: &mut sqlx::PgConnection,
+    run: &str,
+    account: &AccountId,
+    thread_id: &str,
+) -> StoreResult<bool> {
+    let status: Option<String> = sqlx::query_scalar(
+        "select status from run_view where id = $1 and account_id = $2 and thread_id = $3",
+    )
+    .bind(run)
+    .bind(account.as_str())
+    .bind(thread_id)
+    .fetch_optional(tx)
+    .await?;
+    Ok(status.is_some_and(|status| RunStatus::from_stored(&status).is_terminal()))
 }
 
 /// Which natural key names the row to drain. The column name is interpolated into SQL, so it

@@ -420,12 +420,16 @@ async fn cancel(
     Ok((StatusCode::OK, Json(mutated("canceled", &thread_id, None))).into_response())
 }
 
-/// What `POST /ag-ui` named as the queued send it is firing, if anything.
-pub fn pending_id_from(input: &RunAgentInput) -> Option<String> {
-    let props = &input.forwarded_props;
-    let named = ["pendingId", "pendingUserMessageId"].map(|key| props.get(key)?.as_str());
-    let mut ids = named.into_iter().flatten().map(str::trim);
-    ids.find(|id| !id.is_empty()).map(str::to_string)
+/// The names `POST /ag-ui` gives the queued send it is firing, the short one first.
+const PENDING_ID: &[&str] = &["pendingId", "pendingUserMessageId"];
+
+/// What `POST /ag-ui` names under the first of `keys` in `forwardedProps` that is a string with an
+/// id in it: the queued send it fires (`PENDING_ID`), or the run whose reply it retries (`retryOf`,
+/// #300). Anything else names nothing, and both are read here so the two cannot drift.
+fn named_id<'a>(input: &'a RunAgentInput, keys: &[&str]) -> Option<&'a str> {
+    let named = keys.iter().map(|key| input.forwarded_props.get(key));
+    let mut ids = named.flatten().filter_map(Value::as_str).map(str::trim);
+    ids.find(|id| !id.is_empty())
 }
 
 /// The last user message's id — NativeChat's bubble id, and the natural key we stored as
@@ -471,8 +475,10 @@ fn saved_id(id: Option<&str>) -> Option<&str> {
 
 /// Consume a queued send as this turn, or refuse so two machines cannot both fire it.
 ///
-/// `Ok` means this turn may start: we drained a row, this run already drained it (retry), or the
-/// turn was never a queued send; it carries the row's source pick, when the send made one.
+/// `Ok` means this turn may start: we drained a row, this run already drained it (retry), the
+/// turn retries the reply of a run that drained it and has ended (`retryOf`, #300), or the turn
+/// was never a queued send. It carries the row's source pick, when the send made one, except on a
+/// retry of its reply, whose own pick ("Send this reply on Server") comes first.
 /// Anything else is a conflict the client can show — or a send held for its Mac.
 ///
 /// A SEND ITS MAC WOULD CARRY STAYS QUEUED WHILE NO MAC IS CONNECTED: drained, it could only fail
@@ -484,23 +490,25 @@ pub async fn consume_for_turn(
     input: &RunAgentInput,
     (chosen, own): (Option<TurnSource>, Option<SourceKind>),
 ) -> Result<Option<TurnSource>, Response> {
-    let pending_id = pending_id_from(input);
+    let pending_id = named_id(input, PENDING_ID);
     if pending_id.is_some() && !input.messages.iter().any(|message| message.role == "user") {
         return Err(bad("a queued send needs a user message"));
     }
     let (thread_id, run_id) = (input.thread_id.as_str(), input.run_id.as_str());
-    let key = match (&pending_id, last_user_message_id(input)) {
-        (Some(id), _) => DrainKey::Id(id),
-        (None, Some(bubble)) => DrainKey::ClientMessageId(bubble),
+    // A RETRY IS READ BESIDE THE BUBBLE ONLY: a POST naming a queued send by id fires that send.
+    let retry_of = named_id(input, &["retryOf"]);
+    let (key, run) = match (pending_id, last_user_message_id(input)) {
+        (Some(id), _) => (DrainKey::Id(id), (run_id, None)),
+        (None, Some(bubble)) => (DrainKey::ClientMessageId(bubble), (run_id, retry_of)),
         (None, None) => return Ok(None),
     };
     let held = Held::now(state, account, own).await;
     let fires = |row: &_| matches_turn(row, input) && held.of(row, chosen).is_none();
     let store = &state.auth.store;
-    let drained =
-        store.drain_pending_user_message(key, account, thread_id, run_id, now_ms(), fires);
+    let drained = store.drain_pending_user_message(key, account, thread_id, run, now_ms(), fires);
     match drained.await {
         Ok(DrainResult::Drained(row) | DrainResult::AlreadyThisRun(row)) => Ok(named(&row)),
+        Ok(DrainResult::Retried(row)) => Ok(chosen.or_else(|| named(&row))),
         Ok(DrainResult::Stale(row))
             if held.of(&row, chosen).is_some() && matches_turn(&row, input) =>
         {

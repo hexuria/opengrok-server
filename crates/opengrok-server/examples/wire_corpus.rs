@@ -194,6 +194,23 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_teammate_with_no_proxy_is_refused_in_words_on_a_shared_coworkers_own_plan",
         "/ag-ui/threads/{thread_id}",
     ),
+    // A retry of a queued send's reply (`retryOf`, #300): the replay after one, shaped like any
+    // thread's, and the three refusals of a retry that may not run (no `retryOf`, a run still
+    // going, another run), each shaped like any `already-consumed`. Kept by name so NativeChat can
+    // check each; each test makes one call on the route it is kept for.
+    (
+        "a_retry_of_a_queued_sends_failed_reply_runs_afresh_on_the_door_it_names",
+        "/ag-ui/threads/{thread_id}",
+    ),
+    (
+        "a_retry_that_names_no_run_is_still_already_consumed",
+        "/ag-ui",
+    ),
+    (
+        "a_retry_of_a_reply_still_running_is_already_consumed",
+        "/ag-ui",
+    ),
+    ("a_retry_naming_another_run_is_already_consumed", "/ag-ui"),
 ];
 
 const REDACTED: &str = "«redacted»";

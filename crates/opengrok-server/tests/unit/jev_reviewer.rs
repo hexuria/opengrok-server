@@ -6,6 +6,15 @@ use cred_swap_core::detect::merge;
 use cred_swap_core::{Cloak, Decision, Policy, Style, Surrogates};
 use typesafe_sdk::{Answer, ChoiceAnswer};
 
+/// How sure Jev has to be before a span is masked. Kept beside the only callers there are: no
+/// route reviews with `review` yet, and its caller will choose its own.
+///
+/// The default leans towards masking: a stand-in that turned out to be
+/// unnecessary costs a slightly odd-looking word in the prompt, and a miss
+/// costs the thing this exists to prevent. Raise it when a coworker's work is
+/// mostly code, where capitalised words are types rather than people.
+const DEFAULT_THRESHOLD: f64 = 0.55;
+
 fn chose(label: &str, confidence: f64) -> Answer {
     // Collected into whatever map the field is, so the test does not have
     // to name a type the SDK does not re-export.
