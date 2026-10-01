@@ -1,0 +1,38 @@
+{
+  "method": "POST",
+  "path": "/ag-ui",
+  "status": 409,
+  "body": {
+    "v": 1,
+    "error": "already-consumed",
+    "id": "pum_0199bb4e-0000-7000-8000-000000000001",
+    "runId": "run-queued-0199bb4e000070008000000000000002",
+    "event": {
+      "type": "CUSTOM",
+      "timestamp": 100,
+      "name": "pending-user-message",
+      "value": {
+        "v": 1,
+        "op": "drained",
+        "threadId": "th-retry-other-0199bb4e000070008000000000000003",
+        "message": {
+          "v": 1,
+          "id": "pum_0199bb4e-0000-7000-8000-000000000001",
+          "threadId": "th-retry-other-0199bb4e000070008000000000000003",
+          "content": "summarise the report I sent this morning",
+          "replyTo": null,
+          "recipeId": null,
+          "recipeValues": null,
+          "skillId": null,
+          "clientMessageId": "bubble-queued",
+          "status": "drained",
+          "createdAtMs": 1790000000000,
+          "updatedAtMs": 1790000001000,
+          "drainedAtMs": 1790000001000,
+          "drainedRunId": "run-queued-0199bb4e000070008000000000000002",
+          "inferenceSource": "local_proxy"
+        }
+      }
+    }
+  }
+}
