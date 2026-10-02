@@ -529,7 +529,8 @@ async fn a_person_is_on_the_gateway_until_they_choose_their_own_subscription() {
         json!({"kind": "gateway", "via": "loopback", "baseUrl": null, "localModel": null,
                "healthy": false, "hasApiKey": false,
                "relay": {"connected": false, "machineId": null, "machineLabel": null,
-                         "localModel": null}}),
+                         "localModel": null},
+               "newBotDefault": null}),
         "the default, whole: never a 404 and never an empty body"
     );
 }
@@ -546,7 +547,8 @@ async fn a_person_saves_their_own_proxy_and_reads_it_back_healthy() {
     let expected = json!({"kind": "local_proxy", "via": "loopback", "baseUrl": h.proxy_url,
                           "localModel": "gpt-5.5", "healthy": true, "hasApiKey": false,
                           "relay": {"connected": false, "machineId": null, "machineLabel": null,
-                                    "localModel": null}});
+                                    "localModel": null},
+                          "newBotDefault": null});
     assert_eq!(
         saved, expected,
         "the PUT answers as GET does, its trailing slash gone"
@@ -1770,6 +1772,305 @@ async fn the_system_message_opens_with_the_model_the_turn_asks() {
     let told = "Your replies come from gpt-6-luna on the person's own plan.\n\nYou are Luna.";
     assert!(said.starts_with(told), "{said}");
     assert!(!said.contains(h.proxy_url.as_str()), "no address: {said}");
+}
+
+// ---- A person's default for new bots (#318) ---------------------------------------------------
+
+/// What NativeChat's default for new bots sends: the person's own plan on the Fast tier (the
+/// `--fast` id), thinking hard.
+fn plan_default() -> Value {
+    json!({ "source": "local_proxy", "model": "gpt-6-sol--fast", "effort": "high" })
+}
+
+impl Harness {
+    /// `who`'s default for new bots saved as `default`, on the gateway as their own turns' door.
+    async fn default_for_new_bots(&self, who: &Person, default: Value) {
+        let body = json!({ "kind": "gateway", "newBotDefault": default });
+        let (status, saved) = self.set(who, body).await;
+        assert_eq!(status, 200, "{saved}");
+    }
+
+    /// `coworker`'s event types, in order.
+    async fn logged(&self, coworker: &str) -> Vec<String> {
+        let stream = format!("coworker/{coworker}");
+        let query = "select event_type from events where stream_id = $1 order by stream_seq";
+        let rows = sqlx::query_scalar(query).bind(stream);
+        rows.fetch_all(self.store.pool()).await.expect("the log")
+    }
+}
+
+/// The setting with a default for new bots, as NativeChat saves it: one PUT, answered as GET
+/// answers, and in the account's log, where every later read and every replay finds it.
+#[tokio::test]
+async fn a_person_names_the_model_new_bots_are_born_on() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let body = json!({ "kind": "gateway", "newBotDefault": plan_default() });
+    let (status, saved) = h.set(&ada, body).await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["newBotDefault"], plan_default(), "{saved}");
+    assert_eq!(saved["kind"], "gateway", "{saved}");
+    let (account, _) = h.store.load_account(&ada.id).await.expect("account");
+    let kept = account.inference_source.new_bot_default.expect("kept");
+    let kept = (kept.source, kept.model.as_str());
+    assert_eq!(kept, (SourceKind::LocalProxy, "gpt-6-sol--fast"));
+}
+
+/// Like every field of the setting: a PUT that leaves the default out keeps it, `null` clears it,
+/// and a read always carries it, null when there is none.
+#[tokio::test]
+async fn the_default_for_new_bots_is_kept_when_left_out_and_cleared_by_null() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let (_, read) = h.read(&ada).await;
+    assert_eq!(read.get("newBotDefault"), Some(&Value::Null), "{read}");
+    h.default_for_new_bots(&ada, plan_default()).await;
+    assert_eq!(h.read(&ada).await.1["newBotDefault"], plan_default());
+
+    let body = json!({ "kind": "local_proxy", "baseUrl": h.proxy_url, "localModel": "gpt-5.5" });
+    let (status, kept) = h.set(&ada, body).await;
+    assert_eq!(status, 200, "{kept}");
+    assert_eq!(
+        kept["newBotDefault"],
+        plan_default(),
+        "left out is kept: {kept}"
+    );
+    let gateway = json!({ "source": "gateway", "model": " openai/gpt-5.5 " });
+    let body = json!({ "kind": "local_proxy", "newBotDefault": gateway });
+    let (_, saved) = h.set(&ada, body).await;
+    let trimmed = json!({ "source": "gateway", "model": "openai/gpt-5.5", "effort": "inherit" });
+    assert_eq!(
+        saved["newBotDefault"], trimmed,
+        "no effort is inherit: {saved}"
+    );
+
+    let body = json!({ "kind": "gateway", "newBotDefault": null });
+    let (status, cleared) = h.set(&ada, body).await;
+    assert_eq!(status, 200, "{cleared}");
+    assert_eq!(
+        cleared.get("newBotDefault"),
+        Some(&Value::Null),
+        "{cleared}"
+    );
+    let (_, read) = h.read(&ada).await;
+    assert_eq!(read.get("newBotDefault"), Some(&Value::Null), "{read}");
+    assert_eq!(
+        read["localModel"], "gpt-5.5",
+        "only the default was cleared: {read}"
+    );
+}
+
+/// ON THE PERSON'S OWN PLAN A NEW BOT ASKS FOR THE DEFAULT'S MODEL, so a default there is held to
+/// what their subscription may answer and refused in the words a `localModel` is, with nothing
+/// saved. Recorded for NativeChat: the one PUT.
+#[tokio::test]
+async fn a_default_for_new_bots_on_the_persons_plan_is_refused_a_model_it_cannot_answer() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let default = json!({ "source": "local_proxy", "model": GATEWAY_PIN, "effort": "high" });
+    let body = json!({ "kind": "gateway", "newBotDefault": default });
+    let (status, refused) = h.set(&ada, body).await;
+    assert_eq!(status, 400, "{refused}");
+    let words = opengrok_core::inference::subscription_model(GATEWAY_PIN).unwrap_err();
+    let why = format!("newBotDefault.model: {words}");
+    assert_eq!(refused, json!({ "error": why }));
+    let (account, _) = h.store.load_account(&ada.id).await.expect("account");
+    assert_eq!(
+        account.inference_source.new_bot_default, None,
+        "nothing was saved"
+    );
+}
+
+/// Each part is held to what it is held to elsewhere, in the same words: on the person's plan the
+/// model as a `localModel` is, on the gateway as a hire's pin is, the effort to a coworker's words
+/// and the source to a turn's. A refused default saves none of its body.
+#[tokio::test]
+async fn a_default_for_new_bots_is_held_to_the_rules_of_its_parts() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let body = json!({ "kind": "gateway", "localModel": "claude-sonnet-4.5" });
+    let (_, as_local) = h.set(&ada, body).await;
+    let as_local = as_local["error"].as_str().unwrap_or_default().to_string();
+    let words = as_local.strip_prefix("localModel: ").expect("prefixed");
+    let default = json!({ "source": "local_proxy", "model": "claude-sonnet-4.5" });
+    let body = json!({ "kind": "gateway", "newBotDefault": default });
+    let (status, refused) = h.set(&ada, body).await;
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(refused["error"], format!("newBotDefault.model: {words}"));
+
+    let no_pin = "newBotDefault.model: a coworker needs a model to think with";
+    let no_source = "newBotDefault.source must be \"gateway\" or \"local_proxy\"";
+    let efforts =
+        "newBotDefault.effort must be one of inherit, none, low, medium, high, xhigh, max";
+    for (default, why) in [
+        (json!({ "source": "gateway", "model": "  " }), no_pin),
+        (json!({ "source": "gateway" }), no_pin),
+        (
+            json!({ "source": "local_proxy" }),
+            "newBotDefault.model: name a model the proxy serves",
+        ),
+        (
+            json!({ "source": "local-proxy", "model": "gpt-5.5" }),
+            no_source,
+        ),
+        (json!({ "model": "gpt-5.5" }), no_source),
+        (
+            json!({ "source": "gateway", "model": "openai/gpt-5.5", "effort": "loud" }),
+            efforts,
+        ),
+        (
+            json!("openai/gpt-5.5"),
+            "newBotDefault must be an object or null",
+        ),
+    ] {
+        let body = json!({ "kind": "local_proxy", "baseUrl": h.proxy_url,
+                           "newBotDefault": default });
+        let (status, refused) = h.set(&ada, body).await;
+        assert_eq!(status, 400, "{default}: {refused}");
+        assert_eq!(refused, json!({ "error": why }), "{default}");
+    }
+    let (_, read) = h.read(&ada).await;
+    assert_eq!(
+        read["kind"], "gateway",
+        "a refused body saves none of itself: {read}"
+    );
+    assert_eq!(read["newBotDefault"], Value::Null, "{read}");
+}
+
+/// A HIRE THAT NAMES NO MODEL IS BORN ON ITS HIRER'S DEFAULT, whole: the model, and the door and
+/// effort as the bot's own, in the hire's own append, so nothing about it is read from the
+/// account afterwards. Recorded for NativeChat: the one hire.
+#[tokio::test]
+async fn a_bot_hired_with_no_model_is_born_on_its_hirers_default() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    h.default_for_new_bots(&ada, plan_default()).await;
+    let body = Some(json!({ "name": "Luna" }));
+    let (status, hired) = h
+        .send(Some(&ada), reqwest::Method::POST, "/coworkers", body)
+        .await;
+    assert_eq!(status, 201, "{hired}");
+    assert_eq!(hired["model"], "gpt-6-sol--fast", "{hired}");
+    assert_eq!(hired["source"], "local_proxy", "{hired}");
+    assert_eq!(hired["effort"], "high", "{hired}");
+    let coworker = hired["id"].as_str().unwrap_or_default().to_string();
+    let logged = h.logged(&coworker).await;
+    assert_eq!(
+        logged[..3],
+        [
+            "coworker-hired",
+            "coworker-source-set",
+            "coworker-effort-set"
+        ],
+        "explicit from its first append: {logged:?}"
+    );
+}
+
+/// A changed default moves only the bots hired after it: a bot keeps the door, model and effort it
+/// was born on, and the next hire is born on the new default.
+#[tokio::test]
+async fn a_changed_default_moves_only_the_bots_hired_after_it() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    h.default_for_new_bots(&ada, plan_default()).await;
+    let first = h.hire(&ada, "Luna").await;
+    let gateway = json!({ "source": "gateway", "model": "openai/gpt-5.5" });
+    h.default_for_new_bots(&ada, gateway).await;
+    let listed = h.listed(&ada, &first).await;
+    let born = (&listed["model"], &listed["source"], &listed["effort"]);
+    assert_eq!(
+        born,
+        (
+            &json!("gpt-6-sol--fast"),
+            &json!("local_proxy"),
+            &json!("high")
+        )
+    );
+    let later = h.hire(&ada, "Sol").await;
+    let listed = h.listed(&ada, &later).await;
+    let born = (&listed["model"], &listed["source"], &listed["effort"]);
+    assert_eq!(
+        born,
+        (
+            &json!("openai/gpt-5.5"),
+            &json!("gateway"),
+            &json!("inherit")
+        )
+    );
+}
+
+/// A hire that names its own model takes nothing from the default: not its door, not its effort.
+#[tokio::test]
+async fn a_bot_hired_on_a_model_it_names_takes_nothing_from_the_default() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    h.default_for_new_bots(&ada, plan_default()).await;
+    let body = Some(json!({ "name": "Luna", "model": "openai/gpt-5.5" }));
+    let (status, hired) = h
+        .send(Some(&ada), reqwest::Method::POST, "/coworkers", body)
+        .await;
+    assert_eq!(status, 201, "{hired}");
+    assert_eq!(hired["model"], "openai/gpt-5.5", "{hired}");
+    assert_eq!(hired.get("source"), Some(&Value::Null), "{hired}");
+    assert_eq!(hired["effort"], "inherit", "{hired}");
+    let logged = h.logged(hired["id"].as_str().unwrap_or_default()).await;
+    let chosen = ["coworker-source-set", "coworker-effort-set"];
+    assert!(
+        !logged.iter().any(|event| chosen.contains(&event.as_str())),
+        "{logged:?}"
+    );
+}
+
+/// A template's model sits above the default and takes nothing from it either; a template that
+/// names no model leaves the hire to the default, whole.
+#[tokio::test]
+async fn a_templates_model_beats_the_default_for_new_bots() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let org = unique("org");
+    let ada = h.member_of(Some(&org)).await;
+    let template = |model: Option<&str>| opengrok_store::CoworkerTemplate {
+        id: unique("tpl"),
+        org_id: org.clone(),
+        name: "Analyst".to_string(),
+        description: String::new(),
+        model: model.map(str::to_string),
+        tool_ceiling: opengrok_policy::ToolSet::only(["shell"]),
+        needs_approval: opengrok_policy::ToolSet::None,
+        points: opengrok_store::PointsLimit::default(),
+        role: None,
+        created_at_ms: 1,
+        updated_at_ms: 1,
+    };
+    let (pinned, unpinned) = (template(Some("openai/gpt-5.5")), template(None));
+    h.store.put_template(&pinned).await.expect("template");
+    h.store.put_template(&unpinned).await.expect("template");
+    h.default_for_new_bots(&ada, plan_default()).await;
+
+    let hire = |template: &str| Some(json!({ "name": "Analyst", "templateId": template }));
+    let post = reqwest::Method::POST;
+    let (status, hired) = h
+        .send(Some(&ada), post.clone(), "/coworkers", hire(&pinned.id))
+        .await;
+    assert_eq!(status, 201, "{hired}");
+    assert_eq!(hired["model"], "openai/gpt-5.5", "{hired}");
+    assert_eq!(hired.get("source"), Some(&Value::Null), "{hired}");
+    assert_eq!(hired["effort"], "inherit", "{hired}");
+
+    let (status, hired) = h
+        .send(Some(&ada), post, "/coworkers", hire(&unpinned.id))
+        .await;
+    assert_eq!(status, 201, "{hired}");
+    assert_eq!(hired["model"], "gpt-6-sol--fast", "{hired}");
+    assert_eq!(hired["source"], "local_proxy", "{hired}");
+    assert_eq!(hired["effort"], "high", "{hired}");
 }
 
 // ---- The account's time zone (#316) ----------------------------------------------------------

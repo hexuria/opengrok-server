@@ -16,7 +16,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use opengrok_core::id::{AccountId, RunId};
-use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource, Via, subscription_model};
+use opengrok_core::inference::{
+    InferenceSource, NewBotDefault, SourceKind, TurnSource, Via, subscription_model,
+};
 use opengrok_core::run::Run;
 
 use crate::model::ModelEndpoint;
@@ -156,10 +158,10 @@ pub enum KeyChange {
 
 /// The setting a `PUT /account/inference-source` body asks for over `current`, and what it does
 /// to the key, or the sentence it is refused with. A field absent keeps what is saved; `null` or
-/// blank clears it, and so for `via` and `relay.localModel`. EVERY RULE IS ASKED HERE, BEFORE
-/// ANYTHING IS WRITTEN: an address that is not this machine, or a model the terms forbid, beside
-/// a fresh key saves neither. The key goes out in a header, so it is printable and bounded or
-/// refused now, not at a turn.
+/// blank clears it, and so for `via`, `relay.localModel` and `newBotDefault` (null only). EVERY
+/// RULE IS ASKED HERE, BEFORE ANYTHING IS WRITTEN: an address that is not this machine, or a model
+/// the terms forbid, beside a fresh key saves neither. The key goes out in a header, so it is
+/// printable and bounded or refused now, not at a turn.
 pub fn apply(
     current: &InferenceSource,
     body: &serde_json::Value,
@@ -210,6 +212,9 @@ pub fn apply(
             }
         }
         Some(_) => return Err("relay must be an object or null".to_string()),
+    }
+    if let Some(chosen) = body.get("newBotDefault") {
+        source.new_bot_default = NewBotDefault::named(chosen)?;
     }
     let key = match text(body, "apiKey")? {
         None => KeyChange::Keep,
@@ -493,6 +498,7 @@ pub async fn listed(
 /// `apply`. Never the key, only whether there is one; `healthy` is a live `/healthz` on every read,
 /// whatever the kind, and false with no address. `mac` is the account's connected Mac and its
 /// enrolled label, for `relay`: an account with none reads `connected: false` and nulls, whole.
+/// `newBotDefault` is always there, null until set: a missing key reads as a server from before.
 pub async fn described(
     source: &InferenceSource,
     mac: Option<(String, Option<String>)>,
@@ -515,6 +521,7 @@ pub async fn described(
             "machineLabel": machine_label,
             "localModel": source.relay_model,
         },
+        "newBotDefault": source.new_bot_default,
     })
 }
 

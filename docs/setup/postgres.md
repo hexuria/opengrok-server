@@ -196,3 +196,13 @@ off.
 `EVERY_BOOT`, not in `SCHEMA`. The built-in widenings look for an exact older list, which never
 names the machine. Run first, the pass left a ceiling on an older list narrow for good while its
 profile widened (review of #282). Its row makes it match nothing on every later boot.
+
+**A transform that writes events runs from the binary, not from `SCHEMA`.** The second, #318's
+`null-source-bots-are-pinned`, pins each bot with no `source` of its own to the door and model its
+owner's setting gave it. That is coworker events decided by the aggregate, each owner's replayed
+setting, and `subscription_model`'s allowlist, none of which SQL can spell without a second copy.
+So it runs at boot (`crates/opengrok/src/pins.rs`), after the schema and before the listener,
+under an advisory lock of its own, and writes its row only once every bot is pinned. A pass that
+stops early writes none and the next boot finishes it, each pinned bot having a source by then.
+A bot an older replica hires mid-deploy, after the pass, keeps no source and goes where its owner's
+setting says, as every bot did before.

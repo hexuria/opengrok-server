@@ -3,6 +3,7 @@
 mod admin;
 mod kek;
 mod purge;
+mod pins;
 mod repair;
 
 use std::net::SocketAddr;
@@ -284,6 +285,13 @@ async fn main() -> anyhow::Result<()> {
     let vault = kek::from_env().map_err(|error| anyhow::anyhow!("{error}"))?;
     kek::check_at_boot(&auth.store, vault.as_ref()).await;
     let vault = vault.map(Arc::new);
+
+    // Each bot with no source of its own is pinned once to the door its owner's setting gave it
+    // (#318), before this process serves anyone. A pass that stops early is finished by the next
+    // boot, and until then such a bot goes where it always went, so it never stops the boot.
+    if let Err(error) = pins::pin_once(&auth.store, pins::MARKER).await {
+        tracing::error!(%error, "pin: the pass stopped before its end; the next boot finishes it");
+    }
 
     let connectors = load_connectors()?;
     let plugins = load_plugins();

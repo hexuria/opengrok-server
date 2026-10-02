@@ -4,7 +4,10 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use opengrok_core::account::{Account, AccountCommand, AccountError, Plan};
-use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource, Via, subscription_model};
+use opengrok_core::coworker::Effort;
+use opengrok_core::inference::{
+    InferenceSource, NewBotDefault, SourceKind, TurnSource, Via, subscription_model,
+};
 use opengrok_core::run::{Run, RunCommand, RunEvent};
 use serde_json::json;
 
@@ -215,6 +218,11 @@ fn an_account_keeps_the_setting_it_was_given_and_starts_on_the_gateway() {
         has_key: true,
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
+        new_bot_default: Some(NewBotDefault {
+            source: SourceKind::LocalProxy,
+            model: "gpt-6-sol--fast".to_string(),
+            effort: Effort::High,
+        }),
     };
     let events = account
         .decide(AccountCommand::SetInferenceSource {
@@ -424,6 +432,58 @@ fn a_turn_names_its_source_as_a_word_or_with_the_way_it_goes() {
         (SourceKind::LocalProxy, Via::Loopback),
         "no default way is the loopback"
     );
+}
+
+/// A setting logged before a default for new bots existed reads as none, and a setting without one
+/// is logged as it was before, so neither an old log nor an older replica sees anything new.
+#[test]
+fn a_setting_from_before_the_default_for_new_bots_reads_as_none() {
+    let logged = json!({ "type": "inference-source-set", "at_ms": 2,
+                         "source": { "kind": "local_proxy", "base_url": "http://127.0.0.1:9",
+                                     "local_model": "gpt-5.5", "has_key": false } });
+    let event = serde_json::from_value(logged).expect("an event from before");
+    let account = Account::replay(&[event]);
+    assert_eq!(account.inference_source.new_bot_default, None);
+    let unset = serde_json::to_value(InferenceSource::default()).unwrap();
+    assert!(unset.get("new_bot_default").is_none(), "{unset}");
+}
+
+/// A default is named whole or refused in the words its parts are refused in elsewhere: on the
+/// gateway its model as a hire's pin is, on the person's plan as a `localModel` is, its effort as
+/// a coworker's. Null is none, and an effort left out is inherit.
+#[test]
+fn a_default_for_new_bots_is_named_whole_or_refused_in_its_parts_words() {
+    let named = |value| NewBotDefault::named(&value);
+    assert_eq!(named(json!(null)), Ok(None));
+    let gateway = named(json!({ "source": "gateway", "model": " xai/grok-4.6 " }));
+    let gateway = gateway.unwrap().unwrap();
+    assert_eq!(gateway.model, "xai/grok-4.6", "trimmed, as a pin is");
+    assert_eq!(gateway.effort, Effort::Inherit);
+    let fast = json!({ "source": "local_proxy", "model": "gpt-6-sol--fast", "effort": "xhigh" });
+    let fast = named(fast).unwrap().unwrap();
+    assert_eq!(
+        (fast.source, fast.effort),
+        (SourceKind::LocalProxy, Effort::XHigh)
+    );
+    let plan_words = subscription_model("xai/grok-4.6@sub").unwrap_err();
+    assert_eq!(
+        named(json!({ "source": "local_proxy", "model": "xai/grok-4.6@sub" })),
+        Err(format!("newBotDefault.model: {plan_words}"))
+    );
+    assert_eq!(
+        named(json!({ "source": "gateway", "model": "" })),
+        Err("newBotDefault.model: a coworker needs a model to think with".to_string())
+    );
+    let off = named(json!({ "source": "gateway", "model": "m", "effort": "none" }));
+    assert_eq!(off.unwrap().unwrap().effort, Effort::Off);
+    let loud = named(json!({ "source": "gateway", "model": "m", "effort": "loud" }));
+    assert!(
+        loud.unwrap_err()
+            .starts_with("newBotDefault.effort must be one of inherit, none")
+    );
+    let stored = serde_json::to_value(&fast).unwrap();
+    let wire = json!({ "source": "local_proxy", "model": "gpt-6-sol--fast", "effort": "xhigh" });
+    assert_eq!(stored, wire, "the log and the wire spell it alike");
 }
 
 /// A person's time zone is an IANA name or nothing: an unknown one is refused before it is logged,
