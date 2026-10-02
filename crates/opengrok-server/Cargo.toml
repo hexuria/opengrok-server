@@ -23,6 +23,8 @@ opengrok-server = { path = ".", default-features = false, features = ["record-wi
 sqlx.workspace = true
 base64.workspace = true
 reqwest.workspace = true
+# What a test reads back from the log: a refused computer is said at warn (#301).
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

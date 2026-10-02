@@ -198,6 +198,29 @@ impl DockerComputer {
         })
     }
 
+    /// Whether this host's Docker has `self.image` (`docker image inspect`), never pulling it.
+    /// `Ok(false)` only when Docker says it has no such image; a Docker that cannot answer (not
+    /// installed, its daemon down) is the error, which wants another fix.
+    pub async fn has_image(&self) -> BoxResult<bool> {
+        let inspect = [
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            self.image.as_str(),
+        ];
+        match self.docker(&inspect).await {
+            Ok(_) => Ok(true),
+            Err(BoxError::NoSuchBox) => Ok(false),
+            Err(BoxError::Refused { body, .. })
+                if body.to_lowercase().contains("no such image") =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// A grok-box image (or `OG_DOCKER_DESKTOP=1`) runs its own entrypoint with a noVNC desktop.
     /// Headless `debian:stable-slim` stays `sleep infinity` so existing boxes do not change.
     pub fn wants_desktop(&self) -> bool {

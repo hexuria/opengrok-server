@@ -211,3 +211,27 @@ async fn two_boxes_do_not_share_a_filesystem() {
     let _ = computer.destroy(&second).await;
     outcome.expect("boxes must be isolated");
 }
+
+/// `has_image` tells an image this host never built from one it has, without making a box (#301):
+/// a `:local` tag nobody built refused every Local VM on the e2e host, found only at hire.
+#[tokio::test]
+async fn an_image_this_host_lacks_is_told_from_one_it_has() {
+    let computer = computer_or_skip!();
+    let never_built = format!("opengrok-never-built-{}:local", std::process::id());
+    let lacking = computer.clone().with_image(never_built);
+    assert!(!lacking.has_image().await.expect("the daemon answers"));
+
+    let listed = tokio::process::Command::new("docker")
+        .args(["image", "ls", "--quiet"])
+        .output()
+        .await
+        .expect("docker image ls");
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    if let Some(id) = listed.lines().next() {
+        let having = computer.with_image(id.trim());
+        assert!(
+            having.has_image().await.expect("the daemon answers"),
+            "{id}"
+        );
+    }
+}

@@ -268,6 +268,14 @@ async fn main() -> anyhow::Result<()> {
             }
         },
     };
+    // The image a Local VM is made from, looked for once (#301); off the boot path like the
+    // stray-box pass below, as asking Docker is a call to the provider.
+    if computer
+        .as_ref()
+        .is_some_and(|computer| computer.kind() == "local-docker")
+    {
+        tokio::spawn(repair::docker_image(opengrok_box::DockerComputer::new()));
+    }
 
     // Seals every credential: connector tokens, org computer keys, coworker gateway keys, saved
     // site logins and passkeys. Absent is a legitimate deployment that stores none, not a crash; a

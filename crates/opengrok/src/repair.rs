@@ -1,6 +1,10 @@
 //! The boot pass over the boxes #302's race left running: reported on every boot, destroyed
-//! only when asked. A boot chore like `kek::check_at_boot`, so it lives with the boot.
+//! only when asked. A boot chore like `kek::check_at_boot`, so it lives with the boot; so does the
+//! look for the image Local VMs are made from (`docker_image`).
 
+use opengrok_box::BoxResult;
+use opengrok_box::DockerComputer;
+use opengrok_box::docker::image_is_local;
 use opengrok_core::coworker::BoxMode;
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_server::agui::AgUiState;
@@ -57,6 +61,33 @@ pub async fn stray_boxes(state: &AgUiState, destroy: bool) -> Vec<String> {
         }
     }
     found
+}
+
+/// Look once, at boot, for the image every Local VM is made from (#301). A `:local` tag is never
+/// pulled (`image_is_local`), so one never built refused each "Get a computer" with
+/// `provider_error`, found only at hire and under a clean log; it is warned about here, with the
+/// command that builds it. Boot goes on: the image can be built later. Docker pulls any other.
+pub async fn docker_image(docker: DockerComputer) {
+    say_image(&docker.image, docker.has_image().await);
+}
+
+fn say_image(image: &str, present: BoxResult<bool>) {
+    match present {
+        Ok(true) => {}
+        Ok(false) if image_is_local(image) => tracing::warn!(
+            image,
+            "computer: OG_DOCKER_IMAGE is not on this host, and a :local tag is never pulled, so \
+             every Local VM is refused until it is built. In a checkout of hexuria/box: \
+             docker build -f docker/Dockerfile -t {image} ."
+        ),
+        Ok(false) => tracing::info!(
+            image,
+            "computer: OG_DOCKER_IMAGE is not on this host yet; Docker pulls it for the first Local VM"
+        ),
+        Err(error) => {
+            tracing::warn!(image, %error, "computer: Docker could not say whether OG_DOCKER_IMAGE is on this host; no Local VM is made until it can")
+        }
+    }
 }
 
 /// The scope row of a coworker standing where #302 left one: on a SHARED box of an account or org

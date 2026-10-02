@@ -626,6 +626,7 @@ async fn hire_at(base: &str, token: &str) -> String {
 #[tokio::test]
 async fn a_hosted_hire_whose_ascii_create_fails_records_why_and_makes_no_box() {
     let database_url = database_or_skip!();
+    let (log, _logging) = Log::start();
     for (status, code) in [(429, "quota_exceeded"), (503, "provider_error")] {
         let (ascii, stand_in) = StandInAscii::start(status, 500).await;
         let (base, state, account, token) = hosted(&database_url, &ascii).await;
@@ -677,6 +678,65 @@ async fn a_hosted_hire_whose_ascii_create_fails_records_why_and_makes_no_box() {
                 .is_some_and(|message| message.contains(&status.to_string())),
             "{status}: the message carries what box.ascii.dev said: {screen}"
         );
+        // AND THE LOG SAYS SO (#301): the row alone was silent, and a host refusing every
+        // computer kept a clean log. The scope, the kind and the code; never the key or the URL.
+        let said = log.events();
+        let recorded = said.iter().find(|event| {
+            event["fields"]["message"] == "computer: none given; the account says why"
+                && event["fields"]["scope_id"] == account.as_str()
+        });
+        let recorded = recorded.unwrap_or_else(|| panic!("{status}: not logged: {said:?}"));
+        assert_eq!(recorded["level"], "WARN", "{status}: {recorded}");
+        assert_eq!(
+            recorded["fields"]["scope"], "account",
+            "{status}: {recorded}"
+        );
+        assert_eq!(recorded["fields"]["kind"], "ascii", "{status}: {recorded}");
+        assert_eq!(recorded["fields"]["code"], code, "{status}: {recorded}");
+        let text = log.text();
+        assert!(
+            !text.contains(ORG_KEY) && !text.contains(&ascii),
+            "{status}: {text}"
+        );
+    }
+}
+
+/// What this thread logs while the guard lives, one JSON object per event.
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Log {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Log {
+    /// A `#[tokio::test]` runs every task on the test's one thread, the server's handlers
+    /// included, so that thread's default subscriber hears them.
+    fn start() -> (Self, tracing::subscriber::DefaultGuard) {
+        let log = Self::default();
+        let sink = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || sink.clone())
+            .finish();
+        (log, tracing::subscriber::set_default(subscriber))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    fn events(&self) -> Vec<Value> {
+        let text = self.text();
+        text.lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
     }
 }
 

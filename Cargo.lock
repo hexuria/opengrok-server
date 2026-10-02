@@ -2352,6 +2352,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "typesafe-sdk",
  "uuid",
 ]
