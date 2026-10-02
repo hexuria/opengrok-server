@@ -20,6 +20,8 @@
 //! difference between "no" and "we do not know" must never be a way in — which is the same rule as
 //! CLAUDE.md #8's "a typo may only ever narrow access", seen from the lookup side.
 
+pub mod shell;
+
 use std::collections::BTreeSet;
 
 use opengrok_core::id::{AccountId, CoworkerId};

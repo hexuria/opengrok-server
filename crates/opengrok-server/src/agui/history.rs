@@ -354,26 +354,56 @@ fn bounded_arguments(arguments: &str) -> String {
     json!({ "clipped": clip_chars(arguments, EARLIER_ARGS_CHARS) }).to_string()
 }
 
+/// What a run was asked, as the model reads it: its journaled messages.
+fn asked_of(run: &Run) -> Vec<ChatMessage> {
+    let (sent, attached) = (prompt_of(run), super::attachments::Attached::default());
+    let said = sent
+        .iter()
+        .filter_map(|message| chat_message(message, &sent, &attached));
+    said.collect()
+}
+
 /// One earlier run's part of a conversation: the person's messages, then what the coworker said
 /// and did, bounded (`conversation_of`).
 fn earlier_run(run: &Run) -> Vec<ChatMessage> {
-    let sent = prompt_of(run);
-    let mut messages: Vec<ChatMessage> = sent
-        .iter()
-        .filter_map(|message| {
-            chat_message(message, &sent, &super::attachments::Attached::default())
-        })
-        .collect();
+    let mut messages = asked_of(run);
     messages.extend(conversation_of(&said_in(&run.emitted), true));
     messages
 }
 
-/// The conversation a run carries on with once a person answered its card: the thread's earlier
-/// turns, when the log can tell them whole, then this run's own (`conversation_from`).
-///
-/// ONE REBUILD FOR EVERY RESUME, so a card's yes, a submitted form and a crash resume (#91)
-/// cannot disagree about what the model is shown. A thread the log cannot tell whole resumes with
-/// this run alone, which is what every resume had before the history was kept.
+/// What a run carries on from, a card's resume and a crash's alike: the thread's earlier turns,
+/// when the log can tell them whole, then what this run was asked. A thread the log cannot tell
+/// whole carries on with this run alone, which is what every resume had before the history was
+/// kept. A PAIR'S RUN IS REBUILT AS IT WAS FIRST ASKED (`for_message`, #314): its words read
+/// back raw would reach the model unfenced, beside the other Bot's own (review of #325).
+async fn carried_from(
+    state: &AgUiState,
+    account: &AccountId,
+    run_id: &RunId,
+    run: &Run,
+) -> Vec<ChatMessage> {
+    if opengrok_wire::pair::is_pair_thread(&run.thread_id) {
+        let me = run.coworker_id.as_ref().map_or("", |id| id.as_str());
+        let (at, words) = (
+            (&*run.thread_id, run_id.as_str()),
+            first_said(run, "content"),
+        );
+        let asked = for_message(state, account, at, (me, &words.unwrap_or_default())).await;
+        return asked.unwrap_or_default();
+    }
+    let mut messages = match thread_runs(state, account, &run.thread_id, run_id.as_str()).await {
+        Some(runs) if runs.iter().all(|run| run.prompt.is_some()) => {
+            runs.iter().flat_map(earlier_run).collect()
+        }
+        _ => Vec::new(),
+    };
+    messages.extend(asked_of(run));
+    messages
+}
+
+/// The conversation a run carries on with once a person answered its card: `carried_from`, then
+/// `said_up_to`. ONE REBUILD FOR EVERY RESUME, so a card's yes, a submitted form and a crash
+/// resume (#91) cannot disagree about what the model is shown.
 pub(crate) async fn for_resume(
     state: &AgUiState,
     account: &AccountId,
@@ -381,56 +411,33 @@ pub(crate) async fn for_resume(
     run: &Run,
     answered: &PendingApproval,
 ) -> Vec<ChatMessage> {
-    let mut messages = match thread_runs(state, account, &run.thread_id, run_id.as_str()).await {
-        Some(runs) if runs.iter().all(|run| run.prompt.is_some()) => {
-            runs.iter().flat_map(earlier_run).collect()
-        }
-        _ => Vec::new(),
-    };
-    messages.extend(conversation_from(run, answered));
+    let mut messages = carried_from(state, account, run_id, run).await;
+    messages.extend(said_up_to(run, answered));
     messages
 }
 
-/// The conversation an interrupted run carries on with (#91): the thread's earlier turns, when the
-/// log can tell them whole, then what this run was asked and everything it said and did — the
-/// same rebuild `for_resume` does, with no answered call at the end.
+/// The conversation an interrupted run carries on with (#91): `for_resume`'s, with no answered
+/// call at the end.
 pub(crate) async fn for_interrupted(
     state: &AgUiState,
     account: &AccountId,
     run_id: &RunId,
     run: &Run,
 ) -> Vec<ChatMessage> {
-    let mut messages = match thread_runs(state, account, &run.thread_id, run_id.as_str()).await {
-        Some(runs) if runs.iter().all(|run| run.prompt.is_some()) => {
-            runs.iter().flat_map(earlier_run).collect()
-        }
-        _ => Vec::new(),
-    };
-    let sent = prompt_of(run);
-    messages.extend(sent.iter().filter_map(|message| {
-        chat_message(message, &sent, &super::attachments::Attached::default())
-    }));
+    let mut messages = carried_from(state, account, run_id, run).await;
     messages.extend(conversation_of(&said_in(&run.emitted), false));
     messages
 }
 
-/// A run rebuilt from its own log for a resume: what the person asked, then everything the
-/// coworker said and did, ending on the answered call — named, with its arguments, and still
-/// without a result, because the result is what the resume adds next (#187).
+/// Everything a run said and did, for a resume, ending on the answered call — named, with its
+/// arguments, and still without a result, because the result is what the resume adds next (#187).
 ///
 /// The rebuild used to read only the emitted text and results, so after "Allow once" the model
 /// saw the system message and a bare tool output: not the request, not the call. The answered
 /// call's own "waiting for approval" result is left out; the real one follows. A run whose log
 /// never had the call (an MCP ask writes none) gets it from the suspension, so the result that
 /// follows still answers a call the model can see.
-pub(crate) fn conversation_from(run: &Run, answered: &PendingApproval) -> Vec<ChatMessage> {
-    let sent = prompt_of(run);
-    let mut messages: Vec<ChatMessage> = sent
-        .iter()
-        .filter_map(|message| {
-            chat_message(message, &sent, &super::attachments::Attached::default())
-        })
-        .collect();
+fn said_up_to(run: &Run, answered: &PendingApproval) -> Vec<ChatMessage> {
     let said: Vec<Said> = said_in(&run.emitted)
         .into_iter()
         .filter(|said| !matches!(said, Said::Result { id, .. } if *id == answered.call_id))
@@ -438,7 +445,7 @@ pub(crate) fn conversation_from(run: &Run, answered: &PendingApproval) -> Vec<Ch
     let called = said
         .iter()
         .any(|said| matches!(said, Said::Call { id, .. } if *id == answered.call_id));
-    messages.extend(conversation_of(&said, false));
+    let mut messages = conversation_of(&said, false);
     if !called {
         messages.push(ChatMessage::calls(
             "",
@@ -450,6 +457,56 @@ pub(crate) fn conversation_from(run: &Run, answered: &PendingApproval) -> Vec<Ch
         ));
     }
     messages
+}
+
+/// What a Bot's turn on another Bot's message is asked with (#314), its first ask, a card's
+/// resume and a crash's carry-on alike: its pair thread's turns before `run_id` from its own side,
+/// then the message. Each message it was sent, and each it sent from elsewhere, is a user message
+/// fenced as a skill is, our words last; what it said and did in its own turns is its own. The
+/// other Bot's words in its turns are never shown: only a message reaches a Bot. `None` when the
+/// message cannot be quoted, or the thread is no pair's.
+pub(crate) async fn for_message(
+    state: &AgUiState,
+    account: &AccountId,
+    (thread_id, run_id): (&str, &str),
+    (me, words): (&str, &str),
+) -> Option<Vec<ChatMessage>> {
+    use opengrok_plugins::message::{Said as Way, fenced_message};
+    let (lo, hi) = opengrok_wire::pair::pair_peers(thread_id)?;
+    let peer = crate::pairs::name_of(state, if lo == me { &hi } else { &lo }).await;
+    let person = crate::persona::caller(state, account).await;
+    let runs = thread_runs(state, account, thread_id, run_id).await;
+    let runs = runs.unwrap_or_default();
+    let mine = |run: &Run| run.coworker_id.as_ref().map(|id| id.as_str()) == Some(me);
+    // A message it sent from one of its own turns here is in that turn already, call and result.
+    let called_here: HashSet<String> = (runs.iter().filter(|run| mine(run)))
+        .flat_map(|run| said_in(&run.emitted))
+        .filter_map(|said| match said {
+            Said::Call { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    let user = |way, words: &str| {
+        fenced_message(way, &peer, &person, words).map(|text| ChatMessage::text("user", text))
+    };
+    let mut messages = Vec::new();
+    for run in &runs {
+        let body = first_said(run, "content").unwrap_or_default();
+        if mine(run) {
+            messages.extend(user(Way::Received, &body));
+            messages.extend(conversation_of(&said_in(&run.emitted), true));
+        } else if !first_said(run, "callId").is_some_and(|call| called_here.contains(&call)) {
+            messages.extend(user(Way::Sent, &body));
+        }
+    }
+    messages.push(user(Way::Received, words)?);
+    Some(messages)
+}
+
+/// A field of a run's first journaled message: a Bot's message's words and its sender's call.
+fn first_said(run: &Run, key: &str) -> Option<String> {
+    let first = run.prompt.iter().flatten().next();
+    first.and_then(|asked| asked.get(key)?.as_str().map(str::to_string))
 }
 
 /// Every earlier run in order, and — when the newest one stopped or failed partway through its
@@ -498,6 +555,15 @@ pub(crate) fn with_prompt_frames(run: &Run, mut events: Vec<Value>) -> Vec<Value
         .into_iter()
         .filter(|message| message.role == "user")
         .filter_map(|message| {
+            // A Bot's message says which Bot sent it (#314), on each of its frames.
+            let from = message.extra.get("fromCoworkerId").cloned();
+            let frame = |value: Value| match (&from, frame(value)) {
+                (Some(from), Value::Object(mut said)) => {
+                    said.insert("fromCoworkerId".to_string(), from.clone());
+                    Value::Object(said)
+                }
+                (_, said) => said,
+            };
             let content = message.content?;
             let words = content.text();
             // A MESSAGE OF PARTS IS STILL A BUBBLE (#229, nativechat#90), even with no words and

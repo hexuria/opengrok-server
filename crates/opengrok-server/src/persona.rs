@@ -449,6 +449,25 @@ pub fn routine_line(hirer: &str, fired: chrono::DateTime<chrono::Utc>) -> String
     )
 }
 
+/// A Bot's opening line on another Bot's message (#314): the side thread it is in, who can read
+/// it, and that it may only read. Names only: the message itself is the turn's user message, fenced
+/// (`pairs::opening`), and never a word of this one.
+#[must_use]
+pub fn message_line(peer: &str, person: &str, arrived: chrono::DateTime<chrono::Utc>) -> String {
+    let (peer, person) = (
+        called(peer, "", "another Bot"),
+        called(person, "", "your person"),
+    );
+    format!(
+        "Nobody is talking with you: this turn is in the side thread between you and {peer}, two \
+         of {person}'s Bots, and {peer} has sent you the message below with `message_bot`. It \
+         arrived at {} UTC. {person} can read this thread and cannot write in it. You may just read \
+         the message; answer {peer} only if it helps, and only with `message_bot`: nothing else you \
+         write here reaches {peer}.",
+        arrived.format("%Y-%m-%d %H:%M, %A")
+    )
+}
+
 /// What the bearer is called, read from their account. A read that fails names nobody — the
 /// date still goes — rather than costing the turn.
 pub async fn caller(state: &AgUiState, account: &opengrok_core::id::AccountId) -> String {

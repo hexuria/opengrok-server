@@ -1,0 +1,29 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads",
+  "status": 200,
+  "body": [
+    {
+      "threadId": "pair-cw_0199bb4e-0000-7000-8000-000000000001-cw_0199bb4e-0000-7000-8000-000000000002",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+      "origin": "pair",
+      "peerBotIds": [
+        "cw_0199bb4e-0000-7000-8000-000000000001",
+        "cw_0199bb4e-0000-7000-8000-000000000002"
+      ],
+      "title": "hello Bob",
+      "lastRunId": "run_0199bb4e-0000-7000-8000-000000000003",
+      "lastStatus": "finished",
+      "updatedAtMs": 1790000000000
+    },
+    {
+      "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000001",
+      "origin": "chat",
+      "title": "ask Bob to check the inbox",
+      "lastRunId": "0199bb4e-0000-7000-8000-000000000004",
+      "lastStatus": "finished",
+      "updatedAtMs": 1790000001000
+    }
+  ]
+}

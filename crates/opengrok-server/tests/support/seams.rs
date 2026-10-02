@@ -144,3 +144,14 @@ impl TxtLookup for StaticDns {
             .unwrap_or_default())
     }
 }
+
+/// `message_bot` as one run of `sender`'s, driven by `person`, is given it (#314): what a test
+/// carries one call out with twice, as a sender resumed after its call would.
+pub async fn message_bot_runner(
+    state: &crate::agui::AgUiState,
+    person: &opengrok_core::id::AccountId,
+    sender: &opengrok_core::id::CoworkerId,
+    run_id: &str,
+) -> Option<opengrok_harness::ToolRunner> {
+    crate::pairs::onto(state, (person, sender), Some(run_id), None, None).await
+}

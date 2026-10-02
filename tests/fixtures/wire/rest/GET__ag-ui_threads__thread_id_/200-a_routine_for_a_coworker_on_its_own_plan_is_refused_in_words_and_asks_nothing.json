@@ -4,42 +4,51 @@
   "status": 200,
   "body": {
     "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+    "kind": "chat",
+    "readOnly": false,
+    "coworkers": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "name": "Luna"
+      }
+    ],
     "runs": [
       {
-        "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+        "runId": "run_0199bb4e-0000-7000-8000-000000000003",
         "status": "failed",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
         "failure": "This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule.",
         "finishReason": null,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
         "events": [
           {
             "type": "RUN_STARTED",
-            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_START",
-            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000003-prompt",
             "role": "user",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
-            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000003-prompt",
             "delta": "write the weekly report",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_END",
-            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000003-prompt",
             "timestamp": 100
           },
           {
             "name": "opengrok.inferenceSource",
             "type": "CUSTOM",
-            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "kind": "local_proxy",
               "model": "gpt-6-luna"
@@ -50,7 +59,7 @@
           {
             "name": "run-timing",
             "type": "CUSTOM",
-            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "tools": [],
               "budget": {
@@ -82,7 +91,7 @@
           },
           {
             "type": "RUN_ERROR",
-            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "message": "This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule.",
             "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
@@ -91,6 +100,7 @@
       }
     ],
     "hiddenRunIds": [],
+    "timeline": [],
     "pendingUserMessages": [],
     "pendingEvents": []
   }

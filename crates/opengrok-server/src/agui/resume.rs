@@ -123,7 +123,10 @@ async fn stop_parked_run(
             .append_run(run_id, seq, &events, &view, Some(account_id))
             .await
         {
-            Ok(_) => return true,
+            Ok(_) => {
+                crate::pairs::ended(&state.agui, thread_id, view.status);
+                return true;
+            }
             Err(opengrok_store::StoreError::Conflict) => continue,
             Err(error) => {
                 tracing::error!(%error, run = %run_id, "could not interrupt a parked run");
@@ -695,6 +698,8 @@ pub(crate) async fn resume_interrupted_run(
     let runner =
         runner.or_else(|| (!kept.is_empty()).then(opengrok_harness::ToolRunner::local_only));
     let runner = runner.map(|r| crate::skills::onto_captured(&state.agui, &account_id, r, kept));
+    let (who, sending) = ((&account_id, &coworker_id), Some(run_id.as_str()));
+    let runner = crate::pairs::onto(&state.agui, who, sending, None, runner).await;
     let asked =
         crate::agui::history::for_interrupted(&state.agui, &account_id, &run_id, &run).await;
     let (at, who) = ((&run_id, &run), (&account_id, &coworker_id));
@@ -790,6 +795,7 @@ pub(crate) async fn carry_out_answer(
         .with_judge_failures(failures);
     // The skills the captured system message lists, and no others (#270).
     let runner = crate::skills::onto_captured(state, account_id, runner, &run.offered_skills);
+    let runner = crate::pairs::onto(state, who, Some(run_id.as_str()), None, Some(runner)).await?;
     let asked = crate::agui::history::for_resume(state, account_id, run_id, run, &answered).await;
     let (journal, request) =
         carried_on(state, (run_id, run), who, coworker, asked, generation).await;

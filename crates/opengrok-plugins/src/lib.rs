@@ -24,6 +24,7 @@
 //! of a plugin meant for somebody else.
 
 pub mod catalogue;
+pub mod message;
 pub mod skill;
 
 pub use catalogue::{Admission, Catalogue, Entry, InstallError, Policy, Trust};

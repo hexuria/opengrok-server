@@ -4,6 +4,9 @@
   "status": 200,
   "body": {
     "threadId": "th-0199bb4e000070008000000000000001",
+    "kind": "chat",
+    "readOnly": false,
+    "coworkers": [],
     "runs": [
       {
         "runId": "0199bb4e-0000-7000-8000-000000000002",
@@ -12,6 +15,7 @@
         "updatedAtMs": 1790000001000,
         "failure": null,
         "finishReason": null,
+        "coworkerId": null,
         "events": [
           {
             "type": "RUN_STARTED",
@@ -101,6 +105,7 @@
       }
     ],
     "hiddenRunIds": [],
+    "timeline": [],
     "pendingUserMessages": [],
     "pendingEvents": []
   }

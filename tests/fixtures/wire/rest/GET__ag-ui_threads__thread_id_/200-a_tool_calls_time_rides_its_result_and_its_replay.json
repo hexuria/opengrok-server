@@ -4,18 +4,27 @@
   "status": 200,
   "body": {
     "threadId": "th-0199bb4e000070008000000000000001",
+    "kind": "chat",
+    "readOnly": false,
+    "coworkers": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "name": "Thinker"
+      }
+    ],
     "runs": [
       {
-        "runId": "0199bb4e-0000-7000-8000-000000000002",
+        "runId": "0199bb4e-0000-7000-8000-000000000003",
         "status": "finished",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
         "failure": null,
         "finishReason": null,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
         "events": [
           {
             "type": "RUN_STARTED",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "threadId": "th-0199bb4e000070008000000000000001",
             "timestamp": 100
           },
@@ -39,7 +48,7 @@
           {
             "name": "opengrok.inferenceSource",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "kind": "gateway",
               "model": "oag/cheap"
@@ -69,30 +78,30 @@
             "type": "TOOL_CALL_RESULT",
             "content": "ran",
             "timestamp": 100,
-            "durationMs": 154,
+            "durationMs": 150,
             "toolCallId": "mock-call-1"
           },
           {
             "role": "assistant",
             "type": "TEXT_MESSAGE_START",
-            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "the command ran; that is all I needed",
-            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_END",
-            "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "name": "run-timing",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "tools": [
                 {
@@ -131,7 +140,7 @@
           },
           {
             "type": "RUN_FINISHED",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "threadId": "th-0199bb4e000070008000000000000001",
             "timestamp": 100
           }
@@ -139,6 +148,7 @@
       }
     ],
     "hiddenRunIds": [],
+    "timeline": [],
     "pendingUserMessages": [],
     "pendingEvents": []
   }

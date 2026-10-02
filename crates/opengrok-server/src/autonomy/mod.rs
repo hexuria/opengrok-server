@@ -63,6 +63,10 @@ pub(crate) struct Firing {
     pub run_id: RunId,
     /// The routine's own limits; empty for a monitor, which sets none.
     pub run_limits: RunLimits,
+    /// The Bot's message this turn answers (#314), its outbox row; `None` for a routine's or a
+    /// monitor's. A message that cannot be had is refused in its thread where a routine is only
+    /// logged: its row stays claimed, holding its pair, until a run is there to say why.
+    pub message: Option<opengrok_store::BotMessageRow>,
 }
 
 /// Fire one run as this coworker, for this account, and see it through to its ending.
@@ -84,7 +88,9 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         thread_id,
         run_id,
         run_limits,
+        message,
     } = firing;
+    let message = message.as_ref();
     let policy = state
         .auth
         .store
@@ -97,20 +103,25 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         opengrok_policy::Action::UseCoworker,
         &policy,
     );
+    let refused = |why: String| crate::pairs::refused(&state, message, why);
     if let Some(reason) = decision.reason() {
         tracing::warn!(%origin, coworker = %coworker_id, %reason, "a firing was refused by policy");
-        return;
+        return refused(format!("This message was not delivered: {reason}.")).await;
     }
 
     let Ok((coworker, _)) = state.auth.store.load_coworker(&coworker_id).await else {
         tracing::warn!(%origin, coworker = %coworker_id, "a firing named a coworker that does not load");
-        return;
+        return refused("This message was not delivered: its Bot could not be read.".into()).await;
     };
     // Asked here as well as at the door: a routine made before its coworker was retired still
     // names it, and a retired coworker's key is revoked — its turn would bill the deployment.
     if coworker.retired || coworker.is_group() {
         tracing::warn!(%origin, coworker = %coworker_id, "a firing named a coworker that cannot take work");
-        return;
+        let why = format!(
+            "This message was not delivered: {} can no longer take work.",
+            coworker.name
+        );
+        return refused(why).await;
     }
     // The org's ceiling as it stands NOW, over the routine's own limits: one lowered after the
     // routine was saved still binds, since `and` only ever narrows.
@@ -118,7 +129,8 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         crate::agui::routes::run_limits(&state, &account_id, Some(&coworker_id), run_limits);
     let Some(limits) = limits.await else {
         tracing::warn!(%origin, "a firing was refused: its org's run ceiling could not be read");
-        return;
+        return refused("This message was not answered: the run limits could not be read.".into())
+            .await;
     };
 
     let tools = crate::agui::routes::tools_for_coworker(
@@ -131,16 +143,41 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     )
     .await;
     let tools = crate::skills::onto_any(&state, &account_id, &coworker_id, tools).await;
+    let who = (&account_id, &coworker_id);
+    let tools = crate::pairs::onto(&state, who, Some(run_id.as_str()), None, tools).await;
     let skills: String = tools.iter().map(|t| t.skills_line()).collect();
 
-    // Composed once: a routine's turn is still this coworker's turn, its skills (#270) too.
+    // Composed once: a routine's turn is still this coworker's turn, its skills (#270) too. A
+    // message's is the pair thread's: its words are the turn's user message, never the system's.
     let hirer = crate::persona::caller(&state, &account_id).await;
-    let route = opengrok_harness::local_proxy::Route::for_routine(coworker.source, &coworker.model);
+    let (route, line, asked, said) = match message {
+        Some(row) => match crate::pairs::opening(&state, row, &hirer).await {
+            Some((line, said)) => {
+                let route = opengrok_harness::local_proxy::Route::for_message(
+                    coworker.source,
+                    &coworker.model,
+                );
+                (route, line, crate::pairs::prompt(row, &run_id), said)
+            }
+            None => {
+                return refused(
+                    "This message could not be quoted, so it was not delivered.".into(),
+                )
+                .await;
+            }
+        },
+        None => (
+            opengrok_harness::local_proxy::Route::for_routine(coworker.source, &coworker.model),
+            crate::persona::routine_line(&hirer, chrono::Utc::now()),
+            opengrok_core::run::routine_prompt(&run_id, &prompt),
+            vec![ChatMessage::text("user", prompt)],
+        ),
+    };
     let system = crate::persona::system_message(
         &coworker.name,
         &crate::persona::of(&state, &coworker_id, coworker.role.clone()).await,
         route.asks(&coworker.model),
-        Some(&(crate::persona::routine_line(&hirer, chrono::Utc::now()) + &skills)),
+        Some(&(line + &skills)),
     );
     let journal = StoreJournal {
         state: state.clone(),
@@ -155,7 +192,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         offered_skills: tools.iter().flat_map(|t| t.offered_skills()).collect(),
         // The hirer's instruction is this turn's question. Journaled like a person's message, so
         // a routine that parks on a card resumes knowing what it was told to do.
-        prompt: Some(opengrok_core::run::routine_prompt(&run_id, &prompt)),
+        prompt: Some(asked),
         limits,
         generation: 0,
     };
@@ -164,9 +201,15 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     // model, effort, identity and standing role — the rules `run()` holds turns to.
     let who = (Some(&coworker_id), Some(&account_id));
     let asked = (route, coworker.model.clone(), coworker.effort);
-    let message = vec![ChatMessage::text("user", prompt)];
-    let request =
-        crate::agui::routes::turn_request(&state, who, asked, Some(system), message).await;
+    let request = crate::agui::routes::turn_request(&state, who, asked, Some(system), said).await;
+
+    // THE CLAIM, as a turn's: a message's run id is its row's, which a drain and the sweep may
+    // both reach for, and only the one whose `Started` commits runs it (`PairDelivery` Start).
+    match journal.claim(run_id.as_str()).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => return tracing::warn!(%origin, %error, "a firing could not start its run"),
+    }
 
     // Held while the run works, so the recovery sweep does not mistake a slow firing for an
     // abandoned run; dropped (or killed) when the process dies, which is when recovery should.
@@ -272,6 +315,7 @@ pub(crate) fn start_fired(
             thread_id: thread_id.to_string(),
             run_id,
             run_limits,
+            message: None,
         },
     ));
     (StatusCode::ACCEPTED, Json(reply)).into_response()

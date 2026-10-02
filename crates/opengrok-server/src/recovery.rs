@@ -48,6 +48,10 @@ pub async fn sweep_forever(state: crate::host_state::HostState) {
     // A first sweep immediately: the most likely moment to find an abandoned run is just after the
     // restart that abandoned it.
     loop {
+        // The pairs first (#314): a message whose drain died with its process is started here.
+        // Not in `sweep_once`: a pair's drain runs its turn in the process that asked for it,
+        // which must be one that stays up, and a test that carries runs on is not.
+        crate::pairs::sweep(&state).await;
         if let Err(error) = sweep_once(&state).await {
             // A failed sweep is not fatal. The runs stay claimable and the next sweep tries again;
             // taking the process down over it would turn a database hiccup into an outage.
@@ -378,6 +382,7 @@ async fn fail_run(
         .store
         .append_run(run_id, seq, &events, &view, None)
         .await?;
+    crate::pairs::ended(state, &run.thread_id, run.status);
 
     // THE RUN IS FAILED; THE BUBBLE IS NOT. Everything above settles the run aggregate, and until
     // this existed that was the whole of recovery — which left the thing the person is actually

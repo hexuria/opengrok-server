@@ -408,8 +408,7 @@ async fn run(args: &[String]) -> Result<(), String> {
                 .get("commit")
                 .is_some_and(|value| !matches!(value.as_str(), "0" | "false" | "no"));
             let store = store().await?;
-            let report = store
-                .purge_accounts_except(&keep, !commit)
+            let report = crate::purge::purge_accounts_except(&store, &keep, !commit)
                 .await
                 .map_err(|e| e.to_string())?;
             println!(

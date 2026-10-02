@@ -16,7 +16,8 @@ must touch the models, and what to do with a counterexample: [`POLICY.md`](POLIC
 | `tla/RecipeLease.tla` | Starting a recipe run on one bot (`start_recipe_run`, `opengrok-store/src/postgres.rs`): starters that each lock, take the insert's snapshot, insert where no live lease is visible, and commit; a landed run clears its lease. |
 | `tla/RelayCall.tla` | One model call a person's Mac carries (#292, `opengrok-harness/src/relay.rs`): the door sends `infer` down the asked machine's stream and waits; any daemon-token holder may POST answers to the call's id, as often as it likes; the door gives up at its clock or on a Stop and tells the Mac to cancel. |
 | `tla/HeldSend.tla` | A queued send the person's Mac would carry (#292, `agui/pending.rs`): the app fires it while a Mac connects and leaves; the fire's check and the row's locked drain are two steps; a Mac that opens its stream makes the server fire it too (`drain_held`), once the person's other turns on the thread have ended, one sending per thread; the drained turn's call then finds a Mac or not. |
-| `lean/Harness.lean` | The four facts that must hold for every constant, not just the ones TLC can enumerate. Lean 4 core only. |
+| `tla/PairDelivery.tla` | A message one Bot sends another (#314, `opengrok-server/src/pairs.rs`): the sender's call writes the outbox row, unique on (sender run, call, receiver), and asks the pair to drain; a drain takes the pair's lock, looks for a run of the pair in flight and claims the oldest queued message; the claimed message's run, whose id the row named, starts once; a pair's run ending drains it again, and so does every sweep, which also starts a claimed message whose drain died. The process crashes and restarts. |
+| `lean/Harness.lean` | The facts that must hold for every constant, not just the ones TLC can enumerate: the loop's four, and a chain of Bot messages' bound (#314). Lean 4 core only. |
 | `tla/*.cfg` | One per claim. A first line saying EXPECTED TO FAIL is a counterexample kept on purpose; its `\* VIOLATES:` line names the one invariant it must break, and breaking any other fails the check. |
 
 ## Model
@@ -42,6 +43,14 @@ the same person's other machine and another account's machine under the same id.
 the pending delivery the relay adds: a fire's check and the row's drain as two steps, the Mac
 coming and going around them, the reconnect drain racing the app and waiting out the person's
 other turns on the thread, one sending per thread that a new trigger sends round again.
+
+**Bot messages** (`PairDelivery`). The outbox is rows, `free → queued → claimed`, and each row's
+run `none → live → ended`, where a refusal (its Bot retired, on its person's own plan) is a run
+that ends at once, in words. Drains are tasks in memory: spawned by a write, by a pair's run
+ending and by the sweep, and lost in a crash. A drain looks and claims under the pair's lock, or,
+without it, in two steps. A claimed row's run is started by its drain, or by the sweep once that
+drain is gone; the run's id is the row's, so the second start finds the run there. A send's call
+may be carried out again.
 
 **Lifecycle** (`RunLifecycle`). The aggregate is `running | awaiting | finished | failed |
 stopped`. Loop 1 is the turn; loop *k+1* continues the *k*-th answer. Each loop is `unborn →
@@ -90,6 +99,11 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | A Mac that comes to stay gets the held send | liveness | `HeldSend` `DrainsOnceTheMacStays` |
 | With a Mac connected and nothing running on the thread, the server is sending the held send | safety | `HeldSend` `NeverStranded` |
 | A drained send's turn finds a Mac | safety | `HeldSend` `ServedIfDrained`, which fails by nature (see 16) |
+| A Bot's message starts at most one run, however often its call is carried out | safety | `PairDelivery` `OneRunPerSend` |
+| At most one run of a pair's thread is in flight, its claim counted | safety | `PairDelivery` `OnePerPair` |
+| With the process up and swept, a message waiting on an idle pair has a drain coming | safety | `PairDelivery` `NeverStranded` |
+| Every message is started, or refused in words | liveness | `PairDelivery` `EveryMessageStarted` |
+| A chain of Bot messages is at most `MAX_HOPS` deep and holds at most its cap | safety | Lean `Chain.chain_bounded` |
 
 ## TLA+ findings
 
@@ -279,6 +293,27 @@ Each trace is TLC's shortest.
       stream another replica holds is no Mac to this one, so a turn there is `relay_offline` and
       a send fired there is held until the Mac reconnects to it.
 
+17. **Bot to bot** (#314). Three counterexamples, each kept, each a design choice made before the
+    code (`PairDelivery`, 34,403 states for three messages, each call carried out twice, and two
+    restarts):
+    - **Without the key** (`PairDelivery_nokey`, `OneRunPerSend`, seven states): a call carried
+      out a second time writes a second row, and one message starts two runs. The row is unique on
+      (sender run, call, receiver), and a call that finds its rows gets them back
+      (`enqueue_bot_messages`). Test: `a_message_starts_one_run_however_often_its_call_is_carried_out`.
+    - **Without the pair's lock** (`PairDelivery_noclaim`, `OnePerPair`, seven states): two drains
+      look, both find nothing in flight, and claim in turn, the second taking the next message
+      while the first one's run is starting. The lock is taken as its own statement before the
+      look (`claim_pair_message`), for finding 14's reason. Test:
+      `a_second_message_waits_until_the_pairs_run_has_ended`.
+    - **Without the run-end drain** (`PairDelivery_norunend`, `NeverStranded`, six states): a
+      message whose drain found its pair busy waits for the next sweep after that run ends. Every
+      write that ends a pair's run asks the pair to drain (`pairs::ended`): the loop's
+      (`append_events_once`), a Stop's (`stop_run`, and `stop_parked_run` for a parked run a new
+      turn stops) and the recovery sweep's (`fail_run`). Test: the same.
+    - **Holds as built**: a claimed message whose drain died in a crash holds its pair until the
+      sweep starts it (`pairs_to_sweep`, after `LEASE_MS`); the run's id makes a slow drain and the
+      sweep start it once.
+
 ## Lean findings
 
 `lean/Harness.lean` checks with Lean 4.23 core, with no `sorry` and no axioms beyond core.
@@ -301,6 +336,14 @@ Each trace is TLC's shortest.
   that and still says a park survives.) `unrecorded_one_terminal` and `close_sends_one_terminal`
   are about frames: whatever ending the log refused, its replacement carries exactly one
   terminal, so `close` sends one ending whether or not its write succeeded.
+- **`Chain`** (#314). A call from a run whose message had hop `h` (0 for a turn no Bot started)
+  writes only while `h < maxHops` and the chain's messages plus its recipients stay within `cap`,
+  all or nothing, each at hop `h + 1`. Over any sequence of calls from no messages, every hop is
+  at most `maxHops` and the chain holds at most `cap` (`chain_bounded`), for every constant.
+  Assumption: a chain's calls are written one at a time, which the owner's lock in
+  `enqueue_bot_messages` makes so, since every Bot in a chain is one person's; a call carried out
+  again writes nothing. **Not run on the desk that wrote it** (Lean is not installed on macOS
+  here); CI's formal job checks it.
 - **`Answer`.** With `append(log, expected)` succeeding only when `log = expected`, any batch
   of commits that read the same seq has at most one success. Assumption: each successful
   commit spawns exactly one continuation (`answer_run`, `resume_settled`).
@@ -436,6 +479,24 @@ The state graph was the object being minimised. The results:
     `against_a_stopped_run.rs::a_loop_from_before_a_resume_can_write_nothing`. Each was broken
     on purpose (verdict ignoring the answer, resuming despite an open tool, no fence) and failed.
 
+- #314, bot to bot:
+  - `crates/opengrok-store/src/pairs.rs`: the `bot_message` outbox and `timeline_view`;
+    `enqueue_bot_messages` (owner's lock, existing rows, caps, rows and the `messaged` row in one
+    transaction), `claim_pair_message` (the pair's lock, the in-flight look, the claim),
+    `pairs_to_sweep`.
+  - `crates/opengrok-server/src/pairs.rs`: `Mail::send` (the call), `drain_soon` and `drain`,
+    `ended` (from `append_events_once`, `stop_run`, `stop_parked_run` and `recovery::fail_run`),
+    `sweep` (from `recovery::sweep_forever`, every `SWEEP_INTERVAL`), and `fire`, which is
+    `autonomy::fire` with the message: its run is claimed by the row's id before the loop, and a
+    message that cannot be had is a run failed in words (`refused`).
+  - Not in the model, from the review of #325: nothing a person POSTs to `/ag-ui` runs in a pair's
+    thread, whatever its messages (an empty body, a tool result or words before an answer used to
+    start a turn there or stop a parked one); and a card's resume and a crash's carry-on rebuild
+    a pair's run through `history::for_message`, as its first ask, so the message is fenced on
+    every ask and the other Bot's own words are never shown.
+  - Tests: `against_bot_messages.rs`. The idempotency key, the pair's lock, the run-end drain and
+    the fence on the resume paths were each broken on purpose, and their tests failed.
+
 ## Remaining hazards the models name but this change does not fix
 
 - **A reattached stream moves a round at a time.** The owner's retry follows the log, which
@@ -468,5 +529,9 @@ The state graph was the object being minimised. The results:
 - **A fenced loop's own stream is told `RUN_ERROR`, not a stop**: its ending is refused and
   `unrecorded` substitutes the one error that is true of the write. A client still attached to
   the replaced loop shows a failure while the run carries on under the sweep's loop.
+- **A pair's run parked on a card holds its pair** (#314) until the card is answered or the run
+  is stopped: the pair's next message waits behind it, by design (`OnePerPair`).
+- **A write that ends a pair's run without `pairs::ended` leaves its next message to the
+  sweep**, up to `SWEEP_INTERVAL` late. The four that end runs today call it; a fifth must too.
 - **`run-tool-started`, `run-resumed` and `run-spent` are not roll-back safe.** An older binary reads the event types as corrupt,
   so any run that has one — every run parked since — would fail to load after a rollback.

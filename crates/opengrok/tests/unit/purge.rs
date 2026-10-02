@@ -3,7 +3,6 @@
 //! the kept one is untouched, and an allowlist that names nobody deletes nothing.
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
-#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
@@ -14,6 +13,8 @@ use opengrok_core::schedule::{Schedule, ScheduleCommand, Wake};
 use opengrok_server::auth::password::hash_password;
 use opengrok_store::PgStore;
 use serde_json::json;
+
+use super::purge_accounts_except;
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -400,11 +401,9 @@ async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
     }
 
     // An allowlist that names nobody refuses before touching a row: empty, or a typo.
-    let empty = store.purge_accounts_except(&[], false).await;
+    let empty = purge_accounts_except(&store, &[], false).await;
     assert!(empty.is_err(), "an empty allowlist must refuse");
-    let typo = store
-        .purge_accounts_except(&[format!("nobody-{stamp}@og.local")], false)
-        .await;
+    let typo = purge_accounts_except(&store, &[format!("nobody-{stamp}@og.local")], false).await;
     let message = typo.expect_err("an unknown email must refuse").to_string();
     assert!(message.contains("does not exist"), "{message}");
     assert_eq!(
@@ -420,8 +419,7 @@ async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
     );
 
     // A dry run reports the work and changes nothing.
-    let rehearsal = store
-        .purge_accounts_except(&keep, true)
+    let rehearsal = purge_accounts_except(&store, &keep, true)
         .await
         .expect("dry run");
     assert_eq!(rehearsal.accounts_deleted, 1, "{rehearsal:?}");
@@ -431,8 +429,7 @@ async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
         "a dry run deleted rows"
     );
 
-    let report = store
-        .purge_accounts_except(&keep, false)
+    let report = purge_accounts_except(&store, &keep, false)
         .await
         .expect("purge");
     assert!(

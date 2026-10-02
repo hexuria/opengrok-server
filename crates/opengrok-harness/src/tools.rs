@@ -8,6 +8,7 @@
 //! close. Acting on a fragment would mean running a command whose arguments are half-written, so
 //! nothing runs until the closing fragment arrives.
 
+use opengrok_tools::message_bot::{BotMail, BotOffer, MESSAGE_BOT};
 use opengrok_tools::skill::{SkillOffer, SkillSource, USE_SKILL};
 use opengrok_tools::{Executor, ToolCall, ToolContext, ToolResult};
 use opengrok_wire::agui::{Event, EventType};
@@ -17,6 +18,9 @@ use opengrok_wire::agui::{Event, EventType};
 /// reach out.
 pub type LocalTool = std::sync::Arc<dyn Fn(&ToolCall) -> ToolResult + Send + Sync>;
 
+/// `message_bot`'s offers, its sender and whether it is advertised, and its mail (#314).
+type Bots = (Vec<BotOffer>, (String, bool), std::sync::Arc<dyn BotMail>);
+
 /// The executor plus the identity to run as. Assembled by the server from the session.
 pub struct ToolRunner {
     /// `None` for a coworker with no computer that still has local tools (a group member
@@ -25,6 +29,10 @@ pub struct ToolRunner {
     local: Vec<(serde_json::Value, LocalTool)>,
     /// The skills `use_skill` reads this turn, and where from (#270). `None` offers no tool.
     skills: Option<(Vec<SkillOffer>, std::sync::Arc<dyn SkillSource>)>,
+    /// The person's Bots `message_bot` may name, the sender's id, whether the tool is advertised,
+    /// and where a call's messages are written (#314). Not advertised at its chain's last hop, but
+    /// a call still reaches `mail`, which refuses it in the contract's words. `None`: no tool.
+    bots: Option<Bots>,
 }
 
 impl ToolRunner {
@@ -33,6 +41,7 @@ impl ToolRunner {
             executor: Some((executor, context)),
             local: Vec::new(),
             skills: None,
+            bots: None,
         }
     }
 
@@ -42,6 +51,7 @@ impl ToolRunner {
             executor: None,
             local: Vec::new(),
             skills: None,
+            bots: None,
         }
     }
 
@@ -62,6 +72,18 @@ impl ToolRunner {
         source: std::sync::Arc<dyn SkillSource>,
     ) -> Self {
         self.skills = (!offers.is_empty()).then_some((offers, source));
+        self
+    }
+
+    /// Offer `message_bot` naming `offers`, sent as `sender` through `mail` (#314).
+    #[must_use]
+    pub fn with_bots(
+        mut self,
+        offers: Vec<BotOffer>,
+        sender: (String, bool),
+        mail: std::sync::Arc<dyn BotMail>,
+    ) -> Self {
+        self.bots = Some((offers, sender, mail));
         self
     }
 
@@ -225,6 +247,12 @@ impl ToolRunner {
                 .as_ref()
                 .map(|(offers, _)| opengrok_tools::skill::schema(offers)),
         );
+        let bots = self
+            .bots
+            .as_ref()
+            .filter(|(_, (_, advertised), _)| *advertised);
+        schemas
+            .extend(bots.map(|(offers, me, _)| opengrok_tools::message_bot::schema(offers, &me.0)));
         schemas
     }
 
@@ -240,6 +268,11 @@ impl ToolRunner {
         // raises a card — no approval list may name it (the server's `set_approvals`).
         if let Some((offers, source)) = self.skills.as_ref().filter(|_| call.name == USE_SKILL) {
             return opengrok_tools::skill::answer(call, offers, source.as_ref()).await;
+        }
+        // Before the executor too: its ceiling, ownership and caps were asked when it was offered,
+        // and its `BotMail` asks them again (#314); it runs nothing on a computer.
+        if let Some((offers, me, mail)) = self.bots.as_ref().filter(|_| call.name == MESSAGE_BOT) {
+            return opengrok_tools::message_bot::answer(call, offers, &me.0, mail.as_ref()).await;
         }
         match self.executor.as_ref() {
             Some((executor, context)) => executor.execute(context, call).await,

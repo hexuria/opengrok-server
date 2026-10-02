@@ -2244,6 +2244,9 @@ async fn list_tools(
     .await;
     let runner = runner.unwrap_or_else(ToolRunner::local_only);
     let runner = crate::skills::onto(&state, &account_id, &coworker_id, runner).await;
+    let who = (&account_id, &coworker_id);
+    let runner = crate::pairs::onto(&state, who, None, None, Some(runner)).await;
+    let runner = runner.unwrap_or_else(ToolRunner::local_only);
     let tools: Vec<serde_json::Value> = runner
         .tool_schemas()
         .into_iter()
@@ -2734,6 +2737,14 @@ pub(crate) async fn turn(
             "a turn needs a signed-in caller; sign in and send it again"
         });
     };
+    // A PAIR'S THREAD IS ITS TWO BOTS' (#314): nothing a person POSTs runs in one, WHATEVER ITS
+    // MESSAGES. Refusing only new words let an empty body, a tool result or words before the
+    // last answer start a turn there, or stop a run parked on a card (review of #325). No client
+    // POSTs into one: its runs are the server's, read by polling, and a card's answer comes by
+    // its own route (`/ag-ui/runs/{id}/answer`, `/ag-ui/user-form/…`), which this never sees.
+    if opengrok_wire::pair::is_pair_thread(&input.thread_id) {
+        return read_only();
+    }
     // A source the turn names that cannot be honoured refuses before anything is charged or drained.
     let named = input.forwarded_props.get("inferenceSource");
     let chosen_source = match crate::inference::named(named, "inferenceSource") {
@@ -2887,6 +2898,12 @@ fn unauthorized(sentence: &str) -> Response {
     (StatusCode::UNAUTHORIZED, said).into_response()
 }
 
+/// The 403 a person's words into a pair's thread get, the contract's body (#314).
+pub(crate) fn read_only() -> Response {
+    let body = Json(opengrok_wire::pair::read_only_body());
+    (StatusCode::FORBIDDEN, body).into_response()
+}
+
 /// A store that did not answer: a 503 with its words.
 pub(crate) fn unavailable(error: impl std::fmt::Display) -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response()
@@ -2961,12 +2978,16 @@ async fn start_claimed_turn(
     // tool call rather than streamed markdown. And `use_skill`, for the skills its owner attached
     // that this person may use (#270): the system message lists them from this same runner.
     let tools = super::chat_ui::attach(tools);
-    let tools = Some(match (&account_id, &run_coworker) {
+    // The live stream, made here so `message_bot` can put its `messaged` row on it (#314).
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let tools = match (&account_id, &run_coworker) {
         (Some(account), Some(coworker)) => {
-            crate::skills::onto(&state, account, coworker, tools).await
+            let tools = crate::skills::onto(&state, account, coworker, tools).await;
+            let (run, live) = (Some(input.run_id.as_str()), Some(tx.clone()));
+            crate::pairs::onto(&state, (account, coworker), run, live, Some(tools)).await
         }
-        _ => tools,
-    });
+        _ => Some(tools),
+    };
 
     // Where it asks (`turn_request` says what follows), before the system message that names it.
     let (run, account) = (&input.run_id, account_id.as_ref());
@@ -3167,7 +3188,6 @@ async fn start_claimed_turn(
         state.clone(),
         RunId::from_stored(run_id.clone()),
     ));
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     // The HTTP body is the live sink. Awaiting the conversation first, then wrapping the
     // Vec in `stream::iter`, is what made NativeChat paint the whole reply at once.
     tokio::spawn(async move {
@@ -3693,6 +3713,7 @@ async fn append_events_once(
         .store
         .append_run(&run_id, seq, &to_append, &view, account_id)
         .await?;
+    crate::pairs::ended(state, thread_id, view.status);
     Ok(())
 }
 
@@ -4060,6 +4081,8 @@ struct ThreadRunReplay {
     failure: Option<String>,
     /// See `replay_run`'s `finishReason`.
     finish_reason: Option<&'static str>,
+    /// Whose turn it was: in a pair's thread, which of its two Bots (#314). Null for none.
+    coworker_id: Option<String>,
     /// ABSENT, not empty, when `?events=false` asked for the list without the bodies. An empty
     /// array would say this run emitted nothing, which is a different claim and a false one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4125,7 +4148,12 @@ pub async fn replay_thread(
         Ok(pending) => pending,
         Err(error) => return unavailable(error),
     };
-    if newest_first.is_empty() && hidden.is_empty() {
+    // A Bot's main chat carries its timeline rows (#314), even before the person has said a word.
+    let timeline = match crate::pairs::timeline(&state, &account_id, &thread_id).await {
+        Ok(timeline) => timeline,
+        Err(error) => return unavailable(error),
+    };
+    if newest_first.is_empty() && hidden.is_empty() && timeline.is_empty() {
         return (StatusCode::NOT_FOUND, "no such thread").into_response();
     }
 
@@ -4188,6 +4216,7 @@ pub async fn replay_thread(
             updated_at_ms: summary.updated_at_ms,
             failure: run.failure,
             finish_reason: run.finish_reason.map(|reason| reason.as_str()),
+            coworker_id: run.coworker_id.map(|id| id.as_str().to_string()),
             // The frames are loaded either way: whether a run started and why it failed are only
             // knowable from its log, and answering those two from the projection would mean
             // guessing. `events=false` saves the client the megabytes, not the server the read.
@@ -4195,10 +4224,22 @@ pub async fn replay_thread(
         });
     }
 
+    // What kind of thread this is and who is in it, on every thread, so no client has to guess
+    // from an id (#314): a pair's is its two Bots' and read-only, a chat's is the person's.
+    let pair = opengrok_wire::pair::is_pair_thread(&thread_id);
+    let ran = runs
+        .iter()
+        .filter_map(|run| run.coworker_id.clone())
+        .collect();
+    let coworkers = crate::pairs::coworkers(&state, &thread_id, ran).await;
     let mut body = serde_json::json!({
         "threadId": thread_id,
+        "kind": if pair { "pair" } else { "chat" },
+        "readOnly": pair,
+        "coworkers": coworkers,
         "runs": runs,
         "hiddenRunIds": hidden,
+        "timeline": timeline,
     });
     // Sibling of `runs`, never mixed into a run's frames: a queued send is not a turn yet, and
     // dropping it into `events` would make NativeChat paint a bubble as if the coworker had
@@ -4238,6 +4279,9 @@ struct ThreadListRow {
     thread_id: String,
     coworker_id: Option<String>,
     origin: &'static str,
+    /// A pair's thread's two Bots, lower id first (#314); absent on any other thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer_bot_ids: Option<[String; 2]>,
     title: Option<String>,
     last_run_id: String,
     last_status: String,
@@ -4312,8 +4356,13 @@ pub async fn list_threads(
                 .map(|(_, name)| name.trim())
                 .filter(|name| !name.is_empty())
                 .map(str::to_string);
+            let peers = opengrok_wire::pair::pair_peers(&thread.thread_id);
             ThreadListRow {
-                origin: origin_word(thread.routine.as_ref().map(|(by, _)| *by)),
+                origin: match peers {
+                    Some(_) => "pair",
+                    None => origin_word(thread.routine.as_ref().map(|(by, _)| *by)),
+                },
+                peer_bot_ids: peers.map(|(lo, hi)| [lo, hi]),
                 title: named.or_else(|| {
                     super::history::title_of(thread.first_prompt.as_deref().unwrap_or_default())
                 }),
@@ -4731,6 +4780,7 @@ pub async fn stop_run(
         {
             Ok(_) => {
                 tracing::info!(run = %run_id, by = %account_id, "a run was stopped");
+                crate::pairs::ended(state, &run.thread_id, run.status);
                 // A call its person's Mac is carrying is cancelled there, now (`relay`).
                 state.auth.relay.stop(run_id.as_str());
                 let closed = close_cards(&host, &account_id, &run).await;
