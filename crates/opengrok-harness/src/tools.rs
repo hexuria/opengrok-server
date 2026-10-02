@@ -151,6 +151,16 @@ impl ToolRunner {
         }
     }
 
+    /// A run a routine started: of the routine tools, only the listing (#316). See
+    /// `Executor::with_routines_listing_only`.
+    #[must_use]
+    pub fn with_routines_listing_only(mut self) -> Self {
+        if let Some((executor, context)) = self.executor.take() {
+            self.executor = Some((executor.with_routines_listing_only(), context));
+        }
+        self
+    }
+
     /// The person said yes, in this run, to a leave-box action: the tunnel is not asked about
     /// again. See `Executor::with_egress_consented`.
     #[must_use]

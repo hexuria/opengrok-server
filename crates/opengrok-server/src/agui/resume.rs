@@ -688,7 +688,11 @@ pub(crate) async fn resume_interrupted_run(
         crate::agui::routes::TURN_WAKE_PATIENCE,
     )
     .await
-    .map(|runner| runner.with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted)));
+    .map(|runner| runner.with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted)))
+    .map(|runner| match run.fired_by_routine(&run_id) {
+        true => runner.with_routines_listing_only(),
+        false => runner,
+    });
     // The skills the captured system message lists, and no others (#270): with none, and no
     // computer, it carries on talking, as before.
     let kept = &run.offered_skills;
@@ -790,6 +794,11 @@ pub(crate) async fn carry_out_answer(
     let runner = runner
         .with_egress_consented(consented)
         .with_judge_failures(failures);
+    // A routine's run lists routines and makes none, after a card as before it (#316).
+    let runner = match run.fired_by_routine(run_id) {
+        true => runner.with_routines_listing_only(),
+        false => runner,
+    };
     // The skills the captured system message lists, and no others (#270).
     let runner = crate::skills::onto_captured(state, account_id, runner, &run.offered_skills);
     let runner = crate::pairs::onto(state, who, Some(run_id.as_str()), None, Some(runner)).await?;
@@ -834,8 +843,8 @@ pub(crate) async fn carried_on(
     // and way, and on the gateway its captured pin (a log from before pins were stored falls back
     // to the current one); never a door or pin the coworker has now. A proxy turn never becomes a
     // gateway one mid-run, nor the reverse, and one its Mac carried goes on at its Mac; a routine's
-    // never goes on at a plan. As hard as it started, with no fallback: a log from before the
-    // effort was stored sent none.
+    // goes on where it started too (#316), and a Bot's turn on a message by its own rule (#314).
+    // As hard as it started, with no fallback: a log from before the effort was stored sent none.
     let pin = run.pin_for_resume(&coworker.model);
     let route = local_proxy::resumed(state, account_id, (run, run_id), &pin).await;
     // The system message this turn OPENED with, not a fresh composition: a role or title edited

@@ -59,22 +59,7 @@ pub struct LogEvent {
 
 impl PgStore {
     pub async fn load_schedule(&self, id: &ScheduleId) -> StoreResult<(Schedule, i64)> {
-        let rows = sqlx::query(
-            "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
-        )
-        .bind(schedule_stream(id))
-        .fetch_all(self.pool())
-        .await?;
-
-        let mut seq = 0_i64;
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            seq = row.try_get::<i64, _>("stream_seq")?;
-            let payload: serde_json::Value = row.try_get("payload")?;
-            let event: ScheduleEvent = serde_json::from_value(payload)
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            events.push(event);
-        }
+        let (events, seq) = self.stream::<ScheduleEvent>(&schedule_stream(id)).await?;
         Ok((Schedule::replay(&events), seq))
     }
 
@@ -126,10 +111,12 @@ impl PgStore {
                 .await?;
             let clock_ms = at_ms.max(chrono::Utc::now().timestamp_millis());
             let next_due_ms = if active && state.kind == WakeKind::Cron {
-                next_fire_ms(&state.cron, clock_ms)
+                next_fire_ms(&state.cron, &state.tz, clock_ms)
             } else {
                 None
             };
+            let last_skip = serde_json::to_value(state.skipped.last())
+                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
             let coworker = state.coworker_id.as_ref().map_or("", |c| c.as_str());
             // A firing in this batch stamps last_fired_ms; anything else leaves it alone.
             let fired_at = events.iter().find_map(|event| match event {
@@ -143,8 +130,9 @@ impl PgStore {
                 "insert into schedule_view
                    (id, account_id, coworker_id, cron, prompt, name, active, next_due_ms,
                     updated_at_ms, created_at_ms, last_fired_ms, kind, hook_id, secret_hash,
-                    webhook_key, run_limits)
-                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, $13, $14, $15)
+                    webhook_key, run_limits, tz, last_skip)
+                 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12, $13, $14, $15,
+                    $16, $17)
                  on conflict (id) do update set
                    coworker_id = excluded.coworker_id,
                    cron = excluded.cron,
@@ -152,7 +140,7 @@ impl PgStore {
                    name = excluded.name,
                    active = excluded.active,
                    next_due_ms = case when schedule_view.cron = excluded.cron
-                     and schedule_view.active = excluded.active
+                     and schedule_view.active = excluded.active and schedule_view.tz = excluded.tz
                      then case when schedule_view.next_due_ms is null then null
                        else greatest(schedule_view.next_due_ms, excluded.next_due_ms) end
                      else excluded.next_due_ms end,
@@ -163,7 +151,9 @@ impl PgStore {
                    hook_id = excluded.hook_id,
                    secret_hash = excluded.secret_hash,
                    webhook_key = excluded.webhook_key,
-                   run_limits = excluded.run_limits",
+                   run_limits = excluded.run_limits,
+                   tz = excluded.tz,
+                   last_skip = excluded.last_skip",
             )
             .bind(id.as_str())
             .bind(account_id.as_str())
@@ -183,6 +173,8 @@ impl PgStore {
             .bind(&state.secret_hash)
             .bind(&state.webhook_key)
             .bind(run_limits)
+            .bind(&state.tz)
+            .bind(last_skip)
             .execute(&mut *tx)
             .await?;
         }
@@ -195,7 +187,7 @@ impl PgStore {
         let rows = sqlx::query(
             "select id, coworker_id, cron, prompt, name, active, next_due_ms, updated_at_ms,
                     created_at_ms, last_fired_ms, kind, hook_id, secret_hash, webhook_key,
-                    run_limits
+                    run_limits, tz, last_skip
              from schedule_view where account_id = $1 order by updated_at_ms desc",
         )
         .bind(account_id.as_str())
@@ -234,6 +226,12 @@ impl PgStore {
                         .unwrap_or_default(),
                     run_limits: serde_json::from_value(row.try_get("run_limits")?)
                         .map_err(|error| StoreError::Corrupt(error.to_string()))?,
+                    tz: row.try_get("tz")?,
+                    last_skip: serde_json::from_value(
+                        row.try_get::<Option<serde_json::Value>, _>("last_skip")?
+                            .unwrap_or_default(),
+                    )
+                    .map_err(|error| StoreError::Corrupt(error.to_string()))?,
                 })
             })
             .collect()
@@ -288,7 +286,7 @@ impl PgStore {
         let mut tx = self.pool().begin().await?;
 
         let rows = sqlx::query(
-            "select id, account_id, coworker_id, cron, prompt, name from schedule_view
+            "select id, account_id, coworker_id, cron, tz, prompt, name from schedule_view
              where active and next_due_ms is not null and next_due_ms <= $1
              order by next_due_ms limit $2
              for update skip locked",
@@ -303,8 +301,8 @@ impl PgStore {
             let id: String = row.try_get("id")?;
             let cron: String = row.try_get("cron")?;
             // The next occurrence after NOW, not after the missed slot — a schedule that was due
-            // an hour ago fires once, not sixty times.
-            let next = next_fire_ms(&cron, now_ms);
+            // an hour ago fires once, not sixty times — read in the routine's own zone.
+            let next = next_fire_ms(&cron, &row.try_get::<String, _>("tz")?, now_ms);
             sqlx::query("update schedule_view set next_due_ms = $2 where id = $1")
                 .bind(&id)
                 .bind(next)
@@ -325,22 +323,7 @@ impl PgStore {
     }
 
     pub async fn load_monitor(&self, id: &MonitorId) -> StoreResult<(Monitor, i64)> {
-        let rows = sqlx::query(
-            "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
-        )
-        .bind(monitor_stream(id))
-        .fetch_all(self.pool())
-        .await?;
-
-        let mut seq = 0_i64;
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            seq = row.try_get::<i64, _>("stream_seq")?;
-            let payload: serde_json::Value = row.try_get("payload")?;
-            let event: MonitorEvent = serde_json::from_value(payload)
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            events.push(event);
-        }
+        let (events, seq) = self.stream::<MonitorEvent>(&monitor_stream(id)).await?;
         Ok((Monitor::replay(&events), seq))
     }
 

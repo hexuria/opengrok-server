@@ -3073,3 +3073,146 @@ async fn a_held_screen_names_the_conversation_holding_it() {
     }
     assert_eq!(spy.last_box(), None);
 }
+
+/// A desk that answers from memory, and keeps which account each call was answered as. Its one
+/// routine is `acct_1`'s "Weekly report".
+#[derive(Default)]
+struct Desk {
+    asked: Mutex<Vec<(String, routine::Ask)>>,
+}
+
+#[async_trait]
+impl routine::RoutineDesk for Desk {
+    async fn answer(&self, context: &ToolContext, ask: routine::Ask) -> Result<Value, String> {
+        let account = context.account_id.to_string();
+        self.asked.lock().unwrap().push((account, ask));
+        Ok(json!({ "done": true }))
+    }
+    async fn stored_name(&self, context: &ToolContext, routine: &str) -> Result<String, String> {
+        match (context.account_id.as_str(), routine) {
+            ("acct_1", "sched_mine") => Ok("Weekly report".to_string()),
+            _ => Err(format!(
+                "no routine {routine} is yours; call list_routines."
+            )),
+        }
+    }
+}
+
+fn with_desk(desk: &Arc<Desk>) -> Executor {
+    allowing(Arc::new(SpyComputer::default())).with_routines(desk.clone())
+}
+
+/// A DELETE ALWAYS ASKS (#316), on the policy's card, however wide the grant: the card names the
+/// routine as stored, never as the model wrote it, and nothing is deleted until the person's yes
+/// releases that one call.
+#[tokio::test]
+async fn a_delete_always_asks_naming_the_routine_as_stored() {
+    let desk = Arc::new(Desk::default());
+    let context = context_with_box("box_mine");
+    let delete = call(
+        routine::DELETE_ROUTINE,
+        json!({ "routine": "sched_mine", "name": "Something harmless" }),
+    );
+    let asked = with_desk(&desk).execute(&context, &delete).await;
+    assert!(asked.awaiting_approval, "{asked:?}");
+    assert_eq!(asked.awaiting_reason, Some(AwaitingReason::PolicyApproval));
+    assert!(asked.content.contains("\"Weekly report\""), "{asked:?}");
+    assert!(!asked.content.contains("harmless"), "{asked:?}");
+    assert!(desk.asked.lock().unwrap().is_empty(), "nothing deleted yet");
+
+    let yes = with_desk(&desk).with_approved(["call_1".to_string()]);
+    let done = yes.execute(&context, &delete).await;
+    assert!(done.ok, "{done:?}");
+    let answered = desk.asked.lock().unwrap().clone();
+    let deleted = routine::Ask::Delete {
+        routine: "sched_mine".to_string(),
+    };
+    assert_eq!(answered, [("acct_1".to_string(), deleted)]);
+}
+
+/// A routine the session's account does not own is refused as unknown, before any card.
+#[tokio::test]
+async fn a_routine_that_is_not_yours_is_refused_before_any_card() {
+    let desk = Arc::new(Desk::default());
+    let delete = call(
+        routine::DELETE_ROUTINE,
+        json!({ "routine": "sched_theirs" }),
+    );
+    let refused = with_desk(&desk)
+        .execute(&context_with_box("box_mine"), &delete)
+        .await;
+    assert!(!refused.ok && !refused.awaiting_approval, "{refused:?}");
+    let said = "refused: no routine sched_theirs is yours; call list_routines.";
+    assert_eq!(refused.content, said);
+}
+
+/// THE ACCOUNT IS THE SESSION'S (CLAUDE.md #7): a call that names another account or coworker,
+/// in any spelling, is answered as the context's account, and the coworker it names is not read
+/// as the Bot to wake. Nor does the call need, or wake, a box.
+#[tokio::test]
+async fn a_routine_call_runs_as_the_sessions_account_and_never_touches_the_box() {
+    let desk = Arc::new(Desk::default());
+    let spy = Arc::new(SpyComputer::default());
+    let executor = allowing(spy.clone()).with_routines(desk.clone());
+    let arguments = json!({ "prompt": "standup", "when": "0 9 * * MON-FRI",
+        "account_id": "acct_other", "accountId": "acct_other", "coworker_id": "cw_other" });
+    let create = call(routine::CREATE_ROUTINE, arguments);
+    let boxless = ToolContext {
+        box_id: None,
+        ..context_with_box("box_mine")
+    };
+    assert!(!executor.box_needs_wake(&boxless, &create).await);
+    let made = executor.execute(&boxless, &create).await;
+    assert!(made.ok, "{made:?}");
+    let (account, ask) = desk.asked.lock().unwrap()[0].clone();
+    assert_eq!(account, "acct_1");
+    let named = match ask {
+        routine::Ask::Create(fields) => fields.bot,
+        other => Some(format!("not a create: {other:?}")),
+    };
+    assert_eq!(named, None, "no bot named, so the session's own");
+    assert_eq!(spy.last_box(), None, "the box was never reached");
+}
+
+/// A RUN A ROUTINE STARTED IS OFFERED ONLY THE LISTING, and a call to the others is refused: a
+/// routine must not make routines. A ceiling without the row offers none of the four.
+#[tokio::test]
+async fn a_routines_own_run_may_only_list_and_a_ceiling_can_switch_them_off() {
+    let desk = Arc::new(Desk::default());
+    let names = |executor: &Executor| -> Vec<String> {
+        let schemas = executor.tool_schemas(
+            &AccountId::from_stored("acct_1"),
+            &CoworkerId::from_stored("cw_1"),
+        );
+        let named = schemas
+            .iter()
+            .filter_map(|s| s["function"]["name"].as_str());
+        named
+            .filter(|name| routine::is_routine_tool(name))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(names(&with_desk(&desk)), routine::TOOLS);
+    let listing = with_desk(&desk).with_routines_listing_only();
+    assert_eq!(names(&listing), [routine::LIST_ROUTINES]);
+    let create = call(
+        routine::CREATE_ROUTINE,
+        json!({ "prompt": "p", "when": "0 9 * * 1" }),
+    );
+    let refused = listing
+        .execute(&context_with_box("box_mine"), &create)
+        .await;
+    assert!(refused.content.contains("may only list"), "{refused:?}");
+
+    let mut policy = permissive();
+    if let Some(ceiling) = policy.ceiling.as_mut() {
+        ceiling.tools = opengrok_policy::ToolSet::only(["shell"]);
+    }
+    let off =
+        Executor::with_policy(Arc::new(SpyComputer::default()), policy).with_routines(desk.clone());
+    assert!(names(&off).is_empty());
+    let list = call(routine::LIST_ROUTINES, json!({}));
+    let refused = off.execute(&context_with_box("box_mine"), &list).await;
+    assert!(refused.content.contains("may never run"), "{refused:?}");
+    assert!(desk.asked.lock().unwrap().is_empty());
+}

@@ -19,11 +19,12 @@
       },
       "lastRun": {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "running",
+        "status": "finished",
         "startedAtMs": 1790000000000,
-        "finishedAtMs": null,
-        "summary": "Routine Inbox is running."
+        "finishedAtMs": 1790000001000,
+        "summary": "Routine Inbox ran: You said: a webhook arrived; report in\n\n<webhook_event>\n{\"item\":\"milk\"}\n</webhook_event>. This is the mock door standing in for oag/cheap — no model was called."
       },
+      "tz": "UTC",
       "webhook": {
         "type": "webhook",
         "url": "http://opengrok.lan:1447/hooks/hook_0199bb4e-0000-7000-8000-000000000004",

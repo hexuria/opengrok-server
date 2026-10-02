@@ -610,7 +610,12 @@ pub(crate) async fn tools_for_coworker(
         .with_review_approved(review_approved.iter().cloned())
         .with_egress_tunnel_mode(egress_tunnel)
         .with_egress_policy(egress_policy)
-        .with_egress_policy_unconfirmed(egress_unconfirmed);
+        .with_egress_policy_unconfirmed(egress_unconfirmed)
+        // The person's routines (#316), through the desk the routes use; the ceiling's row says
+        // whether they are offered, and the context's account is the only one they answer as.
+        .with_routines(Arc::new(crate::autonomy::desk::Tools {
+            state: state.clone(),
+        }));
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin. The executor offers it only where the
@@ -1815,7 +1820,9 @@ pub async fn set_approvals(
         &policy,
     );
     if let Some(reason) = decision.reason() {
-        return refuse_use(&state, &account_id, &coworker_id, reason).await;
+        return refuse_use(&state, &account_id, &coworker_id, reason)
+            .await
+            .into_response();
     }
 
     // `use_skill` NEVER NEEDS A YES, and listing it would promise a card that never comes: it only
@@ -1869,15 +1876,15 @@ pub(crate) async fn refuse_use(
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     reason: &str,
-) -> Response {
+) -> (StatusCode, String) {
     match state
         .auth
         .store
         .may_use_coworker(account_id, coworker_id)
         .await
     {
-        Ok(false) => (StatusCode::NOT_FOUND, "no such coworker").into_response(),
-        Ok(true) | Err(_) => (StatusCode::FORBIDDEN, reason.to_string()).into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "no such coworker".to_string()),
+        Ok(true) | Err(_) => (StatusCode::FORBIDDEN, reason.to_string()),
     }
 }
 
@@ -2272,6 +2279,15 @@ async fn list_tools(
             }))
         })
         .collect();
+    // The routine tools are listed as their ceiling's one row (#316), as the Tools card shows it.
+    use opengrok_tools::routine;
+    let routines =
+        |row: &serde_json::Value| row["name"].as_str().is_some_and(routine::is_routine_tool);
+    let (offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(routines);
+    if !offered.is_empty() {
+        tools.push(serde_json::json!({ "name": routine::ROW,
+            "description": routine::ROW_DESCRIPTION, "kind": "builtin" }));
+    }
     Json(serde_json::json!({ "tools": tools })).into_response()
 }
 
@@ -2813,7 +2829,9 @@ pub(crate) async fn turn(
         let using = opengrok_policy::Action::UseCoworker;
         let decision = opengrok_policy::decide(account_id, &coworker_id, using, &policy);
         if let Some(reason) = decision.reason() {
-            return refuse_use(&state, account_id, &coworker_id, reason).await;
+            return refuse_use(&state, account_id, &coworker_id, reason)
+                .await
+                .into_response();
         }
 
         // WHICH MODEL A COWORKER THINKS WITH IS THE COWORKER'S, NOT THE DEPLOYMENT'S. Hiring takes
@@ -5176,8 +5194,10 @@ fn journalled_why(
     pending: &opengrok_core::run::PendingApproval,
 ) -> Option<String> {
     // Only the one ambiguous kind. A form's or a policy card's journalled words are the
-    // ask's bare line ("Waiting for you"), and `why_of` says more for those.
-    if pending.reason != opengrok_core::run::SuspendReason::AutoReview {
+    // ask's bare line ("Waiting for you"), and `why_of` says more for those — except a routine's
+    // delete, whose words name the routine as stored, which nothing else on the run does (#316).
+    let delete = pending.tool == opengrok_tools::routine::DELETE_ROUTINE;
+    if pending.reason != opengrok_core::run::SuspendReason::AutoReview && !delete {
         return None;
     }
     let text = |event: &serde_json::Value, key: &str| -> Option<String> {

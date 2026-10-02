@@ -378,6 +378,7 @@ async fn seed_schedule(
             name: name.to_string(),
             wake,
             run_limits: Default::default(),
+            tz: "UTC".to_string(),
             at_ms,
         })
         .expect("create schedule");

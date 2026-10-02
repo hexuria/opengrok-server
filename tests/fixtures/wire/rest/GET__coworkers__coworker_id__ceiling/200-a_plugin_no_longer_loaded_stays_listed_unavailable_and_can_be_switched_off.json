@@ -60,6 +60,13 @@
         "enabled": false
       },
       {
+        "name": "routines",
+        "kind": "builtin",
+        "description": "List, make, edit and delete your routines when you ask in chat. Deleting one always asks you first.",
+        "enabled": false,
+        "label": "Routines"
+      },
+      {
         "name": "gmail",
         "kind": "plugin",
         "label": "gmail",

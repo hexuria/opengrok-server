@@ -26,9 +26,9 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use opengrok_core::id::{HookId, RunId};
-use opengrok_core::schedule::{FireCause, ScheduleCommand};
+use opengrok_core::schedule::FireCause;
 
-use crate::autonomy::routes::mutate_schedule;
+use crate::autonomy::desk::mutate_schedule;
 use crate::host_state::HostState;
 use crate::now_ms;
 
@@ -215,10 +215,19 @@ async fn inbound(
     }
 
     let run_id = RunId::new();
-    let at_ms = now_ms();
     let schedule_id = row.schedule_id.clone();
     let account_id = row.account_id.clone();
-    let after = match mutate_schedule(&state, &account_id, &schedule_id, at_ms, |loaded| {
+    // A routine on its person's own plan with nobody to answer it is skipped, as the clock's and
+    // "run now" are (#316): recorded, no run, and the caller told why in the row's words.
+    let coworker = state.agui.auth.store.load_schedule(&schedule_id).await;
+    let coworker = coworker.ok().and_then(|(loaded, _)| loaded.coworker_id);
+    let skip = match &coworker {
+        Some(coworker) => {
+            crate::autonomy::unreachable(&state.agui, &account_id, coworker, &run_id).await
+        }
+        None => None,
+    };
+    let after = match mutate_schedule(&state.agui, &account_id, &schedule_id, now_ms(), |loaded| {
         // CHECKED AGAIN, AGAINST THE AGGREGATE THIS VERY APPEND WILL WRITE. The hash above came
         // from the projection and a rotation could have landed since — firing on the key a
         // rotation replaced is precisely what rotating exists to stop. `mutate_schedule` re-reads
@@ -226,38 +235,28 @@ async fn inbound(
         if loaded.kind != opengrok_core::schedule::WakeKind::Webhook
             || !key_matches(&loaded.secret_hash, presented)
         {
-            return Err((
-                StatusCode::UNAUTHORIZED.as_u16(),
-                json!({ "error": "bad token" }),
-            ));
+            return Err((StatusCode::UNAUTHORIZED, "bad token".to_string()));
         }
-        loaded
-            .decide(ScheduleCommand::Fire {
-                run_id: run_id.clone(),
-                cause: FireCause::Webhook,
-                at_ms,
-            })
-            .map_err(|reason| {
-                let code = if reason == opengrok_core::schedule::ScheduleError::Paused {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::BAD_REQUEST
-                };
-                (code.as_u16(), json!({ "error": reason.to_string() }))
-            })
+        let firing = crate::autonomy::firing(skip, FireCause::Webhook, &run_id);
+        loaded.decide(firing).map_err(|reason| {
+            let code = if reason == opengrok_core::schedule::ScheduleError::Paused {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, reason.to_string())
+        })
     })
     .await
     {
         Ok(after) => after,
-        Err((code, body)) => {
-            return (
-                StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST),
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                body.to_string(),
-            )
-                .into_response();
-        }
+        Err((code, why)) => return json_error(code, &why),
     };
+    if let Some((code, why)) = skip {
+        let body = json!({ "error": why, "code": code }).to_string();
+        let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
+        return (StatusCode::CONFLICT, json, body).into_response();
+    }
 
     let prompt = wake_prompt(&after.prompt, payload.as_ref());
     crate::autonomy::start_fired(

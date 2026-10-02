@@ -1,0 +1,8 @@
+{
+  "method": "POST",
+  "path": "/schedules",
+  "status": 422,
+  "body": {
+    "error": "a routine can wake at most once a minute: use 5 fields, like */5 * * * *."
+  }
+}

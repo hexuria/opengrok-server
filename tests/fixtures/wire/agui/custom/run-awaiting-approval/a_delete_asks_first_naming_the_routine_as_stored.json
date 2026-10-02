@@ -1,0 +1,16 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-awaiting-approval",
+  "threadId": "thr-0199bb4e000070008000000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "callId": "call-routine",
+  "tool": "delete_routine",
+  "arguments": {
+    "routine": "sched_0199bb4e-0000-7000-8000-000000000003",
+    "name": "A harmless test"
+  },
+  "reason": "policy-approval",
+  "why": "Delete the routine \"Weekly report\"? It stops for good.",
+  "summary": "Delete the routine sched_0199bb4e-0000-7000-8000-000000000003"
+}

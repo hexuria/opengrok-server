@@ -262,6 +262,34 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_bot_hired_with_no_model_is_born_on_its_hirers_default",
         "/coworkers",
     ),
+    // Routines (#316): the one-minute floor's 422, on a create and on an edit, shaped like any
+    // refusal; "run now" skipped for a plan Bot's absent Mac, a 409 with its code, and the skip's
+    // row in the history; a routine row whose `lastRun` is a skip; and a Bot's ceiling with its
+    // one Routines row. Each test makes one call of each kind on the route it is kept for.
+    (
+        "a_routine_that_wakes_more_often_than_once_a_minute_is_refused",
+        "/schedules",
+    ),
+    (
+        "an_edit_to_a_cron_under_a_minute_is_refused",
+        "/schedules/{id}",
+    ),
+    (
+        "run_now_with_no_mac_answers_409_and_records_the_skip",
+        "/schedules/{id}/run",
+    ),
+    (
+        "run_now_with_no_mac_answers_409_and_records_the_skip",
+        "/schedules/{id}/runs",
+    ),
+    (
+        "a_due_routine_with_no_mac_is_skipped_and_its_clock_moves_on",
+        "/schedules",
+    ),
+    (
+        "a_bots_ceiling_lists_its_routines_as_one_row",
+        "/coworkers/{coworker_id}/ceiling",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

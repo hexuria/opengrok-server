@@ -78,24 +78,32 @@ impl PgStore {
         &self.pool
     }
 
-    /// Replay an account's log. Returns the state and the sequence it was read at.
-    pub async fn load_account(&self, id: &AccountId) -> StoreResult<(Account, i64)> {
+    /// A stream's events in order, and the sequence they were read at: what every `load_*`
+    /// replays. An event this binary cannot read is `Corrupt`, never skipped.
+    pub(crate) async fn stream<E: serde::de::DeserializeOwned>(
+        &self,
+        stream: &str,
+    ) -> StoreResult<(Vec<E>, i64)> {
         let rows = sqlx::query(
             "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
         )
-        .bind(account_stream(id))
+        .bind(stream)
         .fetch_all(&self.pool)
         .await?;
-
         let mut seq = 0_i64;
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
             seq = row.try_get::<i64, _>("stream_seq")?;
             let payload: serde_json::Value = row.try_get("payload")?;
-            let event: AccountEvent = serde_json::from_value(payload)
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            events.push(event);
+            let event = serde_json::from_value(payload);
+            events.push(event.map_err(|error| StoreError::Corrupt(error.to_string()))?);
         }
+        Ok((events, seq))
+    }
+
+    /// Replay an account's log. Returns the state and the sequence it was read at.
+    pub async fn load_account(&self, id: &AccountId) -> StoreResult<(Account, i64)> {
+        let (events, seq) = self.stream::<AccountEvent>(&account_stream(id)).await?;
         Ok((Account::replay(&events), seq))
     }
 
@@ -357,22 +365,7 @@ impl PgStore {
 impl PgStore {
     /// Replay a run's log.
     pub async fn load_run(&self, id: &RunId) -> StoreResult<(Run, i64)> {
-        let rows = sqlx::query(
-            "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
-        )
-        .bind(crate::run_stream(id))
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut seq = 0_i64;
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            seq = row.try_get::<i64, _>("stream_seq")?;
-            let payload: serde_json::Value = row.try_get("payload")?;
-            let event: RunEvent = serde_json::from_value(payload)
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            events.push(event);
-        }
+        let (events, seq) = self.stream::<RunEvent>(&crate::run_stream(id)).await?;
         Ok((Run::replay(&events), seq))
     }
 
@@ -804,22 +797,9 @@ impl PgStore {
 /// Coworkers: who works here, and which computer is theirs.
 impl PgStore {
     pub async fn load_coworker(&self, id: &CoworkerId) -> StoreResult<(Coworker, i64)> {
-        let rows = sqlx::query(
-            "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
-        )
-        .bind(crate::coworker_stream(id))
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut seq = 0_i64;
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            seq = row.try_get::<i64, _>("stream_seq")?;
-            let payload: serde_json::Value = row.try_get("payload")?;
-            let event: CoworkerEvent = serde_json::from_value(payload)
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            events.push(event);
-        }
+        let (events, seq) = self
+            .stream::<CoworkerEvent>(&crate::coworker_stream(id))
+            .await?;
         Ok((Coworker::replay(&events), seq))
     }
 
@@ -1356,22 +1336,9 @@ impl<'a> CredentialUpdate<'a> {
 /// Connections: an authentication that happened, and who may borrow it.
 impl PgStore {
     pub async fn load_connection(&self, id: &str) -> StoreResult<(Connection, i64)> {
-        let rows = sqlx::query(
-            "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
-        )
-        .bind(format!("connection/{id}"))
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut seq = 0_i64;
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            seq = row.try_get::<i64, _>("stream_seq")?;
-            let payload: serde_json::Value = row.try_get("payload")?;
-            let event: ConnectionEvent = serde_json::from_value(payload)
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            events.push(event);
-        }
+        let (events, seq) = self
+            .stream::<ConnectionEvent>(&format!("connection/{id}"))
+            .await?;
         Ok((Connection::replay(&events), seq))
     }
 

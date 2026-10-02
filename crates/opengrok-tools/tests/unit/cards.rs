@@ -39,7 +39,7 @@ fn command_only_for_the_shells_and_summaries_never_boilerplate() {
         "gmail.api.send",
         "computer",
         "open_url",
-        opengrok_tools::RUN_RECIPE,
+        crate::RUN_RECIPE,
     ] {
         let summary = summary_for(tool, &args);
         assert!(!summary.is_empty());
@@ -68,7 +68,7 @@ fn computer_and_open_url_summaries_name_the_action() {
         ("computer", &typed, "say x say x"),
         ("computer", &odd, "zoom"),
         ("open_url", &page, "https://example.com/inbox"),
-        (opengrok_tools::RUN_RECIPE, &recipe, "Open Gmail"),
+        (crate::RUN_RECIPE, &recipe, "Open Gmail"),
     ];
     for (tool, args, names) in cases {
         let summary = summary_for(tool, args);
@@ -91,7 +91,7 @@ fn computer_and_open_url_summaries_name_the_action() {
 /// card quotes, rather than reading as a plugin tool with raw JSON.
 #[test]
 fn a_use_skill_card_names_the_skill() {
-    let tool = opengrok_tools::skill::USE_SKILL;
+    let tool = crate::skill::USE_SKILL;
     let triage = json!({ "name": "triage" });
     assert_eq!(summary_for(tool, &triage), "Read the skill \"triage\"");
     let long = json!({ "name": "x".repeat(200) });
@@ -149,15 +149,12 @@ fn a_tunnel_card_offers_no_rule_it_cannot_honour() {
         "pending",
         "computer",
         &args,
-        Some(opengrok_tools::review::EGRESS_TUNNEL_ASK_REASON),
+        Some(crate::review::EGRESS_TUNNEL_ASK_REASON),
         9,
     );
     let approval = &card["message"]["approval"];
     assert!(approval.get("proposedRule").is_none(), "{approval}");
-    assert_eq!(
-        approval["reason"],
-        opengrok_tools::review::EGRESS_TUNNEL_ASK_REASON
-    );
+    assert_eq!(approval["reason"], crate::review::EGRESS_TUNNEL_ASK_REASON);
     assert_eq!(approval["surface"], "computer");
     let judged = auto_review_card(
         "e_j",
@@ -165,7 +162,7 @@ fn a_tunnel_card_offers_no_rule_it_cannot_honour() {
         "pending",
         "computer",
         &args,
-        Some(opengrok_tools::review::REVIEW_ASK_REASON),
+        Some(crate::review::REVIEW_ASK_REASON),
         9,
     );
     assert!(

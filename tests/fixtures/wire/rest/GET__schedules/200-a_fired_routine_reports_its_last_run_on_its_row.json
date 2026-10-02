@@ -18,6 +18,7 @@
         "maxWallMs": null
       },
       "lastRun": null,
+      "tz": "UTC",
       "webhook": {
         "type": "webhook",
         "url": "http://opengrok.lan:1447/hooks/hook_0199bb4e-0000-7000-8000-000000000003",

@@ -28,6 +28,11 @@
         "name": "live_api_send",
         "description": "Send a message",
         "kind": "plugin"
+      },
+      {
+        "name": "routines",
+        "description": "List, make, edit and delete your routines when you ask in chat. Deleting one always asks you first.",
+        "kind": "builtin"
       }
     ]
   }

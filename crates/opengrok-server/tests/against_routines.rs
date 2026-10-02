@@ -139,6 +139,22 @@ async fn harness(
     public_gateway_url: Option<&str>,
     public_url: &str,
 ) -> Harness {
+    harness_in(database_url, email, (public_gateway_url, public_url), false).await
+}
+
+/// An advertising server whose routines may wake in seconds (`OG_ROUTINE_SECOND_CRON`), for a
+/// test that needs a tick's worth of due routines now rather than in a minute.
+async fn in_seconds(database_url: &str, email: &str) -> Harness {
+    let addresses = (Some("http://opengrok.lan:1447"), "http://127.0.0.1:9/auth");
+    harness_in(database_url, email, addresses, true).await
+}
+
+async fn harness_in(
+    database_url: &str,
+    email: &str,
+    (public_gateway_url, public_url): (Option<&str>, &str),
+    second_cron: bool,
+) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(database_url)
@@ -152,6 +168,7 @@ async fn harness(
     let minter = Arc::new(TokenMinter::new(b"a-routine-woken-by-a-webhook-secret"));
     let mut auth = AuthState::new(store.clone(), minter, email.to_string());
     auth.public_url = public_url.to_string();
+    auth.second_cron = second_cron;
     let agui = AgUiState {
         auth,
         door: Arc::new(MockDoor::echoing()),
@@ -1561,6 +1578,7 @@ async fn an_edit_written_with_a_stale_clock_does_not_fire_the_slot_twice() {
             },
             coworker_id: None,
             run_limits: None,
+            tz: None,
             at_ms: stale,
         })
         .expect("update");
@@ -1568,7 +1586,7 @@ async fn an_edit_written_with_a_stale_clock_does_not_fire_the_slot_twice() {
         after.apply(event);
     }
     assert_eq!(
-        next_fire_ms(&after.cron, stale),
+        next_fire_ms(&after.cron, &after.tz, stale),
         Some(slot),
         "the stale time lands on the slot"
     );
@@ -1689,6 +1707,7 @@ async fn a_hook_with_no_stored_key_says_to_rotate_before_an_edit() {
         secret_hash: "a-hash-from-before".to_string(),
         webhook_key: String::new(),
         run_limits: Default::default(),
+        tz: "UTC".to_string(),
         at_ms: now_ms(),
     }];
     let state = Schedule::replay(&events);
@@ -1719,7 +1738,7 @@ async fn a_routine_that_cannot_fire_does_not_stop_the_tick() {
 
     let database_url = database_or_skip!();
     let _clock = clock(&database_url, true).await;
-    let h = advertising(&database_url, &email("tick")).await;
+    let h = in_seconds(&database_url, &email("tick")).await;
     let coworker = h.hire().await;
     let every_second =
         |prompt: &str| json!({ "coworkerId": coworker, "cron": "* * * * * *", "prompt": prompt });
@@ -1809,6 +1828,7 @@ async fn an_edit_after_the_last_slot_was_claimed_does_not_fire_it_again() {
             },
             coworker_id: None,
             run_limits: None,
+            tz: None,
             at_ms: stale,
         })
         .expect("update");

@@ -18,12 +18,18 @@
         "maxWallMs": null
       },
       "lastRun": {
-        "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "failed",
-        "startedAtMs": 1790000001000,
-        "finishedAtMs": 1790000002000,
-        "summary": "Routine Weekly failed: This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule"
-      }
+        "runId": null,
+        "status": null,
+        "startedAtMs": null,
+        "finishedAtMs": null,
+        "summary": "Skipped: your computer was off, so your plan couldn't answer",
+        "at": 1790000001000,
+        "cause": "clock",
+        "state": "skipped",
+        "skipped": "relay_offline",
+        "reason": "Skipped: your computer was off, so your plan couldn't answer"
+      },
+      "tz": "UTC"
     }
   ]
 }

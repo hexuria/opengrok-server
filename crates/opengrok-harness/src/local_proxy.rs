@@ -302,12 +302,9 @@ impl Route {
         }
     }
 
-    /// A routine's: THE GATEWAY, whatever its hirer chose for their own turns, since a person's
-    /// subscription is theirs to spend in person and a routine fires with nobody at the keyboard.
-    /// A coworker whose own `source` is `local_proxy` answers on a plan alone, so its routine is
-    /// refused in words before any model is asked, never run on the server's keys instead. Only
-    /// that door counts; the hirer's own setting never does (#294).
-    pub fn for_routine(source: Option<SourceKind>, pin: &str) -> Self {
+    /// A monitor's: the gateway, or on its Bot's own plan refused in words before any model is
+    /// asked, as a routine's was before #316: a monitor never spends a person's plan.
+    pub fn for_monitor(source: Option<SourceKind>, pin: &str) -> Self {
         let why = "This Bot answers on your own plan, and routines run on the server's keys, so \
                    this routine did not run. Give the Bot a Server model to run it on a schedule.";
         Self::fired(source, pin, why)
@@ -410,21 +407,14 @@ pub async fn route(
     Route::LocalProxy { model, endpoint }
 }
 
-/// Where a carry-on asks, after a card, a form or a restart: by its start's rule, on what it
-/// captured. A turn's is `route`. A ROUTINE'S IS `for_routine`, NEVER `route`: one refused on its
-/// coworker's plan captured the proxy, and `route` would carry it on at the person's plan after a
-/// restart between its start and its refusal (#304). It is refused again, in the same words. A
-/// Bot's turn on a message (#314) is fired the same way, and carries on by `for_message`.
+/// Where a carry-on asks, after a card, a form or a restart: where its start went, on what it
+/// captured, a routine's as a turn's (#316): one that started on the gateway goes on there, and
+/// one that started on the person's plan goes on there, by the way it went. A Bot's turn on a
+/// message (#314) carries on by `for_message`, refused again in the same words on a plan.
 pub async fn resumed(saved: &dyn Saved, who: &AccountId, run: (&Run, &RunId), pin: &str) -> Route {
     let (run, run_id) = run;
-    if run.fired_by_routine(run_id) {
-        let pair = opengrok_wire::pair::is_pair_thread(&run.thread_id);
-        let fired = if pair {
-            Route::for_message
-        } else {
-            Route::for_routine
-        };
-        return fired(Some(run.inference_source), pin);
+    if run.fired_by_routine(run_id) && opengrok_wire::pair::is_pair_thread(&run.thread_id) {
+        return Route::for_message(Some(run.inference_source), pin);
     }
     let (source, captured) = (Some(run.source_for_resume()), run.model.as_deref());
     let (run_id, none) = (run_id.as_str(), (None, None));

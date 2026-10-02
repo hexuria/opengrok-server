@@ -2,5 +2,7 @@
   "method": "PATCH",
   "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001",
   "status": 404,
-  "body": "no such coworker"
+  "body": {
+    "error": "no such coworker"
+  }
 }

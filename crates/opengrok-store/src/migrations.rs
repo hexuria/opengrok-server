@@ -337,6 +337,10 @@ alter table schedule_view add column if not exists webhook_key text not null def
 -- rather than a stream that grows by a `schedule-fired` per firing. '{}' sets none, which is
 -- true of every routine projected before the column existed.
 alter table schedule_view add column if not exists run_limits jsonb not null default '{}'::jsonb;
+-- #316: the IANA zone a routine's cron is read in, which the sweep's claim reads it in; every
+-- routine projected before zones was read in UTC. And its last skipped firing, for its row.
+alter table schedule_view add column if not exists tz text not null default 'UTC';
+alter table schedule_view add column if not exists last_skip jsonb;
 
 create table if not exists monitor_view (
     id            text        primary key,
@@ -1342,6 +1346,26 @@ update ceiling_view
  where tools ? 'only' and not (tools->'only' ? 'message_bot')
    and not exists (select 1 from schema_migrations where name = 'the-bots-join-the-ceiling');
 insert into schema_migrations (name) values ('the-bots-join-the-ceiling') on conflict do nothing;
+-- #316: a Bot's four routine tools are one ceiling row, on by default, so every list ceiling gains
+-- them ONCE, after the machine and the Bots and for the same reasons; and its owner's profile too,
+-- which the run's policy intersects with it (neither of those needed a profile). One without them
+-- after this was switched off, and a set that admits nothing still admits nothing.
+update ceiling_view
+   set version = version + 1,
+       tools = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
+         from (select distinct jsonb_array_elements_text((tools->'only') || '["create_routine",
+           "delete_routine", "list_routines", "update_routine"]'::jsonb) tool) known))
+ where tools ? 'only'
+   and not (tools->'only' ?& '{create_routine,delete_routine,list_routines,update_routine}')
+   and not exists (select 1 from schema_migrations where name = 'the-routines-join-the-ceiling');
+update grant_view
+   set profile = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
+         from (select distinct jsonb_array_elements_text((profile->'only') || '["create_routine",
+           "delete_routine", "list_routines", "update_routine"]'::jsonb) tool) known))
+ where profile ? 'only'
+   and not (profile->'only' ?& '{create_routine,delete_routine,list_routines,update_routine}')
+   and not exists (select 1 from schema_migrations where name = 'the-routines-join-the-ceiling');
+insert into schema_migrations (name) values ('the-routines-join-the-ceiling') on conflict do nothing;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

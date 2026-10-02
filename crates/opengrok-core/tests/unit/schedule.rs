@@ -13,6 +13,7 @@ fn created() -> Schedule {
         secret_hash: String::new(),
         webhook_key: String::new(),
         run_limits: RunLimits::default(),
+        tz: UTC.to_string(),
         at_ms: 1_000,
     }])
 }
@@ -28,6 +29,7 @@ fn webhook() -> Schedule {
         secret_hash: "hash".to_string(),
         webhook_key: "og_secret".to_string(),
         run_limits: RunLimits::default(),
+        tz: UTC.to_string(),
         at_ms: 1_000,
     }])
 }
@@ -56,7 +58,7 @@ fn a_five_field_day_of_the_week_fires_on_standard_crons_days() {
     let sunday = 1_790_467_200_000; // 2026-09-27T00:00:00Z
     let week = |cron: &str| {
         let (mut after, mut days, end) = (sunday, Vec::new(), sunday + 604_800_000);
-        while let Some(next) = next_fire_ms(cron, after).filter(|next| *next < end) {
+        while let Some(next) = next_fire_ms(cron, UTC, after).filter(|next| *next < end) {
             let when = chrono::DateTime::from_timestamp_millis(next).expect("a time");
             assert_eq!(when.format("%H:%M").to_string(), "09:00", "{cron}");
             days.push(when.format("%a").to_string());
@@ -127,6 +129,7 @@ fn an_update_keeps_the_id_and_revalidates_the_cron() {
             wake: cron_wake("not cron"),
             coworker_id: None,
             run_limits: None,
+            tz: None,
             at_ms: 2,
         }),
         Err(ScheduleError::BadCron(_))
@@ -138,6 +141,7 @@ fn an_update_keeps_the_id_and_revalidates_the_cron() {
             wake: cron_wake("0 9 * * 1"),
             coworker_id: None,
             run_limits: None,
+            tz: None,
             at_ms: 2,
         })
         .expect("update");
@@ -155,9 +159,9 @@ fn an_update_keeps_the_id_and_revalidates_the_cron() {
 fn next_fire_is_strictly_after_the_given_moment() {
     // Every 2 seconds from t=0: the next fire after t=0 is t=2s, not t=0 again — `after` must
     // be exclusive or a claimed schedule would be claimed forever.
-    let next = next_fire_ms("*/2 * * * * *", 0).expect("a next occurrence");
+    let next = next_fire_ms("*/2 * * * * *", UTC, 0).expect("a next occurrence");
     assert_eq!(next, 2_000);
-    let after_that = next_fire_ms("*/2 * * * * *", next).expect("another");
+    let after_that = next_fire_ms("*/2 * * * * *", UTC, next).expect("another");
     assert_eq!(after_that, 4_000);
 }
 
@@ -170,6 +174,7 @@ fn a_bad_expression_is_refused_at_create() {
             name: String::new(),
             wake: cron_wake("every tuesday probably"),
             run_limits: RunLimits::default(),
+            tz: UTC.to_string(),
             at_ms: 0,
         })
         .expect_err("should refuse");
@@ -185,6 +190,7 @@ fn an_empty_prompt_is_refused() {
             name: String::new(),
             wake: cron_wake("*/2 * * * * *"),
             run_limits: RunLimits::default(),
+            tz: UTC.to_string(),
             at_ms: 0,
         })
         .expect_err("should refuse");
@@ -267,6 +273,7 @@ fn a_webhook_create_skips_the_clock_and_keeps_the_secret() {
                 webhook_key: "og_secret".to_string(),
             },
             run_limits: RunLimits::default(),
+            tz: UTC.to_string(),
             at_ms: 1,
         })
         .expect("webhook create");
@@ -291,6 +298,7 @@ fn a_webhook_without_a_secret_is_refused() {
                 webhook_key: "og_secret".to_string(),
             },
             run_limits: RunLimits::default(),
+            tz: UTC.to_string(),
             at_ms: 1,
         })
         .expect_err("empty hash");
@@ -403,6 +411,7 @@ fn an_update_can_hand_the_routine_to_another_coworker() {
             wake: cron_wake("0 */5 * * * *"),
             coworker_id: Some(CoworkerId::from_stored("cw_2")),
             run_limits: None,
+            tz: None,
             at_ms: 2,
         })
         .expect("update");
@@ -424,6 +433,7 @@ fn an_update_without_a_coworker_keeps_the_one_it_had() {
             wake: cron_wake("0 */5 * * * *"),
             coworker_id: None,
             run_limits: None,
+            tz: None,
             at_ms: 2,
         })
         .expect("update");
@@ -456,6 +466,7 @@ fn a_routine_keeps_its_limits_until_an_edit_replaces_them() {
             name: String::new(),
             wake: cron_wake("0 */5 * * * *"),
             run_limits: two,
+            tz: UTC.to_string(),
             at_ms: 1,
         })
         .expect("create");
@@ -468,6 +479,7 @@ fn a_routine_keeps_its_limits_until_an_edit_replaces_them() {
         wake: cron_wake("0 */5 * * * *"),
         coworker_id: None,
         run_limits,
+        tz: None,
         at_ms: 2,
     };
     for event in &schedule.decide(edit(None)).expect("rename") {
@@ -508,4 +520,135 @@ fn old_created_events_replay_as_cron() {
     assert_eq!(schedule.kind, WakeKind::Cron);
     assert!(schedule.hook_id.is_empty());
     assert!(schedule.webhook_key.is_empty());
+}
+
+/// A ROUTINE'S CRON IS READ IN ITS OWN ZONE (#316). Weekdays at nine in Manila (UTC+8, no summer
+/// time) is one in the morning UTC, the same day; the same cron in UTC is nine.
+#[test]
+fn a_cron_is_read_in_the_routines_own_zone() {
+    // Friday 2 October 2026, 00:00 UTC: Friday 08:00 in Manila.
+    let friday = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
+        .expect("a time")
+        .timestamp_millis();
+    let at = |tz: &str| {
+        let next = next_fire_ms("0 9 * * MON-FRI", tz, friday).expect("a next wake");
+        chrono::DateTime::from_timestamp_millis(next)
+            .expect("a time")
+            .to_rfc3339()
+    };
+    assert_eq!(at("Asia/Manila"), "2026-10-02T01:00:00+00:00");
+    assert_eq!(at(UTC), "2026-10-02T09:00:00+00:00");
+    assert_eq!(next_fire_ms("0 9 * * *", "Mars/Olympus_Mons", friday), None);
+}
+
+/// A zone is held to the IANA database in `decide`, in the account's own words, before the cron
+/// is asked anything: an unknown zone is not reported as a bad cron. An edit keeps its zone, or
+/// moves it; and a routine written before zones replays as the UTC its cron was read in.
+#[test]
+fn a_routine_keeps_an_iana_zone_and_refuses_any_other() {
+    let create = |tz: &str| ScheduleCommand::Create {
+        coworker_id: CoworkerId::from_stored("cw_1"),
+        prompt: "standup".to_string(),
+        name: String::new(),
+        wake: cron_wake("0 9 * * MON-FRI"),
+        run_limits: RunLimits::default(),
+        tz: tz.to_string(),
+        at_ms: 1,
+    };
+    let refused = Schedule::default()
+        .decide(create("asia/manila"))
+        .expect_err("a zone in the wrong case");
+    assert_eq!(
+        refused.to_string(),
+        "\"asia/manila\" is not an IANA time zone this server knows; send one like \"Europe/London\""
+    );
+    let created = Schedule::default().decide(create("Asia/Manila"));
+    let mut schedule = Schedule::replay(&created.expect("create"));
+    assert_eq!(schedule.tz, "Asia/Manila");
+    let edit = |tz: Option<&str>| ScheduleCommand::Update {
+        name: "standup".to_string(),
+        prompt: "standup".to_string(),
+        wake: cron_wake("0 10 * * MON-FRI"),
+        coworker_id: None,
+        run_limits: None,
+        tz: tz.map(str::to_string),
+        at_ms: 2,
+    };
+    for event in &schedule.decide(edit(None)).expect("an edit that keeps it") {
+        schedule.apply(event);
+    }
+    assert_eq!(schedule.tz, "Asia/Manila");
+    assert!(matches!(
+        schedule.decide(edit(Some("Nowhere"))),
+        Err(ScheduleError::UnknownTimeZone(_))
+    ));
+    for event in &schedule
+        .decide(edit(Some("Europe/London")))
+        .expect("move it")
+    {
+        schedule.apply(event);
+    }
+    assert_eq!(schedule.tz, "Europe/London");
+
+    let old: ScheduleEvent = serde_json::from_str(
+        r#"{"type":"created","coworker_id":"cw_1","cron":"0 0 9 * * 1","prompt":"x","at_ms":1}"#,
+    )
+    .expect("a created event from before zones");
+    assert_eq!(Schedule::replay(&[old]).tz, UTC);
+}
+
+/// THE ONE-MINUTE FLOOR (#315): only a seconds field other than `0` wakes more often than once a
+/// minute, and only a 6- or 7-field expression has one.
+#[test]
+fn only_a_seconds_field_other_than_zero_is_under_a_minute() {
+    for slow in [
+        "* * * * *",
+        "*/5 * * * *",
+        "0 * * * * *",
+        "0 0 9 1 1 * 2031",
+    ] {
+        assert!(!under_a_minute(slow), "{slow}");
+    }
+    for faster in [
+        "* * * * * *",
+        "*/2 * * * * *",
+        "30 * * * * *",
+        "0,30 * * * * *",
+    ] {
+        assert!(under_a_minute(faster), "{faster}");
+    }
+}
+
+/// A SKIPPED FIRING IS HELD TO A FIRING'S RULES and kept for the history: a paused routine skips
+/// nothing the clock or a hook asked for, and a person's "run now" is recorded either way.
+#[test]
+fn a_skip_is_recorded_under_the_rules_a_firing_is() {
+    let skip = |cause| {
+        ScheduleCommand::Skip(Skip {
+            cause,
+            code: "relay_offline".to_string(),
+            at_ms: 3,
+        })
+    };
+    let mut schedule = created();
+    for event in &schedule
+        .decide(skip(FireCause::Clock))
+        .expect("a clock skip")
+    {
+        schedule.apply(event);
+    }
+    assert_eq!(schedule.skipped.len(), 1);
+    assert_eq!(schedule.skipped[0].cause, FireCause::Clock);
+    assert!(schedule.clock_runs.is_empty(), "no run");
+    schedule.apply(&ScheduleEvent::Paused { at_ms: 4 });
+    assert!(matches!(
+        schedule.decide(skip(FireCause::Webhook)),
+        Err(ScheduleError::Paused)
+    ));
+    let events = schedule.decide(skip(FireCause::Manual)).expect("run now");
+    assert_eq!(events[0].event_type(), "schedule-skipped");
+    let written = serde_json::to_value(&events[0]).expect("serialise");
+    let expected = serde_json::json!({"type": "skipped", "cause": "manual",
+        "code": "relay_offline", "at_ms": 3});
+    assert_eq!(written, expected);
 }
