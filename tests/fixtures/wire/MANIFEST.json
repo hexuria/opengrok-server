@@ -1,5 +1,5 @@
 {
-  "server_sha": "608ff0b765bb1f490502cb9108218e80e991b3c7",
+  "server_sha": "e702e91e54c110430ad43a9976acef78e76c5688",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -375,8 +375,8 @@
       "source": "streamed or replayed by /inference-relay/requests, recorded from the test the_model_list_carries_the_macs_models_and_says_it_is_connected (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
-      "file": "relay/ping/a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
-      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+      "file": "relay/ping/a_coworker_on_its_own_plan_asks_the_mac_for_its_pin_and_one_off_it_the_setting.json",
+      "source": "streamed or replayed by /inference-relay/requests, recorded from the test a_coworker_on_its_own_plan_asks_the_mac_for_its_pin_and_one_off_it_the_setting (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "relay/ready/a_call_in_flight_when_its_stream_is_replaced_is_answered_all_the_same.json",
@@ -671,8 +671,8 @@
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects.json",
-      "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac-2.json",
+      "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__ag-ui_threads__thread_id_/200-a_hidden_turn_is_withheld_from_every_client_and_still_kept.json",
@@ -691,7 +691,7 @@
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test asking_without_the_frames_still_says_which_runs_exist (crates/opengrok-server/tests/against_a_whole_thread.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac-2.json",
+      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac-3.json",
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
@@ -1159,11 +1159,15 @@
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__schedules/200-a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing-2.json",
+      "source": "GET /schedules, recorded from the test a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-2.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing-2.json",
+      "file": "rest/GET__schedules/200-a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing-3.json",
       "source": "GET /schedules, recorded from the test a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
@@ -1701,6 +1705,22 @@
     {
       "file": "rest/POST__coworkers__coworker_id__approvals/422-use_skill_can_never_be_listed_as_needing_a_yes.json",
       "source": "POST /coworkers/{coworker_id}/approvals, recorded from the test use_skill_can_never_be_listed_as_needing_a_yes (crates/opengrok-server/tests/against_coworker_skills.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__coworkers__coworker_id__computer/200-a_rebuilt_box_that_loses_its_scope_leaves_the_disk_the_winner_runs_on.json",
+      "source": "POST /coworkers/{coworker_id}/computer, recorded from the test a_rebuilt_box_that_loses_its_scope_leaves_the_disk_the_winner_runs_on (crates/opengrok-server/tests/against_a_raced_computer.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__coworkers__coworker_id__computer/200-an_update_racing_a_heal_keeps_the_rebuilt_box_and_its_files.json",
+      "source": "POST /coworkers/{coworker_id}/computer, recorded from the test an_update_racing_a_heal_keeps_the_rebuilt_box_and_its_files (crates/opengrok-server/tests/against_a_raced_computer.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__coworkers__coworker_id__computer_reset/200-a_request_that_records_first_keeps_its_box_and_the_reset_destroys_its_own.json",
+      "source": "POST /coworkers/{coworker_id}/computer/reset, recorded from the test a_request_that_records_first_keeps_its_box_and_the_reset_destroys_its_own (crates/opengrok-server/tests/against_a_raced_computer.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__coworkers__coworker_id__computer_update/202-a_rebuilt_box_whose_record_fails_is_left_running_with_its_files.json",
+      "source": "POST /coworkers/{coworker_id}/computer/update, recorded from the test a_rebuilt_box_whose_record_fails_is_left_running_with_its_files (crates/opengrok-server/tests/against_a_raced_computer.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__coworkers__coworker_id__keys/201-a_bot_key_shakes_hands_and_a_computerless_coworker_lists_an_empty_toolbox.json",

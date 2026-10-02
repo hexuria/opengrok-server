@@ -1,0 +1,21 @@
+{
+  "method": "POST",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/computer",
+  "status": 200,
+  "body": {
+    "agentId": "cw_0199bb4e-0000-7000-8000-000000000001",
+    "state": "absent",
+    "vncUrl": null,
+    "boxId": "bx_gate_0199bb4e000070008000000000000002",
+    "update": {
+      "phase": "transferring",
+      "startedAtMs": 1790000000000,
+      "updatedAtMs": 1790000001000,
+      "error": null
+    },
+    "image": null,
+    "isEgressTunnelAvailable": false,
+    "shareScope": "user",
+    "egressPolicy": "ask"
+  }
+}

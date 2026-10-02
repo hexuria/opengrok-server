@@ -69,7 +69,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "ran",
             "timestamp": 100,
-            "durationMs": 155,
+            "durationMs": 153,
             "toolCallId": "mock-call-1"
           },
           {
