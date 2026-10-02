@@ -137,10 +137,11 @@ curl -fsS -X POST "$OG/schedules" -H "authorization: Bearer $TOKEN" -H 'content-
 # → {"id":…,"nextDueMs":…}
 ```
 
-Five fields are read as minute-first and promoted to the parser's seconds-first form
-(`normalized_cron`, `crates/opengrok-core/src/schedule.rs`), so `0 9 * * 1-5` means 09:00 on
-weekdays. `nextDueMs` in the reply says when that is on the server's clock. Its runs land in a
-thread whose id is the schedule's own. `GET /schedules` lists it, and `POST
+Five fields are standard cron, minute first, with 0 or 7 for Sunday and 1 for Monday. They are
+stored in the parser's seconds-first form with the days of the week named (`normalized_cron`,
+`crates/opengrok-core/src/schedule.rs`), so `0 9 * * 1-5` comes back as `0 0 9 * * MON-FRI`,
+09:00 on weekdays. `nextDueMs` in the reply says when that is on the server's clock. Its runs
+land in a thread whose id is the schedule's own. `GET /schedules` lists it, and `POST
 /schedules/{id}/pause` or `/resume` and `DELETE /schedules/{id}` manage it
 (`scripts/slice10-autonomy-smoke.sh`). *Unverified:* where NativeChat shows a routine's result.
 

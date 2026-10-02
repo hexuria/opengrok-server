@@ -6,11 +6,11 @@
     {
       "id": "sched_0199bb4e-0000-7000-8000-000000000001",
       "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
-      "name": "Inbox",
-      "cron": null,
-      "prompt": "sign in",
-      "kind": "webhook",
-      "active": true,
+      "name": "Weekly",
+      "cron": "0 0 9 * * MON",
+      "prompt": "write the weekly report",
+      "kind": "cron",
+      "active": false,
       "nextDueMs": null,
       "runLimits": {
         "maxRounds": null,
@@ -22,13 +22,7 @@
         "status": "running",
         "startedAtMs": 1790000000000,
         "finishedAtMs": null,
-        "summary": "Routine Inbox is running."
-      },
-      "webhook": {
-        "type": "webhook",
-        "url": "http://opengrok.lan:1447/hooks/hook_0199bb4e-0000-7000-8000-000000000004",
-        "key": "«redacted»",
-        "header": "Authorization: Bearer «redacted»"
+        "summary": "Routine Weekly is running."
       }
     }
   ]

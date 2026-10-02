@@ -74,28 +74,97 @@ pub enum FireCause {
     Webhook,
 }
 
-/// A cron expression the way people write them (5 fields), silently promoted to the 6-field form
-/// the parser wants (seconds first) so `0 9 * * 1` means "09:00 every Monday" and not a parse
-/// error. A 6- or 7-field expression passes through untouched — which is also what lets tests
-/// schedule in seconds.
-pub fn normalized_cron(expression: &str) -> String {
-    let fields = expression.split_whitespace().count();
-    if fields == 5 {
-        format!("0 {}", expression.trim())
-    } else {
-        expression.trim().to_string()
-    }
+/// The `cron` crate's names for the days, by standard cron's numbers: 0 and 7 are both Sunday.
+const WEEKDAYS: [&str; 8] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
+/// Why a numbered day of the week was refused, after the item itself.
+const NOT_A_DAY: &str = "is not a day of the week: a day is 0 to 7, where 0 and 7 are both \
+                         Sunday, or SUN to SAT, and a range runs forward and steps by 1 to 7";
+
+/// A cron expression the way people write them, 5 fields with standard cron's days of the week
+/// (0 or 7 for Sunday, 1 for Monday), promoted to the 6-field form the parser wants (seconds
+/// first) WITH THOSE DAYS NAMED: `0 9 * * 1` is stored as `0 0 9 * * MON`, 09:00 every Monday.
+/// The crate counts Sunday as 1 and refuses 0, so the digits handed over as written fired a day
+/// early (`1-5` ran Sunday to Thursday); a name is the same day to both countings.
+///
+/// A 6- or 7-field expression passes through untouched — which is also what lets tests schedule
+/// in seconds — SO ITS DAY OF THE WEEK IS THE CRATE'S, Sunday as 1. Every stored expression is
+/// one, and a row stored before this translation existed must fire where it always has.
+pub fn normalized_cron(expression: &str) -> Result<String, ScheduleError> {
+    let fields: Vec<&str> = expression.split_whitespace().collect();
+    let [minute, hour, day_of_month, month, days] = fields[..] else {
+        return Ok(expression.trim().to_string());
+    };
+    let days = named_weekdays(days)
+        .map_err(|why| ScheduleError::BadCron(format!("{} ({why})", expression.trim())))?;
+    Ok(format!("0 {minute} {hour} {day_of_month} {month} {days}"))
 }
 
-/// The inverse for the wire: the desktop's routine editor writes and re-reads the 5-field form,
-/// so a stored `0 0 9 * * 1` goes back out as `0 9 * * 1`. A 6-field expression whose seconds are
-/// not `0` (tests scheduling in seconds) is returned as it is — there is no 5-field form for it.
+/// Whether a day-of-week item counts its days by number: a digit before any step. Only those
+/// mean different days to the two countings. `*`, `?` and a name do not, and nor do their steps
+/// (`*/2` is Sunday, Tuesday, Thursday and Saturday to both).
+fn numbers_a_day(item: &str) -> bool {
+    let base = item.split_once('/').map_or(item, |(base, _)| base);
+    base.bytes().any(|b| b.is_ascii_digit())
+}
+
+/// A standard day-of-week field in the crate's names, item by item, so a list keeps its shape:
+/// `1,3,5` is `MON,WED,FRI` and `1-5/2` is `MON-FRI/2`. A lone number with a step runs to the
+/// field's end, 7, as the crate reads one in every field: `1/2` is Mon, Wed, Fri and Sun.
+fn named_weekdays(field: &str) -> Result<String, String> {
+    let mut named = Vec::new();
+    for item in field.split(',') {
+        if !numbers_a_day(item) {
+            named.push(item.to_string());
+            continue;
+        }
+        let base = item.split_once('/').map_or(item, |(base, _)| base);
+        let step = item.split_once('/').map(|(_, step)| step);
+        let refused = || format!("{item} {NOT_A_DAY}");
+        let number = |text: &str| match text.parse::<usize>() {
+            Ok(n) if n <= 7 && text.bytes().all(|b| b.is_ascii_digit()) => Ok(n),
+            _ => Err(refused()),
+        };
+        let (first, last) = match base.split_once('-') {
+            Some((first, last)) => (number(first)?, number(last)?),
+            None => {
+                let day = number(base)?;
+                (day, if step.is_some() { 7 } else { day })
+            }
+        };
+        let every = step.map_or(Ok(1), number)?;
+        if first > last || every == 0 {
+            return Err(refused());
+        }
+        // THE CRATE TAKES NO RANGE THAT WRAPS (`FRI-SUN` is its 6 to its 1, and refused), so a
+        // range ending on 7 stops at Saturday, and Sunday follows when the step lands on it.
+        let sunday = last == 7 && (1..7).contains(&first) && (7 - first) % every == 0;
+        let last = if first < 7 { last.min(6) } else { last };
+        let step = step.map_or(String::new(), |step| format!("/{step}"));
+        named.push(if first == last {
+            WEEKDAYS[first].to_string()
+        } else {
+            format!("{}-{}{step}", WEEKDAYS[first], WEEKDAYS[last])
+        });
+        if sunday {
+            named.push("SUN".to_string());
+        }
+    }
+    Ok(named.join(","))
+}
+
+/// The inverse, as a client reads a stored expression back (NativeChat's `from_server_cron`
+/// drops the seconds the same way): `0 0 9 * * MON` reads as `0 9 * * MON`, the same day to
+/// either counting. A 6-field expression whose seconds are not `0` (tests scheduling in seconds)
+/// is returned as it is — there is no 5-field form for it — and so is one that numbers its days
+/// of the week: those are the crate's numbers, and read as 5 fields they would land a day later.
 pub fn display_cron(normalized: &str) -> String {
     let fields: Vec<&str> = normalized.split_whitespace().collect();
-    if fields.len() == 6 && fields[0] == "0" {
-        fields[1..].join(" ")
-    } else {
-        normalized.to_string()
+    match fields[..] {
+        ["0", minute, hour, day_of_month, month, days] if !days.split(',').any(numbers_a_day) => {
+            format!("{minute} {hour} {day_of_month} {month} {days}")
+        }
+        _ => normalized.to_string(),
     }
 }
 
@@ -103,7 +172,7 @@ pub fn display_cron(normalized: &str) -> String {
 /// with no future occurrence (a fixed date already past) — and the caller must treat that as "done
 /// firing", not as an error.
 pub fn next_fire_ms(expression: &str, after_ms: i64) -> Option<i64> {
-    let schedule = cron::Schedule::from_str(&normalized_cron(expression)).ok()?;
+    let schedule = cron::Schedule::from_str(&normalized_cron(expression).ok()?).ok()?;
     let after = chrono::DateTime::from_timestamp_millis(after_ms)?;
     schedule
         .after(&after)
@@ -428,7 +497,7 @@ impl Schedule {
         let name = name.trim().to_string();
         match wake {
             Wake::Cron { cron } => {
-                let cron = normalized_cron(&cron);
+                let cron = normalized_cron(&cron)?;
                 // Accepted must mean "will fire": an unparseable expression, or one with no
                 // future occurrence at all, is refused here rather than stored as a dead row.
                 if next_fire_ms(&cron, at_ms).is_none() {
@@ -488,7 +557,7 @@ impl Schedule {
         let name = name.trim().to_string();
         match wake {
             Wake::Cron { cron } => {
-                let cron = normalized_cron(&cron);
+                let cron = normalized_cron(&cron)?;
                 if next_fire_ms(&cron, at_ms).is_none() {
                     return Err(ScheduleError::BadCron(cron));
                 }
@@ -676,443 +745,5 @@ pub struct ScheduleView {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used, clippy::panic)]
-
-    use super::*;
-
-    fn created() -> Schedule {
-        Schedule::replay(&[ScheduleEvent::Created {
-            coworker_id: CoworkerId::from_stored("cw_1"),
-            cron: "0 */5 * * * *".to_string(),
-            prompt: "check the queue".to_string(),
-            name: "queue check".to_string(),
-            kind: WakeKind::Cron,
-            hook_id: String::new(),
-            secret_hash: String::new(),
-            webhook_key: String::new(),
-            run_limits: RunLimits::default(),
-            at_ms: 1_000,
-        }])
-    }
-
-    fn webhook() -> Schedule {
-        Schedule::replay(&[ScheduleEvent::Created {
-            coworker_id: CoworkerId::from_stored("cw_1"),
-            cron: String::new(),
-            prompt: "handle the ping".to_string(),
-            name: "todo ping".to_string(),
-            kind: WakeKind::Webhook,
-            hook_id: "hook_abc".to_string(),
-            secret_hash: "hash".to_string(),
-            webhook_key: "og_secret".to_string(),
-            run_limits: RunLimits::default(),
-            at_ms: 1_000,
-        }])
-    }
-
-    fn cron_wake(cron: &str) -> Wake {
-        Wake::Cron {
-            cron: cron.to_string(),
-        }
-    }
-
-    #[test]
-    fn five_field_cron_is_promoted_and_six_field_is_kept() {
-        assert_eq!(normalized_cron("*/5 * * * *"), "0 */5 * * * *");
-        assert_eq!(normalized_cron("*/2 * * * * *"), "*/2 * * * * *");
-    }
-
-    #[test]
-    fn an_update_keeps_the_id_and_revalidates_the_cron() {
-        let mut schedule = created();
-        assert!(matches!(
-            schedule.decide(ScheduleCommand::Update {
-                name: "x".to_string(),
-                prompt: "y".to_string(),
-                wake: cron_wake("not cron"),
-                coworker_id: None,
-                run_limits: None,
-                at_ms: 2,
-            }),
-            Err(ScheduleError::BadCron(_))
-        ));
-        let events = schedule
-            .decide(ScheduleCommand::Update {
-                name: "Monday report".to_string(),
-                prompt: "write the weekly report".to_string(),
-                wake: cron_wake("0 9 * * 1"),
-                coworker_id: None,
-                run_limits: None,
-                at_ms: 2,
-            })
-            .expect("update");
-        for event in &events {
-            schedule.apply(event);
-        }
-        assert_eq!(schedule.name, "Monday report");
-        assert_eq!(schedule.cron, "0 0 9 * * 1");
-        assert_eq!(display_cron(&schedule.cron), "0 9 * * 1");
-        assert_eq!(display_cron("*/2 * * * * *"), "*/2 * * * * *");
-        assert_eq!(schedule.prompt, "write the weekly report");
-    }
-
-    #[test]
-    fn next_fire_is_strictly_after_the_given_moment() {
-        // Every 2 seconds from t=0: the next fire after t=0 is t=2s, not t=0 again — `after` must
-        // be exclusive or a claimed schedule would be claimed forever.
-        let next = next_fire_ms("*/2 * * * * *", 0).expect("a next occurrence");
-        assert_eq!(next, 2_000);
-        let after_that = next_fire_ms("*/2 * * * * *", next).expect("another");
-        assert_eq!(after_that, 4_000);
-    }
-
-    #[test]
-    fn a_bad_expression_is_refused_at_create() {
-        let error = Schedule::default()
-            .decide(ScheduleCommand::Create {
-                coworker_id: CoworkerId::from_stored("cw_1"),
-                prompt: "hi".to_string(),
-                name: String::new(),
-                wake: cron_wake("every tuesday probably"),
-                run_limits: RunLimits::default(),
-                at_ms: 0,
-            })
-            .expect_err("should refuse");
-        assert!(matches!(error, ScheduleError::BadCron(_)));
-    }
-
-    #[test]
-    fn an_empty_prompt_is_refused() {
-        let error = Schedule::default()
-            .decide(ScheduleCommand::Create {
-                coworker_id: CoworkerId::from_stored("cw_1"),
-                prompt: "   ".to_string(),
-                name: String::new(),
-                wake: cron_wake("*/2 * * * * *"),
-                run_limits: RunLimits::default(),
-                at_ms: 0,
-            })
-            .expect_err("should refuse");
-        assert!(matches!(error, ScheduleError::EmptyPrompt));
-    }
-
-    #[test]
-    fn a_paused_schedule_cannot_fire() {
-        let mut schedule = created();
-        schedule.apply(&ScheduleEvent::Paused { at_ms: 2_000 });
-        let error = schedule
-            .decide(ScheduleCommand::Fire {
-                run_id: RunId::from_stored("run_1"),
-                cause: FireCause::Clock,
-                at_ms: 3_000,
-            })
-            .expect_err("paused must not fire");
-        // A person's "run now" is the exception: they asked.
-        let events = schedule
-            .decide(ScheduleCommand::Fire {
-                run_id: RunId::from_stored("run_manual"),
-                cause: FireCause::Manual,
-                at_ms: 3_000,
-            })
-            .expect("a manual fire on a paused schedule");
-        for event in &events {
-            schedule.apply(event);
-        }
-        assert!(schedule.manual_runs.contains("run_manual"));
-        assert!(matches!(error, ScheduleError::Paused));
-    }
-
-    #[test]
-    fn pause_resume_fire_round_trip() {
-        let mut schedule = created();
-        schedule.apply(&ScheduleEvent::Paused { at_ms: 2 });
-        let events = schedule
-            .decide(ScheduleCommand::Resume { at_ms: 3 })
-            .expect("resume");
-        for event in &events {
-            schedule.apply(event);
-        }
-        schedule
-            .decide(ScheduleCommand::Fire {
-                run_id: RunId::from_stored("run_1"),
-                cause: FireCause::Clock,
-                at_ms: 4,
-            })
-            .expect("a resumed schedule fires");
-    }
-
-    #[test]
-    fn a_deleted_schedule_refuses_everything() {
-        let mut schedule = created();
-        schedule.apply(&ScheduleEvent::Deleted { at_ms: 2 });
-        assert!(matches!(
-            schedule.decide(ScheduleCommand::Fire {
-                run_id: RunId::from_stored("run_1"),
-                cause: FireCause::Clock,
-                at_ms: 3,
-            }),
-            Err(ScheduleError::Deleted)
-        ));
-        assert!(matches!(
-            schedule.decide(ScheduleCommand::Pause { at_ms: 3 }),
-            Err(ScheduleError::Deleted)
-        ));
-    }
-
-    #[test]
-    fn a_webhook_create_skips_the_clock_and_keeps_the_secret() {
-        let events = Schedule::default()
-            .decide(ScheduleCommand::Create {
-                coworker_id: CoworkerId::from_stored("cw_1"),
-                prompt: "handle the ping".to_string(),
-                name: "todo ping".to_string(),
-                wake: Wake::Webhook {
-                    hook_id: "hook_abc".to_string(),
-                    secret_hash: "hash".to_string(),
-                    webhook_key: "og_secret".to_string(),
-                },
-                run_limits: RunLimits::default(),
-                at_ms: 1,
-            })
-            .expect("webhook create");
-        let schedule = Schedule::replay(&events);
-        assert_eq!(schedule.kind, WakeKind::Webhook);
-        assert!(schedule.cron.is_empty());
-        assert_eq!(schedule.hook_id, "hook_abc");
-        assert_eq!(schedule.webhook_key, "og_secret");
-        assert_eq!(schedule.secret_hash, "hash");
-    }
-
-    #[test]
-    fn a_webhook_without_a_secret_is_refused() {
-        let error = Schedule::default()
-            .decide(ScheduleCommand::Create {
-                coworker_id: CoworkerId::from_stored("cw_1"),
-                prompt: "handle the ping".to_string(),
-                name: "todo ping".to_string(),
-                wake: Wake::Webhook {
-                    hook_id: "hook_abc".to_string(),
-                    secret_hash: String::new(),
-                    webhook_key: "og_secret".to_string(),
-                },
-                run_limits: RunLimits::default(),
-                at_ms: 1,
-            })
-            .expect_err("empty hash");
-        assert!(matches!(error, ScheduleError::BadWebhook));
-    }
-
-    #[test]
-    fn a_paused_webhook_refuses_an_inbound_fire_but_not_run_now() {
-        let mut schedule = webhook();
-        schedule.apply(&ScheduleEvent::Paused { at_ms: 2 });
-        assert!(matches!(
-            schedule.decide(ScheduleCommand::Fire {
-                run_id: RunId::from_stored("run_hook"),
-                cause: FireCause::Webhook,
-                at_ms: 3,
-            }),
-            Err(ScheduleError::Paused)
-        ));
-        let events = schedule
-            .decide(ScheduleCommand::Fire {
-                run_id: RunId::from_stored("run_manual"),
-                cause: FireCause::Manual,
-                at_ms: 3,
-            })
-            .expect("run now on a paused webhook");
-        for event in &events {
-            schedule.apply(event);
-        }
-        assert!(schedule.manual_runs.contains("run_manual"));
-        assert!(schedule.webhook_runs.is_empty());
-    }
-
-    #[test]
-    fn rotating_the_secret_replaces_the_key_and_keeps_the_hook_id() {
-        let mut schedule = webhook();
-        let events = schedule
-            .decide(ScheduleCommand::RotateWebhookSecret {
-                secret_hash: "hash2".to_string(),
-                webhook_key: "og_new".to_string(),
-                at_ms: 2,
-            })
-            .expect("rotate");
-        for event in &events {
-            schedule.apply(event);
-        }
-        assert_eq!(schedule.hook_id, "hook_abc");
-        assert_eq!(schedule.secret_hash, "hash2");
-        assert_eq!(schedule.webhook_key, "og_new");
-        assert!(matches!(
-            created().decide(ScheduleCommand::RotateWebhookSecret {
-                secret_hash: "x".to_string(),
-                webhook_key: "og_y".to_string(),
-                at_ms: 2,
-            }),
-            Err(ScheduleError::NotWebhook)
-        ));
-    }
-
-    #[test]
-    fn a_webhook_fire_is_labelled_webhook_not_manual() {
-        let mut schedule = webhook();
-        let events = schedule
-            .decide(ScheduleCommand::Fire {
-                run_id: RunId::from_stored("run_hook"),
-                cause: FireCause::Webhook,
-                at_ms: 2,
-            })
-            .expect("webhook fire");
-        for event in &events {
-            schedule.apply(event);
-        }
-        assert!(schedule.webhook_runs.contains("run_hook"));
-        assert!(!schedule.manual_runs.contains("run_hook"));
-    }
-
-    /// The routine's thread is its id, and a person can reply into it; a run the routine never
-    /// fired must not be listed as one the clock did. So every firing is remembered by cause.
-    #[test]
-    fn every_firing_is_remembered_by_what_caused_it() {
-        let mut schedule = created();
-        for (run, cause) in [
-            ("run_clock", FireCause::Clock),
-            ("run_manual", FireCause::Manual),
-        ] {
-            let events = schedule
-                .decide(ScheduleCommand::Fire {
-                    run_id: RunId::from_stored(run),
-                    cause,
-                    at_ms: 2,
-                })
-                .expect("fire");
-            for event in &events {
-                schedule.apply(event);
-            }
-        }
-        assert!(schedule.clock_runs.contains("run_clock"));
-        assert!(!schedule.clock_runs.contains("run_manual"));
-        assert!(schedule.manual_runs.contains("run_manual"));
-    }
-
-    /// A ROUTINE CAN CHANGE HANDS WITHOUT LOSING ITS HISTORY. Delete-and-recreate would mint a
-    /// new id, and the id is the routine's thread — every run it ever made would fall off it.
-    #[test]
-    fn an_update_can_hand_the_routine_to_another_coworker() {
-        let mut schedule = created();
-        let events = schedule
-            .decide(ScheduleCommand::Update {
-                name: "queue check".to_string(),
-                prompt: "check the queue".to_string(),
-                wake: cron_wake("0 */5 * * * *"),
-                coworker_id: Some(CoworkerId::from_stored("cw_2")),
-                run_limits: None,
-                at_ms: 2,
-            })
-            .expect("update");
-        for event in &events {
-            schedule.apply(event);
-        }
-        assert_eq!(schedule.coworker_id, Some(CoworkerId::from_stored("cw_2")));
-    }
-
-    /// An edit that does not name a coworker keeps the one it had — and so does every
-    /// `schedule-updated` written before the field existed.
-    #[test]
-    fn an_update_without_a_coworker_keeps_the_one_it_had() {
-        let mut schedule = created();
-        let events = schedule
-            .decide(ScheduleCommand::Update {
-                name: "renamed".to_string(),
-                prompt: "check the queue".to_string(),
-                wake: cron_wake("0 */5 * * * *"),
-                coworker_id: None,
-                run_limits: None,
-                at_ms: 2,
-            })
-            .expect("update");
-        for event in &events {
-            schedule.apply(event);
-        }
-        assert_eq!(schedule.coworker_id, Some(CoworkerId::from_stored("cw_1")));
-
-        let old: ScheduleEvent = serde_json::from_str(
-            r#"{"type":"updated","name":"n","cron":"0 */5 * * * *","prompt":"p","at_ms":3}"#,
-        )
-        .expect("an updated event from before coworker_id");
-        schedule.apply(&old);
-        assert_eq!(schedule.coworker_id, Some(CoworkerId::from_stored("cw_1")));
-    }
-
-    /// A routine's limits are set at create, kept by an edit that says nothing about them, and
-    /// replaced whole by one that does — and every event written before limits existed replays
-    /// as one that set or changed none.
-    #[test]
-    fn a_routine_keeps_its_limits_until_an_edit_replaces_them() {
-        let two = RunLimits {
-            max_rounds: std::num::NonZeroU32::new(2),
-            ..RunLimits::default()
-        };
-        let events = Schedule::default()
-            .decide(ScheduleCommand::Create {
-                coworker_id: CoworkerId::from_stored("cw_1"),
-                prompt: "check the queue".to_string(),
-                name: String::new(),
-                wake: cron_wake("0 */5 * * * *"),
-                run_limits: two,
-                at_ms: 1,
-            })
-            .expect("create");
-        let mut schedule = Schedule::replay(&events);
-        assert_eq!(schedule.run_limits, two);
-
-        let edit = |run_limits| ScheduleCommand::Update {
-            name: "renamed".to_string(),
-            prompt: "check the queue".to_string(),
-            wake: cron_wake("0 */5 * * * *"),
-            coworker_id: None,
-            run_limits,
-            at_ms: 2,
-        };
-        for event in &schedule.decide(edit(None)).expect("rename") {
-            schedule.apply(event);
-        }
-        assert_eq!(
-            schedule.run_limits, two,
-            "an edit that names no limits keeps them"
-        );
-        let old: ScheduleEvent = serde_json::from_str(
-            r#"{"type":"updated","name":"n","cron":"0 */5 * * * *","prompt":"p","at_ms":3}"#,
-        )
-        .expect("an updated event from before run limits");
-        schedule.apply(&old);
-        assert_eq!(schedule.run_limits, two);
-        for event in &schedule
-            .decide(edit(Some(RunLimits::default())))
-            .expect("clear")
-        {
-            schedule.apply(event);
-        }
-        assert!(schedule.run_limits.is_empty(), "replaced whole, so cleared");
-
-        let old: ScheduleEvent = serde_json::from_str(
-            r#"{"type":"created","coworker_id":"cw_1","cron":"0 */5 * * * *","prompt":"x","at_ms":1}"#,
-        )
-        .expect("a created event from before run limits");
-        assert!(Schedule::replay(&[old]).run_limits.is_empty());
-    }
-
-    #[test]
-    fn old_created_events_replay_as_cron() {
-        let event: ScheduleEvent = serde_json::from_str(
-            r#"{"type":"created","coworker_id":"cw_1","cron":"0 */5 * * * *","prompt":"x","name":"n","at_ms":1}"#,
-        )
-        .expect("old created");
-        let schedule = Schedule::replay(&[event]);
-        assert_eq!(schedule.kind, WakeKind::Cron);
-        assert!(schedule.hook_id.is_empty());
-        assert!(schedule.webhook_key.is_empty());
-    }
-}
+#[path = "../tests/unit/schedule.rs"]
+mod tests;
