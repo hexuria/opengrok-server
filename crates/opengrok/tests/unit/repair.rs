@@ -1,7 +1,7 @@
 //! The boot pass on seeded rows (#302): it reports a stray box unless told to destroy it, destroys
 //! only #302's strays when told, and never touches a box recorded only on a coworker's row, which
 //! is how a box hired before 31 Aug 2026 was kept. Needs Postgres; skips loudly without
-//! OG_DATABASE_URL.
+//! OG_DATABASE_URL. And what boot says about the Local VM image (#301), which needs neither.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_store::PgStore;
 
-use super::{destroys, stray_boxes};
+use super::{destroys, say_image, stray_boxes};
 
 macro_rules! database_or_skip {
     () => {
@@ -377,4 +377,65 @@ async fn a_box_recorded_only_on_a_coworkers_row_is_never_destroyed() {
     for id in every {
         assert!(h.boxes.running().contains(id), "{id} still runs");
     }
+}
+
+/// What `say` logs, as the boot's own formatter writes it, without colour.
+fn logged(say: impl FnOnce()) -> String {
+    let written = Log::default();
+    let sink = written.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, say);
+    String::from_utf8_lossy(&written.0.lock().unwrap()).into_owned()
+}
+
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Log {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A `:local` image this host never built is said once, at warn, with the command that builds
+/// it (#301). Until then the first sign was a refused hire.
+#[test]
+fn a_local_image_never_built_is_warned_about_with_the_command_that_builds_it() {
+    let said = logged(|| say_image("grok-box:local", Ok(false)));
+    assert_eq!(said.lines().count(), 1, "{said}");
+    assert!(said.contains(" WARN "), "{said}");
+    assert!(said.contains("hexuria/box"), "{said}");
+    let build = "docker build -f docker/Dockerfile -t grok-box:local .";
+    assert!(said.contains(build), "{said}");
+}
+
+/// A Docker that cannot answer is warned about too, as no Local VM can be made without it: by its
+/// code, never its words, which can carry an address (`unix:///var/run/docker.sock`).
+#[test]
+fn a_docker_that_cannot_answer_is_warned_about_by_its_code() {
+    let words = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock";
+    let said = logged(|| say_image("grok-box:local", Err(BoxError::Unreachable(words.into()))));
+    assert!(
+        said.contains(" WARN ") && said.contains("provider_unreachable"),
+        "{said}"
+    );
+    assert!(!said.contains("docker.sock"), "{said}");
+}
+
+/// An image Docker has says nothing, and one it can pull is no fault: the first Local VM pulls it.
+#[test]
+fn an_image_docker_has_or_can_pull_is_not_warned_about() {
+    assert_eq!(logged(|| say_image("grok-box:local", Ok(true))), "");
+    let pulled = logged(|| say_image("debian:stable-slim", Ok(false)));
+    assert!(
+        !pulled.contains(" WARN ") && pulled.contains("pulls it"),
+        "{pulled}"
+    );
 }

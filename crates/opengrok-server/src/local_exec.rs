@@ -233,18 +233,6 @@ pub async fn load_policy(
     }
 }
 
-/// Persisted policy plus this process's session allows.
-pub async fn load_effective_policy(
-    store: &opengrok_store::PgStore,
-    broker: &LocalExecBroker,
-    account_id: &str,
-    machine_id: &str,
-) -> LocalExecPolicy {
-    let mut policy = load_policy(store, account_id, machine_id).await;
-    policy.session_allow = broker.session_allows(account_id, machine_id).await;
-    policy
-}
-
 // ---------------------------------------------------------------------------------------------
 // The account-facing management API: a person sets their own machines' mode and allow/deny rules.
 // (The daemon poll endpoints and the enqueue path are separate, later slices.) Account-authed via
@@ -351,9 +339,11 @@ async fn enrol_daemon(
     enrolled
         .await
         .map_err(|_| failed("could not enrol the machine"))?;
-    // A RE-ENROLMENT RETIRES THE OLD TOKEN'S RELAY STREAM TOO, as revoke does (review of #298):
-    // after the row, so a stream opening with the old token meanwhile fails its second check.
+    // A RE-ENROLMENT RETIRES THE OLD TOKEN'S STREAMS TOO, as revoke does: its relay stream (review
+    // of #298) and its command stream (#299), which was still sent commands. After the row, so a
+    // stream opening with the old token meanwhile fails its second check.
     state.relay.disconnect(account, &machine_id);
+    state.local_exec.disconnect(account, &machine_id).await;
     Ok(Json(serde_json::json!({ "machineId": machine_id, "token": token })).into_response())
 }
 
@@ -364,11 +354,13 @@ async fn revoke_daemon(
     axum::extract::Path(machine_id): axum::extract::Path<String>,
 ) -> Result<Response, Response> {
     let (account_id, ..) = crate::account_api::caller(&state, &headers).await?;
-    let revoked = state.store.revoke_daemon(account_id.as_str(), &machine_id);
+    let account = account_id.as_str();
+    let revoked = state.store.revoke_daemon(account, &machine_id);
     revoked.await.map_err(|_| failed("could not revoke"))?;
-    // Its relay stream too (#292): a stream opened before the revoke would still be sent the
-    // person's turns, though no answer from it would be taken.
-    state.relay.disconnect(account_id.as_str(), &machine_id);
+    // Its streams too (#292, #299): one opened before the revoke would still be sent the person's
+    // turns and commands, though no answer from it would be taken.
+    state.relay.disconnect(account, &machine_id);
+    state.local_exec.disconnect(account, &machine_id).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -598,8 +590,7 @@ pub async fn enqueue_and_wait(
     approval_id: &str,
     pre_approved: bool,
 ) -> EnqueueResult {
-    let policy =
-        load_effective_policy(&state.store, &state.local_exec, account_id, machine_id).await;
+    let policy = load_policy(&state.store, account_id, machine_id).await;
     let decision = decide(&policy, command);
     let request_id = uuid::Uuid::now_v7().to_string();
     let origin_label = origin.label();
@@ -793,35 +784,40 @@ async fn run_direct(
 /// `GET /local-exec/requests` — the daemon opens this ONCE and holds it. The server registers the
 /// stream as this machine's provider and pushes newline-delimited JSON frames (`welcome`, `exec`,
 /// `cancel`) down it. Daemon-token authed: the token names the machine, and only that machine's
-/// commands ever come down this stream.
+/// commands ever come down this stream, which ends when the token is retired (#299).
 async fn poll_requests(State(state): State<AuthState>, headers: HeaderMap) -> Response {
-    let Some((_account_id, machine_id)) = daemon_from_bearer(&state, &headers).await else {
-        return (StatusCode::UNAUTHORIZED, "enrol this machine first").into_response();
+    let enrol_first = || (StatusCode::UNAUTHORIZED, "enrol this machine first").into_response();
+    let Some((account_id, machine_id)) = daemon_from_bearer(&state, &headers).await else {
+        return enrol_first();
     };
     use futures::StreamExt as _;
-    let rx = state.local_exec.connect(&machine_id).await;
-    // The reconnect hint goes first, before any frame (mirrors the gateway `/events` stream and what
-    // the daemon's SSE reader expects).
-    let opening =
-        futures::stream::once(async { Ok::<_, Infallible>("retry: 1000\n\n".to_string()) });
-    let frames = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv()
-            .await
-            .map(|frame| (Ok::<_, Infallible>(format!("data: {frame}\n\n")), rx))
+    let rx = state.local_exec.connect(&account_id, &machine_id).await;
+    // A TOKEN RETIRED AS ITS STREAM OPENED KEEPS NO STREAM, as on the relay: revoke and
+    // re-enrolment end the machine's stream after its row changes, and this connect may have come
+    // after that. Dropped here, the stream is closed to the broker before its daemon is sent a
+    // frame.
+    if daemon_from_bearer(&state, &headers).await.is_none() {
+        return enrol_first();
+    }
+    // The reconnect hint first (the gateway `/events` stream's, which the daemon's SSE reader
+    // expects), then the frames, and every 15 s a ping, an SSE comment the reader skips, so a proxy
+    // does not close an idle stream. Pings outlive the frames of a stream a reconnect replaced; the
+    // broker's `null` (`disconnect`) ends the stream.
+    let every = Duration::from_secs(15);
+    let ping = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+    let frames = futures::stream::unfold((rx, ping), |(mut rx, mut ping)| async move {
+        let chunk = tokio::select! {
+            Some(frame) = rx.recv() => (!frame.is_null()).then(|| format!("data: {frame}\n\n"))?,
+            _ = ping.tick() => ":ping\n\n".to_string(),
+        };
+        Some((Ok::<_, Infallible>(chunk), (rx, ping)))
     });
-    // Keepalives so a proxy does not close an idle stream; they are SSE comments the reader skips.
-    let pings = futures::stream::unfold((), |()| async {
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        Some((Ok::<_, Infallible>(":ping\n\n".to_string()), ()))
-    });
-    (
-        [
-            (header::CONTENT_TYPE, "text/event-stream"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        axum::body::Body::from_stream(opening.chain(futures::stream::select(frames, pings))),
-    )
-        .into_response()
+    let opening = futures::stream::once(async { Ok("retry: 1000\n\n".to_string()) });
+    let sse = [
+        (header::CONTENT_TYPE, "text/event-stream"),
+        (header::CACHE_CONTROL, "no-cache"),
+    ];
+    (sse, axum::body::Body::from_stream(opening.chain(frames))).into_response()
 }
 
 /// `POST /local-exec/responses` — the daemon posts back on this. A `client` frame carries one
@@ -952,13 +948,7 @@ impl opengrok_tools::UserMachineSink for ReverseExecSink {
         account_id: &opengrok_core::id::AccountId,
         command: &str,
     ) -> opengrok_tools::UserMachineVerdict {
-        let policy = load_effective_policy(
-            &self.auth.store,
-            &self.auth.local_exec,
-            account_id.as_str(),
-            &self.machine_id,
-        )
-        .await;
+        let policy = load_policy(&self.auth.store, account_id.as_str(), &self.machine_id).await;
         match decide(&policy, command) {
             LocalExecDecision::Allow => opengrok_tools::UserMachineVerdict::Allow,
             LocalExecDecision::Ask => opengrok_tools::UserMachineVerdict::Ask,

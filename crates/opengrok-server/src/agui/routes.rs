@@ -497,7 +497,7 @@ pub(crate) async fn tools_for_coworker(
                     running = true;
                 }
                 None => {
-                    tracing::warn!(%error, box_id, "the box's state could not be read; a tool that needs it will say so")
+                    tracing::warn!(scope, scope_id = %scope_id, kind = %kind, code = %error.code(), box_id, "the box's state could not be read; a tool that needs it will say so")
                 }
             }
         }

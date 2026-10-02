@@ -166,10 +166,10 @@ pub async fn take_over_with_local_docker(
     replacing: Option<&str>,
 ) -> Option<(Arc<dyn Computer>, String)> {
     let Some(computer) = provider_for(state, org_id, "local-docker").await else {
-        tracing::warn!(scope, scope_id, %refused, "computer: the provider refused and this server runs no Local VM to fall back on");
+        tracing::warn!(scope, scope_id, kind = "ascii", code = %refused.code(), box_id = ?replacing, "computer: the provider refused and this server runs no Local VM to fall back on");
         return None;
     };
-    tracing::warn!(scope, scope_id, %refused, "computer: the provider refused; asking local Docker");
+    tracing::warn!(scope, scope_id, kind = "ascii", code = %refused.code(), box_id = ?replacing, "computer: the provider refused; asking local Docker");
     let box_id = computer.create(None).await.ok()?;
     let at_ms = chrono::Utc::now().timestamp_millis();
     let store = &state.auth.store;
@@ -188,7 +188,8 @@ pub async fn take_over_with_local_docker(
     {
         tracing::warn!(scope, scope_id, %error, "computer: the takeover could not be stamped on the account; the pane will not say the box changed");
     }
-    tracing::warn!(scope, scope_id, box_id = %box_id, "computer: local Docker box is this scope's computer");
+    // As a refused hire's record is (#301). box.ascii.dev is the one kind taken over (`FELL_BACK`).
+    tracing::warn!(scope, scope_id, kind = "ascii", code = %refused.code(), box_id = %box_id, "computer: refused; local Docker box is this scope's computer, and the account says why");
     Some((computer, box_id))
 }
 
@@ -246,8 +247,8 @@ async fn claim(
             Slot::Rebuilt(_) => provider.discard(box_id).await,
             Slot::Empty | Slot::Replacing(_) => provider.destroy(box_id).await,
         };
-        let removed = removed.map_err(|error| error.to_string());
-        tracing::warn!(scope, scope_id, box_id, kept = ?kept, removed = ?removed, "computer: the scope's box is not the one made here, so it was removed");
+        let removed = removed.map_err(|error| error.code());
+        tracing::warn!(scope, scope_id, kind, box_id, kept = ?kept, removed = ?removed, "computer: the scope's box is not the one made here, so it was removed");
     }
     Ok(kept)
 }
@@ -302,14 +303,19 @@ pub struct Provisioned {
 }
 
 /// Record a provisioning failure at the ACCOUNT level (so a boxless account can say why before any
-/// agent exists) and return it. Never fatal — the hire stands, boxless.
+/// agent exists) and return it. Never fatal — the hire stands, boxless. SAID AT WARN, with the
+/// scope, the kind and the code: the row alone was silent, and a host whose image was missing
+/// refused every "Get a computer" under a clean log (#301). Never the message: a provider's
+/// words can carry its URLs.
 async fn record_error(
     state: &AgUiState,
     account_id: &AccountId,
+    (scope, scope_id, kind): (&str, &str, &str),
     code: &str,
     message: &str,
     at_ms: i64,
 ) -> Provisioned {
+    tracing::warn!(scope, scope_id, kind, %code, "computer: none given; the account says why");
     let _ = state
         .auth
         .store
@@ -342,9 +348,6 @@ pub fn error_json_at(error: &Option<(String, String, i64)>) -> Value {
     }
 }
 
-/// Ensure the account has its one computer and assign it (shared) to `coworker`. The account's
-/// first agent creates the box and records it; every later agent reuses the same box. Applies the
-/// assignment to `coworker`; returns the events to persist, the box id, and any error. Never raises.
 /// The effective sharing mode for an account and its org: the account's OVERRIDE if set, else the
 /// org DEFAULT, else the built-in default (per-account). Returns (mode, org_id).
 pub async fn resolve_mode(state: &AgUiState, account_id: &AccountId) -> (String, Option<String>) {
@@ -442,18 +445,18 @@ pub async fn warm_scope_for_account(state: &AgUiState, account_id: &AccountId) {
         _ => return,
     };
     match ensure_scope_box(state, None, org_id.as_deref(), scope, &scope_id).await {
-        Ok((box_id, _)) => tracing::info!(
+        Ok((box_id, ..)) => tracing::info!(
             scope,
             scope_id,
             box_id,
             "computer: warmed for a new account"
         ),
-        Err((code, message)) => {
+        Err((kind, code, _)) => {
             tracing::warn!(
                 scope,
                 scope_id,
+                kind,
                 code,
-                message,
                 "computer: could not warm for a new account"
             )
         }
@@ -481,10 +484,11 @@ pub async fn ensure_computer_for(
         coworker.is_group(),
     );
     let ensured = ensure_scope_box(state, Some(account_id), org_id.as_deref(), scope, &scope_id);
-    let (box_id, fell_back) = match ensured.await {
+    let (box_id, kind, fell_back) = match ensured.await {
         Ok(ensured) => ensured,
-        Err((code, message)) => {
-            return record_error(state, account_id, &code, &message, at_ms).await;
+        Err((kind, code, message)) => {
+            let at = (scope, scope_id.as_str(), kind);
+            return record_error(state, account_id, at, &code, &message, at_ms).await;
         }
     };
 
@@ -507,7 +511,8 @@ pub async fn ensure_computer_for(
         // the existing assignment, report success with the scope's box.
         Err(CoworkerError::AlreadyHasComputer) => Vec::new(),
         Err(error) => {
-            return record_error(state, account_id, "unknown", &error.to_string(), at_ms).await;
+            let (at, why) = ((scope, scope_id.as_str(), kind.as_str()), error.to_string());
+            return record_error(state, account_id, at, "unknown", &why, at_ms).await;
         }
     };
     // A takeover's stamp IS the news about this box; clearing it on success kept the swap silent.
@@ -526,14 +531,15 @@ pub async fn ensure_computer_for(
 /// so the claim that keeps two first requests from each keeping one (#302) holds for a hire, `POST
 /// …/computer`, a reset's re-provision and both warm-ups. Idempotent: a scope with a box answers
 /// it. With `account_id`, box.ascii.dev refusing the create is taken over by a Local VM, stamped
-/// on that account. Answers the box and whether it is a takeover's, or `(code, message)`.
+/// on that account. Answers the box, its kind and whether it is a takeover's, or the kind asked
+/// (`unknown` before one is chosen), the code and the message.
 pub async fn ensure_scope_box(
     state: &AgUiState,
     account_id: Option<&AccountId>,
     org_id: Option<&str>,
     scope: &str,
     scope_id: &str,
-) -> Result<(String, bool), (String, String)> {
+) -> Result<(String, String, bool), (&'static str, String, String)> {
     let store = &state.auth.store;
     // A recorded box whose container no longer exists is healed here rather than reported: the
     // row is cleared and the scope gets a new box below, so a bot whose computer vanished comes
@@ -547,13 +553,13 @@ pub async fn ensure_scope_box(
             if updating(state, scope, scope_id).await
                 || !box_is_gone(state, org_id, &kind, &box_id).await
             {
-                return Ok((box_id, false));
+                return Ok((box_id, kind, false));
             }
             tracing::warn!(scope, scope_id = %scope_id, box_id, "computer: the recorded box is gone; provisioning a new one");
             let _ = store.clear_scoped_computer(scope, scope_id, &box_id).await;
         }
         Ok(None) => {}
-        Err(error) => return Err(("unknown".to_string(), error.to_string())),
+        Err(error) => return Err(("unknown", "unknown".into(), error.to_string())),
     }
     let kind = kind_for_new(state, org_id).await;
     let Some(provider) = provider_for(state, org_id, kind).await else {
@@ -568,7 +574,7 @@ pub async fn ensure_scope_box(
             None => "set up box.ascii.dev first",
         };
         let message = format!("no computer is configured for your organization — {fix}");
-        return Err((code.to_string(), message));
+        return Err((kind, code.to_string(), message));
     };
     // NAME THE PROVIDER CALL. Until 6 Sep 2026 a create left no trace at all: the only record
     // was the error row it wrote on failure, so "did we ask box.ascii.dev today, and what did it
@@ -593,25 +599,26 @@ pub async fn ensure_scope_box(
                 org_id,
             );
             return match claimed.await {
-                Ok(Some((kept, _))) => Ok((kept, false)),
-                Ok(None) => Err(("unknown".into(), "the computer was not recorded".into())),
-                Err(error) => Err(("unknown".into(), error.to_string())),
-            };
+                Ok(Some((kept, kept_kind))) => Ok((kept, kept_kind, false)),
+                Ok(None) => Err("the computer was not recorded".to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+            .map_err(|why| (kind, "unknown".into(), why));
         }
         Err(error) => error,
     };
-    // The upstream refusal, in full, at WARN. This is the line whose absence meant a
-    // `quota_exceeded` from hours earlier could not be told from one from a second ago.
-    tracing::warn!(scope, scope_id, kind, code = %error.code(), %error, "computer: the provider refused");
+    // The upstream refusal at WARN, by its code and never its words, which can carry a URL. Its
+    // absence meant a `quota_exceeded` from hours earlier could not be told from one a second ago.
+    tracing::warn!(scope, scope_id, kind, code = %error.code(), "computer: the provider refused");
     if kind == "ascii"
         && let Some(account_id) = account_id
-        && let Some((_, taken)) =
+        && let Some((local, taken)) =
             take_over_with_local_docker(state, account_id, scope, scope_id, org_id, &error, None)
                 .await
     {
-        return Ok((taken, true));
+        return Ok((taken, local.kind().to_string(), true));
     }
-    Err((error.code().to_string(), error.to_string()))
+    Err((kind, error.code().to_string(), error.to_string()))
 }
 
 /// Destroy a scope's box (best-effort, on the provider that made it) and forget it: only that
@@ -633,7 +640,7 @@ async fn destroy_and_clear(state: &AgUiState, org_id: Option<&str>, scope: &str,
     if let Some(provider) = provider
         && let Err(error) = provider.destroy(&box_id).await
     {
-        tracing::warn!(%error, box_id, "could not destroy a scope's box; forgetting it anyway");
+        tracing::warn!(scope, scope_id, kind = %kind, code = %error.code(), box_id, "could not destroy a scope's box; forgetting it anyway");
     }
     let _ = store.clear_scoped_computer(scope, scope_id, &box_id).await;
 }
@@ -862,7 +869,8 @@ pub async fn coworker_screen(
         stamp_egress_fields(&mut body, host_wants, None);
         body
     };
-    let group = match state.auth.store.load_coworker(coworker_id).await {
+    let store = &state.auth.store;
+    let group = match store.load_coworker(coworker_id).await {
         Ok((coworker, _)) if !coworker.name.is_empty() => coworker.is_group(),
         _ => return absent(),
     };
@@ -874,17 +882,10 @@ pub async fn coworker_screen(
         agent_id,
         group,
     );
-    let Ok(Some((box_id, kind, stopped))) = state
-        .auth
-        .store
-        .scoped_computer_full(scope, &scope_id)
-        .await
+    let Ok(Some((box_id, kind, stopped))) = store.scoped_computer_full(scope, &scope_id).await
     else {
-        if let Ok(Some((code, message, at_ms))) = state
-            .auth
-            .store
-            .account_computer_error(account_id.as_str())
-            .await
+        if let Ok(Some((code, message, at_ms))) =
+            store.account_computer_error(account_id.as_str()).await
         {
             let mut body = json!({
                 "agentId": agent_id,
@@ -905,10 +906,7 @@ pub async fn coworker_screen(
                 "the computer's provider is not available".into(),
             )
         });
-        let at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis() as i64)
-            .unwrap_or(0);
+        let at_ms = chrono::Utc::now().timestamp_millis();
         let mut body = json!({
             "agentId": agent_id,
             "state": if stopped { "stopped" } else { "unknown" },
@@ -971,11 +969,8 @@ pub async fn coworker_screen(
     // hires (a per-bot quota refusal), which beside a healthy Local VM would read as its fault.
     // Additive — `agentId`/`state`/`vncUrl` are what the renderer validates.
     if kind == "local-docker"
-        && let Ok(Some((code, message, at_ms))) = state
-            .auth
-            .store
-            .account_computer_error(account_id.as_str())
-            .await
+        && let Ok(Some((code, message, at_ms))) =
+            store.account_computer_error(account_id.as_str()).await
         && message.starts_with(FELL_BACK)
     {
         screen["computerError"] = json!({ "code": code, "message": message, "updatedAtMs": at_ms });
@@ -1106,7 +1101,7 @@ pub async fn update_scope_box(
         let store = store.clone();
         let scope_id = scope_id.clone();
         async move {
-            tracing::warn!(scope, scope_id = %scope_id, why, "computer: update failed");
+            tracing::warn!(scope, scope_id = %scope_id, "computer: update failed; its record says why");
             let _ = store
                 .set_box_update_phase(
                     scope,
@@ -1335,7 +1330,7 @@ pub async fn idle_stop_once(state: &AgUiState, before_ms: i64) -> usize {
                 );
             }
             Err(error) => {
-                tracing::warn!(%error, box_id, "could not stop an idle box");
+                tracing::warn!(scope, scope_id, kind, code = %error.code(), box_id, "could not stop an idle box");
             }
         }
     }

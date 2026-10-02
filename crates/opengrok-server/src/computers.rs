@@ -382,10 +382,10 @@ async fn set_mode(
     let warmed = if body.mode == "per-org" {
         let org = org_id.as_str();
         match crate::agui::provision::ensure_scope_box(&state, None, Some(org), "org", org).await {
-            Ok((box_id, _)) => json!({ "provisioned": true, "boxId": box_id }),
+            Ok((box_id, ..)) => json!({ "provisioned": true, "boxId": box_id }),
             // Non-fatal: the mode is set; the box just could not warm yet (e.g. no org key). The
             // first bot will try again, and the reason is surfaced for the admin.
-            Err((code, message)) => json!({
+            Err((_, code, message)) => json!({
                 "provisioned": false,
                 "computerError": { "code": code, "message": message },
             }),
