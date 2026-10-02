@@ -708,7 +708,7 @@ pub fn share_scope_of(scope: &str) -> &'static str {
 /// The standing answer for a computer scope; no row is `ask`. `Err` when the store could not
 /// answer — the caller decides what that means where it stands: the run path fails closed,
 /// the pane says nothing, the GET says 503.
-pub async fn egress_policy_read(
+pub(crate) async fn egress_policy_read(
     state: &AgUiState,
     scope: &str,
     scope_id: &str,

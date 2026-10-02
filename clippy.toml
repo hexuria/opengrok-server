@@ -1,0 +1,6 @@
+# axum's `Response` (an `http::Response`) is 128 bytes, exactly `result_large_err`'s default
+# threshold, so the lint flags the `Result<_, Response>` the handlers and their helpers return,
+# where either half is the reply. Boxing it would not be a reply: `Box<Response>` is not an
+# `IntoResponse`, so every handler and every `?` would have to unbox it again. Every other
+# error type still answers to the default threshold.
+large-error-ignored = ["http::Response"]
