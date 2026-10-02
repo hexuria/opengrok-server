@@ -380,8 +380,8 @@ async fn eager_scope_box_creates_once_and_is_idempotent() {
     // A throwaway org scope id unique to this run.
     let scope_id = format!("org_{}", uuid::Uuid::now_v7().simple());
 
-    let box_id =
-        opengrok_server::agui::provision::ensure_scope_box(&state, None, "org", &scope_id, 1)
+    let (box_id, _) =
+        opengrok_server::agui::provision::ensure_scope_box(&state, None, None, "org", &scope_id)
             .await
             .expect("eager provision");
     assert!(
@@ -390,8 +390,8 @@ async fn eager_scope_box_creates_once_and_is_idempotent() {
     );
 
     // Idempotent: selecting per-org again (or the first bot arriving) reuses the SAME box.
-    let again =
-        opengrok_server::agui::provision::ensure_scope_box(&state, None, "org", &scope_id, 2)
+    let (again, _) =
+        opengrok_server::agui::provision::ensure_scope_box(&state, None, None, "org", &scope_id)
             .await
             .expect("second call");
     assert_eq!(
@@ -406,7 +406,7 @@ async fn eager_scope_box_creates_once_and_is_idempotent() {
         let _ = state
             .auth
             .store
-            .clear_scoped_computer("org", &scope_id)
+            .clear_scoped_computer("org", &scope_id, &b)
             .await;
     }
 }

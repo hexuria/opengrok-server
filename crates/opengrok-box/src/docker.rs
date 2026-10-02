@@ -574,6 +574,12 @@ impl Computer for DockerComputer {
         Ok(())
     }
 
+    /// The container only, as `recreate` removes the box it replaces: a box rebuilt on another's
+    /// volumes holds a person's files there, and may share them with the box that kept the scope.
+    async fn discard(&self, box_id: &str) -> BoxResult<()> {
+        self.docker(&["rm", "-f", box_id]).await.map(|_| ())
+    }
+
     fn image(&self) -> String {
         self.image.clone()
     }

@@ -220,8 +220,9 @@ impl Harness {
         .await
     }
 
-    /// Record a computer on the coworker the way provisioning does, without a provider: the
-    /// row's `boxId` is read from the aggregate, not from a live box.
+    /// Record a computer for the coworker the way per-bot provisioning does, without a provider:
+    /// the scope's record and the coworker's own assignment. The row's `boxId` is the scope's
+    /// box, the one its turns run on, never the id on the coworker's row (#302).
     async fn assign_box(&self, owner: &Person, id: &str) -> String {
         let coworker_id = CoworkerId::from_stored(id.to_string());
         let (loaded, seq) = self
@@ -231,6 +232,14 @@ impl Harness {
             .expect("load the coworker");
         let box_id = BoxId::from_stored(unique("box"));
         let at_ms = chrono::Utc::now().timestamp_millis();
+        self.store
+            .set_sharing_mode("account", owner.id.as_str(), "per-bot", at_ms)
+            .await
+            .expect("per-bot");
+        self.store
+            .set_scoped_computer("bot", id, box_id.as_str(), "local-docker", None, at_ms)
+            .await
+            .expect("record the bot's box");
         let events = loaded
             .decide(CoworkerCommand::AssignComputer {
                 box_id: box_id.clone(),

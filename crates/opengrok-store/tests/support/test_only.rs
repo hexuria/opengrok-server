@@ -184,6 +184,50 @@ impl PgStore {
         Ok(())
     }
 
+    // ---- A scope's computer, as tests read and seed it ----
+
+    /// The scope's box and its kind: `scoped_computer_full` without the idle flag.
+    pub async fn scoped_computer(
+        &self,
+        scope: &str,
+        scope_id: &str,
+    ) -> StoreResult<Option<(String, String)>> {
+        Ok(self
+            .scoped_computer_full(scope, scope_id)
+            .await?
+            .map(|(box_id, kind, _)| (box_id, kind)))
+    }
+
+    /// Write a scope's box over whatever it had: a test's seed. Nothing the server runs may, as a
+    /// later create overwriting an earlier one is how #302's boxes ran untracked; it claims
+    /// (`claim_scoped_computer`).
+    pub async fn set_scoped_computer(
+        &self,
+        scope: &str,
+        scope_id: &str,
+        box_id: &str,
+        kind: &str,
+        org_id: Option<&str>,
+        at_ms: i64,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "insert into scoped_computer (scope, scope_id, box_id, kind, org_id, last_used_at_ms, updated_at_ms)
+             values ($1, $2, $3, $4, $5, $6, $6)
+             on conflict (scope, scope_id) do update set
+               box_id = excluded.box_id, kind = excluded.kind, org_id = excluded.org_id,
+               last_used_at_ms = excluded.last_used_at_ms, updated_at_ms = excluded.updated_at_ms",
+        )
+        .bind(scope)
+        .bind(scope_id)
+        .bind(box_id)
+        .bind(kind)
+        .bind(org_id)
+        .bind(at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     /// Does this account have ANY registered, non-revoked device? The gate for "an unregistered
     /// device gets no remote control" — false ⇒ the control plane refuses the dangerous actions.
     pub async fn has_registered_device(&self, account_id: &str) -> StoreResult<bool> {

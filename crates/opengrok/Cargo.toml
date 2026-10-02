@@ -38,3 +38,7 @@ chrono.workspace = true
 # the grok-box SDK asks for ring; with both present rustls refuses to guess and panics on the
 # first HTTPS call — inside a tokio task, which silently killed model turns.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
+[dev-dependencies]
+# The boot repair's stand-in provider (`tests/unit/repair.rs`) implements `Computer`.
+async-trait.workspace = true

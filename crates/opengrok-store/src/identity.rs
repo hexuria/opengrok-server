@@ -8,7 +8,7 @@
 
 use opengrok_core::id::{AccountId, OrgId};
 use opengrok_core::limits::RunLimits;
-use opengrok_core::org::{InviteState, Org, OrgEvent};
+use opengrok_core::org::{Org, OrgEvent};
 use sqlx::Row;
 
 use crate::postgres::PgStore;
@@ -169,22 +169,5 @@ impl PgStore {
             .map(|row| row.try_get::<String, _>("org_id"))
             .transpose()?
             .map(OrgId::from_stored))
-    }
-
-    /// A convenience the smoke and the admin CLI both want: the state of one invite code.
-    pub async fn invite_state(&self, code: &str) -> StoreResult<Option<InviteState>> {
-        let row = sqlx::query("select state from org_invite where code = $1")
-            .bind(code)
-            .fetch_optional(self.pool())
-            .await?;
-        Ok(row.and_then(|row| {
-            row.try_get::<String, _>("state")
-                .ok()
-                .map(|state| match state.as_str() {
-                    "redeemed" => InviteState::Redeemed(AccountId::from_stored("")),
-                    "revoked" => InviteState::Revoked,
-                    _ => InviteState::Open,
-                })
-        }))
     }
 }

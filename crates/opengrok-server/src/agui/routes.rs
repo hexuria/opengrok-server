@@ -481,6 +481,7 @@ pub(crate) async fn tools_for_coworker(
                     &scope_id,
                     org_id.as_deref(),
                     &error,
+                    Some(box_id.as_str()),
                 )
                 .await
             } else {
@@ -1399,14 +1400,17 @@ pub async fn repin_coworker(
     // The same row the roster lists, by construction: the app overwrites its row from this reply
     // and relaunches onto `GET /coworkers`, so two spellings of one coworker is a coworker that
     // changes shape on restart.
-    Json(coworker_row(
+    let live = provision::live_boxes(&state, &account_id, &[&view]).await;
+    let box_id = live.get(&view.id).map(String::as_str);
+    let row = coworker_row(
         &view,
         Some(&profile),
         hidden_from_sidebar,
         &owner,
         &account_id,
-    ))
-    .into_response()
+        box_id,
+    );
+    Json(row).into_response()
 }
 
 /// A member hiding a coworker an org-mate shared: the one change that is theirs to make, because
@@ -1438,6 +1442,7 @@ async fn hide_shared(
         hidden,
         owner,
         account_id,
+        None,
     ))
     .into_response()
 }
@@ -1486,6 +1491,7 @@ pub(crate) fn coworker_row(
     hidden_from_sidebar: bool,
     owner: &opengrok_store::RosterOwner,
     viewer: &opengrok_core::id::AccountId,
+    box_id: Option<&str>,
 ) -> serde_json::Value {
     let mine = owner.id == *viewer;
     // Blank reads as absent, the way `Persona::compose` reads the same blob: a cleared title is
@@ -1515,8 +1521,9 @@ pub(crate) fn coworker_row(
         // The hirer's computer, so null on a shared row: a member's turns resolve a box from
         // the member's own scope, and every computer route answers them 404, so the owner's id
         // here would name a machine the row's reader can neither open nor work on. Null is
-        // already the row's word for "no computer" (a hire with none answers it).
-        "boxId": view.box_id.as_ref().filter(|_| mine).map(|id| id.as_str()),
+        // already the row's word for "no computer" (a hire with none answers it). The SCOPE'S
+        // box (`provision::live_boxes`), never the one frozen on the coworker's row (#302).
+        "boxId": box_id.filter(|_| mine),
         "isGroup": !view.members.is_empty(),
         "memberIds": view.members.iter().map(CoworkerId::as_str).collect::<Vec<_>>(),
         "mine": mine,
@@ -1756,7 +1763,9 @@ pub async fn hire(
     // relaunches onto `GET /coworkers`; the two keys only a hire can answer ride on top of it.
     // Not hidden: nobody can have hidden an id minted a moment ago.
     let profile = template.as_ref().and_then(crate::templates::hire_profile);
-    let mut row = coworker_row(&view, profile.as_ref(), false, &owner, &account_id);
+    // The box the claim just gave it, which is the scope's.
+    let box_id = view.box_id.as_ref().map(|id| id.as_str());
+    let mut row = coworker_row(&view, profile.as_ref(), false, &owner, &account_id, box_id);
     if let Some(row) = row.as_object_mut() {
         row.insert(
             "computerError".to_string(),
@@ -1894,6 +1903,11 @@ pub async fn list_coworkers(
         Ok(profiles) => profiles,
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
+    let own: Vec<&CoworkerView> = coworkers
+        .iter()
+        .filter_map(|(view, owner)| (owner.id == account_id).then_some(view))
+        .collect();
+    let live = provision::live_boxes(&state, &account_id, &own).await;
     // An ARRAY, always. An empty roster is a valid answer and must not become null or an
     // object — the desktop client throws on a malformed array reply (RUNBOOK §4).
     let rows: Vec<serde_json::Value> = coworkers
@@ -1905,6 +1919,7 @@ pub async fn list_coworkers(
                 hidden.contains(view.id.as_str()),
                 owner,
                 &account_id,
+                live.get(&view.id).map(String::as_str),
             )
         })
         .collect();
@@ -2284,7 +2299,8 @@ async fn computer_screen(
 }
 
 /// `POST /coworkers/{id}/computer/update` — rebuild the coworker's computer on the newest image,
-/// keeping its files. Answers 202 with the status; the phases arrive on `GET …/computer`.
+/// keeping its files. Answers 202 with the status as accepted; the phases and the outcome arrive
+/// on `GET …/computer`.
 async fn computer_update(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -2299,16 +2315,14 @@ async fn computer_update(
         Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
         Err(refusal) => return refusal,
     }
-    if let Err((status, message)) =
-        provision::begin_update_for_coworker(&state, &account_id, &coworker_id).await
+    let update = match provision::begin_update_for_coworker(&state, &account_id, &coworker_id).await
     {
-        return (status, message).into_response();
-    }
-    (
-        StatusCode::ACCEPTED,
-        Json(provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await),
-    )
-        .into_response()
+        Ok(update) => update,
+        Err((status, message)) => return (status, message).into_response(),
+    };
+    let accepted = provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await;
+    tokio::spawn(update);
+    (StatusCode::ACCEPTED, Json(accepted)).into_response()
 }
 
 /// `POST /coworkers/{id}/computer/reset` — destroy the computer, data and all, and start fresh.
