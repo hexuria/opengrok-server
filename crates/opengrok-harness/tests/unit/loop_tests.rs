@@ -3299,7 +3299,7 @@ async fn a_recipe_the_loop_plays_is_written_to_the_journal() {
         1,
     )
     .await;
-    assert_eq!(journal.recipes_played(), vec!["search-youtube".to_string()]);
+    assert_eq!(recipes_played(&journal), vec!["search-youtube".to_string()]);
     let (frames, spent) = journal.spent_with_frames().remove(0);
     assert_eq!(spent.round, Some(opengrok_core::run::RoundKind::Spoken));
     assert!(
@@ -3566,7 +3566,7 @@ async fn a_card_answered_later_in_a_request_does_not_replay_an_earlier_recipe() 
     )
     .await;
     assert_eq!(*plays.lock().unwrap(), 1, "only the approved recipe played");
-    assert_eq!(journal.recipes_played(), vec!["post-reply".to_string()]);
+    assert_eq!(recipes_played(&journal), vec!["post-reply".to_string()]);
     let (frames, spent) = journal.spent_with_frames().remove(0);
     assert_eq!(spent.round, None, "an approved call is not a round");
     assert!(
@@ -6026,4 +6026,13 @@ async fn a_result_settled_from_a_cards_answer_says_no_time() {
     let settled = results_for(&events, "f1");
     assert_eq!(settled.len(), 1, "{events:?}");
     assert!(settled[0].extra.get("durationMs").is_none(), "{settled:?}");
+}
+
+/// Every recipe `record_spent` recorded, in order. Only tests ask, so it lives beside them.
+fn recipes_played(journal: &crate::journal::MemoryJournal) -> Vec<String> {
+    journal
+        .spent()
+        .into_iter()
+        .flat_map(|spent| spent.recipes)
+        .collect()
 }

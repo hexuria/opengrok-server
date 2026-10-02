@@ -121,14 +121,6 @@ impl MemoryJournal {
         self.batches().iter().map(Vec::len).sum()
     }
 
-    /// Every recipe `record_spent` recorded, in order.
-    pub fn recipes_played(&self) -> Vec<String> {
-        self.spent()
-            .into_iter()
-            .flat_map(|spent| spent.recipes)
-            .collect()
-    }
-
     /// Every `record_spent`, in order.
     pub fn spent(&self) -> Vec<opengrok_core::run::RoundSpent> {
         self.spent_with_frames()

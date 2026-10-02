@@ -2,8 +2,8 @@
 
 mod admin;
 mod kek;
-mod purge;
 mod pins;
+mod purge;
 mod repair;
 
 use std::net::SocketAddr;
