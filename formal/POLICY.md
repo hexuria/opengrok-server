@@ -81,7 +81,9 @@ model that stops matching fails the gate. That mapping is the part a person has 
 | `RecipeLease` lock, snapshot, insert, commit, land | `start_recipe_run` / `record_recipe_run` in `opengrok-store/src/postgres.rs` |
 | `RelayCall` post, deliver, ends, give up | `RelayBroker::answer`, `Answering::pipe`, `Call::bytes`, `RelayBroker::stop` in `opengrok-harness/src/relay.rs` |
 | `HeldSend` check, drain, trigger, wait, ask | `Held::now` + `consume_for_turn`, `drain_held`, `send_held`, `thread_now` in `opengrok-server/src/agui/pending.rs`; `RelayBroker::draining`, `drained`, `ask` |
+| `PairDelivery` enqueue, drain (look, claim), start, run end, sweep, crash | `enqueue_bot_messages`, `claim_pair_message`, `pairs_to_sweep` in `opengrok-store/src/pairs.rs`; `Mail::send`, `drain`, `fire`, `ended`, `sweep` in `opengrok-server/src/pairs.rs`; `StoreJournal::claim` |
 | Lean `Ending`, `Answer`, `Budget`, `Close` | the same, for every constant |
+| Lean `Chain` | `message_bot`'s caps: `MAX_HOPS`, `PER_CHAIN` in `opengrok-tools/src/message_bot.rs`, counted by `enqueue_bot_messages` |
 | `run_properties.rs` | `Run::decide` + `apply`, against `ExactlyOneEnding`, `ended_is_stable`, `ApprovedAtMostOnce` |
 
 ## 7. What a PR that touches the models reports

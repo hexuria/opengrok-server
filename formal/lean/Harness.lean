@@ -1,7 +1,8 @@
 /-!
 # The harness's semantic core, proved independent of scheduling
 
-Four facts the TLA+ models check for small constants, proved here for every constant:
+Five facts the TLA+ models check for small constants, or leave to a proof, proved here for every
+constant:
 
 1. `Budget`: the loop's budgets alone end it. Every round that continues spends one unit of
    one of two budgets, so a run makes at most `R + C - 1` model calls, which is strictly
@@ -13,6 +14,8 @@ Four facts the TLA+ models check for small constants, proved here for every cons
 4. `Answer`: an append at an expected sequence number is a compare-and-set, so of any
    number of answers that read the same parked run, at most one commits, and each commit
    starts one continuation: an approved call runs at most once per answer.
+5. `Chain`: Bots messaging each other cannot go on for ever. Every message of one chain has a
+   hop of at most `MAX_HOPS`, and the chain holds at most its cap of messages (#314).
 
 Only Lean 4 core is used (no Mathlib), so `lean Harness.lean` is the whole check.
 -/
@@ -87,6 +90,84 @@ theorem calls_with_wrap_up_bounded (R C : Nat) (rounds : Nat → Bool) (i : Nat)
   have := continues_bounded R C rounds i h; omega
 
 end Budget
+
+namespace Chain
+
+/-! How far an exchange between one person's Bots can go (#314). A chain is every message sent
+because of one turn nobody's Bot asked for: a person's message, a routine's. `message_bot` admits
+a call from a run whose own message had hop `h` (0 for a turn no Bot started) only while
+`h < maxHops`, so at the limit the tool is not offered and the call is refused, and only when the
+chain's messages and the call's recipients together stay within `cap`, all or nothing. Each
+recipient's message has hop `h + 1`. Both are read from the outbox rows (`enqueue_bot_messages`)
+under the owner's lock, and every Bot in a chain is that one person's, so a chain's calls are
+written one at a time: `after` below. A call carried out again writes no row, so it is not a call
+here at all. -/
+
+/-- `n` messages of hop `k`: what one call writes for its `n` recipients. -/
+def copies (k : Nat) : Nat → List Nat
+  | 0 => []
+  | n + 1 => k :: copies k n
+
+theorem copies_length (k : Nat) : ∀ n, (copies k n).length = n
+  | 0 => rfl
+  | n + 1 => by simp [copies, copies_length k n]
+
+theorem mem_copies (k x : Nat) : ∀ n, x ∈ copies k n → x = k
+  | 0, h => by simp [copies] at h
+  | n + 1, h => by
+    simp only [copies, List.mem_cons] at h
+    cases h with
+    | inl h => exact h
+    | inr h => exact mem_copies k x n h
+
+/-- One call as the outbox takes it: the chain's hops so far, the hop of the message that started
+    the sending run, and how many Bots the call names. -/
+def send (maxHops cap : Nat) (chain : List Nat) (h n : Nat) : List Nat :=
+  if h < maxHops ∧ chain.length + n ≤ cap then copies (h + 1) n ++ chain else chain
+
+theorem send_hops (maxHops cap : Nat) (chain : List Nat) (h n : Nat)
+    (hc : ∀ x ∈ chain, x ≤ maxHops) : ∀ x ∈ send maxHops cap chain h n, x ≤ maxHops := by
+  intro x hx
+  unfold send at hx
+  by_cases hg : h < maxHops ∧ chain.length + n ≤ cap
+  · rw [if_pos hg] at hx
+    rw [List.mem_append] at hx
+    cases hx with
+    | inl hx =>
+      have hk := mem_copies (h + 1) x n hx
+      have hlt := hg.1
+      omega
+    | inr hx => exact hc x hx
+  · rw [if_neg hg] at hx
+    exact hc x hx
+
+theorem send_length (maxHops cap : Nat) (chain : List Nat) (h n : Nat)
+    (hc : chain.length ≤ cap) : (send maxHops cap chain h n).length ≤ cap := by
+  unfold send
+  by_cases hg : h < maxHops ∧ chain.length + n ≤ cap
+  · rw [if_pos hg, List.length_append, copies_length]
+    have hle := hg.2
+    omega
+  · rw [if_neg hg]
+    exact hc
+
+/-- The chain after `calls`, each a (sending run's hop, recipients) pair, from no messages. -/
+def after (maxHops cap : Nat) : List (Nat × Nat) → List Nat
+  | [] => []
+  | c :: cs => send maxHops cap (after maxHops cap cs) c.1 c.2
+
+/-- A CHAIN IS BOUNDED. Whatever the Bots write, every message's hop is at most `maxHops` and the
+    chain holds at most `cap` messages, so it starts at most `cap` turns: for every constant, not
+    only `MAX_HOPS = 4` and 12. -/
+theorem chain_bounded (maxHops cap : Nat) (calls : List (Nat × Nat)) :
+    (∀ x ∈ after maxHops cap calls, x ≤ maxHops) ∧ (after maxHops cap calls).length ≤ cap := by
+  induction calls with
+  | nil => exact ⟨fun x hx => by simp [after] at hx, by simp [after]⟩
+  | cons c cs ih =>
+    simp only [after]
+    exact ⟨send_hops maxHops cap _ c.1 c.2 ih.1, send_length maxHops cap _ c.1 c.2 ih.2⟩
+
+end Chain
 
 namespace Ending
 
