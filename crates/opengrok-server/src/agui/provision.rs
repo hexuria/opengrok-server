@@ -173,9 +173,8 @@ pub async fn take_over_with_local_docker(
     let box_id = computer.create(None).await.ok()?;
     let at_ms = chrono::Utc::now().timestamp_millis();
     let store = &state.auth.store;
-    let claimed = claim(
-        state, &*computer, scope, scope_id, replacing, &box_id, org_id,
-    );
+    let slot = replacing.map_or(Slot::Empty, Slot::Replacing);
+    let claimed = claim(state, &*computer, scope, scope_id, slot, &box_id, org_id);
     let (kept, kind) = claimed.await.ok()??;
     if kept != box_id {
         return Some((provider_for(state, org_id, &kind).await?, kept));
@@ -197,32 +196,60 @@ pub async fn take_over_with_local_docker(
 pub const FELL_BACK: &str = "box.ascii.dev refused this computer, so it now runs as a Local VM \
 on this server — files on the old computer are not on this one";
 
+/// Where a box this request made goes: into a scope with no box, in place of one the scope still
+/// names, or in place of the box it was rebuilt from (`recreate`), whose disk it runs on.
+#[derive(Clone, Copy)]
+enum Slot<'a> {
+    Empty,
+    Replacing(&'a str),
+    Rebuilt(&'a str),
+}
+
 /// Record a box this request just made on `provider` as the scope's computer
-/// (`claim_scoped_computer`), and answer the scope's box afterwards. A box that did not become it,
-/// because another request recorded one first or the record failed, is destroyed on the provider
-/// that made it: left running, it was billed with nothing tracking or idle-stopping it (#302).
+/// (`claim_scoped_computer`), and answer the scope's box afterwards. A box KNOWN to have lost (the
+/// write ran and the scope names another, or none) is removed on its provider: left running, it
+/// was billed with nothing tracking it (#302). A rebuilt one is only discarded, as its disk holds
+/// the person's files and may be the winner's (#311). A failed write may still have landed, so the
+/// row decides, and a box it does not name is left running and logged, never removed blind.
 async fn claim(
     state: &AgUiState,
     provider: &dyn Computer,
     scope: &str,
     scope_id: &str,
-    replacing: Option<&str>,
+    slot: Slot<'_>,
     box_id: &str,
     org_id: Option<&str>,
 ) -> opengrok_store::StoreResult<Option<(String, String)>> {
     let (kind, at_ms) = (provider.kind(), chrono::Utc::now().timestamp_millis());
+    let replacing = match slot {
+        Slot::Empty => None,
+        Slot::Replacing(old) | Slot::Rebuilt(old) => Some(old),
+    };
     let store = &state.auth.store;
-    let kept = store
+    let claimed = store
         .claim_scoped_computer(scope, scope_id, replacing, box_id, kind, org_id, at_ms)
         .await;
-    if !matches!(&kept, Ok(Some((kept, _))) if kept == box_id) {
-        let destroyed = provider
-            .destroy(box_id)
-            .await
-            .map_err(|error| error.to_string());
-        tracing::warn!(scope, scope_id, box_id, kept = ?kept, destroyed = ?destroyed, "computer: the scope's box is not the one made here, so it was destroyed");
+    let kept = match claimed {
+        Ok(kept) => kept,
+        Err(error) => {
+            return match store.scoped_computer_full(scope, scope_id).await {
+                Ok(Some((kept, kind, _))) if kept == box_id => Ok(Some((kept, kind))),
+                _ => {
+                    tracing::warn!(scope, scope_id, box_id, %error, "computer: a box made here could not be recorded and is left running");
+                    Err(error)
+                }
+            };
+        }
+    };
+    if kept.as_ref().is_none_or(|(kept, _)| kept != box_id) {
+        let removed = match slot {
+            Slot::Rebuilt(_) => provider.discard(box_id).await,
+            Slot::Empty | Slot::Replacing(_) => provider.destroy(box_id).await,
+        };
+        let removed = removed.map_err(|error| error.to_string());
+        tracing::warn!(scope, scope_id, box_id, kept = ?kept, removed = ?removed, "computer: the scope's box is not the one made here, so it was removed");
     }
-    kept
+    Ok(kept)
 }
 
 /// Local VM (server-host Docker) is a SELF-HOST / dev convenience only. A hosted, multi-tenant
@@ -513,7 +540,13 @@ pub async fn ensure_scope_box(
     // back with one instead of a black screen forever.
     match store.scoped_computer_full(scope, scope_id).await {
         Ok(Some((box_id, kind, _))) => {
-            if !box_is_gone(state, org_id, &kind, &box_id).await {
+            // An update removes the box it rebuilds before it records the new one, so the old one
+            // reads `absent` meanwhile; healing then took the scope from the rebuilt box, and its
+            // loss took the person's files (#311). Until the update ends or goes stale, the
+            // recorded box stands.
+            if updating(state, scope, scope_id).await
+                || !box_is_gone(state, org_id, &kind, &box_id).await
+            {
                 return Ok((box_id, false));
             }
             tracing::warn!(scope, scope_id = %scope_id, box_id, "computer: the recorded box is gone; provisioning a new one");
@@ -550,7 +583,15 @@ pub async fn ensure_scope_box(
     let error = match provider.create(None).await {
         Ok(box_id) => {
             tracing::info!(scope, scope_id, kind, box_id = %box_id, "computer: the provider gave us a box");
-            let claimed = claim(state, &*provider, scope, scope_id, None, &box_id, org_id);
+            let claimed = claim(
+                state,
+                &*provider,
+                scope,
+                scope_id,
+                Slot::Empty,
+                &box_id,
+                org_id,
+            );
             return match claimed.await {
                 Ok(Some((kept, _))) => Ok((kept, false)),
                 Ok(None) => Err(("unknown".into(), "the computer was not recorded".into())),
@@ -1010,6 +1051,19 @@ pub const UPDATE_TRANSFERRING: &str = "transferring";
 pub const UPDATE_STARTING: &str = "starting";
 pub const UPDATE_FAILED: &str = "failed";
 
+/// Whether an update of the scope's box is under way: not failed, and moved within
+/// `UPDATE_STALE_AFTER_MS`. A store that cannot say counts as one, so nothing is healed blind.
+async fn updating(state: &AgUiState, scope: &str, scope_id: &str) -> bool {
+    let now = chrono::Utc::now().timestamp_millis();
+    match state.auth.store.box_update(scope, scope_id).await {
+        Ok(Some((phase, _, at_ms, _))) => {
+            phase != UPDATE_FAILED && now - at_ms < UPDATE_STALE_AFTER_MS
+        }
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
 /// Poll until the box's screen is reachable or patience runs out; the caller reports either way.
 pub async fn wait_for_screen(provider: &dyn Computer, box_id: &str, patience: std::time::Duration) {
     let started = std::time::Instant::now();
@@ -1096,12 +1150,13 @@ pub async fn update_scope_box(
     };
     let at_ms = chrono::Utc::now().timestamp_millis();
     // Only in place of the box it rebuilt: a reset or takeover meanwhile owns the scope now.
-    let (org, old) = (org_id.as_deref(), Some(old_box_id.as_str()));
+    let (org, old) = (org_id.as_deref(), Slot::Rebuilt(&old_box_id));
     match claim(&state, &*provider, scope, &scope_id, old, &new_box_id, org).await {
         Ok(Some((kept, _))) if kept == new_box_id => {}
         Ok(_) => return fail("the computer was replaced while it was being updated".into()).await,
         Err(error) => {
-            return fail(format!("the new computer could not be recorded: {error}")).await;
+            let why = format!("{new_box_id} could not be recorded; it still runs, with the files");
+            return fail(format!("{why}: {error}")).await;
         }
     }
     tracing::info!(scope, scope_id = %scope_id, old = %old_box_id, new = %new_box_id, "computer: rebuilt on the newest image");
@@ -1284,75 +1339,6 @@ pub async fn idle_stop_once(state: &AgUiState, before_ms: i64) -> usize {
         }
     }
     stopped
-}
-
-/// Whether the boot repair destroys what it finds: only when `OG_REPAIR_STRAY_BOXES` is exactly
-/// `destroy`. A destroy takes a box's files with it, so a first boot on a real database reports.
-pub fn repair_destroys(setting: Option<&str>) -> bool {
-    setting == Some("destroy")
-}
-
-/// The boxes #302's race left running, and nothing else: a box no computer row records, every
-/// coworker naming it on a SHARED box of an account or org scope whose row names another. A box
-/// recorded only on coworker rows is not one: from `817ec33` to `5c0d141` (29-31 Aug 2026) a
-/// hire's box, dedicated or named by the client, was recorded nowhere else, and no
-/// `account_computer` row was carried into `scoped_computer`. Each is asked of its scope's
-/// provider and, while that provider still has it, logged at warn, and destroyed only when
-/// `destroy` (`repair_destroys`). Answers the boxes still there.
-pub async fn repair_stray_boxes(state: &AgUiState, destroy: bool) -> Vec<String> {
-    let unrecorded = state.auth.store.unrecorded_coworker_boxes().await;
-    let unrecorded = unrecorded.unwrap_or_else(|error| {
-        tracing::warn!(%error, "computer: could not look for boxes no record names");
-        Vec::new()
-    });
-    let mut found = Vec::new();
-    for namers in unrecorded.chunk_by(|one, two| one.0 == two.0) {
-        let box_id = &namers[0].0;
-        let mut row = None;
-        for (_, coworker, account) in namers {
-            row = shaped_like_302(state, account, coworker, box_id).await;
-            if row.is_none() {
-                break;
-            }
-        }
-        let Some(row) = row else { continue };
-        let Some(provider) = provider_for(state, row.org_id.as_deref(), &row.kind).await else {
-            continue;
-        };
-        match provider.state(box_id).await.as_deref() {
-            Ok("absent") => continue,
-            Ok(_) => found.push(box_id.clone()),
-            Err(error) => {
-                tracing::warn!(box_id, %error, "computer: could not ask after a box no record names");
-                continue;
-            }
-        }
-        let (scope, scope_id, kept) = (row.scope, &row.scope_id, &row.box_id);
-        if !destroy {
-            tracing::warn!(box_id, scope, scope_id, kept = %kept, "computer: a box no record names is running; OG_REPAIR_STRAY_BOXES=destroy destroys it");
-        } else if let Err(error) = provider.destroy(box_id).await {
-            tracing::warn!(box_id, scope, scope_id, %error, "computer: a box no record names could not be destroyed");
-        } else {
-            tracing::warn!(box_id, scope, scope_id, kept = %kept, "computer: destroyed a box no record names");
-        }
-    }
-    found
-}
-
-/// The scope row of a coworker standing where #302 left one: on a SHARED box of an account or org
-/// scope whose row names a box other than `stray`. Any other coworker is `None`.
-async fn shaped_like_302(
-    state: &AgUiState,
-    account: &str,
-    coworker: &str,
-    stray: &str,
-) -> Option<ScopedBoxRow> {
-    let coworker = CoworkerId::from_stored(coworker.to_string());
-    let (loaded, _) = state.auth.store.load_coworker(&coworker).await.ok()?;
-    let account = AccountId::from_stored(account.to_string());
-    let row = scoped_box_row_for(state, &account, &coworker).await?;
-    let shared = loaded.box_mode() == Some(BoxMode::Shared);
-    (shared && matches!(row.scope, "account" | "org") && row.box_id != stray).then_some(row)
 }
 
 #[cfg(test)]

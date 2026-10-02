@@ -8,9 +8,10 @@
 //! `absent`. The coworker the loser answered was left naming the orphan.
 //!
 //! The stand-in provider holds every create at a gate the test opens, so both requests are past
-//! their read before either records, and the test picks which records first. The boot repair is
-//! driven on seeded rows: it reports #302's strays unless told to destroy them, and never touches
-//! a box recorded only on a coworker's row, which is how a box hired before 31 Aug 2026 was kept.
+//! their read before either records, and the test picks which records first. It holds a rebuild
+//! the same way, so an update can be raced against a heal, a second update and a failing store:
+//! a rebuilt box runs on the disk of the box it replaces, and losing it must never lose that disk
+//! (#311 review). The boot repair's tests are with the boot (`crates/opengrok/src/repair.rs`).
 //!
 //! Needs Postgres; skips loudly without OG_DATABASE_URL.
 
@@ -21,13 +22,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use opengrok_box::{BoxResult, CommandOutput, Computer, StartedCommand};
+use opengrok_box::{BoxError, BoxResult, CommandOutput, Computer, StartedCommand};
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
-use opengrok_server::agui::provision::{live_boxes, repair_destroys, repair_stray_boxes};
+use opengrok_server::agui::provision::{live_boxes, update_scope_box};
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_server::host_state::HostState;
@@ -47,14 +48,29 @@ macro_rules! database_or_skip {
     };
 }
 
-/// A Local VM provider that remembers what it made and destroyed, and, when gated, holds each
-/// create until the test opens its gate. A box it never made, or has destroyed, is `absent`.
+/// Where a held rebuild waits: before it removes the box it replaces, so a second rebuild of that
+/// box can still start, or after, while the old box reads `absent` and nothing records the new one.
+#[derive(Clone, Copy, PartialEq)]
+enum Hold {
+    BeforeRemovingOld,
+    AfterRemovingOld,
+}
+
+/// A Local VM provider that remembers what it made, destroyed and discarded, and the disk each box
+/// runs on: a rebuild runs on the disk of the box it replaces, as `recreate` does. It holds each
+/// create (`gated`) or rebuild (`hold`) until the test opens its gate. A box it never made, or has
+/// removed, is `absent`, and removing it again is refused, as Docker refuses, disk untouched.
 #[derive(Default)]
 struct Gated {
     gated: bool,
+    hold: Option<Hold>,
+    rebuilt_prefix: &'static str,
     arrived: Mutex<Vec<String>>,
     gates: Mutex<HashMap<String, oneshot::Sender<()>>>,
     destroyed: Mutex<Vec<String>>,
+    discarded: Mutex<Vec<String>>,
+    wiped: Mutex<Vec<String>>,
+    disks: Mutex<HashMap<String, String>>,
     live: Mutex<HashSet<String>>,
 }
 
@@ -66,7 +82,14 @@ impl Gated {
         })
     }
 
-    /// The first `n` creates to reach the gate, in the order they reached it.
+    fn holding_rebuilds(hold: Hold) -> Arc<Self> {
+        Arc::new(Self {
+            hold: Some(hold),
+            ..Self::default()
+        })
+    }
+
+    /// The first `n` creates or rebuilds to reach the gate, in the order they reached it.
     async fn held(&self, n: usize) -> Vec<String> {
         for _ in 0..1500 {
             let arrived = self.arrived.lock().unwrap().clone();
@@ -88,12 +111,38 @@ impl Gated {
         gate.send(()).expect("the create is still waiting");
     }
 
-    fn made(&self, id: &str) {
+    async fn wait(&self, id: &str) {
+        let (open, wait) = oneshot::channel();
+        self.gates.lock().unwrap().insert(id.to_string(), open);
+        self.arrived.lock().unwrap().push(id.to_string());
+        wait.await.expect("the test opens every gate it holds");
+    }
+
+    fn made(&self, id: &str, disk: &str) {
         self.live.lock().unwrap().insert(id.to_string());
+        let mut disks = self.disks.lock().unwrap();
+        disks.insert(id.to_string(), disk.to_string());
+    }
+
+    fn disk(&self, id: &str) -> String {
+        self.disks
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .expect("a box made here")
     }
 
     fn destroyed(&self) -> Vec<String> {
         self.destroyed.lock().unwrap().clone()
+    }
+
+    fn discarded(&self) -> Vec<String> {
+        self.discarded.lock().unwrap().clone()
+    }
+
+    fn wiped(&self) -> Vec<String> {
+        self.wiped.lock().unwrap().clone()
     }
 
     fn running(&self) -> HashSet<String> {
@@ -105,12 +154,28 @@ impl Gated {
 impl Computer for Gated {
     async fn create(&self, _ttl_seconds: Option<u64>) -> BoxResult<String> {
         let id = format!("bx_gate_{}", uuid::Uuid::now_v7().simple());
-        self.made(&id);
+        self.made(&id, &format!("disk_{id}"));
         if self.gated {
-            let (open, wait) = oneshot::channel();
-            self.gates.lock().unwrap().insert(id.clone(), open);
-            self.arrived.lock().unwrap().push(id.clone());
-            wait.await.expect("the test opens every gate it holds");
+            self.wait(&id).await;
+        }
+        Ok(id)
+    }
+    async fn recreate(&self, old_box_id: &str) -> BoxResult<String> {
+        if !self.running().contains(old_box_id) {
+            return Err(BoxError::NoSuchBox);
+        }
+        let prefix = match self.rebuilt_prefix {
+            "" => "bx_rebuilt_",
+            prefix => prefix,
+        };
+        let id = format!("{prefix}{}", uuid::Uuid::now_v7().simple());
+        self.made(&id, &self.disk(old_box_id));
+        if self.hold == Some(Hold::BeforeRemovingOld) {
+            self.wait(&id).await;
+        }
+        self.live.lock().unwrap().remove(old_box_id);
+        if self.hold == Some(Hold::AfterRemovingOld) {
+            self.wait(&id).await;
         }
         Ok(id)
     }
@@ -152,13 +217,27 @@ impl Computer for Gated {
         Ok(())
     }
     async fn destroy(&self, box_id: &str) -> BoxResult<()> {
+        if !self.live.lock().unwrap().remove(box_id) {
+            return Err(BoxError::NoSuchBox);
+        }
+        self.wiped.lock().unwrap().push(self.disk(box_id));
         self.destroyed.lock().unwrap().push(box_id.to_string());
-        self.live.lock().unwrap().remove(box_id);
+        Ok(())
+    }
+    async fn discard(&self, box_id: &str) -> BoxResult<()> {
+        if !self.live.lock().unwrap().remove(box_id) {
+            return Err(BoxError::NoSuchBox);
+        }
+        self.discarded.lock().unwrap().push(box_id.to_string());
         Ok(())
     }
     async fn state(&self, box_id: &str) -> BoxResult<String> {
         let running = self.live.lock().unwrap().contains(box_id);
         Ok(if running { "running" } else { "absent" }.to_string())
+    }
+    /// An update waits for its rebuilt box's screen; these have one at once.
+    async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+        Ok(Some(format!("http://127.0.0.1:1/vnc.html?box={box_id}")))
     }
 }
 
@@ -283,15 +362,9 @@ impl Server {
             .expect("sharing mode");
     }
 
-    /// A coworker of `account` given `first` as a SHARED box, as scope provisioning gives one, or
-    /// no box when `None`: a hire whose provisioning failed, which the client later asks a
-    /// computer for.
+    /// A coworker of `account`, given `first` as its first box, or no box when `None`: a hire
+    /// whose provisioning failed, which the client later asks a computer for.
     async fn coworker(&self, account: &AccountId, first: Option<&str>) -> CoworkerId {
-        self.hired(account, first.map(|id| (id, BoxMode::Shared)))
-            .await
-    }
-
-    async fn hired(&self, account: &AccountId, first: Option<(&str, BoxMode)>) -> CoworkerId {
         let id = CoworkerId::new();
         let mut coworker = Coworker::default();
         let mut events = coworker
@@ -304,11 +377,11 @@ impl Server {
         for event in &events {
             coworker.apply(event);
         }
-        if let Some((first, mode)) = first {
+        if let Some(first) = first {
             let assigned = coworker
                 .decide(CoworkerCommand::AssignComputer {
                     box_id: BoxId::from_stored(first.to_string()),
-                    mode,
+                    mode: BoxMode::Shared,
                     at_ms: 1,
                 })
                 .expect("assign");
@@ -323,6 +396,44 @@ impl Server {
             .await
             .expect("append coworker");
         id
+    }
+
+    /// `POST /coworkers/{id}/computer/update`: the update runs on after the reply.
+    async fn update(&self, member: &Member, coworker: &CoworkerId) -> u16 {
+        let url = format!(
+            "{}/coworkers/{}/computer/update",
+            self.base,
+            coworker.as_str()
+        );
+        let request = self.client.post(url).bearer_auth(&member.token);
+        request.send().await.expect("update").status().as_u16()
+    }
+
+    /// Wait for the scope's update to end: `None` once it succeeded and its record was cleared,
+    /// or the failed record's reason.
+    async fn update_ended(&self, scope: (&str, &str)) -> Option<Option<String>> {
+        for _ in 0..1500 {
+            match self
+                .store()
+                .box_update(scope.0, scope.1)
+                .await
+                .expect("update row")
+            {
+                None => return None,
+                Some((phase, _, _, error)) if phase == "failed" => return Some(error),
+                Some(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        panic!("the update of {scope:?} never ended");
+    }
+
+    /// The account's first box, made by the client asking for a computer.
+    async fn first_box(&self, member: &Member, coworker: &CoworkerId) -> String {
+        assert_eq!(self.post(member, coworker, false).await.unwrap(), 200);
+        let scope = member.id.as_str();
+        self.scope_box("account", scope)
+            .await
+            .expect("the account's box")
     }
 
     /// `POST /coworkers/{id}/computer`, or `…/computer/reset`, in the background.
@@ -619,194 +730,155 @@ async fn a_request_that_records_first_keeps_its_box_and_the_reset_destroys_its_o
     a_reset_racing_a_request(false).await;
 }
 
-/// Told to destroy, the repair destroys a stray box (one no record names, whose coworkers are on a
-/// shared box of an account or org that records another) on its scope's provider; a box a record
-/// names is never touched, nor is one already gone; and a second pass changes nothing.
+/// An update removes the box it rebuilds before it records the new one, and the client that reads
+/// `absent` meanwhile asks for a computer. That request healed the scope with a fresh box, the
+/// update's record then missed, and the rebuilt box was destroyed with the disk it runs on: the
+/// person's files (#311 review). Now the scope waits for the update.
 #[tokio::test]
-async fn told_to_destroy_the_repair_destroys_a_stray_box_and_never_a_recorded_one() {
+async fn an_update_racing_a_heal_keeps_the_rebuilt_box_and_its_files() {
     let database_url = database_or_skip!();
-    let s = server(&database_url, Arc::new(Gated::default())).await;
-    let unique = || format!("bx_{}", uuid::Uuid::now_v7().simple());
-    let (kept, stray, gone, elsewhere, org_kept, org_stray) =
-        (unique(), unique(), unique(), unique(), unique(), unique());
-    for id in [&kept, &stray, &elsewhere, &org_kept, &org_stray] {
-        s.stub.made(id);
-    }
-
-    // An account whose box is `kept`: one coworker on it, one left naming `stray` (the race's
-    // loser), one naming `gone` (a box a reset destroyed), one naming `elsewhere`, which is
-    // another account's recorded box.
+    let s = server(
+        &database_url,
+        Gated::holding_rebuilds(Hold::AfterRemovingOld),
+    )
+    .await;
     let member = s.member(None).await;
     s.share("account", member.id.as_str(), "per-account").await;
-    let other = s.member(None).await;
-    let store = s.store();
-    for (scope_id, box_id) in [(member.id.as_str(), &kept), (other.id.as_str(), &elsewhere)] {
-        store
-            .set_scoped_computer("account", scope_id, box_id, "local-docker", None, 1)
-            .await
-            .expect("record");
-    }
-    let on_kept = s.coworker(&member.id, Some(&kept)).await;
-    let on_stray = s.coworker(&member.id, Some(&stray)).await;
-    s.coworker(&member.id, Some(&gone)).await;
-    s.coworker(&member.id, Some(&elsewhere)).await;
+    let one = s.coworker(&member.id, None).await;
+    let scope = ("account", member.id.as_str());
+    let old = s.first_box(&member, &one).await;
+    let disk = s.stub.disk(&old);
 
-    // The same shape on an org's shared box.
-    let org = format!("org_{}", uuid::Uuid::now_v7().simple());
-    s.share("org", &org, "per-org").await;
-    let org_member = s.member(Some(&org)).await;
-    store
-        .set_scoped_computer("org", &org, &org_kept, "local-docker", Some(&org), 1)
-        .await
-        .expect("record");
-    s.coworker(&org_member.id, Some(&org_kept)).await;
-    let on_org_stray = s.coworker(&org_member.id, Some(&org_stray)).await;
+    assert_eq!(s.update(&member, &one).await, 202);
+    let rebuilt = s.stub.held(1).await.remove(0);
+    assert!(!s.stub.running().contains(&old), "the old box reads absent");
+    assert_eq!(s.post(&member, &one, false).await.unwrap(), 200, "asked");
+    assert_eq!(s.scope_box(scope.0, scope.1).await, Some(old), "no heal");
 
-    let found: HashSet<String> = repair_stray_boxes(&s.state, true)
-        .await
-        .into_iter()
-        .collect();
-
-    assert_eq!(found, HashSet::from([stray.clone(), org_stray.clone()]));
-    let destroyed: HashSet<String> = s.stub.destroyed().into_iter().collect();
+    s.stub.open(&rebuilt);
+    assert_eq!(s.update_ended(scope).await, None, "the update succeeded");
+    assert_eq!(s.scope_box(scope.0, scope.1).await, Some(rebuilt.clone()));
     assert_eq!(
-        destroyed,
-        HashSet::from([stray.clone(), org_stray.clone()]),
-        "the strays go; recorded boxes and one already gone are left alone"
+        s.stub.running(),
+        HashSet::from([rebuilt.clone()]),
+        "no second box"
     );
-    for id in [&kept, &elsewhere, &org_kept] {
-        assert!(
-            s.stub.running().contains(id),
-            "{id} is recorded and still runs"
-        );
-    }
-    // What the stray's coworkers are on is their scope's box, whatever their own row says.
-    for (member, coworker, box_id) in [
-        (&member, &on_stray, &kept),
-        (&member, &on_kept, &kept),
-        (&org_member, &on_org_stray, &org_kept),
-    ] {
-        let roster = s.roster(member).await;
-        assert_eq!(
-            roster.get(coworker.as_str()),
-            Some(&Value::String(box_id.clone()))
-        );
-    }
-
+    assert_eq!(s.stub.disk(&rebuilt), disk, "on the old box's disk");
     assert!(
-        repair_stray_boxes(&s.state, true).await.is_empty(),
-        "nothing left to find"
-    );
-    assert_eq!(
-        s.stub.destroyed().len(),
-        2,
-        "a second pass destroys nothing more: {:?}",
-        s.stub.destroyed()
+        s.stub.wiped().is_empty(),
+        "no disk wiped: {:?}",
+        s.stub.wiped()
     );
 }
 
-/// By default the repair only reports: the boot reads `OG_REPAIR_STRAY_BOXES` through
-/// `repair_destroys`, which destroys on the one word `destroy` and on nothing else, unset included.
-#[tokio::test]
-async fn by_default_the_repair_reports_a_stray_and_destroys_nothing() {
-    assert!(!repair_destroys(None), "unset reports");
-    for word in ["", "1", "true", "yes", "DESTROY", " destroy", "destroy "] {
-        assert!(!repair_destroys(Some(word)), "{word:?} reports");
-    }
-    assert!(repair_destroys(Some("destroy")));
+/// Refuse any write of a box id marked unrecordable: a store failing the write an update records
+/// its rebuilt box with. Other tests' ids are untouched.
+async fn refuse_unrecordable_boxes(s: &Server) {
+    sqlx::raw_sql(
+        "create or replace function refuse_unrecordable_box() returns trigger language plpgsql as $f$
+         begin
+             if new.box_id like 'bx_unrecordable_%' then
+                 raise exception 'the store refused this write';
+             end if;
+             return new;
+         end $f$;
+         do $d$ begin
+             if not exists (select 1 from pg_trigger where tgname = 'refuse_unrecordable_box') then
+                 create trigger refuse_unrecordable_box before insert or update on scoped_computer
+                     for each row execute function refuse_unrecordable_box();
+             end if;
+         end $d$;",
+    )
+    .execute(s.store().pool())
+    .await
+    .expect("install the refusing trigger");
+}
 
+/// A failed write may still have landed, so a rebuilt box whose record failed is never removed
+/// blind: its disk is the person's files. Here the store refuses the write, the row still names
+/// the old box, and the rebuilt one is left running, named in the update's failure.
+#[tokio::test]
+async fn a_rebuilt_box_whose_record_fails_is_left_running_with_its_files() {
     let database_url = database_or_skip!();
-    let s = server(&database_url, Arc::new(Gated::default())).await;
-    let (kept, stray) = (
-        format!("bx_{}", uuid::Uuid::now_v7().simple()),
-        format!("bx_{}", uuid::Uuid::now_v7().simple()),
-    );
-    s.stub.made(&kept);
-    s.stub.made(&stray);
+    let stub = Arc::new(Gated {
+        rebuilt_prefix: "bx_unrecordable_",
+        ..Gated::default()
+    });
+    let s = server(&database_url, stub).await;
+    refuse_unrecordable_boxes(&s).await;
     let member = s.member(None).await;
     s.share("account", member.id.as_str(), "per-account").await;
-    s.store()
-        .set_scoped_computer(
-            "account",
-            member.id.as_str(),
-            &kept,
-            "local-docker",
-            None,
-            1,
-        )
-        .await
-        .expect("record");
-    s.coworker(&member.id, Some(&stray)).await;
+    let one = s.coworker(&member.id, None).await;
+    let scope = ("account", member.id.as_str());
+    let old = s.first_box(&member, &one).await;
+    let disk = s.stub.disk(&old);
 
-    for _boot in 0..2 {
-        let found = repair_stray_boxes(&s.state, repair_destroys(None)).await;
-        assert_eq!(found, vec![stray.clone()], "each boot reports the stray");
-        assert!(s.stub.destroyed().is_empty(), "and destroys nothing");
-        assert!(s.stub.running().contains(&stray));
-    }
-    let found = repair_stray_boxes(&s.state, repair_destroys(Some("destroy"))).await;
-    assert_eq!(found, vec![stray.clone()]);
-    assert_eq!(s.stub.destroyed(), vec![stray], "only the word destroys");
+    assert_eq!(s.update(&member, &one).await, 202);
+    let why = s.update_ended(scope).await.expect("the update failed");
+
+    let running = s.stub.running();
+    let rebuilt = running
+        .iter()
+        .find(|id| id.starts_with("bx_unrecordable_"))
+        .expect("the rebuilt box still runs");
+    assert!(
+        why.unwrap_or_default().contains(rebuilt.as_str()),
+        "the failure names it"
+    );
+    assert!(s.stub.destroyed().is_empty() && s.stub.discarded().is_empty());
+    assert!(
+        s.stub.wiped().is_empty(),
+        "no disk wiped: {:?}",
+        s.stub.wiped()
+    );
+    assert_eq!(s.stub.disk(rebuilt), disk);
+    assert_eq!(
+        s.scope_box(scope.0, scope.1).await,
+        Some(old),
+        "the write never landed"
+    );
 }
 
-/// A box recorded only on a coworker's row is never destroyed, even told to destroy: a dedicated
-/// box hired before 31 Aug 2026 (`817ec33`), in an account with no computer row or in one that has
-/// since been given one; a shared box in an account with no computer row; and a stray that a
-/// dedicated coworker also names.
+/// Two updates of one box (a second Update before the first one's record is in) rebuild it twice
+/// on one disk. The one that records second loses, and only its container goes: destroying it
+/// wiped the disk the winner runs on, the person's files (#311 review).
 #[tokio::test]
-async fn a_box_recorded_only_on_a_coworkers_row_is_never_destroyed() {
+async fn a_rebuilt_box_that_loses_its_scope_leaves_the_disk_the_winner_runs_on() {
     let database_url = database_or_skip!();
-    let s = server(&database_url, Arc::new(Gated::default())).await;
-    let unique = || format!("bx_{}", uuid::Uuid::now_v7().simple());
-    let (kept, old_dedicated, later_dedicated, unscoped_shared, also_dedicated) =
-        (unique(), unique(), unique(), unique(), unique());
-    for id in [
-        &kept,
-        &old_dedicated,
-        &later_dedicated,
-        &unscoped_shared,
-        &also_dedicated,
-    ] {
-        s.stub.made(id);
-    }
+    let s = server(
+        &database_url,
+        Gated::holding_rebuilds(Hold::BeforeRemovingOld),
+    )
+    .await;
+    let member = s.member(None).await;
+    s.share("account", member.id.as_str(), "per-account").await;
+    let one = s.coworker(&member.id, None).await;
+    let scope = ("account", member.id.as_str());
+    let old = s.first_box(&member, &one).await;
+    let disk = s.stub.disk(&old);
 
-    let unscoped = s.member(None).await;
-    s.share("account", unscoped.id.as_str(), "per-account")
-        .await;
-    s.hired(&unscoped.id, Some((&old_dedicated, BoxMode::Dedicated)))
-        .await;
-    s.coworker(&unscoped.id, Some(&unscoped_shared)).await;
+    let update = || {
+        let (state, scope_id) = (s.state.clone(), member.id.as_str().to_string());
+        tokio::spawn(update_scope_box(state, None, "account", scope_id))
+    };
+    let (first, second) = (update(), update());
+    let held = s.stub.held(2).await;
+    s.stub.open(&held[0]);
+    first.await.unwrap();
+    s.stub.open(&held[1]);
+    second.await.unwrap();
 
-    let scoped = s.member(None).await;
-    s.share("account", scoped.id.as_str(), "per-account").await;
-    s.store()
-        .set_scoped_computer(
-            "account",
-            scoped.id.as_str(),
-            &kept,
-            "local-docker",
-            None,
-            1,
-        )
-        .await
-        .expect("record");
-    s.hired(&scoped.id, Some((&later_dedicated, BoxMode::Dedicated)))
-        .await;
-    s.coworker(&scoped.id, Some(&also_dedicated)).await;
-    s.hired(&scoped.id, Some((&also_dedicated, BoxMode::Dedicated)))
-        .await;
-
-    let found = repair_stray_boxes(&s.state, true).await;
-
-    assert!(found.is_empty(), "none of them is #302's stray: {found:?}");
-    assert!(s.stub.destroyed().is_empty(), "{:?}", s.stub.destroyed());
-    for id in [
-        &kept,
-        &old_dedicated,
-        &later_dedicated,
-        &unscoped_shared,
-        &also_dedicated,
-    ] {
-        assert!(s.stub.running().contains(id), "{id} still runs");
-    }
+    assert_eq!(s.scope_box(scope.0, scope.1).await, Some(held[0].clone()));
+    assert!(
+        s.stub.wiped().is_empty(),
+        "no disk wiped: {:?}",
+        s.stub.wiped()
+    );
+    assert_eq!(
+        s.stub.discarded(),
+        vec![held[1].clone()],
+        "the loser's container goes"
+    );
+    assert_eq!(s.stub.running(), HashSet::from([held[0].clone()]));
+    assert_eq!(s.stub.disk(&held[0]), disk, "the winner keeps the files");
 }

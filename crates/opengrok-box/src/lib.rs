@@ -362,6 +362,13 @@ pub trait Computer: Send + Sync {
     /// Permanent. The disk goes with it.
     async fn destroy(&self, box_id: &str) -> BoxResult<()>;
 
+    /// Remove a box and keep its disk: what a box from `recreate` gets when it loses its scope, as
+    /// it runs on the disk of the box it replaced, which may be the winner's too. A provider that
+    /// can `recreate` must say how; for one that cannot, it is never asked.
+    async fn discard(&self, _box_id: &str) -> BoxResult<()> {
+        Err(not_supported("remove a box but keep its disk"))
+    }
+
     /// The box's live run-state, as a lowercase word the boot UI can render honestly:
     /// `"running"` (up and serving), `"absent"` (no such box — released or never created), or the
     /// provider's own word for anything in between (`"exited"`, `"stopped"`, `"created"`, …). The

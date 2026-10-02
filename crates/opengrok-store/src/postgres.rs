@@ -2267,7 +2267,7 @@ impl PgStore {
     ) -> StoreResult<Option<(String, String)>> {
         let sql = if replacing.is_some() {
             "update scoped_computer set box_id = $3, kind = $4, org_id = $5, last_used_at_ms = $6,
-               updated_at_ms = $6 where scope = $1 and scope_id = $2 and box_id = $7 returning box_id, kind"
+               updated_at_ms = $6, stopped = false where scope = $1 and scope_id = $2 and box_id = $7 returning box_id, kind"
         } else {
             "insert into scoped_computer (scope, scope_id, box_id, kind, org_id, last_used_at_ms, updated_at_ms)
              values ($1, $2, $3, $4, $5, $6, $6) on conflict (scope, scope_id)

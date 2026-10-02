@@ -2,6 +2,7 @@
 
 mod admin;
 mod kek;
+mod repair;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -315,8 +316,7 @@ async fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let setting = std::env::var("OG_REPAIR_STRAY_BOXES").ok();
         async move {
-            use opengrok_server::agui::provision::{repair_destroys, repair_stray_boxes};
-            repair_stray_boxes(&state, repair_destroys(setting.as_deref())).await;
+            repair::stray_boxes(&state, repair::destroys(setting.as_deref())).await;
         }
     });
 
