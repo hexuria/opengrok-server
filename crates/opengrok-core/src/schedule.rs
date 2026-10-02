@@ -74,28 +74,97 @@ pub enum FireCause {
     Webhook,
 }
 
-/// A cron expression the way people write them (5 fields), silently promoted to the 6-field form
-/// the parser wants (seconds first) so `0 9 * * 1` means "09:00 every Monday" and not a parse
-/// error. A 6- or 7-field expression passes through untouched — which is also what lets tests
-/// schedule in seconds.
-pub fn normalized_cron(expression: &str) -> String {
-    let fields = expression.split_whitespace().count();
-    if fields == 5 {
-        format!("0 {}", expression.trim())
-    } else {
-        expression.trim().to_string()
-    }
+/// The `cron` crate's names for the days, by standard cron's numbers: 0 and 7 are both Sunday.
+const WEEKDAYS: [&str; 8] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+
+/// Why a numbered day of the week was refused, after the item itself.
+const NOT_A_DAY: &str = "is not a day of the week: a day is 0 to 7, where 0 and 7 are both \
+                         Sunday, or SUN to SAT, and a range runs forward and steps by 1 to 7";
+
+/// A cron expression the way people write them, 5 fields with standard cron's days of the week
+/// (0 or 7 for Sunday, 1 for Monday), promoted to the 6-field form the parser wants (seconds
+/// first) WITH THOSE DAYS NAMED: `0 9 * * 1` is stored as `0 0 9 * * MON`, 09:00 every Monday.
+/// The crate counts Sunday as 1 and refuses 0, so the digits handed over as written fired a day
+/// early (`1-5` ran Sunday to Thursday); a name is the same day to both countings.
+///
+/// A 6- or 7-field expression passes through untouched — which is also what lets tests schedule
+/// in seconds — SO ITS DAY OF THE WEEK IS THE CRATE'S, Sunday as 1. Every stored expression is
+/// one, and a row stored before this translation existed must fire where it always has.
+pub fn normalized_cron(expression: &str) -> Result<String, ScheduleError> {
+    let fields: Vec<&str> = expression.split_whitespace().collect();
+    let [minute, hour, day_of_month, month, days] = fields[..] else {
+        return Ok(expression.trim().to_string());
+    };
+    let days = named_weekdays(days)
+        .map_err(|why| ScheduleError::BadCron(format!("{} ({why})", expression.trim())))?;
+    Ok(format!("0 {minute} {hour} {day_of_month} {month} {days}"))
 }
 
-/// The inverse for the wire: the desktop's routine editor writes and re-reads the 5-field form,
-/// so a stored `0 0 9 * * 1` goes back out as `0 9 * * 1`. A 6-field expression whose seconds are
-/// not `0` (tests scheduling in seconds) is returned as it is — there is no 5-field form for it.
+/// Whether a day-of-week item counts its days by number: a digit before any step. Only those
+/// mean different days to the two countings. `*`, `?` and a name do not, and nor do their steps
+/// (`*/2` is Sunday, Tuesday, Thursday and Saturday to both).
+fn numbers_a_day(item: &str) -> bool {
+    let base = item.split_once('/').map_or(item, |(base, _)| base);
+    base.bytes().any(|b| b.is_ascii_digit())
+}
+
+/// A standard day-of-week field in the crate's names, item by item, so a list keeps its shape:
+/// `1,3,5` is `MON,WED,FRI` and `1-5/2` is `MON-FRI/2`. A lone number with a step runs to the
+/// field's end, 7, as the crate reads one in every field: `1/2` is Mon, Wed, Fri and Sun.
+fn named_weekdays(field: &str) -> Result<String, String> {
+    let mut named = Vec::new();
+    for item in field.split(',') {
+        if !numbers_a_day(item) {
+            named.push(item.to_string());
+            continue;
+        }
+        let base = item.split_once('/').map_or(item, |(base, _)| base);
+        let step = item.split_once('/').map(|(_, step)| step);
+        let refused = || format!("{item} {NOT_A_DAY}");
+        let number = |text: &str| match text.parse::<usize>() {
+            Ok(n) if n <= 7 && text.bytes().all(|b| b.is_ascii_digit()) => Ok(n),
+            _ => Err(refused()),
+        };
+        let (first, last) = match base.split_once('-') {
+            Some((first, last)) => (number(first)?, number(last)?),
+            None => {
+                let day = number(base)?;
+                (day, if step.is_some() { 7 } else { day })
+            }
+        };
+        let every = step.map_or(Ok(1), number)?;
+        if first > last || every == 0 {
+            return Err(refused());
+        }
+        // THE CRATE TAKES NO RANGE THAT WRAPS (`FRI-SUN` is its 6 to its 1, and refused), so a
+        // range ending on 7 stops at Saturday, and Sunday follows when the step lands on it.
+        let sunday = last == 7 && (1..7).contains(&first) && (7 - first) % every == 0;
+        let last = if first < 7 { last.min(6) } else { last };
+        let step = step.map_or(String::new(), |step| format!("/{step}"));
+        named.push(if first == last {
+            WEEKDAYS[first].to_string()
+        } else {
+            format!("{}-{}{step}", WEEKDAYS[first], WEEKDAYS[last])
+        });
+        if sunday {
+            named.push("SUN".to_string());
+        }
+    }
+    Ok(named.join(","))
+}
+
+/// The inverse, as a client reads a stored expression back (NativeChat's `from_server_cron`
+/// drops the seconds the same way): `0 0 9 * * MON` reads as `0 9 * * MON`, the same day to
+/// either counting. A 6-field expression whose seconds are not `0` (tests scheduling in seconds)
+/// is returned as it is — there is no 5-field form for it — and so is one that numbers its days
+/// of the week: those are the crate's numbers, and read as 5 fields they would land a day later.
 pub fn display_cron(normalized: &str) -> String {
     let fields: Vec<&str> = normalized.split_whitespace().collect();
-    if fields.len() == 6 && fields[0] == "0" {
-        fields[1..].join(" ")
-    } else {
-        normalized.to_string()
+    match fields[..] {
+        ["0", minute, hour, day_of_month, month, days] if !days.split(',').any(numbers_a_day) => {
+            format!("{minute} {hour} {day_of_month} {month} {days}")
+        }
+        _ => normalized.to_string(),
     }
 }
 
@@ -103,7 +172,7 @@ pub fn display_cron(normalized: &str) -> String {
 /// with no future occurrence (a fixed date already past) — and the caller must treat that as "done
 /// firing", not as an error.
 pub fn next_fire_ms(expression: &str, after_ms: i64) -> Option<i64> {
-    let schedule = cron::Schedule::from_str(&normalized_cron(expression)).ok()?;
+    let schedule = cron::Schedule::from_str(&normalized_cron(expression).ok()?).ok()?;
     let after = chrono::DateTime::from_timestamp_millis(after_ms)?;
     schedule
         .after(&after)
@@ -428,7 +497,7 @@ impl Schedule {
         let name = name.trim().to_string();
         match wake {
             Wake::Cron { cron } => {
-                let cron = normalized_cron(&cron);
+                let cron = normalized_cron(&cron)?;
                 // Accepted must mean "will fire": an unparseable expression, or one with no
                 // future occurrence at all, is refused here rather than stored as a dead row.
                 if next_fire_ms(&cron, at_ms).is_none() {
@@ -488,7 +557,7 @@ impl Schedule {
         let name = name.trim().to_string();
         match wake {
             Wake::Cron { cron } => {
-                let cron = normalized_cron(&cron);
+                let cron = normalized_cron(&cron)?;
                 if next_fire_ms(&cron, at_ms).is_none() {
                     return Err(ScheduleError::BadCron(cron));
                 }
@@ -717,10 +786,83 @@ mod tests {
         }
     }
 
+    /// What `normalized_cron` stores, or the refusal it says instead.
+    fn stored(typed: &str) -> String {
+        normalized_cron(typed).unwrap_or_else(|refusal| refusal.to_string())
+    }
+
     #[test]
     fn five_field_cron_is_promoted_and_six_field_is_kept() {
-        assert_eq!(normalized_cron("*/5 * * * *"), "0 */5 * * * *");
-        assert_eq!(normalized_cron("*/2 * * * * *"), "*/2 * * * * *");
+        assert_eq!(stored("*/5 * * * *"), "0 */5 * * * *");
+        assert_eq!(stored("*/2 * * * * *"), "*/2 * * * * *");
+    }
+
+    /// STANDARD CRON'S DAYS, one firing at a time across the week from a known Sunday. The crate
+    /// counts Sunday as 1: `1-5` handed to it as written ran Sunday to Thursday.
+    #[test]
+    fn a_five_field_day_of_the_week_fires_on_standard_crons_days() {
+        let sunday = 1_790_467_200_000; // 2026-09-27T00:00:00Z
+        let week = |cron: &str| {
+            let (mut after, mut days, end) = (sunday, Vec::new(), sunday + 604_800_000);
+            while let Some(next) = next_fire_ms(cron, after).filter(|next| *next < end) {
+                let when = chrono::DateTime::from_timestamp_millis(next).expect("a time");
+                assert_eq!(when.format("%H:%M").to_string(), "09:00", "{cron}");
+                days.push(when.format("%a").to_string());
+                after = next;
+            }
+            days.join(" ")
+        };
+        for (cron, days) in [
+            ("0 9 * * 1-5", "Mon Tue Wed Thu Fri"),
+            ("0 9 * * 0", "Sun"),
+            ("0 9 * * 7", "Sun"),
+            ("0 9 * * 1,3,5", "Mon Wed Fri"),
+            ("0 9 * * */2", "Sun Tue Thu Sat"),
+            ("0 9 * * 1-5/2", "Mon Wed Fri"),
+            ("0 9 * * 5-7", "Sun Fri Sat"),
+            ("0 9 * * 1/2", "Sun Mon Wed Fri"),
+            ("0 9 * * MON-FRI", "Mon Tue Wed Thu Fri"),
+        ] {
+            assert_eq!(week(cron), days, "{cron}");
+        }
+    }
+
+    /// What is stored names its days and reads back as the 5 fields that store it again. Six
+    /// fields are the crate's own, kept as written and never shown as 5 that would read Monday.
+    #[test]
+    fn a_numbered_day_is_stored_by_name_and_reads_back() {
+        for (typed, named) in [
+            ("0 9 * * 1-5", "0 0 9 * * MON-FRI"),
+            ("0 9 * * 0,7", "0 0 9 * * SUN,SUN"),
+            ("0 9 * * 5-7", "0 0 9 * * FRI-SAT,SUN"),
+            ("0 9 * * 1-7/2", "0 0 9 * * MON-SAT/2,SUN"),
+            ("0 9 * * */2,?,mon-Fri", "0 0 9 * * */2,?,mon-Fri"),
+        ] {
+            assert_eq!(stored(typed), named, "{typed}");
+            assert_eq!(display_cron(named), named[2..], "{typed}");
+            assert_eq!(stored(&display_cron(named)), named, "{typed}");
+        }
+        assert_eq!(stored("0 0 9 * * 1"), "0 0 9 * * 1");
+        assert_eq!(display_cron("0 0 9 * * 1"), "0 0 9 * * 1");
+    }
+
+    /// A day past 7 is refused in words, and so is a numbered item the crate would read its own
+    /// way: a backward range, a step of 0, a number beside a name.
+    #[test]
+    fn a_day_of_the_week_past_seven_is_refused_in_words() {
+        let refusal = format!("not a cron expression: 0 9 * * 8 (8 {NOT_A_DAY})");
+        assert_eq!(stored("0 9 * * 8"), refusal);
+        for typed in [
+            "0 9 * * 1-8",
+            "0 9 * * 5-1",
+            "0 9 * * 1-5/0",
+            "0 9 * * MON-5",
+        ] {
+            assert!(
+                stored(typed).starts_with("not a cron expression: "),
+                "{typed}"
+            );
+        }
     }
 
     #[test]
@@ -751,8 +893,8 @@ mod tests {
             schedule.apply(event);
         }
         assert_eq!(schedule.name, "Monday report");
-        assert_eq!(schedule.cron, "0 0 9 * * 1");
-        assert_eq!(display_cron(&schedule.cron), "0 9 * * 1");
+        assert_eq!(schedule.cron, "0 0 9 * * MON");
+        assert_eq!(display_cron(&schedule.cron), "0 9 * * MON");
         assert_eq!(display_cron("*/2 * * * * *"), "*/2 * * * * *");
         assert_eq!(schedule.prompt, "write the weekly report");
     }

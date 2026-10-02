@@ -873,7 +873,7 @@ async fn a_body_without_a_kind_is_still_a_cron_routine() {
         .await;
     assert_eq!(status, 201, "{created}");
     assert_eq!(created["kind"], json!("cron"), "{created}");
-    assert_eq!(created["cron"], json!("0 0 9 * * 1"), "{created}");
+    assert_eq!(created["cron"], json!("0 0 9 * * MON"), "{created}");
     assert!(
         created["nextDueMs"].is_i64(),
         "a clock routine still says when it is next due: {created}"
@@ -882,6 +882,54 @@ async fn a_body_without_a_kind_is_still_a_cron_routine() {
         created["webhook"],
         Value::Null,
         "and it carries no webhook block at all: {created}"
+    );
+
+    // STANDARD CRON'S WEEKDAYS. `1-5` is Monday to Friday, stored by name: the cron crate counts
+    // Sunday as 1, and the digits handed to it as written ran Sunday to Thursday.
+    let (status, weekdays) = h
+        .post(
+            "/schedules",
+            json!({ "coworkerId": coworker, "cron": "0 9 * * 1-5", "prompt": "weekday report" }),
+        )
+        .await;
+    assert_eq!(status, 201, "{weekdays}");
+    assert_eq!(weekdays["cron"], json!("0 0 9 * * MON-FRI"), "{weekdays}");
+    let due = weekdays["nextDueMs"]
+        .as_i64()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .expect("nextDueMs");
+    {
+        use chrono::{Datelike, Timelike};
+        assert!(
+            due.weekday().num_days_from_monday() < 5 && (due.hour(), due.minute()) == (9, 0),
+            "next due at 09:00 UTC on a weekday, not {due}"
+        );
+    }
+    let id = weekdays["id"].as_str().expect("id");
+    let gone = h
+        .call(
+            "DELETE",
+            &format!("/schedules/{id}"),
+            Some(&h.token()),
+            Value::Null,
+        )
+        .await;
+    assert!(
+        gone.status < 300,
+        "a weekday routine left behind would fire in a sweep test"
+    );
+
+    // There is no eighth day, and the refusal says what a day is.
+    let (status, refused) = h
+        .post(
+            "/schedules",
+            json!({ "coworkerId": coworker, "cron": "0 9 * * 8", "prompt": "no such day" }),
+        )
+        .await;
+    assert_eq!(status, 422, "{refused}");
+    assert!(
+        refused.to_string().contains("8 is not a day of the week"),
+        "refused in words: {refused}"
     );
 
     // A cron routine with no expression is refused rather than stored as a row that never fires.
@@ -1110,7 +1158,7 @@ async fn an_edited_routine_runs_now_with_its_new_prompt() {
     assert_eq!(row["prompt"], json!("summarise the standup notes"));
     assert_eq!(
         row["cron"],
-        json!("0 0 9 * * 1"),
+        json!("0 0 9 * * MON"),
         "an edit that names no cron keeps it: {row}"
     );
 
@@ -1242,7 +1290,7 @@ async fn an_edit_refuses_what_create_refuses_and_keeps_a_hook_where_it_was() {
         .patch(&format!("/schedules/{id}"), json!({ "cron": "30 9 * * 1" }))
         .await;
     assert_eq!(status, 200, "{row}");
-    assert_eq!(row["cron"], json!("0 30 9 * * 1"), "{row}");
+    assert_eq!(row["cron"], json!("0 30 9 * * MON"), "{row}");
     assert_ne!(
         row["nextDueMs"], before,
         "a new clock is a new next firing: {row}"
