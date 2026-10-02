@@ -67,6 +67,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "c1"
       },
       {
@@ -91,6 +92,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "c3"
       },
       {
@@ -115,6 +117,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "c5"
       },
       {
@@ -139,6 +142,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "c7"
       },
       {
@@ -163,6 +167,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "c9"
       },
       {
@@ -187,6 +192,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "c11"
       },
       {
@@ -211,6 +217,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "c13"
       },
       {
@@ -235,6 +242,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "c15"
       },
       {
@@ -304,15 +312,15 @@
             "limit": 128000,
             "left_out": 0,
             "estimated": [
-              3416,
-              3434,
-              3452,
-              3470,
-              3488,
-              3506,
-              3524,
-              3542,
-              1334
+              3415,
+              3433,
+              3451,
+              3469,
+              3487,
+              3505,
+              3523,
+              3541,
+              1333
             ]
           },
           "model_ms": [

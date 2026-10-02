@@ -8,6 +8,8 @@ pub struct RecordingComputer {
     /// Scripted states, the last repeating; empty means "running" from the start.
     states: Mutex<std::collections::VecDeque<&'static str>>,
     resumes: std::sync::atomic::AtomicUsize,
+    /// How long every command takes to answer: a tool whose time is known.
+    pause_ms: u64,
 }
 
 impl RecordingComputer {
@@ -15,6 +17,14 @@ impl RecordingComputer {
     pub fn sleeping(states: &[&'static str]) -> Self {
         Self {
             states: Mutex::new(states.iter().copied().collect()),
+            ..Self::default()
+        }
+    }
+
+    /// A running box whose every command takes `ms` to answer.
+    pub fn taking(ms: u64) -> Self {
+        Self {
+            pause_ms: ms,
             ..Self::default()
         }
     }
@@ -39,6 +49,9 @@ impl Computer for RecordingComputer {
     async fn run(&self, box_id: &str, command: &str, _t: u32) -> BoxResult<CommandOutput> {
         if let Ok(mut boxes) = self.boxes.lock() {
             boxes.push(box_id.to_string());
+        }
+        if self.pause_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(self.pause_ms)).await;
         }
         Ok(CommandOutput {
             exit_code: 0,

@@ -379,61 +379,6 @@ fn is_missing_catalog_binary(call: &opengrok_tools::ToolCall, content: &str) -> 
     names_the_catalog(call) && intent::is_unrecoverable_command_miss(content)
 }
 
-/// Run a turn, and run any tools the model asked for. One round; see `run_conversation` for the
-/// durable multi-round loop.
-pub async fn run_turn_with_tools(
-    door: &dyn ModelDoor,
-    tools: Option<&ToolRunner>,
-    mut request: ModelRequest,
-    thread_id: &str,
-    run_id: &str,
-    at_ms: i64,
-) -> Vec<Event> {
-    let mut projection = Projection::new(thread_id, run_id, at_ms);
-    let mut events = projection.start();
-
-    // Offer the tools to the model — see the note in `converse`.
-    if let Some(runner) = tools {
-        request.tools = runner.tool_schemas();
-    }
-
-    let budget = RunBudget::default();
-    let mut stream = match budget.open(door, request).await {
-        Ok(stream) => stream,
-        // A door that will not open is a failed run, not a crash: the client gets an ending it can
-        // render and reason about (CLAUDE.md #8, fail closed and say why).
-        Err(error) => {
-            tracing::warn!(%error, "the model door did not open");
-            events.extend(projection.fail(error.sentence()));
-            return events;
-        }
-    };
-
-    while let Some(delta) = budget.next(&mut stream).await {
-        match delta {
-            Ok(delta) => events.extend(projection.push(delta)),
-            Err(error) => {
-                tracing::warn!(%error, "the model stream broke");
-                events.extend(projection.fail(error.sentence()));
-                return events;
-            }
-        }
-    }
-
-    // Anything the model asked for, run on the coworker's own computer. The results are emitted as
-    // AG-UI tool-result events so a person watching sees what happened, and so the log holds it.
-    if let Some(runner) = tools {
-        let calls = collect_tool_calls(&events);
-        events.extend(box_wake_frame(runner, &mut projection, &calls).await);
-        for result in runner.run_all(&calls).await {
-            events.extend(projection.push_tool_result(&result));
-        }
-    }
-
-    events.extend(projection.finish());
-    events
-}
-
 /// The durable loop: model, tools, model again, until the model stops asking.
 ///
 /// THE ORDERING IS THE POINT. Each round's events reach the journal *before* the next model call
@@ -716,8 +661,13 @@ pub async fn resume_conversation(
 
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
     // like a real one, so the model learns which rule stopped it and carries on.
+    //
+    // EACH WITH ITS TIME (#305). The approved call's is its own run, which starts only now, so
+    // the wait on the card is not in it. A no was decided by the person, whose wait is not the
+    // call's either: 0. A result written from the card's answer (a form, a handoff) ran nothing
+    // here, and says no time rather than one made up.
     let approved_ran = matches!(outcome, ResumeOutcome::Approved);
-    let results = match outcome {
+    let timed: Vec<(_, Option<u64>)> = match outcome {
         ResumeOutcome::Approved => {
             // Its start on record first, as for every call a round runs (#91).
             let started = opengrok_core::run::StartedTool {
@@ -749,15 +699,24 @@ pub async fn resume_conversation(
             all.extend(
                 box_wake_frame(tools, &mut projection, std::slice::from_ref(&approved)).await,
             );
-            tools.run_all(std::slice::from_ref(&approved)).await
+            let ran = tools.run_all(std::slice::from_ref(&approved)).await;
+            ran.into_iter()
+                .map(|(result, ms)| (result, Some(ms)))
+                .collect()
         }
-        ResumeOutcome::Refused(why) => vec![opengrok_tools::ToolResult::refused(&approved.id, why)],
+        ResumeOutcome::Refused(why) => {
+            vec![(
+                opengrok_tools::ToolResult::refused(&approved.id, why),
+                Some(0),
+            )]
+        }
         ResumeOutcome::Settled(content) => {
-            vec![opengrok_tools::ToolResult::ok(&approved.id, content)]
+            vec![(opengrok_tools::ToolResult::ok(&approved.id, content), None)]
         }
     };
-    for result in &results {
-        all.extend(projection.push_tool_result(result));
+    let (results, durations): (Vec<_>, Vec<_>) = timed.into_iter().unzip();
+    for (result, ms) in results.iter().zip(durations) {
+        all.extend(projection.push_tool_result(result, ms));
         request.messages.push(tool_result_message(result));
     }
     // What the approved call played, written WITH its result by whichever write takes it
@@ -1575,69 +1534,50 @@ async fn converse_raw(
                 emit_live(sink, &waking).await;
                 round_events.extend(waking);
                 let tool_started = std::time::Instant::now();
-                let ((results, per_tool), auto_review_ms) = if skip_listing {
+                // EACH CALL WITH ITS OWN TIME (#305), for its `TOOL_CALL_RESULT` and `run-timing`.
+                // An answer the loop gives itself was decided before the round ran, in under a
+                // millisecond: 0, a refusal's time to decide. `None` for a result no call produced.
+                let (timed, auto_review_ms): (Vec<_>, u64) = if skip_listing {
                     skipped_redundant_listing = true;
-                    let results: Vec<_> = calls
-                        .iter()
-                        .map(|call| {
-                            opengrok_tools::ToolResult::ok(
-                                &call.id,
-                                "A listing already succeeded this turn. Answer from that result; do not list again.",
-                            )
-                        })
-                        .collect();
-                    let times: Vec<_> = calls.iter().map(|call| (call.name.clone(), 0)).collect();
-                    ((results, times), 0)
-                } else if answers.iter().any(Option::is_some) {
+                    let listed = "A listing already succeeded this turn. Answer from that result; do not list again.";
+                    let answer = |call: &opengrok_tools::ToolCall| {
+                        (opengrok_tools::ToolResult::ok(&call.id, listed), Some(0))
+                    };
+                    (calls.iter().map(answer).collect(), 0)
+                } else {
                     let runnable: Vec<_> = calls
                         .iter()
                         .zip(&answers)
                         .filter(|(_, answer)| answer.is_none())
                         .map(|(call, _)| call.clone())
                         .collect();
-                    let (ran, ran_times, review_ms) = if runnable.is_empty() {
-                        (Vec::new(), Vec::new(), 0)
+                    let (ran, review_ms) = if runnable.is_empty() {
+                        (Vec::new(), 0)
                     } else {
-                        let ((ran, times), ms) =
-                            review::time_auto_review(runner.run_all_timed(&runnable), &request)
-                                .await;
-                        (ran, times, ms)
+                        review::time_auto_review(runner.run_all(&runnable), &request).await
                     };
-                    let mut ran = ran.into_iter();
-                    let mut ran_times = ran_times.into_iter();
-                    let times = calls
-                        .iter()
-                        .zip(&answers)
-                        .map(|(call, answer)| {
-                            if answer.is_some() {
-                                (call.name.clone(), 0)
-                            } else {
-                                ran_times.next().unwrap_or_else(|| (call.name.clone(), 0))
-                            }
-                        })
-                        .collect();
-                    let results = calls
+                    let mut ran = ran.into_iter().map(|(result, ms)| (result, Some(ms)));
+                    let timed = calls
                         .iter()
                         .zip(answers)
-                        .map(|(call, answer)| {
-                            answer.unwrap_or_else(|| {
-                                ran.next().unwrap_or_else(|| {
-                                    opengrok_tools::ToolResult::refused(
-                                        &call.id,
-                                        "the tool did not run",
-                                    )
-                                })
-                            })
-                        })
-                        .collect();
-                    ((results, times), review_ms)
-                } else {
-                    review::time_auto_review(runner.run_all_timed(&calls), &request).await
+                        .map(|(call, answer)| match answer {
+                            Some(answer) => (answer, Some(0)),
+                            None => ran.next().unwrap_or_else(|| {
+                                let lost = "the tool did not run";
+                                (opengrok_tools::ToolResult::refused(&call.id, lost), None)
+                            }),
+                        });
+                    (timed.collect(), review_ms)
                 };
+                let (results, durations): (Vec<_>, Vec<_>) = timed.into_iter().unzip();
                 timing.record_tools(
-                    per_tool
-                        .into_iter()
-                        .map(|(name, ms)| timing::ToolPhase { name, ms })
+                    calls
+                        .iter()
+                        .zip(&durations)
+                        .map(|(call, ms)| timing::ToolPhase {
+                            name: call.name.clone(),
+                            ms: ms.unwrap_or_default(),
+                        })
                         .collect(),
                     timing::elapsed_ms(tool_started),
                     auto_review_ms,
@@ -1668,8 +1608,8 @@ async fn converse_raw(
                     std::mem::take(&mut said),
                     calls.iter().map(tool_call_ref).collect(),
                 ));
-                for (result, call) in results.iter().zip(calls.iter()) {
-                    let produced = projection.push_tool_result(result);
+                for ((result, call), ms) in results.iter().zip(calls.iter()).zip(&durations) {
+                    let produced = projection.push_tool_result(result, *ms);
                     emit_live(sink, &produced).await;
                     remember_agent_shot(&produced, &mut last_agent_shot);
                     round_events.extend(produced);

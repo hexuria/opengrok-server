@@ -255,22 +255,20 @@ impl ToolRunner {
         }
     }
 
-    pub async fn run_all(&self, calls: &[ToolCall]) -> Vec<ToolResult> {
-        self.run_all_timed(calls).await.0
-    }
-
-    /// Same as `run_all`, with per-call wall clock for `run-timing`.
-    pub async fn run_all_timed(&self, calls: &[ToolCall]) -> (Vec<ToolResult>, Vec<(String, u64)>) {
+    /// Each call's result with its own wall clock in milliseconds, from the moment it starts
+    /// running to the moment its result exists: `TOOL_CALL_RESULT.durationMs` (#305) and
+    /// `run-timing`'s tools. The one place a call is timed, the approved call of a resume too.
+    pub async fn run_all(&self, calls: &[ToolCall]) -> Vec<(ToolResult, u64)> {
         let mut results = Vec::with_capacity(calls.len());
-        let mut times = Vec::with_capacity(calls.len());
         for call in calls {
             // Sequentially: a model's calls in one turn frequently depend on each other (write a
             // file, then run it), and running them concurrently would race on the same filesystem.
+            // So a call's time is its own, never the round's.
             let started = std::time::Instant::now();
-            results.push(self.run_one(call).await);
-            times.push((call.name.clone(), crate::timing::elapsed_ms(started)));
+            let result = self.run_one(call).await;
+            results.push((result, crate::timing::elapsed_ms(started)));
         }
-        (results, times)
+        results
     }
 }
 

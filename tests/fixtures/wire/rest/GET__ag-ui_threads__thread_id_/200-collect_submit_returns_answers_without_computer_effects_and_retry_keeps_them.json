@@ -72,6 +72,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "waiting for approval: Waiting for you",
             "timestamp": 100,
+            "durationMs": 0,
             "toolCallId": "collect-1"
           },
           {
@@ -209,7 +210,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  4354
+                  4353
                 ]
               },
               "model_ms": [
@@ -361,7 +362,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  4073
+                  4072
                 ]
               },
               "model_ms": [

@@ -39,6 +39,61 @@ async fn run_turn(
     run_turn_with_tools(door, None, request, thread_id, run_id, at_ms).await
 }
 
+/// Run a turn, and run any tools the model asked for: one round, no journal. Only these tests
+/// ask for it, which is why it lives here; `run_conversation` is the durable multi-round loop.
+async fn run_turn_with_tools(
+    door: &dyn ModelDoor,
+    tools: Option<&ToolRunner>,
+    mut request: ModelRequest,
+    thread_id: &str,
+    run_id: &str,
+    at_ms: i64,
+) -> Vec<Event> {
+    let mut projection = Projection::new(thread_id, run_id, at_ms);
+    let mut events = projection.start();
+
+    // Offer the tools to the model — see the note in `converse`.
+    if let Some(runner) = tools {
+        request.tools = runner.tool_schemas();
+    }
+
+    let budget = RunBudget::default();
+    let mut stream = match budget.open(door, request).await {
+        Ok(stream) => stream,
+        // A door that will not open is a failed run, not a crash: the client gets an ending it can
+        // render and reason about (CLAUDE.md #8, fail closed and say why).
+        Err(error) => {
+            tracing::warn!(%error, "the model door did not open");
+            events.extend(projection.fail(error.sentence()));
+            return events;
+        }
+    };
+
+    while let Some(delta) = budget.next(&mut stream).await {
+        match delta {
+            Ok(delta) => events.extend(projection.push(delta)),
+            Err(error) => {
+                tracing::warn!(%error, "the model stream broke");
+                events.extend(projection.fail(error.sentence()));
+                return events;
+            }
+        }
+    }
+
+    // Anything the model asked for, run on the coworker's own computer. The results are emitted as
+    // AG-UI tool-result events so a person watching sees what happened, and so the log holds it.
+    if let Some(runner) = tools {
+        let calls = collect_tool_calls(&events);
+        events.extend(box_wake_frame(runner, &mut projection, &calls).await);
+        for (result, ms) in runner.run_all(&calls).await {
+            events.extend(projection.push_tool_result(&result, Some(ms)));
+        }
+    }
+
+    events.extend(projection.finish());
+    events
+}
+
 fn tool_runner() -> ToolRunner {
     tool_runner_on(
         Arc::new(crate::tools::tests_support::RecordingComputer::default()),
@@ -56,6 +111,17 @@ fn tool_runner_with(shape: impl FnOnce(Executor) -> Executor) -> ToolRunner {
 /// Ada's runner on any computer, with the executor shaped by the caller (a screen, a sink).
 fn tool_runner_on(
     computer: Arc<dyn opengrok_box::Computer>,
+    shape: impl FnOnce(Executor) -> Executor,
+) -> ToolRunner {
+    use opengrok_policy::ToolSet;
+    runner_granted(computer, ToolSet::All, ToolSet::None, shape)
+}
+
+/// Ada's runner under a grant of `profile`, with `needs_approval` behind a person's yes.
+fn runner_granted(
+    computer: Arc<dyn opengrok_box::Computer>,
+    profile: opengrok_policy::ToolSet,
+    needs_approval: opengrok_policy::ToolSet,
     shape: impl FnOnce(Executor) -> Executor,
 ) -> ToolRunner {
     use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand};
@@ -79,15 +145,15 @@ fn tool_runner_on(
             coworker.apply(&event);
         }
     }
-    // A permissive policy: these tests are about the loop, not about policy, and an executor
-    // built without one now refuses everything by design.
+    // Permissive unless the caller narrows the grant: these tests are about the loop, not about
+    // policy, and an executor built without one now refuses everything by design.
     let account = opengrok_core::id::AccountId::from_stored("acct_ada");
     let policy = opengrok_policy::Context {
         grant: Some(opengrok_policy::Grant {
             principal: account.clone(),
             coworker: CoworkerId::from_stored("cw_ada"),
-            profile: opengrok_policy::ToolSet::All,
-            needs_approval: opengrok_policy::ToolSet::None,
+            profile,
+            needs_approval,
             revoked: false,
         }),
         ceiling: Some(opengrok_policy::Ceiling {
@@ -899,6 +965,8 @@ async fn a_refused_card_is_read_by_the_model_and_never_runs() {
         .find(|event| event.event_type == EventType::ToolCallResult)
         .expect("the refusal is written where the result would have gone");
     assert_eq!(result.extra.get("ok"), Some(&serde_json::json!(false)));
+    // The person decided, and the wait for them is not the call's (#305).
+    assert_eq!(duration_of(result), Some(0), "{result:?}");
     assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
 }
 
@@ -2492,6 +2560,17 @@ async fn a_home_directory_find_is_refused_before_it_runs() {
     );
     assert!(!text.contains("AGENT.md"), "{text:?}");
     assert!(!text.to_ascii_lowercase().contains("i'll look"), "{text:?}");
+    // Refused by the loop before anything ran, in no time to speak of (#305); the catalog call
+    // after it ran, and says its own.
+    let refused = results_for(&events, "c1");
+    assert_eq!(
+        refused.iter().map(|e| duration_of(e)).collect::<Vec<_>>(),
+        [Some(0)]
+    );
+    assert!(
+        duration_of(results_for(&events, "c2")[0]).is_some(),
+        "{events:?}"
+    );
 }
 
 #[test]
@@ -5726,4 +5805,225 @@ async fn an_approved_call_whose_start_cannot_be_journaled_never_runs() {
         Some(vec!["c1:shell".to_string()])
     );
     assert_eq!(computer.last_box(), None, "the approved call did not run");
+}
+
+/// The `TOOL_CALL_RESULT` frames answering `id`, in order: a call that waited on a card has two.
+fn results_for<'a>(events: &'a [Event], id: &str) -> Vec<&'a Event> {
+    events
+        .iter()
+        .filter(|event| event.event_type == EventType::ToolCallResult)
+        .filter(|event| event.extra.get("toolCallId").and_then(|v| v.as_str()) == Some(id))
+        .collect()
+}
+
+/// `durationMs` as the wire carries it: an integer, or nothing.
+fn duration_of(event: &Event) -> Option<u64> {
+    event
+        .extra
+        .get(opengrok_wire::agui::DURATION_MS)
+        .and_then(serde_json::Value::as_u64)
+}
+
+/// A shell answered in-process: `sleep <ms>` takes that long, and anything else answers at once.
+fn paced_shell() -> ToolRunner {
+    ToolRunner::local_only().with_local(
+        serde_json::json!({ "type": "function", "function": { "name": "shell" } }),
+        Arc::new(|call| {
+            let command = call.arguments["command"].as_str().unwrap_or_default();
+            if let Some(ms) = command
+                .strip_prefix("sleep ")
+                .and_then(|ms| ms.parse().ok())
+            {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+            opengrok_tools::ToolResult::ok(&call.id, "[exit code 0]")
+        }),
+    )
+}
+
+/// EACH CALL'S OWN TIME, NOT ITS ROUND'S (#305). A round's calls run one after another and their
+/// results go out together, so the quick call's result is sent after the slow call's wait: the
+/// time on it must still be its own. The journal keeps the very number the stream said, which is
+/// what a replay reads back, and `run-timing` counts the same numbers.
+#[tokio::test]
+async fn each_call_in_a_round_says_its_own_time_and_the_journal_keeps_it() {
+    const SLOW_MS: u64 = 150;
+    let door = Rounds::new(
+        vec![
+            [
+                shell_deltas("c1", &format!("sleep {SLOW_MS}")),
+                shell_deltas("c2", "true"),
+            ]
+            .concat(),
+        ],
+        "Both ran.",
+    );
+    let journal = MemoryJournal::new();
+    let events = run_conversation(
+        &door,
+        Some(&paced_shell()),
+        &journal,
+        request("go"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    assert_eq!(events.last().unwrap().event_type, EventType::RunFinished);
+    let slow = duration_of(results_for(&events, "c1")[0]).expect("the slow call's time");
+    let quick = duration_of(results_for(&events, "c2")[0]).expect("the quick call's time");
+    assert!(slow >= SLOW_MS, "{slow}");
+    assert!(quick < SLOW_MS, "the quick call's time is its own: {quick}");
+
+    let journaled = journal.batches().concat();
+    for (id, said) in [("c1", slow), ("c2", quick)] {
+        let kept: Vec<Option<u64>> = results_for(&journaled, id)
+            .into_iter()
+            .map(duration_of)
+            .collect();
+        assert_eq!(kept, [Some(said)], "the journal keeps what the stream said");
+    }
+    let timing = run_timing_value(&events).expect("run-timing");
+    let counted: Vec<u64> = timing["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["ms"].as_u64().unwrap())
+        .collect();
+    assert_eq!(counted, [slow, quick], "{timing}");
+}
+
+/// A RESUMED APPROVED CALL IS TIMED TOO, FROM WHEN IT RUNS (#305); it used to run untimed. The
+/// person answers the card later than the call takes to run, and the time on its result is the
+/// call's own, the wait on the person left out. The card's own result says how long the gate
+/// took to decide to ask, before anything ran.
+#[tokio::test]
+async fn an_approved_call_says_its_own_time_not_the_wait_on_its_card() {
+    use opengrok_policy::ToolSet;
+    const RUNS_MS: u64 = 120;
+    const ANSWERED_AFTER_MS: u64 = 900;
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::taking(
+        RUNS_MS,
+    ));
+    let door = Rounds::new(vec![shell_deltas("c1", "make release")], "Released.");
+    let journal = MemoryJournal::new();
+    let asking = runner_granted(computer.clone(), ToolSet::All, ToolSet::All, |e| e);
+
+    let parked = run_conversation(
+        &door,
+        Some(&asking),
+        &journal,
+        request("ship it"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+    assert!(parked.iter().any(is_awaiting_card), "{parked:?}");
+    assert_eq!(computer.last_box(), None, "nothing ran before the yes");
+    let asked = duration_of(results_for(&parked, "c1")[0]).expect("the card's result");
+    assert!(asked < RUNS_MS, "{asked}");
+
+    tokio::time::sleep(std::time::Duration::from_millis(ANSWERED_AFTER_MS)).await;
+    let yes = |executor: Executor| executor.with_approved(["c1".to_string()]);
+    let approved = runner_granted(computer.clone(), ToolSet::All, ToolSet::All, yes);
+    let call = opengrok_tools::ToolCall {
+        id: "c1".to_string(),
+        name: "shell".to_string(),
+        arguments: serde_json::json!({"command": "make release"}),
+    };
+    let resumed = resume_conversation(
+        &door,
+        &approved,
+        &journal,
+        request("ship it"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::approved(call, 1),
+    )
+    .await;
+
+    assert_eq!(computer.last_box().as_deref(), Some("box_ada"), "it ran");
+    let ran = results_for(&resumed, "c1");
+    assert_eq!(ran.len(), 1, "{resumed:?}");
+    assert_eq!(ran[0].extra.get("ok"), Some(&serde_json::json!(true)));
+    let took = duration_of(ran[0]).expect("the approved call's time");
+    assert!(took >= RUNS_MS, "{took}");
+    assert!(
+        took < ANSWERED_AFTER_MS,
+        "the wait on the card is not the call's: {took}"
+    );
+    let kept: Vec<Option<u64>> = results_for(&journal.batches().concat(), "c1")
+        .into_iter()
+        .map(duration_of)
+        .collect();
+    assert_eq!(kept, [Some(asked), Some(took)], "both, as they were said");
+}
+
+/// A CALL ITS POLICY REFUSES SAYS HOW LONG THE REFUSAL TOOK (#305): nothing ran, and the time is
+/// the deciding, however short.
+#[tokio::test]
+async fn a_call_its_policy_refuses_says_how_long_the_refusal_took() {
+    use opengrok_policy::ToolSet;
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let reading = ToolSet::Only(["read_file".to_string()].into_iter().collect());
+    let runner = runner_granted(computer.clone(), reading, ToolSet::None, |e| e);
+    let door = Rounds::new(vec![shell_deltas("c1", "rm -rf build")], "I may not.");
+    let journal = MemoryJournal::new();
+
+    let events = run_conversation(
+        &door,
+        Some(&runner),
+        &journal,
+        request("clean up"),
+        "t1",
+        "r1",
+        1,
+    )
+    .await;
+
+    assert_eq!(computer.last_box(), None, "a refused call does not run");
+    let refused = results_for(&events, "c1");
+    assert_eq!(refused.len(), 1, "{events:?}");
+    assert_eq!(refused[0].extra.get("ok"), Some(&serde_json::json!(false)));
+    let said = refused[0].extra["content"].as_str().unwrap_or_default();
+    assert!(
+        said.contains("may not make coworker"),
+        "the grant's no: {said}"
+    );
+    let decided = duration_of(refused[0]).expect("a refusal says its time to decide");
+    let kept: Vec<Option<u64>> = results_for(&journal.batches().concat(), "c1")
+        .into_iter()
+        .map(duration_of)
+        .collect();
+    assert_eq!(kept, [Some(decided)]);
+}
+
+/// A RESULT WRITTEN FROM A CARD'S ANSWER SAYS NO TIME (#305). A form submitted or a box handed
+/// back is settled outside the loop, which runs nothing for it: a number there would be made up,
+/// so the key is left out, as on every frame journaled before the field existed.
+#[tokio::test]
+async fn a_result_settled_from_a_cards_answer_says_no_time() {
+    let computer = Arc::new(crate::tools::tests_support::RecordingComputer::default());
+    let runner = tool_runner_on(computer.clone(), |executor| executor);
+    let call = opengrok_tools::ToolCall {
+        id: "f1".to_string(),
+        name: opengrok_tools::REQUEST_USER_FORM.to_string(),
+        arguments: serde_json::json!({ "title": "Sign in" }),
+    };
+
+    let events = resume_conversation(
+        &MockDoor::echoing(),
+        &runner,
+        &MemoryJournal::new(),
+        request("sign in"),
+        RunContext::new("t1", "r1", 1),
+        Resumption::settled(call, 1, "The person filled the form in."),
+    )
+    .await;
+
+    assert_eq!(computer.last_box(), None, "nothing ran");
+    let settled = results_for(&events, "f1");
+    assert_eq!(settled.len(), 1, "{events:?}");
+    assert!(settled[0].extra.get("durationMs").is_none(), "{settled:?}");
 }

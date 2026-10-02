@@ -14,7 +14,7 @@
 //!   - `RUN_FINISHED` or `RUN_ERROR` last, exactly once, whatever happened. A consumer holds its
 //!     spinner open on that promise, so a stream that dies mid-sentence still gets an ending.
 
-use opengrok_wire::agui::{Event, EventType};
+use opengrok_wire::agui::{DURATION_MS, Event, EventType};
 
 use crate::model::ModelDelta;
 
@@ -212,7 +212,15 @@ impl Projection {
     ///
     /// `TOOL_CALL_RESULT` carries the tool's own id so a consumer can attach the output to the
     /// call it already drew, rather than showing it as a loose message from nowhere.
-    pub fn push_tool_result(&mut self, result: &opengrok_tools::ToolResult) -> Vec<Event> {
+    ///
+    /// `duration_ms` is the call's own time (`DURATION_MS`, #305), journaled with the frame.
+    /// `None` leaves the key out, for a result nothing timed: a number made up for one would
+    /// read as a call that ran.
+    pub fn push_tool_result(
+        &mut self,
+        result: &opengrok_tools::ToolResult,
+        duration_ms: Option<u64>,
+    ) -> Vec<Event> {
         let mut events = self.start();
         // A result belongs after the call it answers, never inside an open message.
         events.extend(self.close_open());
@@ -223,6 +231,9 @@ impl Projection {
             // A refusal is a result the model reads, so whether it succeeded must be legible
             // rather than inferred from the wording.
             .with("ok", result.ok);
+        if let Some(ms) = duration_ms {
+            event = event.with(DURATION_MS, ms);
+        }
         // A screenshot rides the frame. `visibility` tells a client whether this PNG is a
         // chat event it must persist (`transcript` / `failure` / `end`) or only the model's
         // eyes + Computer pane (`agent`). Absent on rows written before this field: treat

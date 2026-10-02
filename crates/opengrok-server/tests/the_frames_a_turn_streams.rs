@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use opengrok_box::{BoxResult, CommandOutput, Computer, StartedCommand};
@@ -39,10 +40,11 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-/// A box that runs anything and says so.
+/// A box that runs anything and says so, taking `pause` over each command.
 #[derive(Default)]
 struct StubBox {
     ran: Mutex<Vec<String>>,
+    pause: Duration,
 }
 
 #[async_trait]
@@ -52,6 +54,7 @@ impl Computer for StubBox {
     }
     async fn run(&self, _b: &str, command: &str, _t: u32) -> BoxResult<CommandOutput> {
         self.ran.lock().expect("ran").push(command.to_string());
+        tokio::time::sleep(self.pause).await;
         Ok(CommandOutput {
             exit_code: 0,
             stdout: "ran".to_string(),
@@ -150,13 +153,20 @@ fn frames(sse: &str) -> Vec<Value> {
         .collect()
 }
 
-#[tokio::test]
-async fn a_turn_that_thinks_and_uses_a_tool_streams_every_step() {
-    let database_url = database_or_skip!();
+/// The server on `stub`, asking `door`, with a person signed in and a coworker hired: what a
+/// turn needs to be sent.
+struct Served {
+    base: String,
+    token: String,
+    coworker: String,
+    client: reqwest::Client,
+}
+
+async fn serve(database_url: &str, door: MockDoor, stub: Arc<StubBox>) -> Served {
     let email = format!("frames-{}@og.local", uuid::Uuid::now_v7().simple());
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
-        .connect(&database_url)
+        .connect(database_url)
         .await
         .expect("connect to Postgres");
     opengrok_store::migrations::run(&pool)
@@ -164,14 +174,13 @@ async fn a_turn_that_thinks_and_uses_a_tool_streams_every_step() {
         .expect("migrations");
     let store = PgStore::new(pool);
     let account = seed_account(&store, &email, "").await;
-    let stub = Arc::new(StubBox::default());
     let minter = Arc::new(TokenMinter::new(b"a-turn-that-thinks-and-acts"));
     let agui = AgUiState {
         auth: AuthState::new(store, minter, email.clone()),
-        door: Arc::new(MockDoor::reasoning_then_a_tool()),
+        door: Arc::new(door),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
-        computer: Some(stub.clone()),
+        computer: Some(stub),
         vault: None,
         connectors: Connectors {
             providers: Arc::new(BTreeMap::new()),
@@ -217,22 +226,49 @@ async fn a_turn_that_thinks_and_uses_a_tool_streams_every_step() {
         .expect("hired");
     let coworker = hired["id"].as_str().expect("coworker id");
 
-    let sse = client
-        .post(format!("{base}/ag-ui"))
-        .header("authorization", format!("Bearer {token}"))
-        .json(&json!({
-            "threadId": format!("th-{}", uuid::Uuid::now_v7().simple()),
-            "runId": uuid::Uuid::now_v7().to_string(),
-            "messages": [{ "id": "m-1", "role": "user", "content": "what is on the box?" }],
-            "forwardedProps": { "coworkerId": coworker },
-        }))
-        .send()
-        .await
-        .expect("turn")
-        .text()
-        .await
-        .expect("sse");
-    let frames = frames(&sse);
+    Served {
+        base,
+        token,
+        coworker: coworker.to_string(),
+        client,
+    }
+}
+
+impl Served {
+    /// One turn on a new thread; the frames it streamed, and the thread it was on.
+    async fn turn(&self, words: &str) -> (Vec<Value>, String) {
+        let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+        let sse = self
+            .client
+            .post(format!("{}/ag-ui", self.base))
+            .header("authorization", format!("Bearer {}", self.token))
+            .json(&json!({
+                "threadId": thread,
+                "runId": uuid::Uuid::now_v7().to_string(),
+                "messages": [{ "id": "m-1", "role": "user", "content": words }],
+                "forwardedProps": { "coworkerId": self.coworker },
+            }))
+            .send()
+            .await
+            .expect("turn")
+            .text()
+            .await
+            .expect("sse");
+        (frames(&sse), thread)
+    }
+}
+
+#[tokio::test]
+async fn a_turn_that_thinks_and_uses_a_tool_streams_every_step() {
+    let database_url = database_or_skip!();
+    let stub = Arc::new(StubBox::default());
+    let served = serve(
+        &database_url,
+        MockDoor::reasoning_then_a_tool(),
+        stub.clone(),
+    )
+    .await;
+    let (frames, _) = served.turn("what is on the box?").await;
     let kinds: Vec<&str> = frames
         .iter()
         .filter_map(|frame| frame["type"].as_str())
@@ -268,5 +304,51 @@ async fn a_turn_that_thinks_and_uses_a_tool_streams_every_step() {
             .iter()
             .any(|command| command.contains("opengrok-tool-ran")),
         "and the tool ran on the box"
+    );
+}
+
+/// EACH TOOL CALL SAYS HOW LONG IT TOOK, AND THE THREAD'S REPLAY SAYS THE SAME (#305). The box
+/// takes a known time over the command; the live `TOOL_CALL_RESULT` carries at least that as an
+/// integer `durationMs`, and the replay carries the very number the stream did: the journaled
+/// one, never one worked out again. NativeChat asked for it for the call's row, live or
+/// reloaded, and the wire corpus keeps this replay by name (`ALSO_KEEP`).
+#[tokio::test]
+async fn a_tool_calls_time_rides_its_result_and_its_replay() {
+    let database_url = database_or_skip!();
+    const BOX_TAKES_MS: u64 = 150;
+    let stub = Arc::new(StubBox {
+        pause: Duration::from_millis(BOX_TAKES_MS),
+        ..StubBox::default()
+    });
+    let served = serve(&database_url, MockDoor::asking_for_a_tool(), stub).await;
+    let (frames, thread) = served.turn("how long does it take?").await;
+    let live = frames
+        .iter()
+        .find(|frame| frame["type"] == "TOOL_CALL_RESULT")
+        .expect("a result was streamed");
+    let took = live["durationMs"].as_u64().expect("an integer durationMs");
+    assert!(took >= BOX_TAKES_MS, "{live}");
+
+    let replay: Value = served
+        .client
+        .get(format!("{}/ag-ui/threads/{thread}", served.base))
+        .header("authorization", format!("Bearer {}", served.token))
+        .send()
+        .await
+        .expect("replay")
+        .json()
+        .await
+        .expect("replay body");
+    let replayed: Vec<&Value> = replay["runs"][0]["events"]
+        .as_array()
+        .expect("the run's frames")
+        .iter()
+        .filter(|frame| frame["type"] == "TOOL_CALL_RESULT")
+        .collect();
+    assert_eq!(replayed.len(), 1, "{replay}");
+    assert_eq!(replayed[0]["toolCallId"], live["toolCallId"], "{replay}");
+    assert_eq!(
+        replayed[0]["durationMs"], live["durationMs"],
+        "the replay says what the stream said: {replay}"
     );
 }

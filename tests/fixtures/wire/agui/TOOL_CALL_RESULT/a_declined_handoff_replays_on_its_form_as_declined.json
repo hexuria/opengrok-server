@@ -1,0 +1,7 @@
+{
+  "ok": true,
+  "type": "TOOL_CALL_RESULT",
+  "content": "The person declined to finish on the computer. Continue without those credentials; do not type secrets with `computer`, and do not raise the same form again.",
+  "timestamp": 100,
+  "toolCallId": "form-0199bb4e000070008000000000000001"
+}

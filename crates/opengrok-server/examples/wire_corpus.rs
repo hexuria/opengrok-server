@@ -211,6 +211,13 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "/ag-ui",
     ),
     ("a_retry_naming_another_run_is_already_consumed", "/ag-ui"),
+    // A tool call's own time (#305): a thread's replay whose result carries the `durationMs` its
+    // live frame did. Every replay with a call now has the key, so the shape alone would keep
+    // whichever test sorts first; the pin keeps the one whose test holds the two to each other.
+    (
+        "a_tool_calls_time_rides_its_result_and_its_replay",
+        "/ag-ui/threads/{thread_id}",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

@@ -4,6 +4,7 @@
   "toolCallId": "look-0199bb4e000070008000000000000001",
   "content": "screenshot of the 1280x800 screen attached",
   "ok": true,
+  "durationMs": 0,
   "image": {
     "mime": "image/png",
     "base64": "AAAA",
