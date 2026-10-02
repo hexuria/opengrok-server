@@ -48,6 +48,18 @@ macro_rules! database_or_skip {
     };
 }
 
+/// How long any one wait here may take IN ALL: a gate's arrivals, a record, a request, an update.
+/// A gate the test never opens, or opens for the wrong request, then fails the test and names what
+/// it waited for. Without it, the rebuild race below once waited on an update held at a gate it
+/// opens only after that update ends, and the suite hung for 45 minutes and more.
+const DEADLINE: Duration = Duration::from_secs(30);
+
+/// `wait`, or a failure naming `what` once it has taken `DEADLINE`.
+async fn within<T>(what: impl std::fmt::Display, wait: impl Future<Output = T>) -> T {
+    let bounded = tokio::time::timeout(DEADLINE, wait).await;
+    bounded.unwrap_or_else(|_| panic!("waited {} s for {what}", DEADLINE.as_secs()))
+}
+
 /// Where a held rebuild waits: before it removes the box it replaces, so a second rebuild of that
 /// box can still start, or after, while the old box reads `absent` and nothing records the new one.
 #[derive(Clone, Copy, PartialEq)]
@@ -91,14 +103,17 @@ impl Gated {
 
     /// The first `n` creates or rebuilds to reach the gate, in the order they reached it.
     async fn held(&self, n: usize) -> Vec<String> {
-        for _ in 0..1500 {
-            let arrived = self.arrived.lock().unwrap().clone();
-            if arrived.len() >= n {
-                return arrived[..n].to_vec();
+        let reached = async {
+            loop {
+                let arrived = self.arrived.lock().unwrap().clone();
+                if arrived.len() >= n {
+                    return arrived[..n].to_vec();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("{n} creates never reached the gate");
+        };
+        let what = format!("{n} creates or rebuilds to reach the gate");
+        within(what, reached).await
     }
 
     fn open(&self, id: &str) {
@@ -407,10 +422,15 @@ impl Server {
             self.base,
             coworker.as_str()
         );
-        let reply = self.client.post(url).bearer_auth(&member.token).send();
-        let reply = reply.await.expect("update");
-        assert_eq!(reply.status().as_u16(), 202, "the update is accepted");
-        let body: Value = reply.json().await.expect("the accepted status");
+        let request = self.client.post(url).bearer_auth(&member.token);
+        let accepted = async {
+            let reply = request.send().await.expect("update");
+            let status = reply.status().as_u16();
+            let body = reply.json::<Value>().await.expect("the accepted status");
+            (status, body)
+        };
+        let (status, body) = within("the update's reply", accepted).await;
+        assert_eq!(status, 202, "the update is accepted");
         assert_eq!(body["update"]["phase"], "pulling", "as accepted: {body}");
         assert_eq!(body["update"]["error"], Value::Null, "as accepted: {body}");
         assert_eq!(body["state"], "running", "the box before the work: {body}");
@@ -419,59 +439,60 @@ impl Server {
     /// Wait for the scope's update to end: `None` once it succeeded and its record was cleared,
     /// or the failed record's reason.
     async fn update_ended(&self, scope: (&str, &str)) -> Option<Option<String>> {
-        for _ in 0..1500 {
-            match self
-                .store()
-                .box_update(scope.0, scope.1)
-                .await
-                .expect("update row")
-            {
-                None => return None,
-                Some((phase, _, _, error)) if phase == "failed" => return Some(error),
-                Some(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+        let ended = async {
+            loop {
+                match self
+                    .store()
+                    .box_update(scope.0, scope.1)
+                    .await
+                    .expect("update row")
+                {
+                    None => return None,
+                    Some((phase, _, _, error)) if phase == "failed" => return Some(error),
+                    Some(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
             }
-        }
-        panic!("the update of {scope:?} never ended");
+        };
+        within(format!("the update of {scope:?} to end"), ended).await
     }
 
     /// The account's first box, made by the client asking for a computer.
     async fn first_box(&self, member: &Member, coworker: &CoworkerId) -> String {
-        assert_eq!(self.post(member, coworker, false).await.unwrap(), 200);
+        assert_eq!(self.post(member, coworker, false).await, 200);
         let scope = member.id.as_str();
         self.scope_box("account", scope)
             .await
             .expect("the account's box")
     }
 
-    /// `POST /coworkers/{id}/computer`, or `…/computer/reset`, in the background.
+    /// `POST /coworkers/{id}/computer`, or `…/computer/reset`, sent in the background at once: a
+    /// held request is in flight before the test awaits it. Answers its status.
     fn post(
         &self,
         member: &Member,
         coworker: &CoworkerId,
         reset: bool,
-    ) -> tokio::task::JoinHandle<u16> {
+    ) -> impl Future<Output = u16> {
         let tail = if reset { "/reset" } else { "" };
-        let url = format!(
-            "{}/coworkers/{}/computer{tail}",
-            self.base,
-            coworker.as_str()
-        );
-        let request = self.client.post(url).bearer_auth(&member.token);
-        tokio::spawn(async move { request.send().await.expect("post").status().as_u16() })
+        let path = format!("/coworkers/{}/computer{tail}", coworker.as_str());
+        let request = self.client.post(format!("{}{path}", self.base));
+        let request = request.bearer_auth(&member.token);
+        let sent = tokio::spawn(async move { request.send().await.expect("post").status() });
+        async move {
+            let answered = within(format!("POST {path} to be answered"), sent).await;
+            answered.expect("the request's task").as_u16()
+        }
     }
 
     /// The roster's `boxId` for each of the member's own coworkers.
     async fn roster(&self, member: &Member) -> HashMap<String, Value> {
-        let rows: Vec<Value> = self
-            .client
-            .get(format!("{}/coworkers", self.base))
-            .bearer_auth(&member.token)
-            .send()
-            .await
-            .expect("roster")
-            .json()
-            .await
-            .expect("roster body");
+        let request = self.client.get(format!("{}/coworkers", self.base));
+        let read = async {
+            let reply = request.bearer_auth(&member.token).send().await;
+            let rows = reply.expect("roster").json::<Vec<Value>>().await;
+            rows.expect("roster body")
+        };
+        let rows = within("the roster", read).await;
         rows.into_iter()
             .map(|row| {
                 (
@@ -498,13 +519,12 @@ impl Server {
 
     /// Wait until the scope records `box_id`: the request let through first has claimed it.
     async fn recorded(&self, scope: &str, scope_id: &str, box_id: &str) {
-        for _ in 0..1500 {
-            if self.scope_box(scope, scope_id).await.as_deref() == Some(box_id) {
-                return;
+        let recorded = async {
+            while self.scope_box(scope, scope_id).await.as_deref() != Some(box_id) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("{scope}/{scope_id} never recorded {box_id}");
+        };
+        within(format!("{scope}/{scope_id} to record {box_id}"), recorded).await;
     }
 
     /// Two members' first requests on one scope, each held after its read, let through one at a
@@ -529,8 +549,8 @@ impl Server {
                 self.stub.open(id);
             }
         }
-        assert_eq!(first.await.unwrap(), 200, "the first request");
-        assert_eq!(second.await.unwrap(), 200, "the second request");
+        assert_eq!(first.await, 200, "the first request");
+        assert_eq!(second.await, 200, "the second request");
         held
     }
 
@@ -688,9 +708,9 @@ async fn a_reset_racing_a_request(reset_records_first: bool) {
     let first = s.post(&member, &one, false);
     let old = s.stub.held(1).await.remove(0);
     s.stub.open(&old);
-    assert_eq!(first.await.unwrap(), 200);
+    assert_eq!(first.await, 200);
     assert_eq!(
-        s.post(&member, &two, false).await.unwrap(),
+        s.post(&member, &two, false).await,
         200,
         "the second shares it"
     );
@@ -712,8 +732,8 @@ async fn a_reset_racing_a_request(reset_records_first: bool) {
     s.stub.open(&winner);
     s.recorded(scope.0, scope.1, &winner).await;
     s.stub.open(&loser);
-    assert_eq!(reset.await.unwrap(), 200, "the reset");
-    assert_eq!(request.await.unwrap(), 200, "the request");
+    assert_eq!(reset.await, 200, "the reset");
+    assert_eq!(request.await, 200, "the request");
 
     let made = [old.clone(), by_reset, by_request];
     let kept = s
@@ -759,7 +779,7 @@ async fn an_update_racing_a_heal_keeps_the_rebuilt_box_and_its_files() {
     s.update(&member, &one).await;
     let rebuilt = s.stub.held(1).await.remove(0);
     assert!(!s.stub.running().contains(&old), "the old box reads absent");
-    assert_eq!(s.post(&member, &one, false).await.unwrap(), 200, "asked");
+    assert_eq!(s.post(&member, &one, false).await, 200, "asked");
     assert_eq!(s.scope_box(scope.0, scope.1).await, Some(old), "no heal");
 
     s.stub.open(&rebuilt);
@@ -868,12 +888,18 @@ async fn a_rebuilt_box_that_loses_its_scope_leaves_the_disk_the_winner_runs_on()
         let (state, scope_id) = (s.state.clone(), member.id.as_str().to_string());
         tokio::spawn(update_scope_box(state, None, "account", scope_id))
     };
-    let (first, second) = (update(), update());
+    // The second update is sent once the first is held, so the first rebuild held is the first
+    // update's. Sent together, either could reach the gate first, as each reads the store on the
+    // way: under load the second did, the test opened its gate and waited for the first update,
+    // held at a gate the test opens only once that update has ended, and the run hung.
+    let first = update();
+    s.stub.held(1).await;
+    let second = update();
     let held = s.stub.held(2).await;
     s.stub.open(&held[0]);
-    first.await.unwrap();
+    within("the first update to end", first).await.unwrap();
     s.stub.open(&held[1]);
-    second.await.unwrap();
+    within("the second update to end", second).await.unwrap();
 
     assert_eq!(s.scope_box(scope.0, scope.1).await, Some(held[0].clone()));
     assert!(
