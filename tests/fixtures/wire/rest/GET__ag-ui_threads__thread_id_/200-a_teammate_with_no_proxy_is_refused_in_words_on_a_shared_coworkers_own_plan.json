@@ -4,18 +4,27 @@
   "status": 200,
   "body": {
     "threadId": "thr-0199bb4e000070008000000000000001",
+    "kind": "chat",
+    "readOnly": false,
+    "coworkers": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "name": "Luna"
+      }
+    ],
     "runs": [
       {
-        "runId": "0199bb4e-0000-7000-8000-000000000002",
+        "runId": "0199bb4e-0000-7000-8000-000000000003",
         "status": "failed",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
         "failure": "You chose your own subscription, but no proxy address is set; set one in your inference source (like http://127.0.0.1:1447), or switch this turn to the gateway.",
         "finishReason": null,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
         "events": [
           {
             "type": "RUN_STARTED",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "threadId": "thr-0199bb4e000070008000000000000001",
             "timestamp": 100
           },
@@ -39,7 +48,7 @@
           {
             "name": "opengrok.inferenceSource",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "via": "loopback",
               "kind": "local_proxy",
@@ -51,7 +60,7 @@
           {
             "name": "run-timing",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "tools": [],
               "budget": {
@@ -84,7 +93,7 @@
           {
             "code": "plan_unavailable",
             "type": "RUN_ERROR",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "message": "You chose your own subscription, but no proxy address is set; set one in your inference source (like http://127.0.0.1:1447), or switch this turn to the gateway.",
             "threadId": "thr-0199bb4e000070008000000000000001",
             "timestamp": 100
@@ -93,6 +102,7 @@
       }
     ],
     "hiddenRunIds": [],
+    "timeline": [],
     "pendingUserMessages": [],
     "pendingEvents": []
   }

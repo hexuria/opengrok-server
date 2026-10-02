@@ -1221,6 +1221,43 @@ create table if not exists schema_migrations (
     name       text        primary key,
     applied_at timestamptz not null default now()
 );
+
+-- #314: one Bot's message to another of its person's, written before anything acts on it
+-- (`pairs.rs`, `formal/tla/PairDelivery.tla`). Unique on (sender run, call, receiver), so a call
+-- carried out again writes no second message; `run_id` is the receiver's run, named here, so the
+-- message starts that run once. `state` is `queued`, then `started` once a drain claims it.
+create table if not exists bot_message (
+    id             text    primary key,
+    owner_id       text    not null,
+    sender_id      text    not null,
+    receiver_id    text    not null,
+    thread_id      text    not null,
+    sender_run_id  text    not null,
+    call_id        text    not null,
+    chain_id       text    not null,
+    hop            integer not null,
+    body           text    not null,
+    run_id         text    not null unique,
+    state          text    not null default 'queued',
+    created_at_ms  bigint  not null,
+    started_at_ms  bigint,
+    unique (sender_run_id, call_id, receiver_id)
+);
+create index if not exists bot_message_thread_idx on bot_message (thread_id, state, created_at_ms);
+create index if not exists bot_message_owner_idx on bot_message (owner_id, created_at_ms);
+create index if not exists bot_message_chain_idx on bot_message (chain_id);
+
+-- #314: the rows a Bot's main chat shows beside its turns, each written in the transaction of the
+-- thing it records. `entry` is the row as the wire carries it, kept whole so a kind this build does
+-- not know is replayed as written; `source_key` is that thing's own key, so it writes one row.
+create table if not exists timeline_view (
+    id           text    primary key,
+    coworker_id  text    not null,
+    source_key   text    not null unique,
+    entry        jsonb   not null,
+    at_ms        bigint  not null
+);
+create index if not exists timeline_view_coworker_idx on timeline_view (coworker_id, at_ms, id);
 "#;
 
 /// Run on EVERY boot, after `SCHEMA`, whether or not the schema itself was replayed.
@@ -1296,6 +1333,15 @@ update ceiling_view
  where tools ? 'only' and not (tools->'only' ? 'user_machine_shell')
    and not exists (select 1 from schema_migrations where name = 'the-machine-joins-the-ceiling');
 insert into schema_migrations (name) values ('the-machine-joins-the-ceiling') on conflict do nothing;
+-- #314: messaging the person's other Bots is a ceiling row, on by default, so every ceiling gains
+-- it ONCE, after the machine and for the same reasons; one without it after this was switched off.
+update ceiling_view
+   set version = version + 1,
+       tools = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
+         from jsonb_array_elements_text((tools->'only') || '["message_bot"]'::jsonb) tool))
+ where tools ? 'only' and not (tools->'only' ? 'message_bot')
+   and not exists (select 1 from schema_migrations where name = 'the-bots-join-the-ceiling');
+insert into schema_migrations (name) values ('the-bots-join-the-ceiling') on conflict do nothing;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

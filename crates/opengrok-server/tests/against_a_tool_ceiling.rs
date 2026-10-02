@@ -196,12 +196,9 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 }
 
 /// Every built-in row the ceiling answers, in order: the box's tools, then the person's machine.
+/// Every built-in row, the person's machine and `message_bot` (#314) among them.
 fn builtins() -> Vec<&'static str> {
-    Executor::builtin_tool_names()
-        .iter()
-        .copied()
-        .chain([USER_MACHINE_SHELL])
-        .collect()
+    Executor::every_builtin().collect()
 }
 
 struct Harness {

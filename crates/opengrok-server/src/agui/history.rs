@@ -452,6 +452,50 @@ pub(crate) fn conversation_from(run: &Run, answered: &PendingApproval) -> Vec<Ch
     messages
 }
 
+/// The conversation a Bot's turn on another Bot's message is asked with (#314): its pair thread's
+/// earlier turns from its own side, then the message. Each message it was sent, and each it sent
+/// from elsewhere, is a user message fenced as a skill is, our words last; what it said and did in
+/// its own turns is its own. The other Bot's words in its turns are never shown: only a message
+/// reaches a Bot. `None` when the message cannot be quoted, which refuses it.
+pub(crate) async fn for_message(
+    state: &AgUiState,
+    account: &AccountId,
+    row: &opengrok_store::BotMessageRow,
+    (peer, person): (&str, &str),
+) -> Option<Vec<ChatMessage>> {
+    use opengrok_plugins::message::{Said as Way, fenced_message};
+    let runs = thread_runs(state, account, &row.thread_id, &row.run_id).await;
+    let runs = runs.unwrap_or_default();
+    let mine = |run: &Run| run.coworker_id.as_ref().map(|id| id.as_str()) == Some(&row.receiver_id);
+    // A message it sent from one of its own turns here is in that turn already, call and result.
+    let called_here: HashSet<String> = (runs.iter().filter(|run| mine(run)))
+        .flat_map(|run| said_in(&run.emitted))
+        .filter_map(|said| match said {
+            Said::Call { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    let asked = |run: &Run, key: &str| {
+        let first = run.prompt.iter().flatten().next();
+        first.and_then(|asked| asked.get(key)?.as_str().map(str::to_string))
+    };
+    let user = |way, words: &str| {
+        fenced_message(way, peer, person, words).map(|text| ChatMessage::text("user", text))
+    };
+    let mut messages = Vec::new();
+    for run in &runs {
+        let words = asked(run, "content").unwrap_or_default();
+        if mine(run) {
+            messages.extend(user(Way::Received, &words));
+            messages.extend(conversation_of(&said_in(&run.emitted), true));
+        } else if !asked(run, "callId").is_some_and(|call| called_here.contains(&call)) {
+            messages.extend(user(Way::Sent, &words));
+        }
+    }
+    messages.push(user(Way::Received, &row.body)?);
+    Some(messages)
+}
+
 /// Every earlier run in order, and — when the newest one stopped or failed partway through its
 /// tools — the sentence that tells the model to continue from them rather than start again.
 fn thread_messages(runs: &[Run]) -> Vec<ChatMessage> {
@@ -498,6 +542,15 @@ pub(crate) fn with_prompt_frames(run: &Run, mut events: Vec<Value>) -> Vec<Value
         .into_iter()
         .filter(|message| message.role == "user")
         .filter_map(|message| {
+            // A Bot's message says which Bot sent it (#314), on each of its frames.
+            let from = message.extra.get("fromCoworkerId").cloned();
+            let frame = |value: Value| match (&from, frame(value)) {
+                (Some(from), Value::Object(mut said)) => {
+                    said.insert("fromCoworkerId".to_string(), from.clone());
+                    Value::Object(said)
+                }
+                (_, said) => said,
+            };
             let content = message.content?;
             let words = content.text();
             // A MESSAGE OF PARTS IS STILL A BUBBLE (#229, nativechat#90), even with no words and

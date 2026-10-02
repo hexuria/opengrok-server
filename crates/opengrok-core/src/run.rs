@@ -732,10 +732,10 @@ impl Run {
             .to_string()
     }
 
-    /// Whether a routine started this run (opengrok-server `autonomy::fire`): its one question is
-    /// the routine's, journaled under the run's own id by `routine_prompt`, the only writer of
-    /// that id. A client names its own messages, so a turn could carry it only on a run of its
-    /// own, and there it only narrows where the run carries on (#304).
+    /// Whether a routine started this run (opengrok-server `autonomy::fire`), or a Bot's message
+    /// did (#314): its one question is journaled under the run's own id by `routine_prompt`, the
+    /// only writer of that id. A client names its own messages, so a turn could carry it only on
+    /// a run of its own, and there it only narrows where the run carries on (#304).
     pub fn fired_by_routine(&self, run_id: &RunId) -> bool {
         let id = routine_prompt_id(run_id);
         matches!(self.prompt.as_deref(), Some([asked]) if asked["id"] == id.as_str())

@@ -1,0 +1,9 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/threads/pair-cw_0199bb4e-0000-7000-8000-000000000001-cw_0199bb4e-0000-7000-8000-000000000002/pending",
+  "status": 403,
+  "body": {
+    "error": "This side thread is between two of your Bots. You can read it, not write in it.",
+    "code": "read-only-thread"
+  }
+}

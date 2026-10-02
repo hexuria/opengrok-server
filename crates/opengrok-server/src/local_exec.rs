@@ -12,9 +12,9 @@
 //! `Bypass`. See `docs/archive/reverse-exec-design.md`.
 
 pub mod broker;
-mod shell;
 mod wire;
 pub use broker::LocalExecBroker;
+use opengrok_policy::shell;
 
 use serde::{Deserialize, Serialize};
 

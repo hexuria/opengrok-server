@@ -54,6 +54,12 @@
         "available": false
       },
       {
+        "name": "message_bot",
+        "kind": "builtin",
+        "description": "Send a message to another of your person's Bots, or to several at once. Each one gets it in the side thread it shares with you, which your person can read, and may answer you there with this tool. Only this tool reaches another Bot: what you write in a reply is never sent to one. Use it when another Bot is better placed to do part of the work or needs to know something; do not use it to chat.",
+        "enabled": false
+      },
+      {
         "name": "gmail",
         "kind": "plugin",
         "label": "gmail",

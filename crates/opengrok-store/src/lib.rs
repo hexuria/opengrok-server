@@ -20,10 +20,10 @@ pub mod autonomy;
 pub mod gateway;
 pub mod identity;
 pub mod migrations;
+pub mod pairs;
 pub mod pending;
 pub mod points;
 pub mod postgres;
-pub mod purge;
 pub mod replica;
 pub mod skills;
 pub mod spend;
@@ -36,6 +36,7 @@ pub use gateway::{
     CoworkerKeyView, KeyRefusal, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
     RefreshTokenRow,
 };
+pub use pairs::BotMessageRow;
 pub use pending::{
     DrainKey, DrainResult, EnqueueResult, NewPendingUserMessage, PendingUserMessagePatch,
     PendingUserMessageRow,
@@ -46,7 +47,6 @@ pub use postgres::{
     RecipeRunRow, RecipeShareRow, RecipeVersionRow, RosterOwner, SiteLoginRow, SiteLoginSecrets,
     SiteLoginWrite, ThreadListing, ThreadRun,
 };
-pub use purge::PurgeReport;
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use skills::{NewSkill, NewSkillVersion, SkillFileRow, SkillRow, SkillVersionRow};
 pub use spend::SpendLimit;

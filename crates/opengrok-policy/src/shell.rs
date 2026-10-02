@@ -23,6 +23,9 @@
 //! safety net, not a sandbox: `git -c alias.x='!rm' x`, `$(echo rm) x`, `git $x` with `x=push`,
 //! or an interpreter's own string (`osascript -e …`) still pass a deny of `rm`. Only `Never`
 //! closes the channel.
+//!
+//! The gate itself is the server's `local_exec`; this half of it is pure, so it lives with the
+//! rest of what decides what may run.
 
 /// Words that run a command taken from their arguments, a string or stdin — shell keywords
 /// included (`then rm`, `! rm`). An allow of one is an allow of anything, so a line whose program
@@ -36,7 +39,7 @@ const RUNS_ANOTHER: &str = "eval exec source . command builtin env nice nohup ti
 const FIND_RUNS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
 
 /// A line as the allow side reads it.
-pub(super) struct Line {
+pub struct Line {
     /// The simple commands between top-level control operators, as written. The whole line when
     /// it nests or redirects to a path: a split through `$( … )`, `{ …; }`, `>&out`, `&> out` or
     /// a heredoc's body cuts a command in half (`ls >&out` read as `ls >` and `out`), and the
@@ -121,7 +124,7 @@ fn runs_another(program: &str) -> bool {
 }
 
 /// Read `line` the way `sh` would, as far as the allow side needs.
-pub(super) fn read(line: &str) -> Line {
+pub fn read(line: &str) -> Line {
     let chars: Vec<char> = line.chars().collect();
     let mut r = Reader::default();
     let mut quote: Option<char> = None;
@@ -295,7 +298,7 @@ pub(super) fn read(line: &str) -> Line {
 /// words after quote removal, so `git status` covers `git  status --short` but not `git statusx`.
 /// The program is compared as written: `/tmp/x/ls` is not `ls`. A pattern that is not itself one
 /// plain command (`cd src && cargo test`) matches nothing.
-pub(super) fn allows(pattern: &str, words: &[String]) -> bool {
+pub fn allows(pattern: &str, words: &[String]) -> bool {
     match read(pattern).plain {
         Some(pattern) => !pattern.is_empty() && words.starts_with(&pattern),
         None => false,
@@ -317,7 +320,7 @@ fn flatten(text: &str) -> String {
 }
 
 /// One word as the deny side reads it.
-pub(super) struct Word {
+pub struct Word {
     /// Quotes and backslashes dropped, expansions kept as written.
     text: String,
     /// `text` with its expansions taken out, when it has any: what is left if each is empty, so
@@ -407,7 +410,7 @@ fn glob(pattern: &str, name: &str, fold: bool) -> bool {
 }
 
 /// The words of one command between operators and brackets.
-pub(super) struct Run {
+pub struct Run {
     words: Vec<Word>,
     /// Its program runs another (`env`, `sh -c`, `then`, `find -exec`…), or a substitution
     /// closed inside it: any word may be the program.
@@ -702,7 +705,7 @@ fn split(line: &str) -> Vec<Run> {
 ///
 /// The line is read with backslash-newline joined (`r\⏎m` is `rm`) and, when it has one, not
 /// joined (in a comment it joins nothing, so `ls #\⏎rm` runs `rm`).
-pub(super) fn programs(line: &str, plain: Option<&[String]>) -> Vec<Run> {
+pub fn programs(line: &str, plain: Option<&[String]>) -> Vec<Run> {
     let mut runs = split(&line.replace("\\\n", ""));
     if line.contains("\\\n") {
         runs.extend(split(line));
@@ -718,7 +721,7 @@ pub(super) fn programs(line: &str, plain: Option<&[String]>) -> Vec<Run> {
 
 /// Does the deny `pattern` name any of `runs`? The program by basename, any case; the rest as
 /// words, after any leading options, so `git push` still meets `git -C . push`.
-pub(super) fn denies(pattern: &str, runs: &[Run]) -> bool {
+pub fn denies(pattern: &str, runs: &[Run]) -> bool {
     let pattern: Vec<String> = flatten(&pattern.replace("\\\n", ""))
         .split_whitespace()
         .map(str::to_string)

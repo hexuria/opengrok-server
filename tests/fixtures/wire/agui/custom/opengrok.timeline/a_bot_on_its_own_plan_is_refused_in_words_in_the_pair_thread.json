@@ -1,0 +1,25 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "opengrok.timeline",
+  "value": {
+    "v": 1,
+    "op": "created",
+    "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+    "entry": {
+      "id": "tl_0199bb4e-0000-7000-8000-000000000002",
+      "atMs": 1790000000000,
+      "kind": "messaged",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000001",
+      "text": "Messaged Luna",
+      "to": [
+        {
+          "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000003",
+          "name": "Luna",
+          "threadId": "pair-cw_0199bb4e-0000-7000-8000-000000000001-cw_0199bb4e-0000-7000-8000-000000000003"
+        }
+      ],
+      "runId": "0199bb4e-0000-7000-8000-000000000004"
+    }
+  }
+}

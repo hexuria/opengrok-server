@@ -1,0 +1,7 @@
+{
+  "type": "TEXT_MESSAGE_CONTENT",
+  "messageId": "run_0199bb4e-0000-7000-8000-000000000001-prompt",
+  "delta": "hello Bob",
+  "timestamp": 100,
+  "fromCoworkerId": "cw_0199bb4e-0000-7000-8000-000000000002"
+}

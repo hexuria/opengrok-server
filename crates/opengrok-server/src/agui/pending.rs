@@ -326,6 +326,10 @@ async fn create(
     Json(body): Json<WriteBody>,
 ) -> Result<Response, Response> {
     let account = caller_on_thread(&state, &headers, &thread_id).await?;
+    // A pair's thread is its two Bots' (#314): nothing is queued into it.
+    if opengrok_wire::pair::is_pair_thread(&thread_id) {
+        return Err(super::routes::read_only());
+    }
     if let Some(why) = version_ok(body.v) {
         return Err(bad(why));
     }

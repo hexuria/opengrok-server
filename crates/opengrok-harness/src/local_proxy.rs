@@ -303,11 +303,24 @@ impl Route {
     /// refused in words before any model is asked, never run on the server's keys instead. Only
     /// that door counts; the hirer's own setting never does (#294).
     pub fn for_routine(source: Option<SourceKind>, pin: &str) -> Self {
+        let why = "This Bot answers on your own plan, and routines run on the server's keys, so \
+                   this routine did not run. Give the Bot a Server model to run it on a schedule.";
+        Self::fired(source, pin, why)
+    }
+
+    /// A Bot's turn on another Bot's message (#314): a routine's rule, since nobody is at the
+    /// keyboard for it either, in its own words. Its owner decided it is refused, as a routine is.
+    pub fn for_message(source: Option<SourceKind>, pin: &str) -> Self {
+        let why = "This Bot answers on your own plan, and messages between your Bots run on the \
+                   server's keys, so this message was not answered. Give the Bot a Server model \
+                   to let it answer your other Bots.";
+        Self::fired(source, pin, why)
+    }
+
+    fn fired(source: Option<SourceKind>, pin: &str, why: &str) -> Self {
         if source != Some(SourceKind::LocalProxy) {
             return Self::Gateway;
         }
-        let why = "This Bot answers on your own plan, and routines run on the server's keys, so \
-                   this routine did not run. Give the Bot a Server model to run it on a schedule.";
         let (model, endpoint) = (pin.to_string(), unavailable(why.to_string(), None, false));
         Self::LocalProxy { model, endpoint }
     }
@@ -395,11 +408,18 @@ pub async fn route(
 /// Where a carry-on asks, after a card, a form or a restart: by its start's rule, on what it
 /// captured. A turn's is `route`. A ROUTINE'S IS `for_routine`, NEVER `route`: one refused on its
 /// coworker's plan captured the proxy, and `route` would carry it on at the person's plan after a
-/// restart between its start and its refusal (#304). It is refused again, in the same words.
+/// restart between its start and its refusal (#304). It is refused again, in the same words. A
+/// Bot's turn on a message (#314) is fired the same way, and carries on by `for_message`.
 pub async fn resumed(saved: &dyn Saved, who: &AccountId, run: (&Run, &RunId), pin: &str) -> Route {
     let (run, run_id) = run;
     if run.fired_by_routine(run_id) {
-        return Route::for_routine(Some(run.inference_source), pin);
+        let pair = opengrok_wire::pair::is_pair_thread(&run.thread_id);
+        let fired = if pair {
+            Route::for_message
+        } else {
+            Route::for_routine
+        };
+        return fired(Some(run.inference_source), pin);
     }
     let (source, captured) = (Some(run.source_for_resume()), run.model.as_deref());
     let (run_id, none) = (run_id.as_str(), (None, None));

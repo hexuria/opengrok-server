@@ -62,6 +62,8 @@ pub async fn sweep_once(
     host: &crate::host_state::HostState,
 ) -> Result<usize, opengrok_store::StoreError> {
     let state = &host.agui;
+    // The pairs first (#314): a message whose drain died with its process is started here.
+    crate::pairs::sweep(host).await;
     let claimed = state
         .auth
         .store
@@ -378,6 +380,7 @@ async fn fail_run(
         .store
         .append_run(run_id, seq, &events, &view, None)
         .await?;
+    crate::pairs::ended(state, &run.thread_id, run.status);
 
     // THE RUN IS FAILED; THE BUBBLE IS NOT. Everything above settles the run aggregate, and until
     // this existed that was the whole of recovery — which left the thing the person is actually

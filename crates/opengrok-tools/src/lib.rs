@@ -26,6 +26,7 @@ pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_
 pub mod credential;
 pub use credential::OFFER_SAVE;
 pub mod mcp;
+pub mod message_bot;
 
 pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
 pub mod observe;
@@ -1336,18 +1337,23 @@ impl Executor {
         self.user_machine.is_some() && ceiling.is_some_and(|tools| tools.allows(USER_MACHINE_SHELL))
     }
 
-    /// Every built-in, the person's machine too: names no plugin may take, a ceiling's rows (#268).
+    /// Every built-in, the person's machine and `message_bot` too: names no plugin may take, a
+    /// ceiling's rows (#268). Neither of those two is the executor's to run: the server offers
+    /// each where its ceiling allows (`reaches_the_machine`, `ToolRunner::with_bots`).
     pub fn every_builtin() -> impl Iterator<Item = &'static str> {
         Self::builtin_tool_names()
             .iter()
             .copied()
-            .chain(std::iter::once(USER_MACHINE_SHELL))
+            .chain([USER_MACHINE_SHELL, message_bot::MESSAGE_BOT])
     }
 
     /// A built-in's words as `tool_schemas` offers them, less what a turn adds (a recipe list).
     pub fn builtin_description(name: &str) -> Option<&'static str> {
         if name == RUN_RECIPE {
             return Some(RUN_RECIPE_DESCRIPTION);
+        }
+        if name == message_bot::MESSAGE_BOT {
+            return Some(message_bot::MESSAGE_BOT_DESCRIPTION);
         }
         builtin_tool_spec(name).map(|(description, _)| description)
     }

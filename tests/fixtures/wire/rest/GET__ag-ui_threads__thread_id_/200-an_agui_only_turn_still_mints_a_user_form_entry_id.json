@@ -4,18 +4,27 @@
   "status": 200,
   "body": {
     "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
+    "kind": "chat",
+    "readOnly": false,
+    "coworkers": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "name": "Dot"
+      }
+    ],
     "runs": [
       {
-        "runId": "0199bb4e-0000-7000-8000-000000000002",
+        "runId": "0199bb4e-0000-7000-8000-000000000003",
         "status": "running",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
         "failure": null,
         "finishReason": null,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
         "events": [
           {
             "type": "RUN_STARTED",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           },
@@ -39,7 +48,7 @@
           {
             "name": "opengrok.inferenceSource",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "kind": "gateway",
               "model": "oag/cheap"
@@ -52,20 +61,20 @@
             "timestamp": 100,
             "toolCallId": "mock-form-1",
             "toolCallName": "request_user_form",
-            "entryId": "e_0199bb4e-0000-7000-8000-000000000003"
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000004"
           },
           {
             "type": "TOOL_CALL_ARGS",
             "delta": "{\"title\":\"Google account\",\"instruction\":\"Enter the address and password.\",\"fields\":[{\"id\":\"email\",\"label\":\"Email\",\"type\":\"email\",\"required\":true},{\"id\":\"password\",\"label\":\"Password\",\"type\":\"password\",\"required\":true}],\"liveHost\":\"accounts.google.com\",\"values\":{}}",
             "timestamp": 100,
             "toolCallId": "mock-form-1",
-            "entryId": "e_0199bb4e-0000-7000-8000-000000000003"
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000004"
           },
           {
             "type": "TOOL_CALL_END",
             "timestamp": 100,
             "toolCallId": "mock-form-1",
-            "entryId": "e_0199bb4e-0000-7000-8000-000000000003"
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000004"
           },
           {
             "ok": false,
@@ -80,7 +89,7 @@
             "name": "run-awaiting-approval",
             "tool": "request_user_form",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "callId": "mock-form-1",
             "reason": "user-form",
             "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
@@ -106,7 +115,7 @@
               "instruction": "Enter the address and password."
             },
             "timestamp": 100,
-            "entryId": "e_0199bb4e-0000-7000-8000-000000000003",
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000004",
             "message": {
               "type": "user-form",
               "formRequest": {
@@ -154,7 +163,7 @@
             },
             "formResolution": "submitted",
             "value": {
-              "id": "e_0199bb4e-0000-7000-8000-000000000003",
+              "id": "e_0199bb4e-0000-7000-8000-000000000004",
               "kind": "send-message",
               "callId": "mock-form-1",
               "message": {
@@ -203,7 +212,7 @@
           {
             "name": "run-timing",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "tools": [
                 {
@@ -240,16 +249,16 @@
           },
           {
             "type": "RUN_FINISHED",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           },
           {
             "name": "user-form",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
-              "id": "e_0199bb4e-0000-7000-8000-000000000003",
+              "id": "e_0199bb4e-0000-7000-8000-000000000004",
               "kind": "send-message",
               "callId": "mock-form-1",
               "message": {
@@ -295,7 +304,7 @@
               ]
             },
             "callId": "mock-form-1",
-            "entryId": "e_0199bb4e-0000-7000-8000-000000000003",
+            "entryId": "e_0199bb4e-0000-7000-8000-000000000004",
             "message": {
               "type": "user-form",
               "formRequest": {
@@ -348,23 +357,24 @@
           {
             "name": "credential.offer_save",
             "type": "CUSTOM",
-            "runId": "0199bb4e-0000-7000-8000-000000000002",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "origin": "accounts.google.com",
               "username": "ada@example.com",
-              "formEntryId": "e_0199bb4e-0000-7000-8000-000000000003"
+              "formEntryId": "e_0199bb4e-0000-7000-8000-000000000004"
             },
             "callId": "mock-form-1",
             "origin": "accounts.google.com",
             "threadId": "thr-0199bb4e-0000-7000-8000-000000000001",
             "username": "ada@example.com",
             "timestamp": 100,
-            "formEntryId": "e_0199bb4e-0000-7000-8000-000000000003"
+            "formEntryId": "e_0199bb4e-0000-7000-8000-000000000004"
           }
         ]
       }
     ],
     "hiddenRunIds": [],
+    "timeline": [],
     "pendingUserMessages": [],
     "pendingEvents": []
   }

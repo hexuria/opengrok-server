@@ -4,42 +4,51 @@
   "status": 200,
   "body": {
     "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+    "kind": "chat",
+    "readOnly": false,
+    "coworkers": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "name": "Nightshift"
+      }
+    ],
     "runs": [
       {
-        "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+        "runId": "run_0199bb4e-0000-7000-8000-000000000003",
         "status": "finished",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
         "failure": null,
         "finishReason": null,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
         "events": [
           {
             "type": "RUN_STARTED",
-            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_START",
-            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000003-prompt",
             "role": "user",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
-            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000003-prompt",
             "delta": "a webhook arrived; report in\n\n<webhook_event>\n{\"item\":\"milk\"}\n</webhook_event>",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_END",
-            "messageId": "run_0199bb4e-0000-7000-8000-000000000002-prompt",
+            "messageId": "run_0199bb4e-0000-7000-8000-000000000003-prompt",
             "timestamp": 100
           },
           {
             "name": "opengrok.inferenceSource",
             "type": "CUSTOM",
-            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "kind": "gateway",
               "model": "oag/cheap"
@@ -50,144 +59,144 @@
           {
             "role": "assistant",
             "type": "TEXT_MESSAGE_START",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "You ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "said: ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "a ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "webhook ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "arrived; ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "report ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "in\n\n<webhook_event>\n{\"item\":\"milk\"}\n</webhook_event>. ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "This ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "is ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "the ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "mock ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "door ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "standing ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "in ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "for ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "oag/cheap ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "— ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "no ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "model ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "was ",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "delta": "called.",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "type": "TEXT_MESSAGE_END",
-            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000002_1",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
             "name": "run-timing",
             "type": "CUSTOM",
-            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "tools": [],
               "budget": {
@@ -219,7 +228,7 @@
           },
           {
             "type": "RUN_FINISHED",
-            "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+            "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           }
@@ -227,6 +236,7 @@
       }
     ],
     "hiddenRunIds": [],
+    "timeline": [],
     "pendingUserMessages": [],
     "pendingEvents": []
   }

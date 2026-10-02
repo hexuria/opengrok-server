@@ -218,6 +218,28 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_tool_calls_time_rides_its_result_and_its_replay",
         "/ag-ui/threads/{thread_id}",
     ),
+    // Bots messaging each other (#314): the 403 a person's words into a pair's thread get, live
+    // and queued, shaped like any refusal; the thread list with a pair's row; a pair's replay with
+    // its `fromCoworkerId` frames; and a Bot's main chat replayed with its `messaged` row. Every
+    // replay now has the new keys, so the shapes alone would keep whichever test sorts first. Each
+    // test makes one call on the route it is kept for.
+    ("a_persons_words_into_a_pair_thread_are_refused", "/ag-ui"),
+    (
+        "a_queued_send_into_a_pair_thread_is_refused",
+        "/ag-ui/threads/{thread_id}/pending",
+    ),
+    (
+        "the_thread_list_names_a_pairs_thread_and_its_two_bots",
+        "/ag-ui/threads",
+    ),
+    (
+        "a_pair_threads_replay_says_it_is_read_only_and_who_sent_what",
+        "/ag-ui/threads/{thread_id}",
+    ),
+    (
+        "the_sender_s_chat_gets_its_messaged_row_live_and_on_replay",
+        "/ag-ui/threads/{thread_id}",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

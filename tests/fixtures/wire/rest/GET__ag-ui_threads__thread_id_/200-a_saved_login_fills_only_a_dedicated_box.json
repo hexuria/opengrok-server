@@ -4,6 +4,14 @@
   "status": 200,
   "body": {
     "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+    "kind": "chat",
+    "readOnly": false,
+    "coworkers": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000001",
+        "name": "Bea"
+      }
+    ],
     "runs": [
       {
         "runId": "0199bb4e-0000-7000-8000-000000000002",
@@ -12,6 +20,7 @@
         "updatedAtMs": 1790000001000,
         "failure": null,
         "finishReason": null,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000001",
         "events": [
           {
             "type": "RUN_STARTED",
@@ -219,7 +228,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  4350
+                  4641
                 ]
               },
               "model_ms": [
@@ -343,6 +352,7 @@
       }
     ],
     "hiddenRunIds": [],
+    "timeline": [],
     "pendingUserMessages": [],
     "pendingEvents": []
   }
