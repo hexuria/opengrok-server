@@ -2737,12 +2737,12 @@ pub(crate) async fn turn(
             "a turn needs a signed-in caller; sign in and send it again"
         });
     };
-    // A PAIR'S THREAD IS ITS TWO BOTS' (#314): a person's own words into one are refused, whoever
-    // they name. A card's answer is not words and comes by its own route, which this never sees.
-    let said = super::history::new_turn_messages(&input, &Default::default(), None);
-    if opengrok_wire::pair::is_pair_thread(&input.thread_id)
-        && said.iter().any(|m| m.role == "user")
-    {
+    // A PAIR'S THREAD IS ITS TWO BOTS' (#314): nothing a person POSTs runs in one, WHATEVER ITS
+    // MESSAGES. Refusing only new words let an empty body, a tool result or words before the
+    // last answer start a turn there, or stop a run parked on a card (review of #325). No client
+    // POSTs into one: its runs are the server's, read by polling, and a card's answer comes by
+    // its own route (`/ag-ui/runs/{id}/answer`, `/ag-ui/user-form/…`), which this never sees.
+    if opengrok_wire::pair::is_pair_thread(&input.thread_id) {
         return read_only();
     }
     // A source the turn names that cannot be honoured refuses before anything is charged or drained.

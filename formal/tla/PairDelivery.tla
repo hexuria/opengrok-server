@@ -18,7 +18,7 @@
 (* ends, its pair drains again (`pairs::ended`, from the ending's write). *)
 (* The recovery sweep drains every pair and starts any claimed row whose  *)
 (* run never began, its drain having died with its process               *)
-(* (`pairs::sweep`, from `recovery::sweep_once`).                         *)
+(* (`pairs::sweep`, from `recovery::sweep_forever`).                      *)
 (*                                                                         *)
 (* One pair: pairs never share a lock, a row or a run. The sends are all  *)
 (* into its thread, in either direction. A sender's call may carry its    *)

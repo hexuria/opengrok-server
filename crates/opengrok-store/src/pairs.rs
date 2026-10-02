@@ -58,9 +58,9 @@ fn message_row(row: &sqlx::postgres::PgRow) -> StoreResult<BotMessageRow> {
 /// One receiver of a call: who, the pair thread, and the ids a new row would take.
 pub struct Receiver<'a> {
     pub receiver_id: &'a str,
-    pub thread_id: &'a str,
-    pub message_id: &'a str,
-    pub run_id: &'a str,
+    pub thread_id: String,
+    pub message_id: String,
+    pub run_id: String,
 }
 
 /// One `message_bot` call, as the outbox writes it.
@@ -137,17 +137,17 @@ impl PgStore {
                      sender_run_id, call_id, chain_id, hop, body, run_id, created_at_ms)
                  values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning *",
             )
-            .bind(to.message_id)
+            .bind(&to.message_id)
             .bind(send.owner_id)
             .bind(send.sender_id)
             .bind(to.receiver_id)
-            .bind(to.thread_id)
+            .bind(&to.thread_id)
             .bind(send.sender_run_id)
             .bind(send.call_id)
             .bind(send.chain_id)
             .bind(send.hop)
             .bind(send.body)
-            .bind(to.run_id)
+            .bind(&to.run_id)
             .bind(send.at_ms)
             .fetch_one(&mut *tx)
             .await?;
@@ -222,29 +222,29 @@ impl PgStore {
     }
 
     /// What the sweep has to do: every pair with a message waiting, and every claimed message
-    /// whose run has not begun `grace_ms` after its claim, its drain having died or stalled.
+    /// whose run has not begun `grace_ms` after its claim, its drain having died or stalled. The
+    /// longest waiting first, so a quiet pair is not left behind a busy batch (review of #325).
     pub async fn pairs_to_sweep(
         &self,
         at_ms: i64,
         grace_ms: i64,
     ) -> StoreResult<(Vec<String>, Vec<BotMessageRow>)> {
         let threads: Vec<String> = sqlx::query_scalar(
-            "select distinct thread_id from bot_message where state = 'queued' limit 100",
+            "select thread_id from bot_message where state = 'queued' group by thread_id
+              order by min(created_at_ms) limit 100",
         )
         .fetch_all(self.pool())
         .await?;
         let stalled = sqlx::query(
             "select m.* from bot_message m left join run_view v on v.id = m.run_id
-              where m.state = 'started' and v.id is null and m.started_at_ms < $1 limit 100",
+              where m.state = 'started' and v.id is null and m.started_at_ms < $1
+              order by m.started_at_ms limit 100",
         )
         .bind(at_ms - grace_ms)
         .fetch_all(self.pool())
         .await?;
-        let stalled = stalled
-            .iter()
-            .map(message_row)
-            .collect::<StoreResult<_>>()?;
-        Ok((threads, stalled))
+        let stalled = stalled.iter().map(message_row);
+        Ok((threads, stalled.collect::<StoreResult<_>>()?))
     }
 
     /// A Bot's timeline rows, its newest `limit`, oldest first: each entry as it was written, so a

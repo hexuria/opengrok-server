@@ -141,51 +141,25 @@ impl BotMail for Mail {
     ) -> Result<Vec<Delivered>, String> {
         let (state, sender) = (&self.state, self.sender.as_str());
         let run = Some(self.run_id.as_str()).filter(|run| !run.is_empty());
-        let (roster, hop, chain) = sending(state, &self.person, &self.sender, run).await?;
+        // A Bot retired since the turn began still gets its message, and its turn says in its
+        // thread that it can no longer take work (`autonomy::fire`): a refusal the person sees.
+        let (_, hop, chain) = sending(state, &self.person, &self.sender, run).await?;
         if !under_the_limit(hop) {
             return Err(capped(&crate::persona::caller(state, &self.person).await));
         }
-        // A Bot retired or given away since the turn began is no longer the person's to message.
-        if let Some(gone) = to
-            .iter()
-            .find(|bot| !roster.iter().any(|(id, _)| *id == bot.id))
-        {
-            let offers = message_bot::offers(&roster);
-            let still = offers.iter().filter(|bot| bot.id != sender);
-            let still: Vec<&str> = still.map(|bot| bot.label.as_str()).collect();
-            let (gone, still) = (&gone.label, still.join(", "));
-            return Err(format!(
-                "no Bot of yours is called \"{gone}\"; you can message: {still}"
-            ));
-        }
-        let ids: Vec<(String, String, String)> = to
-            .iter()
-            .map(|bot| {
-                let fresh = uuid::Uuid::now_v7();
-                (
-                    pair::pair_thread(sender, &bot.id),
-                    format!("bm_{fresh}"),
-                    RunId::new().to_string(),
-                )
-            })
-            .collect();
-        let receivers: Vec<Receiver<'_>> = to
-            .iter()
-            .zip(&ids)
-            .map(|(bot, (thread, message_id, run_id))| Receiver {
+        let receivers: Vec<Receiver<'_>> = (to.iter())
+            .map(|bot| Receiver {
                 receiver_id: &bot.id,
-                thread_id: thread,
-                message_id,
-                run_id,
+                thread_id: pair::pair_thread(sender, &bot.id),
+                message_id: format!("bm_{}", uuid::Uuid::now_v7()),
+                run_id: RunId::new().to_string(),
             })
             .collect();
-        let named: Vec<pair::Messaged<'_>> = to
-            .iter()
-            .zip(&ids)
-            .map(|(bot, (thread, _, _))| pair::Messaged {
+        let named: Vec<pair::Messaged<'_>> = (to.iter().zip(&receivers))
+            .map(|(bot, row)| pair::Messaged {
                 coworker_id: &bot.id,
                 name: &bot.name,
-                thread_id: thread,
+                thread_id: &row.thread_id,
             })
             .collect();
         let (entry_id, at_ms) = (format!("tl_{}", uuid::Uuid::now_v7()), now_ms());
@@ -304,24 +278,27 @@ pub(crate) async fn opening(
     row: &BotMessageRow,
     person: &str,
 ) -> Option<(String, Vec<opengrok_harness::ChatMessage>)> {
-    let sender = CoworkerId::from_stored(row.sender_id.clone());
-    let peer = match state.auth.store.load_coworker(&sender).await {
-        Ok((bot, _)) => bot.name,
-        Err(_) => "another Bot".to_string(),
-    };
     let owner = AccountId::from_stored(row.owner_id.clone());
-    let said = crate::agui::history::for_message(state, &owner, row, (&peer, person)).await?;
+    let (at, said) = (
+        (&*row.thread_id, &*row.run_id),
+        (&*row.receiver_id, &*row.body),
+    );
+    let said = crate::agui::history::for_message(state, &owner, at, said).await?;
+    let peer = name_of(state, &row.sender_id).await;
     Some((
         crate::persona::message_line(&peer, person, chrono::Utc::now()),
         said,
     ))
 }
 
-/// `refuse` for a firing that carries a message; nothing for a routine's.
-pub(crate) async fn refused(state: &AgUiState, message: Option<&BotMessageRow>, why: String) {
-    if let Some(row) = message {
-        refuse(state, row, &why).await;
-    }
+/// A Bot's name as our words carry it, or "another Bot" for one that cannot be read.
+pub(crate) async fn name_of(state: &AgUiState, id: &str) -> String {
+    let bot = state
+        .auth
+        .store
+        .load_coworker(&CoworkerId::from_stored(id))
+        .await;
+    bot.map_or_else(|_| "another Bot".to_string(), |(bot, _)| bot.name)
 }
 
 /// What the message's run journals as asked: its words as the person reads them in the thread,
@@ -340,7 +317,9 @@ pub(crate) fn prompt(row: &BotMessageRow, run_id: &RunId) -> Vec<Value> {
 
 /// A message that cannot be had: its run, started and failed at once, saying why in the pair's
 /// thread, which is how the person sees it was refused. Its ending drains the pair as any does.
-pub(crate) async fn refuse(state: &AgUiState, row: &BotMessageRow, why: &str) {
+/// Nothing for a firing that carries none, a routine's.
+pub(crate) async fn refused(state: &AgUiState, message: Option<&BotMessageRow>, why: String) {
+    let Some(row) = message else { return };
     let run_id = RunId::from_stored(row.run_id.clone());
     let journal = StoreJournal {
         state: state.clone(),

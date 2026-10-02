@@ -9,6 +9,14 @@ fn input(messages: Value) -> RunAgentInput {
     serde_json::from_value(json!({"threadId": "t1", "runId": "r1", "messages": messages})).unwrap()
 }
 
+/// A run rebuilt for a resume from its own log: what it was asked, then what it said and did up
+/// to the answered call — `for_resume` less the thread before it.
+fn conversation_from(run: &Run, answered: &PendingApproval) -> Vec<ChatMessage> {
+    let mut messages = asked_of(run);
+    messages.extend(said_up_to(run, answered));
+    messages
+}
+
 fn ids(messages: &[&Message]) -> Vec<String> {
     messages.iter().map(|message| message.id.clone()).collect()
 }

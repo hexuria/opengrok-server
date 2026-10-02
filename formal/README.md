@@ -486,12 +486,16 @@ The state graph was the object being minimised. The results:
     `pairs_to_sweep`.
   - `crates/opengrok-server/src/pairs.rs`: `Mail::send` (the call), `drain_soon` and `drain`,
     `ended` (from `append_events_once`, `stop_run`, `stop_parked_run` and `recovery::fail_run`),
-    `sweep` (from
-    `recovery::sweep_once`), and `fire`, which is `autonomy::fire` with the message: its run is
-    claimed by the row's id before the loop, and a message that cannot be had is a run failed in
-    words (`refuse`).
-  - Tests: `against_bot_messages.rs`. The idempotency key and the pair's lock were each broken on
-    purpose, and their tests failed.
+    `sweep` (from `recovery::sweep_forever`, every `SWEEP_INTERVAL`), and `fire`, which is
+    `autonomy::fire` with the message: its run is claimed by the row's id before the loop, and a
+    message that cannot be had is a run failed in words (`refused`).
+  - Not in the model, from the review of #325: nothing a person POSTs to `/ag-ui` runs in a pair's
+    thread, whatever its messages (an empty body, a tool result or words before an answer used to
+    start a turn there or stop a parked one); and a card's resume and a crash's carry-on rebuild
+    a pair's run through `history::for_message`, as its first ask, so the message is fenced on
+    every ask and the other Bot's own words are never shown.
+  - Tests: `against_bot_messages.rs`. The idempotency key, the pair's lock, the run-end drain and
+    the fence on the resume paths were each broken on purpose, and their tests failed.
 
 ## Remaining hazards the models name but this change does not fix
 
