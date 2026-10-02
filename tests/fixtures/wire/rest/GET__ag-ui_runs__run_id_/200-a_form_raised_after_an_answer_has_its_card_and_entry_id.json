@@ -168,7 +168,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
-        "durationMs": 3,
+        "durationMs": 0,
         "toolCallId": "shell-1"
       },
       {
