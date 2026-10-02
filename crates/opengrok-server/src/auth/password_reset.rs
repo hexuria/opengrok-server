@@ -24,10 +24,7 @@ use opengrok_core::account::AccountCommand;
 use opengrok_core::id::AccountId;
 
 use super::routes::AuthState;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
+use crate::now_ms;
 
 const PURPOSE: &str = "password-reset";
 const LIFETIME_SECS: i64 = 60 * 60;

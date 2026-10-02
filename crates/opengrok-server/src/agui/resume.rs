@@ -18,10 +18,7 @@ use opengrok_harness::{ModelRequest, local_proxy};
 use crate::agui::AgUiState;
 use crate::agui::routes::{TURN_WAKE_PATIENCE, tools_for_coworker};
 use crate::host_state::HostState;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
+use crate::now_ms;
 
 fn entry_id() -> String {
     format!("e_{}", uuid::Uuid::now_v7())

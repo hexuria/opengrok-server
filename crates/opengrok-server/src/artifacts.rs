@@ -18,6 +18,7 @@ use serde_json::json;
 
 use crate::agui::AgUiState;
 use crate::agui::routes::account_from_bearer;
+use crate::now_ms;
 
 /// The longest an artifact may be after decoding the base64, to keep storage sane.
 const MAX_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
@@ -44,10 +45,6 @@ pub fn router(state: AgUiState) -> Router {
 /// What the request body may weigh: the 25 MiB cap once base64 has grown it by a third, and a
 /// little for the field names around it.
 const MAX_UPLOAD_BYTES: usize = MAX_ARTIFACT_BYTES / 3 * 4 + 64 * 1024;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

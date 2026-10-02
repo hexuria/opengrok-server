@@ -30,6 +30,7 @@ use serde::Serialize;
 
 use crate::agui::AgUiState;
 use crate::gateway_admin::{GatewayAdmin, KeyUsage};
+use crate::now_ms;
 
 const SECRET_PREFIX: &str = "coworker-gateway-key:";
 
@@ -54,10 +55,6 @@ fn secret_id_of(row: &opengrok_store::CoworkerKeyView, coworker: &CoworkerId) ->
     } else {
         legacy_secret_id(coworker)
     }
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 /// What minting at hire came to. Never an error: a hire is not refused over a cap.

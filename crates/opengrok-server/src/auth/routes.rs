@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use super::refresh_grace::GraceSlot;
 use super::token::{ACCESS_TOKEN_TTL_SECONDS, TokenMinter, hash_refresh_token, mint_refresh_token};
+use crate::now_ms;
 
 /// How long a registered challenge is good for. Long enough for a person to finish in the
 /// browser, short enough that an abandoned one does not linger. The challenge lives in
@@ -637,10 +638,6 @@ impl From<StoreError> for AuthFailure {
     fn from(error: StoreError) -> Self {
         Self::Unavailable(error.to_string())
     }
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 /// Sign in. Idempotent per email: a second call adds a session, never a second account.

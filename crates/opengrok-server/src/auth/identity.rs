@@ -22,10 +22,7 @@ use opengrok_core::id::AccountId;
 use opengrok_core::org::{OrgCommand, email_domain};
 
 use super::routes::AuthState;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
+use crate::now_ms;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

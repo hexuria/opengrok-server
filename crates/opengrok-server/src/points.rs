@@ -24,11 +24,8 @@ use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
 use crate::gateway_admin::{AdminError, GatewayAdmin, ModelPoints, ModelUsage};
+use crate::now_ms;
 use crate::spend::micros;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 /// The most a limit may be: a thousand billion reference tokens. Anything larger is a typo, and
 /// the column is a bigint.

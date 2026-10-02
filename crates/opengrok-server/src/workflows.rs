@@ -45,11 +45,8 @@ use crate::agui::AgUiState;
 use crate::agui::routes::owned_coworker;
 #[cfg(feature = "jev")]
 use crate::jev::{Answer, Ask, JevError, JsonContent, NoulCriteria, Question};
+use crate::now_ms;
 use crate::recipes::{Action, StoreRecipes, org_of, permitted};
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()

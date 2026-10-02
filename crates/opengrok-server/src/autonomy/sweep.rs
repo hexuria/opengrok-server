@@ -18,6 +18,7 @@ use opengrok_core::monitor::{MonitorCommand, is_watchable};
 use opengrok_core::schedule::ScheduleCommand;
 
 use crate::agui::routes::AgUiState;
+use crate::now_ms;
 
 /// How often to look for due schedules. Cron has seconds resolution, so the tick must too.
 pub const SCHEDULE_INTERVAL: Duration = Duration::from_secs(1);
@@ -34,10 +35,6 @@ pub(crate) const FIRING_PENDING_MS: i64 = 5 * 60 * 1000;
 
 /// How many schedules one tick may claim — the same anti-stampede cap recovery uses.
 const CLAIM_LIMIT: i64 = 20;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 /// Fire due schedules forever. Started by the binary; stops when the process does. Takes the
 /// host state rather than the bare AG-UI state because a fired run that stops on a form mints its

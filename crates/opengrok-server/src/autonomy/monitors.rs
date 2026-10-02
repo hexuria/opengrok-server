@@ -25,10 +25,7 @@ use super::routes::{
 };
 use crate::agui::routes::{AgUiState, account_from_bearer};
 use crate::host_state::HostState;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
+use crate::now_ms;
 
 pub(super) fn router(state: HostState) -> Router {
     Router::new()

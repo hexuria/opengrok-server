@@ -507,7 +507,7 @@ impl PgStore {
         thread_id: &str,
         account: &AccountId,
     ) -> StoreResult<Vec<String>> {
-        let rows: Vec<String> = sqlx::query_scalar(
+        Ok(sqlx::query_scalar(
             "select id from run_view
              where thread_id = $1 and account_id = $2 and hidden_at_ms is not null
              order by hidden_at_ms desc",
@@ -515,8 +515,7 @@ impl PgStore {
         .bind(thread_id)
         .bind(account.as_str())
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
+        .await?)
     }
 
     /// The runs of one thread that THIS ACCOUNT may read, newest first.
@@ -2232,7 +2231,7 @@ impl PgStore {
         limit: i64,
     ) -> StoreResult<Vec<serde_json::Value>> {
         // Built in SQL so the keys are the reply's; null where a row has no value.
-        let rows = sqlx::query_scalar(
+        Ok(sqlx::query_scalar(
             "select json_build_object('id', id, 'machineId', machine_id, 'origin', origin,
                     'command', command, 'decision', decision, 'rule', rule,
                     'requestedAtMs', requested_at_ms, 'outcome', outcome,
@@ -2243,8 +2242,7 @@ impl PgStore {
         .bind(account_id)
         .bind(limit)
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows)
+        .await?)
     }
 
     // ---- A computer keyed by the scope that shares it (org / account / bot) ----

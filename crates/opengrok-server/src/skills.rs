@@ -44,6 +44,7 @@ use serde_json::{Value, json};
 use crate::agui::AgUiState;
 use crate::agui::routes::{account_from_bearer, owned_coworker};
 use crate::health::refusal;
+use crate::now_ms;
 use crate::recipes::{MAX_TAPE_UPLOAD_BYTES, org_of, tape_into_steps};
 
 /// The most a skill body may be. See the module note: the body shares one system message with the
@@ -89,10 +90,6 @@ pub const MAX_ATTACHED: usize = 20;
 /// an arbitrarily long base64 string and make the server hold it before any of that counting
 /// happens. The layer is the ceiling; `MAX_BUNDLE_BYTES` is the rule.
 const MAX_UPLOAD_BYTES: usize = MAX_BUNDLE_BYTES / 3 * 4 + 64 * 1024;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 pub fn router(state: AgUiState) -> Router {
     // For the from-tape layer, which needs the bearer to know whose slot to take — see

@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
 use crate::agui::routes::{account_from_bearer, owned_coworker};
+use crate::now_ms;
 
 /// The raw tape is capped so a runaway teach cannot fill the table.
 pub(crate) const MAX_RAW_BYTES: usize = 5 * 1024 * 1024;
@@ -62,10 +63,6 @@ const RAW_EVENTS_SENT: usize = 2_000;
 /// so the page's five rows per version are the whole table, not a window onto an endless one.
 /// Workflows keep the same five: it is the same table and the same page.
 pub(crate) const RUNS_KEPT_PER_VERSION: i64 = 5;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 pub fn router(state: AgUiState) -> Router {
     Router::new()

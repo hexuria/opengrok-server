@@ -24,10 +24,7 @@ use opengrok_core::limits::RunLimits;
 use opengrok_core::org::OrgCommand;
 
 use crate::auth::AuthState;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
+use crate::now_ms;
 
 pub fn router(state: AuthState) -> Router {
     Router::new()

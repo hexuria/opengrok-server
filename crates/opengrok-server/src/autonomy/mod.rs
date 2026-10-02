@@ -38,6 +38,7 @@ use opengrok_harness::{ChatMessage, RunBudget, RunContext, run_conversation_with
 
 use crate::agui::routes::{AgUiState, StoreJournal};
 use crate::host_state::HostState;
+use crate::now_ms;
 
 /// How many runs one routine or one monitor may have in flight before another wake is refused.
 ///
@@ -46,10 +47,6 @@ use crate::host_state::HostState;
 /// `run-failed` in a span — and every press is a run that is billed and holds a recovery lease.
 /// The clock sweep caps itself the same way one level up (`sweep::CLAIM_LIMIT`).
 pub const MAX_RUNS_IN_FLIGHT: i64 = 3;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 /// One run nobody asked for, described: who it is for, which coworker takes it, what it opens
 /// with, and which thread journals it.

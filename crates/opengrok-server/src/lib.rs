@@ -57,6 +57,8 @@ pub mod workflows;
 
 pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
+// The one clock every module stamps its events and rows with.
+pub(crate) use agui::routes::now_ms;
 
 /// Everything the server serves today.
 pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {

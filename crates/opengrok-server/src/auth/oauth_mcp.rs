@@ -50,6 +50,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::routes::AuthState;
+use crate::now_ms;
 
 /// The one scope the door serves. Advertised in the 401 challenge and the metadata; the flow
 /// grants exactly this.
@@ -85,10 +86,6 @@ const CONSENT_TTL_SECS: i64 = 10 * 60;
 /// per-address budget (`budget::CLIENT_REGISTRATION`) this is what keeps it from filling the
 /// database.
 const DCR_CEILING: i64 = 1_000;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 fn base(public_url: &str) -> String {
     public_url.trim_end_matches('/').to_string()
