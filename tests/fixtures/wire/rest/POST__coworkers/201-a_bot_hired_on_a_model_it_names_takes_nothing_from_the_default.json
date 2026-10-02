@@ -4,13 +4,8 @@
   "status": 201,
   "body": {
     "id": "cw_0199bb4e-0000-7000-8000-000000000001",
-<<<<<<<< HEAD:tests/fixtures/wire/rest/POST__coworkers/201-a_bot_on_its_own_plan_is_refused_in_words_in_the_pair_thread.json
-    "name": "Ada",
-    "model": "oag/cheap",
-========
     "name": "Luna",
     "model": "openai/gpt-5.5",
->>>>>>>> 26cca4f (the wire corpus follows #318):tests/fixtures/wire/rest/POST__coworkers/201-a_bot_hired_on_a_model_it_names_takes_nothing_from_the_default.json
     "effort": "inherit",
     "source": null,
     "role": null,
@@ -20,18 +15,14 @@
     "visibility": "private",
     "hiddenFromSidebar": false,
     "updatedAtMs": 1790000000000,
-<<<<<<<< HEAD:tests/fixtures/wire/rest/POST__coworkers/201-a_bot_on_its_own_plan_is_refused_in_words_in_the_pair_thread.json
-    "boxId": "bx_quiet_0199bb4e000070008000000000000002",
-========
     "boxId": "bx_source_0199bb4e000070008000000000000002",
->>>>>>>> 26cca4f (the wire corpus follows #318):tests/fixtures/wire/rest/POST__coworkers/201-a_bot_hired_on_a_model_it_names_takes_nothing_from_the_default.json
     "isGroup": false,
     "memberIds": [],
     "mine": true,
     "canManage": true,
     "owner": {
       "id": "acct_0199bb4e-0000-7000-8000-000000000003",
-      "name": "Uriah"
+      "name": "Test User"
     },
     "computerError": null,
     "templateNote": null
