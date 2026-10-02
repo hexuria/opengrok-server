@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account",
+  "status": 422,
+  "body": {
+    "error": "\"Mars/Olympus_Mons\" is not an IANA time zone this server knows; send one like \"Europe/London\""
+  }
+}

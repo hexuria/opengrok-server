@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account/inference-source",
+  "status": 400,
+  "body": {
+    "error": "localModel: claude-sonnet-4.5 is one of Anthropic's models, and Anthropic's terms forbid using a consumer subscription through a third-party app; pick an OpenAI or xAI model, or use the gateway"
+  }
+}

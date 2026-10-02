@@ -6,8 +6,8 @@
     {
       "id": "cw_0199bb4e-0000-7000-8000-000000000001",
       "name": "Luna",
-      "model": "xai/grok-4.7--fast",
-      "effort": "inherit",
+      "model": "gpt-6-sol--fast",
+      "effort": "high",
       "source": "local_proxy",
       "role": null,
       "title": null,

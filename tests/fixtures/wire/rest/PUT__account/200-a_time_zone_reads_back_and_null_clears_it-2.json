@@ -1,17 +1,17 @@
 {
-  "method": "GET",
+  "method": "PUT",
   "path": "/account",
   "status": 200,
   "body": {
     "id": "acct_0199bb4e-0000-7000-8000-000000000001",
-    "email": "cookie-0199bb4e000070008000000000000002@og.local",
+    "email": "source-0199bb4e000070008000000000000002@og.local",
     "firstName": "Test",
     "lastName": "User",
     "avatarUrl": null,
     "orgId": null,
     "verified": true,
     "enabled": true,
-    "timeZone": null,
+    "timeZone": "Europe/London",
     "isAdmin": false
   }
 }

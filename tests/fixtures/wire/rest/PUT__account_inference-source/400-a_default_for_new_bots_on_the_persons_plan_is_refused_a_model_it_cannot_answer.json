@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account/inference-source",
+  "status": 400,
+  "body": {
+    "error": "newBotDefault.model: \"xai/grok-4.6@sub\" is not a model this server knows to be OpenAI's or xAI's, and only theirs (gpt-*, o1*, o3*, o4*, codex*, grok-*) may use your own subscription"
+  }
+}

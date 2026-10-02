@@ -1,5 +1,5 @@
 {
-  "method": "GET",
+  "method": "PUT",
   "path": "/account/inference-source",
   "status": 200,
   "body": {
@@ -15,6 +15,10 @@
       "machineLabel": null,
       "localModel": null
     },
-    "newBotDefault": null
+    "newBotDefault": {
+      "source": "local_proxy",
+      "model": "gpt-6-sol--fast",
+      "effort": "high"
+    }
   }
 }
