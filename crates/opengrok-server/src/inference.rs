@@ -124,7 +124,7 @@ pub(crate) fn named(
     TurnSource::named(value, field).map_err(|why| Box::new(refuse(StatusCode::BAD_REQUEST, why)))
 }
 
-fn refuse(status: StatusCode, sentence: impl Into<String>) -> Response {
+pub(crate) fn refuse(status: StatusCode, sentence: impl Into<String>) -> Response {
     (status, Json(json!({ "error": sentence.into() }))).into_response()
 }
 

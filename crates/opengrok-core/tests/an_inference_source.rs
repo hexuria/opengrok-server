@@ -425,3 +425,42 @@ fn a_turn_names_its_source_as_a_word_or_with_the_way_it_goes() {
         "no default way is the loopback"
     );
 }
+
+/// A person's time zone is an IANA name or nothing: an unknown one is refused before it is logged,
+/// the same one again is no event, and none clears it. An account that never set one has none.
+#[test]
+fn an_account_keeps_an_iana_time_zone_and_refuses_any_other() {
+    let mut account = registered();
+    assert_eq!(account.time_zone, None);
+    let set = |zone: Option<&str>| AccountCommand::SetTimeZone {
+        time_zone: zone.map(str::to_string),
+        at_ms: 2,
+    };
+    let events = account.decide(set(Some(" Asia/Manila "))).unwrap();
+    assert_eq!(events[0].event_type(), "account-time-zone-set");
+    for event in &events {
+        account.apply(event);
+    }
+    assert_eq!(account.time_zone.as_deref(), Some("Asia/Manila"));
+    assert_eq!(account.decide(set(Some("Asia/Manila"))), Ok(Vec::new()));
+    for unknown in ["Mars/Olympus_Mons", "asia/manila", "", "+08:00"] {
+        assert_eq!(
+            account.decide(set(Some(unknown))),
+            Err(AccountError::UnknownTimeZone(unknown.to_string())),
+            "{unknown:?}"
+        );
+    }
+    let why = AccountError::UnknownTimeZone("Mars/Olympus_Mons".to_string()).to_string();
+    assert!(
+        why.contains("IANA") && why.contains("Europe/London"),
+        "{why}"
+    );
+    for event in &account.decide(set(None)).unwrap() {
+        account.apply(event);
+    }
+    assert_eq!(account.time_zone, None, "none clears it");
+    assert_eq!(
+        Account::default().decide(set(Some("UTC"))),
+        Err(AccountError::NotRegistered)
+    );
+}

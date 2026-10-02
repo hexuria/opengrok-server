@@ -1771,3 +1771,99 @@ async fn the_system_message_opens_with_the_model_the_turn_asks() {
     assert!(said.starts_with(told), "{said}");
     assert!(!said.contains(h.proxy_url.as_str()), "no address: {said}");
 }
+
+// ---- The account's time zone (#316) ----------------------------------------------------------
+// Beside the inference source because both are a person's own settings, read and saved alike.
+
+/// The zone a person's routines default to, as NativeChat keeps it current: one PUT, answered as
+/// `GET /account` answers. Recorded for NativeChat.
+#[tokio::test]
+async fn a_person_keeps_their_time_zone_on_their_account() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let body = Some(json!({ "timeZone": "Asia/Manila" }));
+    let (status, saved) = h
+        .send(Some(&ada), reqwest::Method::PUT, "/account", body)
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["timeZone"], "Asia/Manila", "{saved}");
+    assert_eq!(saved["id"], ada.id.as_str(), "the GET shape: {saved}");
+    assert_eq!(saved["isAdmin"], false, "the GET shape: {saved}");
+    let (account, _) = h.store.load_account(&ada.id).await.expect("account");
+    assert_eq!(account.time_zone.as_deref(), Some("Asia/Manila"));
+}
+
+/// A zone the IANA database does not know is refused in words, and nothing is saved. Recorded for
+/// NativeChat: the one PUT.
+#[tokio::test]
+async fn an_unknown_time_zone_is_refused_in_words() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let body = Some(json!({ "timeZone": "Mars/Olympus_Mons" }));
+    let (status, refused) = h
+        .send(Some(&ada), reqwest::Method::PUT, "/account", body)
+        .await;
+    assert_eq!(status, 422, "{refused}");
+    let why = "\"Mars/Olympus_Mons\" is not an IANA time zone this server knows; send one like \
+               \"Europe/London\"";
+    assert_eq!(refused, json!({ "error": why }));
+    let (account, _) = h.store.load_account(&ada.id).await.expect("account");
+    assert_eq!(account.time_zone, None, "nothing was saved");
+}
+
+/// GET always carries `timeZone`, null until set; a PUT sets it and `null` clears it; the same
+/// zone again writes nothing, as the client sends it whenever it starts; a body naming no zone is
+/// 400 and a signed-out caller 401, both in `{error}`.
+#[tokio::test]
+async fn a_time_zone_reads_back_and_null_clears_it() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("ok")], true).await;
+    let ada = h.person().await;
+    let (get, put) = (reqwest::Method::GET, reqwest::Method::PUT);
+    let (status, me) = h.send(Some(&ada), get.clone(), "/account", None).await;
+    assert_eq!(status, 200, "{me}");
+    assert_eq!(me.get("timeZone"), Some(&Value::Null), "{me}");
+
+    let zone = |zone: Value| Some(json!({ "timeZone": zone }));
+    let london = zone(json!(" Europe/London "));
+    let (status, _) = h.send(Some(&ada), put.clone(), "/account", london).await;
+    assert_eq!(status, 200);
+    let (_, me) = h.send(Some(&ada), get.clone(), "/account", None).await;
+    assert_eq!(me["timeZone"], "Europe/London", "{me}");
+    let (_, seq) = h.store.load_account(&ada.id).await.expect("account");
+    let london = zone(json!("Europe/London"));
+    let (status, again) = h.send(Some(&ada), put.clone(), "/account", london).await;
+    assert_eq!((status, &again["timeZone"]), (200, &json!("Europe/London")));
+    let (_, unchanged) = h.store.load_account(&ada.id).await.expect("account");
+    assert_eq!(unchanged, seq, "the same zone again is no event");
+
+    let cleared = zone(Value::Null);
+    let (status, cleared) = h.send(Some(&ada), put.clone(), "/account", cleared).await;
+    assert_eq!(status, 200, "{cleared}");
+    let (_, me) = h.send(Some(&ada), get, "/account", None).await;
+    assert_eq!(
+        me.get("timeZone"),
+        Some(&Value::Null),
+        "null clears it: {me}"
+    );
+
+    let why = "timeZone must be an IANA time zone, like \"Europe/London\", or null";
+    for body in [
+        json!({}),
+        json!({ "timeZone": 7 }),
+        json!({ "timezone": "UTC" }),
+    ] {
+        let sent = Some(body.clone());
+        let (status, refused) = h.send(Some(&ada), put.clone(), "/account", sent).await;
+        assert_eq!(status, 400, "{body}: {refused}");
+        assert_eq!(refused, json!({ "error": why }), "{body}");
+    }
+    let (status, refused) = h.send(None, put, "/account", zone(json!("UTC"))).await;
+    assert_eq!(status, 401, "{refused}");
+    assert!(
+        refused["error"].is_string(),
+        "a sentence, as JSON: {refused}"
+    );
+}

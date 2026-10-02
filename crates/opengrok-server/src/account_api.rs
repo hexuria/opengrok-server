@@ -24,11 +24,12 @@ use opengrok_core::limits::RunLimits;
 use opengrok_core::org::OrgCommand;
 
 use crate::auth::AuthState;
+use crate::inference::refuse;
 use crate::now_ms;
 
 pub fn router(state: AuthState) -> Router {
     Router::new()
-        .route("/account", get(me))
+        .route("/account", get(me).put(put_me))
         .route("/account/profile", post(update_profile))
         .route("/account/password", post(change_password))
         .route("/admin/users", get(list_users))
@@ -124,6 +125,8 @@ fn account_json(id: &AccountId, account: &Account) -> Value {
         "orgId": account.org_id,
         "verified": account.verified,
         "enabled": account.enabled,
+        // Always there, null until the person's client says (#316).
+        "timeZone": account.time_zone,
     })
 }
 
@@ -131,15 +134,47 @@ fn account_json(id: &AccountId, account: &Account) -> Value {
 /// not to change).
 async fn me(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
     match caller(&state, &headers).await {
-        Ok((id, account, _)) => {
-            // Tell the caller whether they are their org's admin, so the console can hide the admin
-            // surface for a member rather than offer a door that only answers 403. The admin checks
-            // below still enforce it server-side; this is the client's cue, not the gate.
-            let is_admin = caller_is_admin(&state, &id, &account).await;
-            let mut body = account_json(&id, &account);
-            body["isAdmin"] = json!(is_admin);
-            Json(body).into_response()
+        Ok((id, account, _)) => me_json(&state, &id, &account).await,
+        Err(refusal) => refusal,
+    }
+}
+
+/// What `GET /account` answers, and `PUT` after it.
+async fn me_json(state: &AuthState, id: &AccountId, account: &Account) -> Response {
+    // Tell the caller whether they are their org's admin, so the console can hide the admin
+    // surface for a member rather than offer a door that only answers 403. The admin checks
+    // below still enforce it server-side; this is the client's cue, not the gate.
+    let mut body = account_json(id, account);
+    body["isAdmin"] = json!(caller_is_admin(state, id, account).await);
+    Json(body).into_response()
+}
+
+/// `PUT /account` — `{timeZone}`: the IANA zone this person's routines default to, which their
+/// client keeps current (#316); null clears it. Refusals are `{error}`, as NativeChat reads them
+/// (#262): 400 for a body naming no zone, 422 for a zone the database does not know.
+async fn put_me(
+    State(state): State<AuthState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let Ok((id, account, seq)) = caller(&state, &headers).await else {
+        return refuse(StatusCode::UNAUTHORIZED, "sign in to change your account");
+    };
+    let time_zone = match body.get("timeZone") {
+        Some(Value::String(zone)) => Some(zone.clone()),
+        Some(Value::Null) => None,
+        _ => {
+            let why = "timeZone must be an IANA time zone, like \"Europe/London\", or null";
+            return refuse(StatusCode::BAD_REQUEST, why);
         }
+    };
+    let at_ms = now_ms();
+    let events = match account.decide(AccountCommand::SetTimeZone { time_zone, at_ms }) {
+        Ok(events) => events,
+        Err(why) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, why.to_string()),
+    };
+    match persist(&state, &id, account, seq, &events).await {
+        Ok(after) => me_json(&state, &id, &after).await,
         Err(refusal) => refusal,
     }
 }

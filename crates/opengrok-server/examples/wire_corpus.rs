@@ -240,6 +240,13 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "the_sender_s_chat_gets_its_messaged_row_live_and_on_replay",
         "/ag-ui/threads/{thread_id}",
     ),
+    // The account's time zone (#316): its save, shaped like any other read of the account, and
+    // its 422, shaped like any refusal. Each test makes one call on `/account`.
+    (
+        "a_person_keeps_their_time_zone_on_their_account",
+        "/account",
+    ),
+    ("an_unknown_time_zone_is_refused_in_words", "/account"),
 ];
 
 const REDACTED: &str = "«redacted»";
