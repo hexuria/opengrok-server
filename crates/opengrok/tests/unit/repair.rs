@@ -416,15 +416,17 @@ fn a_local_image_never_built_is_warned_about_with_the_command_that_builds_it() {
     assert!(said.contains(build), "{said}");
 }
 
-/// A Docker that cannot answer is warned about too: no Local VM can be made without it.
+/// A Docker that cannot answer is warned about too, as no Local VM can be made without it: by its
+/// code, never its words, which can carry an address (`unix:///var/run/docker.sock`).
 #[test]
-fn a_docker_that_cannot_answer_is_warned_about() {
-    let down = BoxError::Unreachable("could not run docker: not found".to_string());
-    let said = logged(|| say_image("grok-box:local", Err(down)));
+fn a_docker_that_cannot_answer_is_warned_about_by_its_code() {
+    let words = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock";
+    let said = logged(|| say_image("grok-box:local", Err(BoxError::Unreachable(words.into()))));
     assert!(
-        said.contains(" WARN ") && said.contains("not found"),
+        said.contains(" WARN ") && said.contains("provider_unreachable"),
         "{said}"
     );
+    assert!(!said.contains("docker.sock"), "{said}");
 }
 
 /// An image Docker has says nothing, and one it can pull is no fault: the first Local VM pulls it.

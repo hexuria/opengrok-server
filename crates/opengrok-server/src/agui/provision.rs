@@ -166,10 +166,10 @@ pub async fn take_over_with_local_docker(
     replacing: Option<&str>,
 ) -> Option<(Arc<dyn Computer>, String)> {
     let Some(computer) = provider_for(state, org_id, "local-docker").await else {
-        tracing::warn!(scope, scope_id, %refused, "computer: the provider refused and this server runs no Local VM to fall back on");
+        tracing::warn!(scope, scope_id, kind = "ascii", code = %refused.code(), box_id = ?replacing, "computer: the provider refused and this server runs no Local VM to fall back on");
         return None;
     };
-    tracing::warn!(scope, scope_id, %refused, "computer: the provider refused; asking local Docker");
+    tracing::warn!(scope, scope_id, kind = "ascii", code = %refused.code(), box_id = ?replacing, "computer: the provider refused; asking local Docker");
     let box_id = computer.create(None).await.ok()?;
     let at_ms = chrono::Utc::now().timestamp_millis();
     let store = &state.auth.store;
@@ -189,7 +189,7 @@ pub async fn take_over_with_local_docker(
         tracing::warn!(scope, scope_id, %error, "computer: the takeover could not be stamped on the account; the pane will not say the box changed");
     }
     // As a refused hire's record is (#301). box.ascii.dev is the one kind taken over (`FELL_BACK`).
-    tracing::warn!(scope, scope_id, kind = "ascii", code = refused.code(), box_id = %box_id, "computer: refused; local Docker box is this scope's computer, and the account says why");
+    tracing::warn!(scope, scope_id, kind = "ascii", code = %refused.code(), box_id = %box_id, "computer: refused; local Docker box is this scope's computer, and the account says why");
     Some((computer, box_id))
 }
 
@@ -247,8 +247,8 @@ async fn claim(
             Slot::Rebuilt(_) => provider.discard(box_id).await,
             Slot::Empty | Slot::Replacing(_) => provider.destroy(box_id).await,
         };
-        let removed = removed.map_err(|error| error.to_string());
-        tracing::warn!(scope, scope_id, box_id, kept = ?kept, removed = ?removed, "computer: the scope's box is not the one made here, so it was removed");
+        let removed = removed.map_err(|error| error.code());
+        tracing::warn!(scope, scope_id, kind, box_id, kept = ?kept, removed = ?removed, "computer: the scope's box is not the one made here, so it was removed");
     }
     Ok(kept)
 }
@@ -607,9 +607,9 @@ pub async fn ensure_scope_box(
         }
         Err(error) => error,
     };
-    // The upstream refusal, in full, at WARN. This is the line whose absence meant a
-    // `quota_exceeded` from hours earlier could not be told from one from a second ago.
-    tracing::warn!(scope, scope_id, kind, code = %error.code(), %error, "computer: the provider refused");
+    // The upstream refusal at WARN, by its code and never its words, which can carry a URL. Its
+    // absence meant a `quota_exceeded` from hours earlier could not be told from one a second ago.
+    tracing::warn!(scope, scope_id, kind, code = %error.code(), "computer: the provider refused");
     if kind == "ascii"
         && let Some(account_id) = account_id
         && let Some((local, taken)) =
@@ -640,7 +640,7 @@ async fn destroy_and_clear(state: &AgUiState, org_id: Option<&str>, scope: &str,
     if let Some(provider) = provider
         && let Err(error) = provider.destroy(&box_id).await
     {
-        tracing::warn!(%error, box_id, "could not destroy a scope's box; forgetting it anyway");
+        tracing::warn!(scope, scope_id, kind = %kind, code = %error.code(), box_id, "could not destroy a scope's box; forgetting it anyway");
     }
     let _ = store.clear_scoped_computer(scope, scope_id, &box_id).await;
 }
@@ -1101,7 +1101,7 @@ pub async fn update_scope_box(
         let store = store.clone();
         let scope_id = scope_id.clone();
         async move {
-            tracing::warn!(scope, scope_id = %scope_id, why, "computer: update failed");
+            tracing::warn!(scope, scope_id = %scope_id, "computer: update failed; its record says why");
             let _ = store
                 .set_box_update_phase(
                     scope,
@@ -1330,7 +1330,7 @@ pub async fn idle_stop_once(state: &AgUiState, before_ms: i64) -> usize {
                 );
             }
             Err(error) => {
-                tracing::warn!(%error, box_id, "could not stop an idle box");
+                tracing::warn!(scope, scope_id, kind, code = %error.code(), box_id, "could not stop an idle box");
             }
         }
     }

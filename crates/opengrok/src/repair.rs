@@ -47,7 +47,7 @@ pub async fn stray_boxes(state: &AgUiState, destroy: bool) -> Vec<String> {
             Ok("absent") => continue,
             Ok(_) => found.push(box_id.clone()),
             Err(error) => {
-                tracing::warn!(box_id, %error, "computer: could not ask after a box no record names");
+                tracing::warn!(box_id, scope = row.scope, kind = %row.kind, code = %error.code(), "computer: could not ask after a box no record names");
                 continue;
             }
         }
@@ -55,7 +55,7 @@ pub async fn stray_boxes(state: &AgUiState, destroy: bool) -> Vec<String> {
         if !destroy {
             tracing::warn!(box_id, scope, scope_id, kept = %kept, "computer: a box no record names is running; OG_REPAIR_STRAY_BOXES=destroy destroys it");
         } else if let Err(error) = provider.destroy(box_id).await {
-            tracing::warn!(box_id, scope, scope_id, %error, "computer: a box no record names could not be destroyed");
+            tracing::warn!(box_id, scope, scope_id, kind = %row.kind, code = %error.code(), "computer: a box no record names could not be destroyed");
         } else {
             tracing::warn!(box_id, scope, scope_id, kept = %kept, "computer: destroyed a box no record names");
         }
@@ -85,7 +85,7 @@ fn say_image(image: &str, present: BoxResult<bool>) {
             "computer: OG_DOCKER_IMAGE is not on this host yet; Docker pulls it for the first Local VM"
         ),
         Err(error) => {
-            tracing::warn!(image, %error, "computer: Docker could not say whether OG_DOCKER_IMAGE is on this host; no Local VM is made until it can")
+            tracing::warn!(image, code = %error.code(), "computer: Docker could not say whether OG_DOCKER_IMAGE is on this host; no Local VM is made until it can")
         }
     }
 }

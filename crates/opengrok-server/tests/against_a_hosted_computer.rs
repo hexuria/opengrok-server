@@ -489,6 +489,10 @@ async fn a_turn_whose_box_refuses_is_told_so_and_gets_no_new_box() {
 const KEK: &str = "rIeYsJHlXEYIoRjZQfL73u7UuVMYxIrdlDT5tndh/kY=";
 const ORG_KEY: &str = "box_org_key_for_the_stand_in";
 
+/// What the stand-in's refusals carry, as a provider's words may: a URL with a key in it. The
+/// account's row keeps the words for the pane; no log line may repeat them (#301).
+const LEAKY: &str = "https://api.box.ascii.dev/v1/boxes?key=SECRET";
+
 /// box.ascii.dev as a hosted server meets it on a bad day. `POST /boxes` answers `create` (200
 /// is a box); every other call answers `other`. Each request is kept as "METHOD /path bearer".
 #[derive(Clone)]
@@ -531,9 +535,9 @@ impl StandInAscii {
                 let status = axum::http::StatusCode::from_u16(status).unwrap();
                 let body = match status.as_u16() {
                     200 => json!({ "id": "box_hosted_1" }),
-                    429 => json!({ "error": "box creation rate limit reached" }),
-                    403 => json!({ "error": "forbidden: this key was revoked" }),
-                    _ => json!({ "error": "upstream unavailable" }),
+                    429 => json!({ "error": format!("box creation rate limit reached: {LEAKY}") }),
+                    403 => json!({ "error": format!("forbidden: this key was revoked: {LEAKY}") }),
+                    _ => json!({ "error": format!("upstream unavailable: {LEAKY}") }),
                 };
                 (status, axum::Json(body))
             }
@@ -693,11 +697,11 @@ async fn a_hosted_hire_whose_ascii_create_fails_records_why_and_makes_no_box() {
         );
         assert_eq!(recorded["fields"]["kind"], "ascii", "{status}: {recorded}");
         assert_eq!(recorded["fields"]["code"], code, "{status}: {recorded}");
-        let text = log.text();
         assert!(
-            !text.contains(ORG_KEY) && !text.contains(&ascii),
-            "{status}: {text}"
+            screen.to_string().contains(LEAKY),
+            "the pane has the words: {screen}"
         );
+        log.holds_none_of_what_a_provider_said(&ascii);
     }
 }
 
@@ -732,6 +736,15 @@ impl Log {
         String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
     }
 
+    /// Not the provider's words (`LEAKY`, its key among them), the org's key or the provider's
+    /// address: a refusal is said by its scope, kind, code and box.
+    fn holds_none_of_what_a_provider_said(&self, ascii: &str) {
+        let text = self.text();
+        for leak in [LEAKY, "SECRET", ORG_KEY, ascii] {
+            assert!(!text.contains(leak), "{leak} was logged: {text}");
+        }
+    }
+
     fn events(&self) -> Vec<Value> {
         let text = self.text();
         text.lines()
@@ -743,6 +756,7 @@ impl Log {
 #[tokio::test]
 async fn a_hosted_turn_whose_ascii_box_answers_403_is_told_so_and_gets_no_box() {
     let database_url = database_or_skip!();
+    let (log, _logging) = Log::start();
     let (ascii, stand_in) = StandInAscii::start(200, 403).await;
     let (base, state, account, token) = hosted(&database_url, &ascii).await;
     let coworker = hire_at(&base, &token).await;
@@ -795,4 +809,14 @@ async fn a_hosted_turn_whose_ascii_box_answers_403_is_told_so_and_gets_no_box() 
         Some(("box_hosted_1".to_string(), "ascii".to_string())),
         "the refused box stays the scope's computer; no Local VM takes its place"
     );
+    // The turn's look at the box is said by its code and the box, never what the box said.
+    let said = log.events();
+    let look = said.iter().find(|event| {
+        event["fields"]["message"]
+            == "the box's state could not be read; a tool that needs it will say so"
+    });
+    let look = look.unwrap_or_else(|| panic!("not logged: {said:?}"));
+    assert_eq!(look["fields"]["code"], "invalid_key", "{look}");
+    assert_eq!(look["fields"]["box_id"], "box_hosted_1", "{look}");
+    log.holds_none_of_what_a_provider_said(&ascii);
 }
