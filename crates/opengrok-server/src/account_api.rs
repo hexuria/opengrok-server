@@ -173,6 +173,12 @@ async fn put_me(
         Ok(events) => events,
         Err(why) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, why.to_string()),
     };
+    // THE SAME ZONE WRITES NOTHING. NativeChat sends it on every launch, and `persist` upserts the
+    // whole projection row from the account loaded above even with no event, so a profile, plan
+    // or password change landing in between would be reverted in the projection.
+    if events.is_empty() {
+        return me_json(&state, &id, &account).await;
+    }
     match persist(&state, &id, account, seq, &events).await {
         Ok(after) => me_json(&state, &id, &after).await,
         Err(refusal) => refusal,

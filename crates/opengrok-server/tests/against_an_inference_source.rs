@@ -2134,11 +2134,26 @@ async fn a_time_zone_reads_back_and_null_clears_it() {
     let (_, me) = h.send(Some(&ada), get.clone(), "/account", None).await;
     assert_eq!(me["timeZone"], "Europe/London", "{me}");
     let (_, seq) = h.store.load_account(&ada.id).await.expect("account");
+    let stamp = || async {
+        sqlx::query_scalar::<_, i64>("select updated_at_ms from account_view where id = $1")
+            .bind(ada.id.as_str())
+            .fetch_one(h.store.pool())
+            .await
+            .expect("projection row")
+    };
+    let before = stamp().await;
     let london = zone(json!("Europe/London"));
     let (status, again) = h.send(Some(&ada), put.clone(), "/account", london).await;
     assert_eq!((status, &again["timeZone"]), (200, &json!("Europe/London")));
     let (_, unchanged) = h.store.load_account(&ada.id).await.expect("account");
     assert_eq!(unchanged, seq, "the same zone again is no event");
+    // Nor a projection write: a row rewritten from the loaded account would undo a profile, plan
+    // or password change that landed between the load and the write.
+    assert_eq!(
+        stamp().await,
+        before,
+        "the same zone again leaves the projection alone"
+    );
 
     let cleared = zone(Value::Null);
     let (status, cleared) = h.send(Some(&ada), put.clone(), "/account", cleared).await;
