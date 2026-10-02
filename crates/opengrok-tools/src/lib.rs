@@ -23,6 +23,7 @@ pub use review::{
 };
 pub mod user_form;
 pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
+pub mod cards;
 pub mod credential;
 pub use credential::OFFER_SAVE;
 pub mod mcp;
@@ -31,6 +32,7 @@ pub mod message_bot;
 pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
 pub mod observe;
 pub use observe::{Observe, Seen};
+pub mod routine;
 pub mod skill;
 pub mod workflow;
 pub use workflow::Workflow;
@@ -746,6 +748,9 @@ pub struct Executor {
     /// The policy could not be read this turn and `Never` is the fail-closed stand-in, not the
     /// person's word: the prompt must not say they chose it.
     egress_policy_unconfirmed: bool,
+    /// The person's routines (#316), and whether this run may only list them: a run a routine
+    /// started may not make one, or a routine could breed routines. `None` offers none.
+    routines: Option<(Arc<dyn routine::RoutineDesk>, bool)>,
 }
 
 /// The built-ins that need a display.
@@ -852,37 +857,38 @@ impl Executor {
             egress_consented: false,
             egress_policy: EgressPolicy::default(),
             egress_policy_unconfirmed: false,
+            routines: None,
         }
     }
 
     /// The executor a real request builds: a computer, and what this principal may do with it.
     pub fn with_policy(computer: Arc<dyn Computer>, policy: opengrok_policy::Context) -> Self {
         Self {
-            computer,
             policy,
-            wake_patience: DEFAULT_WAKE_PATIENCE,
-            woken: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-            on_woken: None,
-            approved_calls: std::collections::BTreeSet::new(),
-            sessions: BTreeMap::new(),
-            plugin_tools: Vec::new(),
-            unavailable_plugins: BTreeMap::new(),
-            user_machine: None,
-            auto_review: None,
-            judge_failures: std::sync::atomic::AtomicU32::new(0),
-            review_approved_calls: std::collections::BTreeSet::new(),
-            screen: false,
-            group_box_name: None,
-            recipes: Vec::new(),
-            recipe_source: None,
-            chosen_recipe: None,
-            observe: crate::observe::wanted(),
-            egress_tunnel: EgressTunnelMode::Off,
-            egress_after_wake: std::sync::Mutex::new(std::collections::BTreeSet::new()),
-            egress_consented: false,
-            egress_policy: EgressPolicy::default(),
-            egress_policy_unconfirmed: false,
+            ..Self::new(computer)
         }
+    }
+
+    /// Offer the routine tools over `desk`, where the ceiling and the grant allow each (#316).
+    #[must_use]
+    pub fn with_routines(mut self, desk: Arc<dyn routine::RoutineDesk>) -> Self {
+        self.routines = Some((desk, false));
+        self
+    }
+
+    /// Only `list_routines`, for a run a routine started: it may not make or change one.
+    #[must_use]
+    pub fn with_routines_listing_only(mut self) -> Self {
+        self.routines = self.routines.map(|(desk, _)| (desk, true));
+        self
+    }
+
+    /// The routine tools this run is offered: none without a desk, only the listing for a run a
+    /// routine started.
+    fn routine_tools(&self) -> impl Iterator<Item = &'static str> + '_ {
+        let listing = self.routines.as_ref().map(|(_, listing)| *listing);
+        let take = listing.map_or(0, |listing| if listing { 1 } else { routine::TOOLS.len() });
+        routine::TOOLS.into_iter().take(take)
     }
 
     /// Say the box has a display, so the screen tools are offered and run.
@@ -975,6 +981,10 @@ impl Executor {
     /// policy denies or parks on a card, a screen tool while a form holds the screen, or a screen
     /// tool the egress tunnel will ask about first, never reaches the box, so nothing wakes.
     fn would_reach_the_box(&self, context: &ToolContext, call: &ToolCall, tool_name: &str) -> bool {
+        // A routine is the server's (#316): its tools never touch the box, so nothing wakes.
+        if routine::is_routine_tool(tool_name) {
+            return false;
+        }
         let decision = opengrok_policy::decide(
             &context.account_id,
             &context.coworker_id,
@@ -1322,6 +1332,7 @@ impl Executor {
                 self.reaches_the_machine()
                     .then(|| USER_MACHINE_SHELL.to_string()),
             )
+            .chain(self.routine_tools().map(str::to_string))
             .chain(
                 self.plugin_tools
                     .iter()
@@ -1337,17 +1348,20 @@ impl Executor {
         self.user_machine.is_some() && ceiling.is_some_and(|tools| tools.allows(USER_MACHINE_SHELL))
     }
 
-    /// Every built-in, the person's machine and `message_bot` too: names no plugin may take, a
-    /// ceiling's rows (#268). Neither of those two is the executor's to run: the server offers
-    /// each where its ceiling allows (`reaches_the_machine`, `ToolRunner::with_bots`).
+    /// Every built-in, the person's machine, `message_bot` and the routine tools too: names no
+    /// plugin may take, and what a new hire's ceiling holds (#268, #314, #316). The machine and
+    /// `message_bot` are not the executor's to run: the server offers each where its ceiling
+    /// allows (`reaches_the_machine`, `ToolRunner::with_bots`).
     pub fn every_builtin() -> impl Iterator<Item = &'static str> {
         Self::builtin_tool_names()
             .iter()
             .copied()
             .chain([USER_MACHINE_SHELL, message_bot::MESSAGE_BOT])
+            .chain(routine::TOOLS)
     }
 
-    /// A built-in's words as `tool_schemas` offers them, less what a turn adds (a recipe list).
+    /// A built-in's words as `tool_schemas` offers them, less what a turn adds (a recipe list);
+    /// and the routines' row's (#316).
     pub fn builtin_description(name: &str) -> Option<&'static str> {
         if name == RUN_RECIPE {
             return Some(RUN_RECIPE_DESCRIPTION);
@@ -1355,7 +1369,7 @@ impl Executor {
         if name == message_bot::MESSAGE_BOT {
             return Some(message_bot::MESSAGE_BOT_DESCRIPTION);
         }
-        builtin_tool_spec(name).map(|(description, _)| description)
+        routine::description(name).or(builtin_tool_spec(name).map(|(description, _)| description))
     }
 
     /// Internal dotted `qualified_name` ↔ OpenAI-safe wire name for this coworker's plugins.
@@ -1546,6 +1560,8 @@ impl Executor {
                 "function": { "name": crate::mcp::openai_safe_tool_name(USER_MACHINE_SHELL), "description": description, "parameters": parameters },
             }));
         }
+        let routines = self.routine_tools().filter(|name| permitted(name));
+        schemas.extend(routines.filter_map(routine::schema));
         let plugin_wires = self.plugin_wire_names();
         let mut schema_budget = crate::mcp::MAX_ADVERTISED_SCHEMAS_BYTES;
         for tool in &self.plugin_tools {
@@ -1593,6 +1609,19 @@ impl Executor {
         {
             return ToolResult::refused(&call.id, BIR_NOT_ON_THE_BOX);
         }
+        // A routine tool's arguments, and for a delete the routine it names, are asked BEFORE any
+        // gate (#316): a call that could never run is told why now, never after a card.
+        let routine = match (routine::is_routine_tool(&tool_name), self.routines.as_ref()) {
+            (false, _) => None,
+            (true, None) => return ToolResult::refused(&call.id, "routines are not on offer here"),
+            (true, Some((desk, listing))) => {
+                let call_of = (tool_name.as_str(), &arguments);
+                match routine::admit(desk.as_ref(), *listing, context, call_of).await {
+                    Ok(admitted) => Some((desk.clone(), admitted)),
+                    Err(why) => return ToolResult::refused(&call.id, why),
+                }
+            }
+        };
         // Two different yeses. The gate's approval (the machine owner's or the policy's card)
         // releases the gate's ask AND skips the judge; a review approval skips only the judge.
         let gate_approved = self.approved_calls.contains(&call.id);
@@ -1647,11 +1676,12 @@ impl Executor {
                 opengrok_policy::Action::RunTool(&tool_name),
                 &self.policy,
             );
-            if decision.needs_approval() {
-                Gate::Ask(
-                    AwaitingReason::PolicyApproval,
-                    decision.reason().unwrap_or("a human yes").to_string(),
-                )
+            // A DELETE ALWAYS ASKS (#316), on the policy's card, in words naming the routine as
+            // stored: an allow becomes the ask, and a grant's own ask says which routine.
+            let delete = routine.as_ref().and_then(|(_, (_, card))| card.clone());
+            if decision.needs_approval() || (decision.is_allowed() && delete.is_some()) {
+                let why = decision.reason().unwrap_or("a human yes").to_string();
+                Gate::Ask(AwaitingReason::PolicyApproval, delete.unwrap_or(why))
             } else if let Some(reason) = decision.reason() {
                 Gate::Deny(reason.to_string())
             } else {
@@ -1784,6 +1814,10 @@ impl Executor {
                     "your machine's owner must approve this command",
                 ),
             };
+        }
+        // The server's own desk, as the context's account: no box is resolved or woken.
+        if let Some((desk, (ask, _))) = routine {
+            return routine::run(desk.as_ref(), context, &call.id, ask).await;
         }
 
         // `machine: "group"` aims the call at the room's shared computer; anything else is the

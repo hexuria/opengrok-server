@@ -429,16 +429,17 @@ async fn a_coworkers_own_door_and_pin_sit_between_the_turn_and_the_setting() {
     );
 }
 
-/// A ROUTINE RUNS ON THE SERVER'S KEYS: on the gateway for a coworker whose own door is none or
-/// the gateway, on its pin; refused in words, asking nothing, for one on its own plan.
+/// A MONITOR RUNS ON THE SERVER'S KEYS, as every firing did before routines ran on the plan
+/// (#316, review of #334): on the gateway for a coworker whose own door is none or the gateway, on
+/// its pin; refused in words, asking nothing, for one on its own plan.
 #[test]
-fn a_routine_asks_the_gateway_unless_its_coworker_is_on_its_own_plan() {
+fn a_monitor_asks_the_gateway_unless_its_coworker_is_on_its_own_plan() {
     for source in [None, Some(SourceKind::Gateway)] {
-        let routed = Route::for_routine(source, "xai/grok-4.6");
+        let routed = Route::for_monitor(source, "xai/grok-4.6");
         let asked = routed.asked("xai/grok-4.6".to_string());
         assert_eq!(asked, ("xai/grok-4.6".to_string(), None), "{source:?}");
     }
-    let routed = Route::for_routine(Some(SourceKind::LocalProxy), "gpt-6-luna");
+    let routed = Route::for_monitor(Some(SourceKind::LocalProxy), "gpt-6-luna");
     assert_eq!(routed.source(), SourceKind::LocalProxy.into());
     assert_eq!(routed.asks("gpt-6-luna"), None, "a refusal asks no model");
     let (model, endpoint) = routed.asked("gpt-6-luna".to_string());
@@ -453,13 +454,13 @@ fn a_routine_asks_the_gateway_unless_its_coworker_is_on_its_own_plan() {
     assert_eq!(endpoint, Some(refused), "not the person's gap to fill");
 }
 
-/// A CARRY-ON GOES BY ITS START'S RULE, on what the start captured. A routine's is `for_routine`:
-/// one refused on its coworker's plan, carried on after a restart, is refused again in the same
-/// words and never sent to the person's proxy, though their setting is that proxy; one that
-/// started on the gateway goes on there. A turn's is `route`, and goes on at the proxy it started
-/// at, on the model it started on.
+/// A CARRY-ON GOES WHERE ITS START WENT, on what the start captured, a routine's as a turn's: one
+/// that started on its coworker's plan goes on at the person's proxy, on the model it started on;
+/// one that started on the gateway goes on there, though the person's setting is that proxy. A
+/// Bot's turn on another Bot's message (#314) is not a routine's: on its plan it is refused again,
+/// in `for_message`'s words, and never sent to the proxy.
 #[tokio::test]
-async fn a_routines_carry_on_goes_by_the_routines_rule_and_never_to_a_plan() {
+async fn a_routines_carry_on_goes_where_its_start_went() {
     use opengrok_core::run::{Run, RunCommand, routine_prompt};
     let ada = AccountId::new();
     let on_proxy = stored(Some(InferenceSource {
@@ -469,10 +470,10 @@ async fn a_routines_carry_on_goes_by_the_routines_rule_and_never_to_a_plan() {
         ..Default::default()
     }));
     let run_id = RunId::new();
-    let started = |kind: SourceKind, prompt: Vec<serde_json::Value>| {
+    let started = |kind: SourceKind, thread_id: &str| {
         let mut run = Run::default();
         let start = RunCommand::Start {
-            thread_id: "sched_weekly".to_string(),
+            thread_id: thread_id.to_string(),
             coworker_id: None,
             model: Some("gpt-6-luna".to_string()),
             effort: Default::default(),
@@ -480,7 +481,7 @@ async fn a_routines_carry_on_goes_by_the_routines_rule_and_never_to_a_plan() {
             system: None,
             skill_id: None,
             offered_skills: Vec::new(),
-            prompt: Some(prompt),
+            prompt: Some(routine_prompt(&run_id, "write the weekly report")),
             limits: Default::default(),
             at_ms: 1,
         };
@@ -490,30 +491,27 @@ async fn a_routines_carry_on_goes_by_the_routines_rule_and_never_to_a_plan() {
         run
     };
     let pin = "gpt-6-luna";
-    let fired = || routine_prompt(&run_id, "write the weekly report");
-
-    let refused = started(SourceKind::LocalProxy, fired());
-    let routed = resumed(&on_proxy, &ada, (&refused, &run_id), pin).await;
-    let again = Route::for_routine(Some(SourceKind::LocalProxy), pin);
-    assert_eq!(
-        routed.asked(pin.to_string()),
-        again.asked(pin.to_string()),
-        "refused again, in the same words, never the proxy"
-    );
-
-    let on_the_gateway = started(SourceKind::Gateway, fired());
-    let routed = resumed(&on_proxy, &ada, (&on_the_gateway, &run_id), pin).await;
-    assert_eq!(routed.asked(pin.to_string()), (pin.to_string(), None));
-
-    let person = vec![serde_json::json!({"id": "m1", "role": "user", "content": "hi"})];
-    let turn = started(SourceKind::LocalProxy, person);
-    let (model, endpoint) = resumed(&on_proxy, &ada, (&turn, &run_id), pin)
+    let on_its_plan = started(SourceKind::LocalProxy, "sched_weekly");
+    let (model, endpoint) = resumed(&on_proxy, &ada, (&on_its_plan, &run_id), pin)
         .await
         .asked(pin.to_string());
-    assert_eq!(model, "gpt-6-luna", "the model the turn started on");
+    assert_eq!(model, "gpt-6-luna", "the model it started on");
     assert!(
         matches!(endpoint, Some(ModelEndpoint::Proxy { .. })),
         "{endpoint:?}"
+    );
+    let on_the_gateway = started(SourceKind::Gateway, "sched_weekly");
+    let routed = resumed(&on_proxy, &ada, (&on_the_gateway, &run_id), pin).await;
+    assert_eq!(routed.asked(pin.to_string()), (pin.to_string(), None));
+
+    let pair = opengrok_wire::pair::pair_thread("cw_a", "cw_b");
+    let message = started(SourceKind::LocalProxy, &pair);
+    let routed = resumed(&on_proxy, &ada, (&message, &run_id), pin).await;
+    let again = Route::for_message(Some(SourceKind::LocalProxy), pin);
+    assert_eq!(
+        routed.asked(pin.to_string()),
+        again.asked(pin.to_string()),
+        "a message's turn is refused again in its own words, never sent to the proxy"
     );
 }
 

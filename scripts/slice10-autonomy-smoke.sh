@@ -31,9 +31,11 @@ else
 fi
 "${PSQL[@]}" "select 1" >/dev/null 2>&1 || fail "cannot reach Postgres"
 
+# OG_ROUTINE_SECOND_CRON=1: step 3's routine wakes every two seconds, under the one-minute floor
+# (#315), which only a mock door may lift; the server refuses to start with it on any other.
 start_server() {
   OG_BIND=127.0.0.1:$PORT OG_DATABASE_URL="$OG_DATABASE_URL" OG_TOKEN_SECRET="$SECRET" \
-  OG_MODEL_DOOR=mock OG_DEV_SIGN_IN=1 RUST_LOG=warn "$BIN" >/dev/null 2>&1 &
+  OG_MODEL_DOOR=mock OG_ROUTINE_SECOND_CRON=1 OG_DEV_SIGN_IN=1 RUST_LOG=warn "$BIN" >/dev/null 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 1 30); do
     curl -fsS --max-time 2 "$BASE/health" >/dev/null 2>&1 && return 0

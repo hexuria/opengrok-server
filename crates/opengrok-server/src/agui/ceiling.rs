@@ -18,24 +18,39 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_policy::ToolSet;
-use opengrok_tools::{Executor, USER_MACHINE_SHELL};
+use opengrok_tools::{Executor, USER_MACHINE_SHELL, routine};
 use serde_json::{Value, json};
 
 use super::routes::{AgUiState, account_from_bearer, now_ms, owned_coworker};
 use crate::health::refusal;
+
+/// The built-ins' rows: one per built-in, and ONE for the four routine tools, which it switches
+/// together (#316, the owner's call): a person decides whether a Bot keeps routines, not which
+/// verb of it.
+fn builtin_rows() -> impl Iterator<Item = &'static str> {
+    let rows = Executor::every_builtin().filter(|name| !routine::is_routine_tool(name));
+    rows.chain([routine::ROW])
+}
 
 /// The rows as `ceiling` sets them, plus one per plugin it still switches on that this server no
 /// longer loads: kept, so it can be seen and switched off.
 async fn rows(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet) -> Vec<Value> {
     // Available exactly when a turn would bind one (`tools_for_coworker`).
     let machine = crate::local_exec::enabled_machine(&state.auth.store, owner.as_str()).await;
-    let mut rows: Vec<Value> = Executor::every_builtin()
+    let mut rows: Vec<Value> = builtin_rows()
         .map(|name| {
             let description = Executor::builtin_description(name).unwrap_or_default();
+            let on = match name {
+                routine::ROW => routine::TOOLS.iter().all(|tool| ceiling.allows(tool)),
+                name => ceiling.allows(name),
+            };
             let mut row = json!({ "name": name, "kind": "builtin",
-                "description": description, "enabled": ceiling.allows(name) });
+                "description": description, "enabled": on });
             if name == USER_MACHINE_SHELL {
                 row["available"] = json!(machine.is_some());
+            }
+            if name == routine::ROW {
+                row["label"] = json!(routine::ROW_LABEL);
             }
             row
         })
@@ -44,7 +59,10 @@ async fn rows(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet) -> Vec<Va
     // name: one name must never switch two things. Nor a plugin with a dot in its name, which is
     // never dialled (`connect_plugins`): a switch for it would say on while no turn offered it.
     let free = |name: &str| {
-        !name.contains('.') && !Executor::every_builtin().any(|builtin| builtin == name)
+        !name.contains('.')
+            && !Executor::every_builtin()
+                .chain(builtin_rows())
+                .any(|b| b == name)
     };
     for plugin in state.plugins.values().filter(|p| free(&p.manifest.name)) {
         let name = &plugin.manifest.name;
@@ -162,6 +180,10 @@ pub(super) async fn put_ceiling(
             None => return refusal(422, &format!("no tool or plugin named {name}")),
             Some(row) if row["kind"] == "plugin" => {
                 entries.insert(opengrok_policy::every_tool_of(&name))
+            }
+            Some(_) if name == routine::ROW => {
+                entries.extend(routine::TOOLS.map(str::to_string));
+                true
             }
             Some(_) => entries.insert(name),
         };

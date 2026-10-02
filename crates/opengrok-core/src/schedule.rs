@@ -8,13 +8,16 @@
 //! cannot be parsed would sit in the log as a row that never fires and never explains itself; the
 //! aggregate refusing it makes "it was accepted" and "it will fire" the same claim. A webhook
 //! wake is the other accepted kind: it has no expression, so `decide` does not ask the clock,
-//! and the sweep never claims it (`next_due_ms` stays NULL).
+//! and the sweep never claims it (`next_due_ms` stays NULL). Its zone (#316) is held the same
+//! way: a cron is read in the routine's own IANA zone, and one the zone database does not know
+//! would be a clock nothing can read.
 //!
 //! FIRING IS AN EVENT because it is provenance: a run that no client started must say what started
-//! it, and `Fired { run_id }` is that answer, in the same log as everything else. Pausing exists
-//! (rather than delete-and-recreate) because "stop for the weekend" should not cost the schedule
-//! its history. A webhook POST is not the person's "run now": a paused webhook refuses, the same
-//! as the clock.
+//! it, and `Fired { run_id }` is that answer, in the same log as everything else. So is a firing
+//! that was skipped because the person's own plan could not answer (`Skipped`): no run exists to
+//! say so, and the routine's history must. Pausing exists (rather than delete-and-recreate)
+//! because "stop for the weekend" should not cost the schedule its history. A webhook POST is not
+//! the person's "run now": a paused webhook refuses, the same as the clock.
 
 use std::str::FromStr;
 
@@ -65,13 +68,46 @@ pub enum Wake {
     },
 }
 
-/// Who asked this firing to exist. The event still stores two bools (`manual`, `webhook`) so
-/// rows written before webhooks deserialize; this enum is the command's vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Who asked this firing to exist. A `Fired` event still stores two bools (`manual`, `webhook`)
+/// so rows written before webhooks deserialize; a `Skipped` one stores this, by its wire word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum FireCause {
     Clock,
     Manual,
     Webhook,
+}
+
+impl FireCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clock => "clock",
+            Self::Manual => "manual",
+            Self::Webhook => "webhook",
+        }
+    }
+}
+
+/// A firing that did not run because the person's own plan could not answer it (#316): when, who
+/// asked for it, and why, as the code the run history names it by (`relay_offline`, `proxy_down`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skip {
+    pub cause: FireCause,
+    pub code: String,
+    pub at_ms: i64,
+}
+
+/// The zone of every routine written before routines had one, which is what they replay as.
+pub const UTC: &str = "UTC";
+
+fn utc() -> String {
+    UTC.to_string()
+}
+
+/// A routine's zone, held to the IANA database exactly as an account's is, case and all.
+pub fn zone(tz: &str) -> Result<chrono_tz::Tz, ScheduleError> {
+    tz.parse()
+        .map_err(|_| ScheduleError::UnknownTimeZone(tz.to_string()))
 }
 
 /// The `cron` crate's names for the days, by standard cron's numbers: 0 and 7 are both Sunday.
@@ -153,6 +189,15 @@ fn named_weekdays(field: &str) -> Result<String, String> {
     Ok(named.join(","))
 }
 
+/// Whether `expression` can wake more often than once a minute: a seconds field, which only a 6-
+/// or 7-field expression has, that is anything but `0` (#315's floor), read on the normalized
+/// form. The callers that store a routine refuse it, outside tests (`OG_ROUTINE_SECOND_CRON`). A
+/// five-field one never can; one `normalized_cron` refuses is refused as a cron, not as this.
+pub fn under_a_minute(expression: &str) -> bool {
+    let normalized = normalized_cron(expression);
+    normalized.is_ok_and(|cron| cron.split_whitespace().next() != Some("0"))
+}
+
 /// The inverse, as a client reads a stored expression back (NativeChat's `from_server_cron`
 /// drops the seconds the same way): `0 0 9 * * MON` reads as `0 9 * * MON`, the same day to
 /// either counting. A 6-field expression whose seconds are not `0` (tests scheduling in seconds)
@@ -168,12 +213,13 @@ pub fn display_cron(normalized: &str) -> String {
     }
 }
 
-/// When a schedule next fires after `after_ms`, in epoch milliseconds. `None` for an expression
-/// with no future occurrence (a fixed date already past) — and the caller must treat that as "done
-/// firing", not as an error.
-pub fn next_fire_ms(expression: &str, after_ms: i64) -> Option<i64> {
+/// When a schedule next fires after `after_ms`, in epoch milliseconds, reading the expression in
+/// the IANA zone `tz` (`0 9 * * *` in Asia/Manila is 01:00 UTC). `None` for an expression with no
+/// future occurrence (a fixed date already past) — and the caller must treat that as "done
+/// firing", not as an error — or for a zone that is not one, which `decide` never stores.
+pub fn next_fire_ms(expression: &str, tz: &str, after_ms: i64) -> Option<i64> {
     let schedule = cron::Schedule::from_str(&normalized_cron(expression).ok()?).ok()?;
-    let after = chrono::DateTime::from_timestamp_millis(after_ms)?;
+    let after = chrono::DateTime::from_timestamp_millis(after_ms)?.with_timezone(&zone(tz).ok()?);
     schedule
         .after(&after)
         .next()
@@ -212,6 +258,10 @@ pub enum ScheduleEvent {
         /// rows written before limits existed, which set none.
         #[serde(default)]
         run_limits: RunLimits,
+        /// The IANA zone its cron is read in (#316). Absent on rows written before routines had
+        /// one, whose crons were always read in UTC — so that is what they replay as.
+        #[serde(default = "utc")]
+        tz: String,
         at_ms: i64,
     },
     /// The person edited the routine in place. An edit is not delete-and-create: the schedule
@@ -240,6 +290,9 @@ pub enum ScheduleEvent {
         /// `schedule-updated` written before limits existed does.
         #[serde(default)]
         run_limits: Option<RunLimits>,
+        /// Its zone, when the edit moved it; `None` keeps it, as every older edit does.
+        #[serde(default)]
+        tz: Option<String>,
     },
     Paused {
         at_ms: i64,
@@ -270,6 +323,9 @@ pub enum ScheduleEvent {
         webhook: bool,
         at_ms: i64,
     },
+    /// A firing that started no run: its coworker answers on the person's own plan, and the
+    /// plan could not answer then (#316). Not caught up later; the clock moves on as it would.
+    Skipped(Skip),
 }
 
 impl ScheduleEvent {
@@ -282,6 +338,7 @@ impl ScheduleEvent {
             Self::Deleted { .. } => "schedule-deleted",
             Self::SecretRotated { .. } => "schedule-secret-rotated",
             Self::Fired { .. } => "schedule-fired",
+            Self::Skipped(_) => "schedule-skipped",
         }
     }
 }
@@ -310,6 +367,10 @@ pub struct Schedule {
     /// What every run this routine starts may spend, at most. Its org's ceiling still binds at
     /// run time, so a ceiling lowered after these were saved narrows them.
     pub run_limits: RunLimits,
+    /// The IANA zone its cron is read in; `UTC` for a routine from before zones.
+    pub tz: String,
+    /// Every firing it skipped, oldest first, for its run history.
+    pub skipped: Vec<Skip>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -332,6 +393,9 @@ pub enum ScheduleError {
     BadWebhook,
     #[error("that schedule is not a webhook")]
     NotWebhook,
+    /// The account's own sentence for the same mistake (#322), so a person reads one.
+    #[error("{}", crate::account::AccountError::UnknownTimeZone(.0.clone()))]
+    UnknownTimeZone(String),
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +408,8 @@ pub enum ScheduleCommand {
         /// Already held to the server's budget and the org's ceiling by the caller, which can
         /// read both; the aggregate can read neither.
         run_limits: RunLimits,
+        /// The IANA zone its cron is read in.
+        tz: String,
         at_ms: i64,
     },
     Update {
@@ -354,6 +420,8 @@ pub enum ScheduleCommand {
         coworker_id: Option<CoworkerId>,
         /// `None` keeps the limits it has; checked by the caller as `Create`'s are.
         run_limits: Option<RunLimits>,
+        /// `None` keeps the zone it has.
+        tz: Option<String>,
         at_ms: i64,
     },
     Pause {
@@ -375,7 +443,12 @@ pub enum ScheduleCommand {
         cause: FireCause,
         at_ms: i64,
     },
+    /// Record a firing that will start no run, under the same rules a firing is held to.
+    Skip(Skip),
 }
+
+/// A wake as an event stores it: kind, normalized cron, hook id, hash, key.
+type Stored = (WakeKind, String, String, String, String);
 
 impl Schedule {
     pub fn replay<'a>(events: impl IntoIterator<Item = &'a ScheduleEvent>) -> Self {
@@ -398,6 +471,7 @@ impl Schedule {
                 secret_hash,
                 webhook_key,
                 run_limits,
+                tz,
                 ..
             } => {
                 self.created = true;
@@ -410,6 +484,7 @@ impl Schedule {
                 self.secret_hash = secret_hash.clone();
                 self.webhook_key = webhook_key.clone();
                 self.run_limits = *run_limits;
+                self.tz = tz.clone();
             }
             ScheduleEvent::Updated {
                 name,
@@ -421,6 +496,7 @@ impl Schedule {
                 webhook_key,
                 coworker_id,
                 run_limits,
+                tz,
                 ..
             } => {
                 self.name = name.clone();
@@ -443,6 +519,9 @@ impl Schedule {
                 }
                 if let Some(webhook_key) = webhook_key {
                     self.webhook_key = webhook_key.clone();
+                }
+                if let Some(tz) = tz {
+                    self.tz = tz.clone();
                 }
             }
             ScheduleEvent::Paused { .. } => self.paused = true,
@@ -470,6 +549,7 @@ impl Schedule {
                     self.clock_runs.insert(run_id.as_str().to_string());
                 }
             }
+            ScheduleEvent::Skipped(skip) => self.skipped.push(skip.clone()),
         }
     }
 
@@ -483,38 +563,20 @@ impl Schedule {
         Ok(())
     }
 
-    fn created_from_wake(
-        coworker_id: CoworkerId,
-        prompt: String,
-        name: String,
-        wake: Wake,
-        run_limits: RunLimits,
-        at_ms: i64,
-    ) -> Result<ScheduleEvent, ScheduleError> {
-        if prompt.trim().is_empty() {
-            return Err(ScheduleError::EmptyPrompt);
-        }
-        let name = name.trim().to_string();
+    /// The wake as an event stores it, or why it cannot be stored. ACCEPTED MUST MEAN "WILL
+    /// FIRE": an unparseable expression, or one with no future occurrence in `tz` at all, is
+    /// refused here rather than stored as a dead row. The zone is asked first, so an unknown one
+    /// is not reported as a bad cron.
+    fn checked(wake: Wake, tz: &str, at_ms: i64) -> Result<Stored, ScheduleError> {
+        zone(tz)?;
         match wake {
             Wake::Cron { cron } => {
                 let cron = normalized_cron(&cron)?;
-                // Accepted must mean "will fire": an unparseable expression, or one with no
-                // future occurrence at all, is refused here rather than stored as a dead row.
-                if next_fire_ms(&cron, at_ms).is_none() {
+                if next_fire_ms(&cron, tz, at_ms).is_none() {
                     return Err(ScheduleError::BadCron(cron));
                 }
-                Ok(ScheduleEvent::Created {
-                    coworker_id,
-                    cron,
-                    prompt,
-                    name,
-                    kind: WakeKind::Cron,
-                    hook_id: String::new(),
-                    secret_hash: String::new(),
-                    webhook_key: String::new(),
-                    run_limits,
-                    at_ms,
-                })
+                let none = String::new;
+                Ok((WakeKind::Cron, cron, none(), none(), none()))
             }
             Wake::Webhook {
                 hook_id,
@@ -527,81 +589,32 @@ impl Schedule {
                 {
                     return Err(ScheduleError::BadWebhook);
                 }
-                Ok(ScheduleEvent::Created {
-                    coworker_id,
-                    cron: String::new(),
-                    prompt,
-                    name,
-                    kind: WakeKind::Webhook,
-                    hook_id: hook_id.trim().to_string(),
-                    secret_hash: secret_hash.trim().to_string(),
-                    webhook_key,
-                    run_limits,
-                    at_ms,
-                })
+                let (hook_id, hash) = (hook_id.trim().to_string(), secret_hash.trim().to_string());
+                Ok((WakeKind::Webhook, String::new(), hook_id, hash, webhook_key))
             }
         }
     }
 
-    fn updated_from_wake(
-        name: String,
-        prompt: String,
-        wake: Wake,
-        coworker_id: Option<CoworkerId>,
-        run_limits: Option<RunLimits>,
-        at_ms: i64,
-    ) -> Result<ScheduleEvent, ScheduleError> {
-        if prompt.trim().is_empty() {
-            return Err(ScheduleError::EmptyPrompt);
+    /// Whether a firing for `cause` may be recorded, run or skipped. A paused schedule refusing
+    /// to fire is the whole point of pause. The sweep should never ask (paused rows are not
+    /// claimed), so this firing twice as a guard is deliberate: the projection being wrong must
+    /// not be enough to fire a run. A person's "run now" is the one exception: they asked, paused
+    /// or not. An inbound webhook is not that exception — a paused routine must not run because a
+    /// todo app POSTed.
+    fn may_fire(&self, cause: FireCause) -> Result<(), ScheduleError> {
+        self.alive()?;
+        if self.paused && cause != FireCause::Manual {
+            return Err(ScheduleError::Paused);
         }
-        let name = name.trim().to_string();
-        match wake {
-            Wake::Cron { cron } => {
-                let cron = normalized_cron(&cron)?;
-                if next_fire_ms(&cron, at_ms).is_none() {
-                    return Err(ScheduleError::BadCron(cron));
-                }
-                Ok(ScheduleEvent::Updated {
-                    name,
-                    cron,
-                    prompt,
-                    at_ms,
-                    kind: Some(WakeKind::Cron),
-                    hook_id: Some(String::new()),
-                    secret_hash: Some(String::new()),
-                    webhook_key: Some(String::new()),
-                    coworker_id,
-                    run_limits,
-                })
-            }
-            Wake::Webhook {
-                hook_id,
-                secret_hash,
-                webhook_key,
-            } => {
-                if hook_id.trim().is_empty()
-                    || secret_hash.trim().is_empty()
-                    || webhook_key.trim().is_empty()
-                {
-                    return Err(ScheduleError::BadWebhook);
-                }
-                Ok(ScheduleEvent::Updated {
-                    name,
-                    cron: String::new(),
-                    prompt,
-                    at_ms,
-                    kind: Some(WakeKind::Webhook),
-                    hook_id: Some(hook_id.trim().to_string()),
-                    secret_hash: Some(secret_hash.trim().to_string()),
-                    webhook_key: Some(webhook_key),
-                    coworker_id,
-                    run_limits,
-                })
-            }
-        }
+        Ok(())
     }
 
     pub fn decide(&self, command: ScheduleCommand) -> Result<Vec<ScheduleEvent>, ScheduleError> {
+        let has_prompt = |prompt: &str| {
+            (!prompt.trim().is_empty())
+                .then_some(())
+                .ok_or(ScheduleError::EmptyPrompt)
+        };
         match command {
             ScheduleCommand::Create {
                 coworker_id,
@@ -609,15 +622,26 @@ impl Schedule {
                 name,
                 wake,
                 run_limits,
+                tz,
                 at_ms,
-            } => Ok(vec![Self::created_from_wake(
-                coworker_id,
-                prompt,
-                name,
-                wake,
-                run_limits,
-                at_ms,
-            )?]),
+            } => {
+                has_prompt(&prompt)?;
+                let (kind, cron, hook_id, secret_hash, webhook_key) =
+                    Self::checked(wake, &tz, at_ms)?;
+                Ok(vec![ScheduleEvent::Created {
+                    coworker_id,
+                    cron,
+                    prompt,
+                    name: name.trim().to_string(),
+                    kind,
+                    hook_id,
+                    secret_hash,
+                    webhook_key,
+                    run_limits,
+                    tz,
+                    at_ms,
+                }])
+            }
 
             ScheduleCommand::Update {
                 name,
@@ -625,17 +649,26 @@ impl Schedule {
                 wake,
                 coworker_id,
                 run_limits,
+                tz,
                 at_ms,
             } => {
                 self.alive()?;
-                Ok(vec![Self::updated_from_wake(
-                    name,
+                has_prompt(&prompt)?;
+                let (kind, cron, hook_id, secret_hash, webhook_key) =
+                    Self::checked(wake, tz.as_deref().unwrap_or(&self.tz), at_ms)?;
+                Ok(vec![ScheduleEvent::Updated {
+                    name: name.trim().to_string(),
+                    cron,
                     prompt,
-                    wake,
+                    at_ms,
+                    kind: Some(kind),
+                    hook_id: Some(hook_id),
+                    secret_hash: Some(secret_hash),
+                    webhook_key: Some(webhook_key),
                     coworker_id,
                     run_limits,
-                    at_ms,
-                )?])
+                    tz,
+                }])
             }
 
             ScheduleCommand::Pause { at_ms } => {
@@ -683,27 +716,18 @@ impl Schedule {
                 cause,
                 at_ms,
             } => {
-                self.alive()?;
-                let (manual, webhook) = match cause {
-                    FireCause::Clock => (false, false),
-                    FireCause::Manual => (true, false),
-                    FireCause::Webhook => (false, true),
-                };
-                // A paused schedule refusing to fire is the whole point of pause. The sweep should
-                // never ask (paused rows are not claimed), so this firing twice as a guard is
-                // deliberate: the projection being wrong must not be enough to fire a run. A
-                // person's "run now" is the one exception: they asked, paused or not. An inbound
-                // webhook is not that exception — a paused routine must not run because a todo
-                // app POSTed.
-                if self.paused && !manual {
-                    return Err(ScheduleError::Paused);
-                }
+                self.may_fire(cause)?;
                 Ok(vec![ScheduleEvent::Fired {
                     run_id,
-                    manual,
-                    webhook,
+                    manual: cause == FireCause::Manual,
+                    webhook: cause == FireCause::Webhook,
                     at_ms,
                 }])
+            }
+
+            ScheduleCommand::Skip(skip) => {
+                self.may_fire(skip.cause)?;
+                Ok(vec![ScheduleEvent::Skipped(skip)])
             }
         }
     }
@@ -742,6 +766,12 @@ pub struct ScheduleView {
     /// routines behind them are: none could set limits then.
     #[serde(default)]
     pub run_limits: RunLimits,
+    /// The IANA zone its cron is read in; `UTC` on rows projected before zones.
+    #[serde(default = "utc")]
+    pub tz: String,
+    /// The firing it skipped last, so a listing can say so without replaying the stream.
+    #[serde(default)]
+    pub last_skip: Option<Skip>,
 }
 
 #[cfg(test)]

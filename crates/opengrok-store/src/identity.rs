@@ -16,22 +16,7 @@ use crate::{StoreError, StoreResult, org_stream};
 
 impl PgStore {
     pub async fn load_org(&self, id: &OrgId) -> StoreResult<(Org, i64)> {
-        let rows = sqlx::query(
-            "select stream_seq, payload from events where stream_id = $1 order by stream_seq",
-        )
-        .bind(org_stream(id))
-        .fetch_all(self.pool())
-        .await?;
-
-        let mut seq = 0_i64;
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            seq = row.try_get::<i64, _>("stream_seq")?;
-            let payload: serde_json::Value = row.try_get("payload")?;
-            let event: OrgEvent = serde_json::from_value(payload)
-                .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            events.push(event);
-        }
+        let (events, seq) = self.stream::<OrgEvent>(&org_stream(id)).await?;
         Ok((Org::replay(&events), seq))
     }
 

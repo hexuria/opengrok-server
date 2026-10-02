@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use opengrok_core::id::{AccountId, RunId};
 use opengrok_core::monitor::{MonitorCommand, is_watchable};
-use opengrok_core::schedule::ScheduleCommand;
+use opengrok_core::schedule::FireCause;
 
 use crate::agui::routes::AgUiState;
 use crate::now_ms;
@@ -63,6 +63,11 @@ pub async fn schedule_tick(
     let mut fired = 0;
     for schedule in due {
         let run_id = RunId::new();
+        // A routine on the person's own plan with nobody to answer it is skipped (#316): the
+        // skip is written in the `Fired`'s place, no run starts, and the claim has already moved
+        // its clock to the next slot, so nothing is caught up later.
+        let (account, coworker) = (&schedule.account_id, &schedule.coworker_id);
+        let skip = crate::autonomy::unreachable(state, account, coworker, &run_id).await;
 
         // The aggregate gets the last word: a schedule paused or deleted between the claim and
         // now refuses here, and the projection having been momentarily stale fires nothing.
@@ -71,23 +76,15 @@ pub async fn schedule_tick(
         // landing between the load and the append is a `Conflict`; this used to `?` out of the
         // whole tick, and every routine claimed after it — its clock already advanced by the
         // claim — skipped its slot. The Routines pane autosaves on blur, so that race is ordinary.
-        let after = match crate::autonomy::routes::mutate_schedule(
-            gateway,
-            &schedule.account_id,
-            &schedule.id,
-            now_ms(),
-            |loaded| {
-                loaded
-                    .decide(ScheduleCommand::Fire {
-                        run_id: run_id.clone(),
-                        cause: opengrok_core::schedule::FireCause::Clock,
-                        at_ms: now_ms(),
-                    })
-                    .map_err(|reason| (409, serde_json::json!({ "error": reason.to_string() })))
-            },
-        )
-        .await
-        {
+        let decided =
+            super::desk::mutate_schedule(state, account, &schedule.id, now_ms(), |loaded| {
+                let firing = crate::autonomy::firing(skip, FireCause::Clock, &run_id);
+                let refused = |why: opengrok_core::schedule::ScheduleError| {
+                    (axum::http::StatusCode::CONFLICT, why.to_string())
+                };
+                loaded.decide(firing).map_err(refused)
+            });
+        let after = match decided.await {
             Ok(after) => after,
             // Warn, not info: the claim already advanced this routine's clock, so a slot that did
             // not fire is gone — whether the routine was paused a moment ago or the store failed.
@@ -96,6 +93,10 @@ pub async fn schedule_tick(
                 continue;
             }
         };
+        if let Some((code, _)) = skip {
+            tracing::info!(schedule = %schedule.id, code, "a claimed schedule was skipped: its plan cannot answer");
+            continue;
+        }
         let Some(coworker_id) = after.coworker_id.clone() else {
             tracing::warn!(schedule = %schedule.id, "a claimed schedule names no coworker");
             continue;

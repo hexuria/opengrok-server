@@ -174,6 +174,14 @@ async fn main() -> anyhow::Result<()> {
             anyhow::bail!("OG_MODEL_DOOR is not valid UTF-8; {DOOR_NAMES}")
         }
     };
+    let mut auth = auth;
+    auth.second_cron = second_cron(
+        std::env::var("OG_ROUTINE_SECOND_CRON").ok().as_deref(),
+        &chosen,
+    )?;
+    if auth.second_cron {
+        tracing::warn!("OG_ROUTINE_SECOND_CRON=1 — routines may wake every second");
+    }
     let door: Arc<dyn ModelDoor> = match chosen {
         DoorChoice::Mock => {
             tracing::warn!("OG_MODEL_DOOR=mock — no model will be called");
@@ -557,6 +565,21 @@ fn door_choice(value: Option<&str>) -> anyhow::Result<DoorChoice> {
     }
 }
 
+/// Whether `OG_ROUTINE_SECOND_CRON` lets a routine wake more often than once a minute (#315's
+/// floor, `autonomy::desk::FLOOR`): `1`, for the tests and smokes that schedule in seconds. ONLY
+/// BEHIND A MOCK DOOR, and any other door REFUSES TO BOOT with it on: a billed model woken every
+/// second is a bill, not a test, and an escape left on in a real deployment must not be quiet.
+fn second_cron(value: Option<&str>, door: &DoorChoice) -> anyhow::Result<bool> {
+    match (value.map(str::trim), door) {
+        (Some("1"), DoorChoice::Mock | DoorChoice::MockTools) => Ok(true),
+        (Some("1"), DoorChoice::Gateway) => anyhow::bail!(
+            "OG_ROUTINE_SECOND_CRON=1 lets a routine wake every second, which only a mock model \
+             door may do; unset it, or set OG_MODEL_DOOR=mock"
+        ),
+        _ => Ok(false),
+    }
+}
+
 /// `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask` makes a mock door answer the auto-review judge
 /// with that word, so the card and the refusal can be driven in the real app with no provider.
 fn with_mock_verdict(door: MockDoor) -> MockDoor {
@@ -601,6 +624,22 @@ mod tests {
             assert!(refused.contains("mock-tools"), "{refused}");
             assert!(refused.contains("unset"), "{refused}");
         }
+    }
+
+    /// The floor's test escape is honoured behind a mock door, and refuses to boot any other.
+    #[test]
+    fn a_routine_may_wake_in_seconds_only_behind_a_mock_door() {
+        for door in [DoorChoice::Mock, DoorChoice::MockTools] {
+            assert!(second_cron(Some("1"), &door).unwrap());
+            assert!(!second_cron(None, &door).unwrap());
+        }
+        let refused = second_cron(Some("1"), &DoorChoice::Gateway).unwrap_err();
+        assert!(
+            refused.to_string().contains("only a mock model door"),
+            "{refused}"
+        );
+        assert!(!second_cron(Some("0"), &DoorChoice::Gateway).unwrap());
+        assert!(!second_cron(None, &DoorChoice::Gateway).unwrap());
     }
 
     #[test]

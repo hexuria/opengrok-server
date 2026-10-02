@@ -488,7 +488,7 @@ async fn monitor_runs(
             return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
         }
     };
-    let rows = history(&runs, query.limit, |run| {
+    let cause = |run: &str| {
         if loaded.manual_runs.contains(run) {
             Some("manual")
         } else if loaded.event_runs.contains(run) {
@@ -496,6 +496,7 @@ async fn monitor_runs(
         } else {
             None
         }
-    });
+    };
+    let rows = history(&runs, query.limit, cause, &[]);
     ([NO_STORE], Json(rows)).into_response()
 }

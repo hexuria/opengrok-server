@@ -505,24 +505,24 @@ async fn an_org_visible_coworker_is_on_a_members_roster_and_answers_them() {
         // The routine doors name the coworker in the body rather than the path, and answered
         // 404 for an id that does not exist but 403 "no grant lets …" for one that does: a
         // stranger could tell a real coworker id from a made-up one by trying to schedule it.
-        for (path, body) in [
+        // The schedules door answers in `{error}`, as NativeChat reads a refusal (#262, #316).
+        let unknown = Value::String("no such coworker".to_string());
+        for (path, body, said) in [
             (
                 "/schedules",
                 json!({ "coworkerId": id, "prompt": "hello", "cron": "0 * * * *" }),
+                json!({ "error": unknown }),
             ),
             (
                 "/monitors",
                 json!({ "coworkerId": id, "watches": "run-failed", "prompt": "hello" }),
+                unknown.clone(),
             ),
         ] {
             let (status, answer) = h
                 .send(&outsider, reqwest::Method::POST, path, Some(body))
                 .await;
-            assert_eq!(
-                (status, answer),
-                (404, Value::String("no such coworker".to_string())),
-                "POST {path}, {id}"
-            );
+            assert_eq!((status, answer), (404, said), "POST {path}, {id}");
         }
         for (method, path, body) in [
             (

@@ -175,6 +175,7 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
                 cron: "0 */15 * * * *".to_string(),
             },
             run_limits: Default::default(),
+            tz: "UTC".to_string(),
             at_ms,
         })
         .expect("create schedule");

@@ -108,6 +108,10 @@ pub struct AuthState {
     /// any other process on the host — and on Docker Desktop a coworker box's traffic to the host
     /// is proxied by a host process, so it arrives from 127.0.0.1 with no forwarding header.
     pub dev_sign_in: bool,
+    /// `OG_ROUTINE_SECOND_CRON=1`: a routine may wake more often than once a minute, for the
+    /// tests and smokes that schedule in seconds (`autonomy::desk::FLOOR`). The binary refuses to
+    /// start with it on any door but a mock one; a test sets it here.
+    pub second_cron: bool,
 }
 
 impl AuthState {
@@ -143,6 +147,7 @@ impl AuthState {
             ascii_base_url: opengrok_box::ascii::DEFAULT_BASE_URL.to_string(),
             refresh_grace: std::sync::Arc::new(super::refresh_grace::RefreshGrace::default()),
             dev_sign_in: false,
+            second_cron: false,
         }
     }
 

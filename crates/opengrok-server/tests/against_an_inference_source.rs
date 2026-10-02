@@ -1581,13 +1581,13 @@ async fn a_teammate_with_no_proxy_is_refused_in_words_on_a_shared_coworkers_own_
     assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (1, 0));
 }
 
-/// A ROUTINE RUNS ON THE SERVER'S KEYS, so one for a coworker on its own plan is refused in words
-/// before any model is asked: nothing goes to the gateway in its plan's place, nor to the person's
-/// proxy, and its row says why. No `plan_unavailable`: there is no reply to send on the gateway
-/// instead. A coworker off its own plan runs its routine on the gateway, on its pin, as before,
-/// though its person's own setting is their proxy (#294).
+/// A ROUTINE FOR A COWORKER ON ITS OWN PLAN RUNS ON THE PERSON'S PLAN (#316, the owner's rule of
+/// 3 Oct 2026): its firing asks the person's proxy for the coworker's pin, exactly as a live turn
+/// on that plan, and nothing goes to the gateway in its place. A coworker off its own plan runs
+/// its routine on the gateway, on its pin, as before, though its person's own setting is their
+/// proxy (#294).
 #[tokio::test]
-async fn a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing() {
+async fn a_routine_for_a_coworker_on_its_own_plan_runs_on_the_persons_proxy() {
     let database_url = database_or_skip!();
     let h = harness(&database_url, vec![words("from the proxy")], true).await;
     let ada = h.person().await;
@@ -1597,23 +1597,26 @@ async fn a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_n
     assert_eq!(h.patch(&ada, &luna, body).await.0, 200);
 
     let (routine, last) = h.routine_run(&ada, &luna).await;
-    let said = "This Bot answers on your own plan, and routines run on the server's keys, so this \
-                routine did not run. Give the Bot a Server model to run it on a schedule.";
-    assert_eq!(last["status"], "failed", "{last}");
-    // A row's summary drops the sentence's closing stop, as every routine's failure does.
-    let summary = format!("Routine Weekly failed: {}", said.trim_end_matches('.'));
-    assert_eq!(last["summary"], summary, "{last}");
-    let asked = (h.gateway.asked().len(), h.proxy.asked().len());
-    assert_eq!(asked, (0, 0), "no model asked anywhere, and nothing billed");
+    assert_eq!(last["status"], "finished", "{last}");
+    assert_eq!(
+        last["summary"], "Routine Weekly ran: from the proxy",
+        "{last}"
+    );
+    let asked = h.proxy.asked();
+    assert_eq!(
+        (h.gateway.asked().len(), asked.len()),
+        (0, 1),
+        "the plan, never the gateway"
+    );
+    assert_eq!(asked[0].1["model"], PLAN_PIN, "on its pin");
     let replay = h.replay(&ada, &routine).await;
     let events = replay["runs"][0]["events"].as_array().cloned();
-    let events = events.unwrap_or_default();
-    let ended = events.last().cloned().unwrap_or_default();
-    assert_eq!(ended["type"], "RUN_ERROR", "{replay}");
-    assert_eq!(ended["message"], said, "{replay}");
-    assert!(ended.get("code").is_none(), "{ended}");
-    let on_its_plan = json!({"kind": "local_proxy", "model": PLAN_PIN});
-    assert_eq!(sources(&events), [on_its_plan], "{replay}");
+    let on_its_plan = json!({"kind": "local_proxy", "via": "loopback", "model": PLAN_PIN});
+    assert_eq!(
+        sources(&events.unwrap_or_default()),
+        [on_its_plan],
+        "{replay}"
+    );
 
     let ada_bot = h.hire(&ada, "Ada").await;
     let (_, last) = h.routine_run(&ada, &ada_bot).await;
@@ -1623,17 +1626,102 @@ async fn a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_n
     let asked = h.gateway.asked();
     assert_eq!(asked.len(), 1, "on the gateway, as before");
     assert_eq!(asked[0].1["model"], "xai/grok-4.6", "on its pin");
-    assert_eq!(h.proxy.asked().len(), 0, "never the person's own proxy");
+    assert_eq!(
+        h.proxy.asked().len(),
+        1,
+        "the proxy only for the plan's own routine"
+    );
 }
 
-/// A ROUTINE IS NEVER CARRIED ON AT A PLAN. A restart between the opening of a routine's run for
-/// a coworker on its own plan and its refusal leaves the run `running`, having captured the
-/// proxy. The recovery sweep carries it on (#91), and by the routine's rule rather than a turn's:
-/// it is refused again in the same words, nothing is asked of the person's proxy though their
-/// setting is that proxy, nothing of the gateway in its place, and the routine's row says it
-/// failed.
+/// A MONITOR NEVER SPENDS A PERSON'S PLAN (review of #334): on a Bot whose own door is its
+/// person's plan, their proxy up, its firing is refused in words before any model is asked, as
+/// every firing was before routines ran on the plan, with no code; neither the proxy nor the
+/// gateway hears of it. The clock's monitor tick fires through the same `autonomy::fire`.
 #[tokio::test]
-async fn a_routine_interrupted_before_its_refusal_is_refused_again_and_never_asks_the_plan() {
+async fn a_monitor_on_a_bots_own_plan_is_refused_in_words_and_asks_nothing() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("from the proxy")], true).await;
+    let ada = h.person().await;
+    h.on_the_proxy(&ada, "local_proxy").await;
+    let luna = h.hire(&ada, "Luna").await;
+    let body = json!({ "source": "local_proxy", "model": PLAN_PIN });
+    assert_eq!(h.patch(&ada, &luna, body).await.0, 200);
+    let body = json!({ "coworkerId": luna, "watches": "run-failed", "prompt": "look into it" });
+    let post = reqwest::Method::POST;
+    let (status, made) = h
+        .send(Some(&ada), post.clone(), "/monitors", Some(body))
+        .await;
+    assert_eq!(status, 201, "{made}");
+    let path = format!("/monitors/{}/run", made["id"].as_str().expect("id"));
+    let (status, accepted) = h.send(Some(&ada), post, &path, Some(json!({}))).await;
+    assert_eq!(status, 202, "{accepted}");
+    let run_id = RunId::from_stored(accepted["runId"].as_str().expect("runId"));
+    let mut run = None;
+    for _ in 0..100 {
+        let loaded = h.store.load_run(&run_id).await.ok().map(|(run, _)| run);
+        if loaded.as_ref().is_some_and(|run| run.status.is_terminal()) {
+            run = loaded;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let run = run.expect("the monitor's run ended");
+    assert_eq!(run.status, opengrok_core::run::RunStatus::Failed);
+    let ended = run.emitted.last().cloned().unwrap_or_default();
+    let said = "This Bot answers on your own plan, and routines run on the server's keys, so this \
+                routine did not run. Give the Bot a Server model to run it on a schedule.";
+    assert_eq!(
+        (&ended["type"], &ended["message"]),
+        (&json!("RUN_ERROR"), &json!(said))
+    );
+    assert!(ended.get("code").is_none(), "{ended}");
+    assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
+}
+
+/// A ROUTINE ON ITS OWN PLAN IS SKIPPED WHILE THE PERSON'S PROXY DOES NOT ANSWER (#316): "run
+/// now" is a 409 in the skip's words with its code, the press is recorded as a skip, no run
+/// starts, and nothing is asked of the gateway or of anybody else.
+#[tokio::test]
+async fn a_routine_on_its_own_plan_is_skipped_while_the_proxy_is_down() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url, vec![words("from the proxy")], true).await;
+    let ada = h.person().await;
+    let down = json!({ "kind": "local_proxy", "baseUrl": "http://127.0.0.1:1",
+                       "localModel": "gpt-5.5" });
+    assert_eq!(h.set(&ada, down).await.0, 200);
+    let luna = h.hire(&ada, "Luna").await;
+    let body = json!({ "source": "local_proxy", "model": PLAN_PIN });
+    assert_eq!(h.patch(&ada, &luna, body).await.0, 200);
+    let body = json!({ "coworkerId": luna, "name": "Weekly", "cron": "0 9 * * 1",
+                       "prompt": "write the weekly report" });
+    let post = reqwest::Method::POST;
+    let (status, created) = h
+        .send(Some(&ada), post.clone(), "/schedules", Some(body))
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let id = created["id"].as_str().expect("id").to_string();
+    let path = format!("/schedules/{id}/run");
+    let (status, refused) = h.send(Some(&ada), post, &path, Some(json!({}))).await;
+    let said = "Skipped: your plan's proxy didn't answer";
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(refused, json!({ "error": said, "code": "proxy_down" }));
+    let get = reqwest::Method::GET;
+    let (_, history) = h.send(Some(&ada), get, &format!("{path}s"), None).await;
+    assert_eq!(history[0]["state"], "skipped", "{history}");
+    assert_eq!(history[0]["skipped"], "proxy_down", "{history}");
+    assert_eq!(history[0]["reason"], said, "{history}");
+    assert_eq!(history[0]["cause"], "manual", "{history}");
+    let runs = h.store.runs_for_thread_owned_by(&id, &ada.id, 10).await;
+    assert!(runs.expect("runs").is_empty(), "no run");
+    assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
+}
+
+/// A ROUTINE'S RUN ON ITS PLAN IS CARRIED ON AT ITS PLAN. A restart after the opening of a
+/// routine's run for a coworker on its own plan leaves the run `running`, having captured the
+/// proxy. The recovery sweep carries it on (#91) where it started, as a turn's: at the person's
+/// proxy, on the model it started on, with nothing asked of the gateway in its place.
+#[tokio::test]
+async fn a_routine_interrupted_on_its_own_plan_is_carried_on_at_the_plan() {
     let database_url = database_or_skip!();
     let h = harness(&database_url, vec![words("from the proxy")], true).await;
     let ada = h.person().await;
@@ -1707,34 +1795,18 @@ async fn a_routine_interrupted_before_its_refusal_is_refused_again_and_never_ask
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    assert_eq!(run.status, RunStatus::Failed, "{:?}", run.emitted);
+    assert_eq!(run.status, RunStatus::Finished, "{:?}", run.emitted);
     assert_eq!(run.generation, 1, "carried on, in its next generation");
-    let said = "This Bot answers on your own plan, and routines run on the server's keys, so this \
-                routine did not run. Give the Bot a Server model to run it on a schedule.";
-    let ended = run.emitted.last().cloned().unwrap_or_default();
-    assert_eq!(ended["type"], "RUN_ERROR", "{ended}");
-    assert_eq!(ended["message"], said, "the same words: {ended}");
-    assert!(ended.get("code").is_none(), "{ended}");
-    assert_eq!(h.proxy.asked().len(), 0, "never the person's plan");
+    let asked = h.proxy.asked();
+    assert_eq!(asked.len(), 1, "the person's plan");
+    assert_eq!(asked[0].1["model"], PLAN_PIN, "on the model it started on");
+    assert!(conversation(&asked[0].1).contains("write the weekly report"));
     let asked_for_it = h
         .gateway
         .asked()
         .iter()
         .any(|(_, body)| conversation(body).contains("write the weekly report"));
     assert!(!asked_for_it, "nor the gateway in its place");
-
-    let get = reqwest::Method::GET;
-    let (_, rows) = h.send(Some(&ada), get, "/schedules", None).await;
-    let row = rows
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|r| r["id"] == routine);
-    let last = row.map(|row| row["lastRun"].clone()).unwrap_or_default();
-    assert_eq!(last["runId"], run_id.as_str(), "{rows}");
-    assert_eq!(last["status"], "failed", "{rows}");
-    let summary = format!("Routine Weekly failed: {}", said.trim_end_matches('.'));
-    assert_eq!(last["summary"], summary, "{rows}");
 }
 
 /// THE COWORKER IS TOLD WHAT IT RUNS ON, first, ahead of every word its owner wrote: the model its
