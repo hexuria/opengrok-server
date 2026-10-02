@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95
+      - uses: dtolnay/rust-toolchain@1.99.0
       - name: crates/opengrok/tests/setup_docs.rs
         run: |
           CARGO_MANIFEST_DIR="$PWD/crates/opengrok" rustc --edition 2024 --test \
@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.95
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -124,7 +124,7 @@ jobs:
       - uses: actions/checkout@v4
       # The version comes from rust-toolchain.toml — the same compiler a developer runs. `@stable`
       # floated ahead of every desk and failed the gate on lints nobody could reproduce locally.
-      - uses: dtolnay/rust-toolchain@1.95
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
