@@ -1,0 +1,8 @@
+{
+  "method": "PATCH",
+  "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001",
+  "status": 422,
+  "body": {
+    "error": "a routine can wake at most once a minute: use 5 fields, like */5 * * * *."
+  }
+}

@@ -2,5 +2,7 @@
   "method": "POST",
   "path": "/schedules",
   "status": 404,
-  "body": "no such coworker"
+  "body": {
+    "error": "no such coworker"
+  }
 }

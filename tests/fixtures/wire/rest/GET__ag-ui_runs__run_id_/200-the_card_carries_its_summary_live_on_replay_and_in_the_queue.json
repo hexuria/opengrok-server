@@ -74,7 +74,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "waiting for approval: running shell on coworker cw_0199bb4e-0000-7000-8000-000000000003 needs a human yes",
         "timestamp": 100,
-        "durationMs": 1,
+        "durationMs": 0,
         "toolCallId": "mock-call-1"
       },
       {
@@ -114,7 +114,7 @@
             "limit": 128000,
             "left_out": 0,
             "estimated": [
-              3416
+              4429
             ]
           },
           "model_ms": [

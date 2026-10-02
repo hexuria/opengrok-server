@@ -1,0 +1,22 @@
+{
+  "method": "PATCH",
+  "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "id": "sched_0199bb4e-0000-7000-8000-000000000001",
+    "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+    "name": "Tick",
+    "cron": "0 */5 * * * *",
+    "prompt": "tick",
+    "kind": "cron",
+    "active": true,
+    "nextDueMs": 1790000000000,
+    "runLimits": {
+      "maxRounds": null,
+      "maxComputerRounds": null,
+      "maxWallMs": null
+    },
+    "lastRun": null,
+    "tz": "UTC"
+  }
+}

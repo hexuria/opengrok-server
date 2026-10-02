@@ -1,0 +1,70 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads/thr-0199bb4e000070008000000000000001",
+  "status": 200,
+  "body": {
+    "threadId": "thr-0199bb4e000070008000000000000001",
+    "kind": "chat",
+    "readOnly": false,
+    "coworkers": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "name": "Ada"
+      }
+    ],
+    "runs": [
+      {
+        "runId": "0199bb4e-0000-7000-8000-000000000003",
+        "status": "running",
+        "startedAtMs": 1790000000000,
+        "updatedAtMs": 1790000001000,
+        "failure": null,
+        "finishReason": null,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "events": [
+          {
+            "type": "RUN_STARTED",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
+            "threadId": "thr-0199bb4e000070008000000000000001",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_START",
+            "messageId": "m2",
+            "role": "user",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "messageId": "m2",
+            "delta": "behind a hidden turn",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_END",
+            "messageId": "m2",
+            "timestamp": 100
+          },
+          {
+            "name": "opengrok.inferenceSource",
+            "type": "CUSTOM",
+            "runId": "0199bb4e-0000-7000-8000-000000000003",
+            "value": {
+              "via": "mac",
+              "kind": "local_proxy",
+              "model": "gpt-5.5"
+            },
+            "threadId": "thr-0199bb4e000070008000000000000001",
+            "timestamp": 100
+          }
+        ]
+      }
+    ],
+    "hiddenRunIds": [
+      "0199bb4e-0000-7000-8000-000000000004"
+    ],
+    "timeline": [],
+    "pendingUserMessages": [],
+    "pendingEvents": []
+  }
+}

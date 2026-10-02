@@ -15,10 +15,10 @@
     "runs": [
       {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "failed",
+        "status": "finished",
         "startedAtMs": 1790000000000,
         "updatedAtMs": 1790000001000,
-        "failure": "This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule.",
+        "failure": null,
         "finishReason": null,
         "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
         "events": [
@@ -50,10 +50,28 @@
             "type": "CUSTOM",
             "runId": "run_0199bb4e-0000-7000-8000-000000000003",
             "value": {
+              "via": "loopback",
               "kind": "local_proxy",
               "model": "gpt-6-luna"
             },
             "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
+            "timestamp": 100
+          },
+          {
+            "role": "assistant",
+            "type": "TEXT_MESSAGE_START",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "delta": "from the proxy",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_END",
+            "messageId": "msg_run_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
           {
@@ -73,7 +91,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  1963
+                  2108
                 ]
               },
               "model_ms": [
@@ -90,9 +108,8 @@
             "tool_rounds": 0
           },
           {
-            "type": "RUN_ERROR",
+            "type": "RUN_FINISHED",
             "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-            "message": "This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule.",
             "threadId": "sched_0199bb4e-0000-7000-8000-000000000001",
             "timestamp": 100
           }

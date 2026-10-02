@@ -1,0 +1,18 @@
+{
+  "method": "GET",
+  "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001/runs",
+  "status": 200,
+  "body": [
+    {
+      "runId": null,
+      "cause": "manual",
+      "status": null,
+      "startedAtMs": null,
+      "endedAtMs": null,
+      "at": 1790000000000,
+      "state": "skipped",
+      "skipped": "relay_offline",
+      "reason": "Skipped: your computer was off, so your plan couldn't answer"
+    }
+  ]
+}

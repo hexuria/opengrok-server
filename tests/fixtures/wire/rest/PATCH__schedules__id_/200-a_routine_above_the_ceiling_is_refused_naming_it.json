@@ -16,6 +16,7 @@
       "maxComputerRounds": null,
       "maxWallMs": 60000
     },
-    "lastRun": null
+    "lastRun": null,
+    "tz": "UTC"
   }
 }
