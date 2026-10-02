@@ -6,7 +6,7 @@
     "id": "sched_0199bb4e-0000-7000-8000-000000000001",
     "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
     "name": "Monday report",
-    "cron": "0 0 9 * * 1",
+    "cron": "0 0 9 * * MON",
     "prompt": "Monday report",
     "kind": "cron",
     "active": true,
