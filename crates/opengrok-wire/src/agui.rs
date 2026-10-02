@@ -43,7 +43,8 @@ pub enum EventType {
     /// `agent` (model + Computer pane, not a chat event to persist). Promote
     /// to `transcript` / `failure` / `end` when the PNG should survive replay.
     /// Absent `visibility` on older frames means `transcript` — those PNGs
-    /// were already first-class events.
+    /// were already first-class events. The call's own time rides
+    /// `extra.durationMs` ([`DURATION_MS`]).
     ToolCallResult,
     /// Deprecated in 0.0.57; use `ReasoningStart`.
     ThinkingStart,
@@ -258,6 +259,22 @@ impl Content {
             .collect()
     }
 }
+
+/// `TOOL_CALL_RESULT.durationMs`: how long the call itself ran, in whole milliseconds, an integer:
+/// from the moment the tool started running to the moment its result existed.
+///
+/// Provenance: hexuria/opengrok-server#305, the shape agreed with NativeChat, which is its reader:
+/// it asked for it to put each tool call's time on that call's row. AG-UI 0.0.57 has no such field;
+/// it rides the frame under the spec's passthrough rule (above), so a client that does not read it
+/// is unaffected.
+///
+/// A FIELD, BECAUSE NOTHING ELSE ON THE WIRE SAYS IT. The loop stamps every frame with the moment
+/// its segment opened, and a round's results go out together once the round has run.
+///
+/// JOURNALED WITH ITS FRAME: a replay says the number the stream said, never one worked out again.
+/// ABSENT, never 0 or `null`, where nothing was timed, such as a result written from a card's
+/// answer when a run resumes, and on every frame journaled before the field existed.
+pub const DURATION_MS: &str = "durationMs";
 
 /// Every AG-UI `type` this server sends (#255). NativeChat's wire ledger is two-way: every word
 /// here must be one the app reads or excuses, so this is the list of what the server CAN send,

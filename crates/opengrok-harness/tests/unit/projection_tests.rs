@@ -311,7 +311,7 @@ fn a_tool_result_with_a_picture_puts_it_on_the_frame() {
             visibility: opengrok_tools::ImageVisibility::Agent,
         },
     );
-    let events = projection.push_tool_result(&result);
+    let events = projection.push_tool_result(&result, None);
     let frame = events
         .iter()
         .find(|event| event.event_type == EventType::ToolCallResult)
@@ -325,10 +325,35 @@ fn a_tool_result_with_a_picture_puts_it_on_the_frame() {
     );
     assert_eq!(image["visibility"], "agent");
 
-    let plain = projection.push_tool_result(&opengrok_tools::ToolResult::ok("c2", "done"));
+    let plain = projection.push_tool_result(&opengrok_tools::ToolResult::ok("c2", "done"), None);
     let frame = plain
         .iter()
         .find(|event| event.event_type == EventType::ToolCallResult)
         .unwrap();
     assert!(frame.extra.get("image").is_none());
+}
+
+/// A call's own time rides its result as an integer `durationMs` (#305), and a result nothing
+/// timed carries no key at all: not 0, not `null`, which a client would paint as a time.
+#[test]
+fn a_tool_result_says_how_long_its_call_took_and_an_untimed_one_says_nothing() {
+    let mut projection = Projection::new("t1", "r1", 100);
+    let timed =
+        projection.push_tool_result(&opengrok_tools::ToolResult::ok("c1", "done"), Some(1234));
+    let frame = timed
+        .iter()
+        .find(|event| event.event_type == EventType::ToolCallResult)
+        .unwrap();
+    let wire = serde_json::to_value(frame).unwrap();
+    assert_eq!(wire["durationMs"], serde_json::json!(1234), "{wire}");
+    assert!(
+        wire["durationMs"].is_u64(),
+        "an integer count of milliseconds: {wire}"
+    );
+    assert_eq!(opengrok_wire::agui::DURATION_MS, "durationMs");
+
+    let untimed = projection.push_tool_result(&opengrok_tools::ToolResult::ok("c2", "done"), None);
+    let wire = serde_json::to_value(untimed.last().unwrap()).unwrap();
+    assert_eq!(wire["type"], "TOOL_CALL_RESULT");
+    assert!(wire.get("durationMs").is_none(), "{wire}");
 }

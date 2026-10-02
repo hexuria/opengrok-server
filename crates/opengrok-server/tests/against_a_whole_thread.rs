@@ -105,13 +105,31 @@ fn view_of(run: &Run, id: &RunId, thread: &str, at_ms: i64) -> RunView {
     }
 }
 
-/// Journal one whole run under a thread: a start, its frames, an ending.
+/// Journal one whole run under a thread: a start, its words, an ending.
 async fn seed_run(
     store: &PgStore,
     account: &AccountId,
     thread: &str,
     at_ms: i64,
     deltas: &[&str],
+    ending: Ending<'_>,
+) -> RunId {
+    let frames: Vec<Value> = deltas
+        .iter()
+        .map(
+            |delta| json!({ "type": "TEXT_MESSAGE_CONTENT", "messageId": "msg-1", "delta": delta }),
+        )
+        .collect();
+    seed_frames(store, account, thread, at_ms, &frames, ending).await
+}
+
+/// Journal one whole run under a thread: a start, `frames` as they are given, an ending.
+async fn seed_frames(
+    store: &PgStore,
+    account: &AccountId,
+    thread: &str,
+    at_ms: i64,
+    frames: &[Value],
     ending: Ending<'_>,
 ) -> RunId {
     let id = RunId::new();
@@ -135,14 +153,10 @@ async fn seed_run(
         .expect("start");
     record(&mut run, &mut log, produced);
 
-    for delta in deltas {
+    for payload in frames {
         let produced = run
             .decide(RunCommand::Emit {
-                payload: json!({
-                    "type": "TEXT_MESSAGE_CONTENT",
-                    "messageId": "msg-1",
-                    "delta": delta,
-                }),
+                payload: payload.clone(),
                 at_ms,
             })
             .expect("emit");
@@ -453,6 +467,62 @@ async fn a_thread_reads_oldest_first_with_every_frame_it_emitted() {
         json!("the second turn"),
         "{body}"
     );
+}
+
+/// A RESULT JOURNALED BEFORE `durationMs` EXISTED REPLAYS AS IT WAS WRITTEN, WITHOUT THE KEY
+/// (non-negotiable #2), and one journaled with it replays with the number journaled (#305): a
+/// replay hands back the log, it does not time anything again or make a time up.
+#[tokio::test]
+async fn a_tool_result_replays_with_the_time_it_was_journaled_with_or_without_one() {
+    let database_url = database_or_skip!();
+    let email = format!("thread-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let (account, access) = h.person(&email).await;
+    let thread = format!("th-{}", uuid::Uuid::now_v7().simple());
+    let base = now_ms();
+    let call =
+        |id: &str| json!({ "type": "TOOL_CALL_START", "toolCallId": id, "toolCallName": "shell" });
+    let untimed = json!({ "type": "TOOL_CALL_RESULT", "timestamp": base, "toolCallId": "call-old",
+                          "content": "ran", "ok": true });
+    let timed = json!({ "type": "TOOL_CALL_RESULT", "timestamp": base, "toolCallId": "call-new",
+                        "content": "ran", "ok": true, "durationMs": 4321 });
+    let old = [call("call-old"), untimed.clone()];
+    seed_frames(
+        &h.store,
+        &account,
+        &thread,
+        base + 1_000,
+        &old,
+        Ending::Finished,
+    )
+    .await;
+    let new = [call("call-new"), timed.clone()];
+    seed_frames(
+        &h.store,
+        &account,
+        &thread,
+        base + 2_000,
+        &new,
+        Ending::Finished,
+    )
+    .await;
+
+    let body = h.thread_json(&access, &thread, "").await;
+    let result_of = |run: usize| {
+        runs_of(&body)[run]["events"]
+            .as_array()
+            .expect("events")
+            .iter()
+            .find(|frame| frame["type"] == "TOOL_CALL_RESULT")
+            .cloned()
+            .expect("a result")
+    };
+    assert_eq!(
+        result_of(0),
+        untimed,
+        "as written, with no durationMs: {body}"
+    );
+    assert_eq!(result_of(1), timed, "with the number journaled: {body}");
 }
 
 #[tokio::test]
