@@ -173,12 +173,6 @@ async fn put_me(
         Ok(events) => events,
         Err(why) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, why.to_string()),
     };
-    // THE SAME ZONE WRITES NOTHING. NativeChat sends it on every launch, and `persist` upserts the
-    // whole projection row from the account loaded above even with no event, so a profile, plan
-    // or password change landing in between would be reverted in the projection.
-    if events.is_empty() {
-        return me_json(&state, &id, &account).await;
-    }
     match persist(&state, &id, account, seq, &events).await {
         Ok(after) => me_json(&state, &id, &after).await,
         Err(refusal) => refusal,
@@ -325,6 +319,7 @@ async fn change_password(
 }
 
 /// Apply events to the account, project, and store — the write half every self-service edit shares.
+/// NO EVENT WRITES NOTHING: a no-op's row, rebuilt from the loaded account, would undo a later edit.
 pub(crate) async fn persist(
     state: &AuthState,
     id: &AccountId,
@@ -332,10 +327,9 @@ pub(crate) async fn persist(
     seq: i64,
     events: &[opengrok_core::account::AccountEvent],
 ) -> Result<Account, Response> {
+    let [_, ..] = events else { return Ok(account) };
     let mut after = account;
-    for event in events {
-        after.apply(event);
-    }
+    events.iter().for_each(|event| after.apply(event));
     let view = AccountView {
         id: id.clone(),
         email: after.email.clone(),
