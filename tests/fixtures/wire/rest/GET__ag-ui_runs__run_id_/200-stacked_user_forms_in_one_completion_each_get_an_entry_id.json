@@ -135,6 +135,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "waiting for approval: Waiting for you",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "mock-form-1"
       },
       {
@@ -142,6 +143,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "waiting for approval: Waiting for you",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "mock-form-2"
       },
       {
@@ -149,6 +151,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "waiting for approval: Waiting for you",
         "timestamp": 100,
+        "durationMs": 0,
         "toolCallId": "mock-form-3"
       },
       {

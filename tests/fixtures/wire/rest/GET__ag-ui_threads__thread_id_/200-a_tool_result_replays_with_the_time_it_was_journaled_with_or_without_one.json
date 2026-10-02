@@ -1,0 +1,58 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/threads/th-0199bb4e000070008000000000000001",
+  "status": 200,
+  "body": {
+    "threadId": "th-0199bb4e000070008000000000000001",
+    "runs": [
+      {
+        "runId": "run_0199bb4e-0000-7000-8000-000000000002",
+        "status": "finished",
+        "startedAtMs": 1790000000000,
+        "updatedAtMs": 1790000000000,
+        "failure": null,
+        "finishReason": null,
+        "events": [
+          {
+            "type": "TOOL_CALL_START",
+            "toolCallId": "call-old",
+            "toolCallName": "shell"
+          },
+          {
+            "ok": true,
+            "type": "TOOL_CALL_RESULT",
+            "content": "ran",
+            "timestamp": 100,
+            "toolCallId": "call-old"
+          }
+        ]
+      },
+      {
+        "runId": "run_0199bb4e-0000-7000-8000-000000000003",
+        "status": "finished",
+        "startedAtMs": 1790000001000,
+        "updatedAtMs": 1790000001000,
+        "failure": null,
+        "finishReason": null,
+        "events": [
+          {
+            "type": "TOOL_CALL_START",
+            "toolCallId": "call-new",
+            "toolCallName": "shell"
+          },
+          {
+            "ok": true,
+            "type": "TOOL_CALL_RESULT",
+            "content": "ran",
+            "timestamp": 100,
+            "durationMs": 4321,
+            "toolCallId": "call-new"
+          }
+        ]
+      }
+    ],
+    "hiddenRunIds": [],
+    "pendingUserMessages": [],
+    "pendingEvents": []
+  }
+}
