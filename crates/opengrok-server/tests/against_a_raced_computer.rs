@@ -398,15 +398,22 @@ impl Server {
         id
     }
 
-    /// `POST /coworkers/{id}/computer/update`: the update runs on after the reply.
-    async fn update(&self, member: &Member, coworker: &CoworkerId) -> u16 {
+    /// `POST /coworkers/{id}/computer/update`: the update runs on after the reply. The 202 is the
+    /// update as accepted, read before any of the work: its outcome, even an instant failure, is
+    /// the status route's to tell, or the reply's shape changes from run to run (#311).
+    async fn update(&self, member: &Member, coworker: &CoworkerId) {
         let url = format!(
             "{}/coworkers/{}/computer/update",
             self.base,
             coworker.as_str()
         );
-        let request = self.client.post(url).bearer_auth(&member.token);
-        request.send().await.expect("update").status().as_u16()
+        let reply = self.client.post(url).bearer_auth(&member.token).send();
+        let reply = reply.await.expect("update");
+        assert_eq!(reply.status().as_u16(), 202, "the update is accepted");
+        let body: Value = reply.json().await.expect("the accepted status");
+        assert_eq!(body["update"]["phase"], "pulling", "as accepted: {body}");
+        assert_eq!(body["update"]["error"], Value::Null, "as accepted: {body}");
+        assert_eq!(body["state"], "running", "the box before the work: {body}");
     }
 
     /// Wait for the scope's update to end: `None` once it succeeded and its record was cleared,
@@ -749,7 +756,7 @@ async fn an_update_racing_a_heal_keeps_the_rebuilt_box_and_its_files() {
     let old = s.first_box(&member, &one).await;
     let disk = s.stub.disk(&old);
 
-    assert_eq!(s.update(&member, &one).await, 202);
+    s.update(&member, &one).await;
     let rebuilt = s.stub.held(1).await.remove(0);
     assert!(!s.stub.running().contains(&old), "the old box reads absent");
     assert_eq!(s.post(&member, &one, false).await.unwrap(), 200, "asked");
@@ -813,7 +820,7 @@ async fn a_rebuilt_box_whose_record_fails_is_left_running_with_its_files() {
     let old = s.first_box(&member, &one).await;
     let disk = s.stub.disk(&old);
 
-    assert_eq!(s.update(&member, &one).await, 202);
+    s.update(&member, &one).await;
     let why = s.update_ended(scope).await.expect("the update failed");
 
     let running = s.stub.running();

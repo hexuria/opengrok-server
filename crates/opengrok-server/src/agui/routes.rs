@@ -2299,7 +2299,8 @@ async fn computer_screen(
 }
 
 /// `POST /coworkers/{id}/computer/update` — rebuild the coworker's computer on the newest image,
-/// keeping its files. Answers 202 with the status; the phases arrive on `GET …/computer`.
+/// keeping its files. Answers 202 with the status as accepted; the phases and the outcome arrive
+/// on `GET …/computer`.
 async fn computer_update(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
@@ -2314,16 +2315,14 @@ async fn computer_update(
         Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
         Err(refusal) => return refusal,
     }
-    if let Err((status, message)) =
-        provision::begin_update_for_coworker(&state, &account_id, &coworker_id).await
+    let update = match provision::begin_update_for_coworker(&state, &account_id, &coworker_id).await
     {
-        return (status, message).into_response();
-    }
-    (
-        StatusCode::ACCEPTED,
-        Json(provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await),
-    )
-        .into_response()
+        Ok(update) => update,
+        Err((status, message)) => return (status, message).into_response(),
+    };
+    let accepted = provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await;
+    tokio::spawn(update);
+    (StatusCode::ACCEPTED, Json(accepted)).into_response()
 }
 
 /// `POST /coworkers/{id}/computer/reset` — destroy the computer, data and all, and start fresh.

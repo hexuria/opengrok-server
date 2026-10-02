@@ -1176,13 +1176,15 @@ pub async fn update_scope_box(
     let _ = store.clear_box_update(scope, &scope_id).await;
 }
 
-/// Start an update of a coworker's computer in the background and answer at once; the status
-/// route carries the phases. Refuses while one is already running.
+/// Record an update of a coworker's computer as accepted and answer the work that runs it, for the
+/// caller to spawn once it has replied: a reply read after the spawn could already carry the
+/// work's failure, and did, so the 202's shape changed from run to run (#311). The status route
+/// carries the phases. Refuses while one is already running.
 pub async fn begin_update_for_coworker(
     state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-) -> Result<(), (axum::http::StatusCode, String)> {
+) -> Result<impl Future<Output = ()> + Send + 'static, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
     let Some(row) = scoped_box_row_for(state, account_id, coworker_id).await else {
         return Err((
@@ -1208,8 +1210,7 @@ pub async fn begin_update_for_coworker(
     {
         return Err((StatusCode::SERVICE_UNAVAILABLE, error.to_string()));
     }
-    tokio::spawn(update_scope_box(state.clone(), org_id, scope, scope_id));
-    Ok(())
+    Ok(update_scope_box(state.clone(), org_id, scope, scope_id))
 }
 
 /// Destroy a coworker's computer, data and all, and provision a fresh one in its place.
