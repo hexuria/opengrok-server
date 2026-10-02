@@ -258,6 +258,7 @@ async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
         has_key: true,
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
+        new_bot_default: None,
     };
     let saved = stored(Some(by_mac.clone()));
     let relayed = |run: &str| {

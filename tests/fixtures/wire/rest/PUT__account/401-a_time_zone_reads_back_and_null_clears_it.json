@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account",
+  "status": 401,
+  "body": {
+    "error": "sign in to change your account"
+  }
+}

@@ -1188,16 +1188,9 @@ pub async fn repin_coworker(
     };
     // One of the words agreed with the client (#271); null is inherit. Anything else refuses the
     // WHOLE body here, before a field of it is written: a name beside "loud" is not renamed.
-    let effort = match body.get("effort") {
-        None => None,
-        Some(serde_json::Value::Null) => Some(Effort::Inherit),
-        Some(word) => match word.as_str().and_then(Effort::parse) {
-            Some(effort) => Some(effort),
-            None => {
-                let words = Effort::ALL.map(Effort::as_str).join(", ");
-                return refuse(format!("effort must be one of {words}"));
-            }
-        },
+    let effort = match Effort::named(body.get("effort")) {
+        Ok(effort) => effort,
+        Err(why) => return refuse(format!("effort {why}")),
     };
     // Absent leaves its door, null hands it back to the person's own setting, any other word 400s.
     let source = body.get("source").map(|word| SourceKind::named(Some(word)));
@@ -1639,15 +1632,18 @@ pub async fn hire(
     };
     // Absent OR blank falls back: `unwrap_or_else` alone let `"model": ""` through, and the
     // aggregate would (now) refuse it rather than the caller getting the default they meant.
-    // The template's pin sits between the request's and the deployment's.
-    let model = request
+    // The template's pin sits between the request's and the hirer's default for new bots (#318).
+    let named = request
         .model
         .as_deref()
         .map(str::trim)
         .filter(|model| !model.is_empty())
         .map(str::to_string)
-        .or_else(|| template.as_ref().and_then(|t| t.model.clone()))
-        .unwrap_or_else(|| state.model.clone());
+        .or_else(|| template.as_ref().and_then(|t| t.model.clone()));
+    let (model, default) = match crate::inference::hire_model(&state, &account_id, named).await {
+        Ok(chosen) => chosen,
+        Err(refusal) => return refusal,
+    };
 
     let mut coworker = opengrok_core::coworker::Coworker::default();
     let mut events = match coworker.decide(CoworkerCommand::Hire {
@@ -1670,6 +1666,13 @@ pub async fn hire(
     }
     for event in &events {
         coworker.apply(event);
+    }
+    // Born on the whole default when it gave the pin: its door and effort, in this same append.
+    if let Some(default) = &default {
+        match coworker.born_on(default, at_ms) {
+            Ok(more) => events.extend(more),
+            Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        }
     }
 
     // A computer, if asked for — via the shared helper (every create path's, before P0-E left only

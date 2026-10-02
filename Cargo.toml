@@ -74,6 +74,11 @@ rmcp = { version = "3", default-features = false, features = [
 # Cron parsing for the scheduler. Parsing only — the ticking is ours, in the same sweep pattern
 #   as recovery, so firing stays durable and policy-checked rather than delegated to a framework.
 cron = "0.17"
+# The IANA time zones an account's `timeZone` is held to (#316, #318). Its database is compiled in,
+#   so a zone this server accepts does not depend on the host carrying tzdata (a slim container
+#   has none), and its `Tz` is a chrono `TimeZone`, which is what `cron` computes a routine's
+#   next wake in. No build script with the default features; MIT OR Apache-2.0.
+chrono-tz = "0.10"
 # Constant-time equality for the gateway bearer. The shipped host compares its token
 #   timing-safe; a port that string-compares invites the classic byte-at-a-time probe.
 subtle = "2"

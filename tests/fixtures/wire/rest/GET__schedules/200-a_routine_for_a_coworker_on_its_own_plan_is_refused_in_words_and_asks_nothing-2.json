@@ -19,10 +19,10 @@
       },
       "lastRun": {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "failed",
+        "status": "running",
         "startedAtMs": 1790000001000,
-        "finishedAtMs": 1790000002000,
-        "summary": "Routine Weekly failed: This Bot answers on your own plan, and routines run on the server's keys, so this routine did not run. Give the Bot a Server model to run it on a schedule"
+        "finishedAtMs": null,
+        "summary": "Routine Weekly is running."
       }
     }
   ]

@@ -14,6 +14,7 @@
       "machineId": null,
       "machineLabel": null,
       "localModel": "gpt-6-sol"
-    }
+    },
+    "newBotDefault": null
   }
 }

@@ -78,7 +78,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "{\"delivered\":[{\"bot\":\"Bob\",\"coworkerId\":\"cw_0199bb4e-0000-7000-8000-000000000003\",\"threadId\":\"pair-cw_0199bb4e-0000-7000-8000-000000000001-cw_0199bb4e-0000-7000-8000-000000000003\",\"messageId\":\"bm_0199bb4e-0000-7000-8000-000000000004\"}],\"refused\":[]}",
             "timestamp": 100,
-            "durationMs": 32,
+            "durationMs": 58,
             "toolCallId": "call-0"
           },
           {
@@ -89,7 +89,7 @@
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
-            "delta": "noted",
+            "delta": "noted by cw_0199bb4e-0000-7000-8000-000000000001",
             "messageId": "msg_0199bb4e-0000-7000-8000-000000000002_1",
             "timestamp": 100
           },

@@ -45,6 +45,7 @@ use serde_json::{Value, json};
 
 use super::resume;
 use crate::host_state::HostState;
+use crate::now_ms;
 
 /// How long an unanswered form or live handoff may block the turn, counted from the card's own
 /// `timestampMs`. Tests pass a later `now` to the settlers rather than waiting this out. Facebook
@@ -1404,10 +1405,6 @@ pub(crate) async fn pending_suspended(
         return Some((run_id, run, seq, pending));
     }
     None
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 /// Journal a settled user-form onto the AG-UI run NativeChat replays.

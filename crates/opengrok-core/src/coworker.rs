@@ -11,9 +11,10 @@
 //! only changes who may end its life.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::id::{BoxId, CoworkerId};
-use crate::inference::SourceKind;
+use crate::inference::{NewBotDefault, SourceKind};
 
 /// How a coworker's computer is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +119,24 @@ impl Effort {
     #[must_use]
     pub fn reasoning_effort(self) -> Option<&'static str> {
         (self != Self::Inherit).then(|| self.as_str())
+    }
+
+    /// An effort a request names, for every door that takes one (a coworker's PATCH, a default
+    /// for new bots): absent names none, null is `Inherit`, and anything that is not one of the
+    /// words is refused with them listed, for the caller to put its field's name in front of.
+    pub fn named(value: Option<&Value>) -> Result<Option<Self>, String> {
+        match value {
+            None => Ok(None),
+            Some(Value::Null) => Ok(Some(Self::Inherit)),
+            Some(word) => word
+                .as_str()
+                .and_then(Self::parse)
+                .map(Some)
+                .ok_or_else(|| {
+                    let words = Self::ALL.map(Self::as_str).join(", ");
+                    format!("must be one of {words}")
+                }),
+        }
     }
 }
 
@@ -417,13 +436,32 @@ impl Coworker {
     }
 
     /// A model must be a route somebody could actually be served on. Trimmed, because a pin of
-    /// spaces is the same lie as an empty one.
-    fn non_blank(model: String) -> Result<String, CoworkerError> {
+    /// spaces is the same lie as an empty one. Public for the default a hire may be born on
+    /// (`NewBotDefault::named`), whose gateway model is held to exactly this.
+    pub fn non_blank(model: String) -> Result<String, CoworkerError> {
         let trimmed = model.trim();
         if trimmed.is_empty() {
             return Err(CoworkerError::EmptyModel);
         }
         Ok(trimmed.to_string())
+    }
+
+    /// A just-hired coworker put on its owner's default for new bots (#318): the door and the
+    /// effort it names, decided as an owner's PATCH decides them and applied here, for the
+    /// hire's own append. The default's model is the hire's pin already.
+    pub fn born_on(
+        &mut self,
+        default: &NewBotDefault,
+        at_ms: i64,
+    ) -> Result<Vec<CoworkerEvent>, CoworkerError> {
+        let source = Some(default.source);
+        let mut events = self.decide(CoworkerCommand::SetSource { source, at_ms })?;
+        let effort = default.effort;
+        events.extend(self.decide(CoworkerCommand::SetEffort { effort, at_ms })?);
+        for event in &events {
+            self.apply(event);
+        }
+        Ok(events)
     }
 
     fn alive(&self) -> Result<(), CoworkerError> {

@@ -18,11 +18,8 @@ use serde_json::json;
 
 use crate::account_api::admin_org;
 use crate::agui::AgUiState;
+use crate::now_ms;
 use opengrok_box::Computer;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 /// The computer kinds an org admin can configure, and their display labels. Local VM is NOT here —
 /// it is server-provided and needs no credential.

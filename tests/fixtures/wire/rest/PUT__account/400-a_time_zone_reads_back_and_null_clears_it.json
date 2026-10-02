@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account",
+  "status": 400,
+  "body": {
+    "error": "timeZone must be an IANA time zone, like \"Europe/London\", or null"
+  }
+}

@@ -82,6 +82,7 @@ pub const WATCHABLE: &[&str] = &[
     "account-profile-updated",
     "account-password-changed",
     "account-inference-source-set",
+    "account-time-zone-set",
 ];
 
 pub fn is_watchable(event_type: &str) -> bool {

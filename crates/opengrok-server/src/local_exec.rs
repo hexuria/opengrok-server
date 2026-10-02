@@ -246,13 +246,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::AuthState;
+use crate::now_ms;
 
 const VALID_MODES: &[&str] = &["never", "ask", "bypass"];
 const VALID_KINDS: &[&str] = &["allow", "deny"];
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 pub fn router(state: AuthState) -> Router {
     Router::new()

@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use crate::now_ms;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
@@ -191,10 +192,6 @@ fn spent(budget: &Budget, live: &[i64], now_ms: i64) -> Option<Spent> {
 fn to_secs(ms: i64) -> u64 {
     let ms = ms.max(1);
     u64::try_from((ms + 999) / 1_000).unwrap_or(1)
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 /// The address a hit is charged to. The HTTPS front (Caddy, `docs/setup/tls.md`) sets

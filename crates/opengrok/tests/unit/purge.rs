@@ -388,6 +388,14 @@ async fn everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything() {
         eprintln!("skipping: OG_DATABASE_URL is not set");
         return;
     };
+    // TAKES TURNS WITH THE PIN PASSES (#318): a pass writes an event for every bot in the database,
+    // so one landing between this purge and its count put a row back on the purged account. Same
+    // session lock as `pins::tests::one_at_a_time`; dropping the connection ends it.
+    let mut _turn = store.pool().acquire().await.expect("connect").detach();
+    sqlx::query("select pg_advisory_lock(318318)")
+        .execute(&mut _turn)
+        .await
+        .expect("take turns with the pin passes");
     let stamp = now_ms();
     let kept_email = format!("purge-keep-{stamp}@og.local");
     let gone_email = format!("purge-gone-{stamp}@og.local");

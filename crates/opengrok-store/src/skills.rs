@@ -426,7 +426,7 @@ impl PgStore {
         expected: Option<i64>,
         at_ms: i64,
     ) -> StoreResult<Option<i64>> {
-        let version = sqlx::query_scalar(
+        Ok(sqlx::query_scalar(
             "insert into coworker_skill_set (coworker_id, skill_ids, version, updated_at_ms)
              select $1, $2, (cardinality($2) > 0)::int, $3
               where $4::bigint is null or $4 = 0
@@ -443,7 +443,6 @@ impl PgStore {
         .bind(at_ms)
         .bind(expected)
         .fetch_optional(self.pool())
-        .await?;
-        Ok(version)
+        .await?)
     }
 }

@@ -27,6 +27,7 @@ use opengrok_core::id::RunId;
 use opengrok_core::run::{RunCommand, RunStatus, RunView};
 
 use crate::agui::routes::AgUiState;
+use crate::now_ms;
 
 /// How long a claim is good for. Long enough that a slow model call does not lose its own run,
 /// short enough that a crash is picked up while somebody still cares.
@@ -37,10 +38,6 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How many to take at once, so one replica cannot swallow every orphan on a bad day.
 const CLAIM_LIMIT: i64 = 10;
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 /// Sweep forever. Started by the binary; stops when the process does. Takes the host state
 /// because a run it carries on can park on a card, and a card is minted through it.

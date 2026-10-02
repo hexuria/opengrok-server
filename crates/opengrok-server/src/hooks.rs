@@ -30,6 +30,7 @@ use opengrok_core::schedule::{FireCause, ScheduleCommand};
 
 use crate::autonomy::routes::mutate_schedule;
 use crate::host_state::HostState;
+use crate::now_ms;
 
 /// Largest JSON body we will attach to a wake. A webhook is a ping-or-payload, not a file drop.
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -151,10 +152,6 @@ pub(crate) fn webhook_trigger_json(state: &HostState, hook_id: &str, key: &str) 
         "key": key,
         "header": format!("Authorization: Bearer {key}"),
     })
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 async fn inbound(

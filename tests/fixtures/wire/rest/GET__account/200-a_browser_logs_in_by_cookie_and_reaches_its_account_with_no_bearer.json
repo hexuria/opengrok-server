@@ -11,6 +11,7 @@
     "orgId": null,
     "verified": true,
     "enabled": true,
+    "timeZone": null,
     "isAdmin": false
   }
 }

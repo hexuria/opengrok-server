@@ -1,0 +1,17 @@
+{
+  "method": "GET",
+  "path": "/account",
+  "status": 200,
+  "body": {
+    "id": "acct_0199bb4e-0000-7000-8000-000000000001",
+    "email": "source-0199bb4e000070008000000000000002@og.local",
+    "firstName": "Test",
+    "lastName": "User",
+    "avatarUrl": null,
+    "orgId": null,
+    "verified": true,
+    "enabled": true,
+    "timeZone": "Europe/London",
+    "isAdmin": false
+  }
+}

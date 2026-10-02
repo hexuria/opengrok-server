@@ -143,6 +143,12 @@ pub enum AccountEvent {
         source: InferenceSource,
         at_ms: i64,
     },
+    /// The IANA zone a person's routines default to (#316), which their client keeps current;
+    /// `None` clears it. Its own event, so keeping it current never rewrites a profile.
+    TimeZoneSet {
+        time_zone: Option<String>,
+        at_ms: i64,
+    },
 }
 
 impl AccountEvent {
@@ -162,6 +168,7 @@ impl AccountEvent {
             Self::ProfileUpdated { .. } => "account-profile-updated",
             Self::PasswordChanged { .. } => "account-password-changed",
             Self::InferenceSourceSet { .. } => "account-inference-source-set",
+            Self::TimeZoneSet { .. } => "account-time-zone-set",
         }
     }
 }
@@ -195,6 +202,8 @@ pub struct Account {
     pub avatar_url: Option<String>,
     /// Where this person's turns are answered; the gateway until they choose.
     pub inference_source: InferenceSource,
+    /// The IANA zone this person's routines default to (#316); none until their client says.
+    pub time_zone: Option<String>,
 }
 
 /// Current hash vs just-rotated-away hash inside [`REFRESH_GRACE_MS`].
@@ -217,6 +226,8 @@ pub enum AccountError {
     NotVerified,
     #[error("that account is not enabled")]
     NotEnabled,
+    #[error("{0:?} is not an IANA time zone this server knows; send one like \"Europe/London\"")]
+    UnknownTimeZone(String),
 }
 
 /// What a caller wants to happen. Named for the intent, not the endpoint that carries it.
@@ -278,6 +289,10 @@ pub enum AccountCommand {
     },
     SetInferenceSource {
         source: InferenceSource,
+        at_ms: i64,
+    },
+    SetTimeZone {
+        time_zone: Option<String>,
         at_ms: i64,
     },
 }
@@ -383,6 +398,7 @@ impl Account {
             AccountEvent::InferenceSourceSet { source, .. } => {
                 self.inference_source = source.clone();
             }
+            AccountEvent::TimeZoneSet { time_zone, .. } => self.time_zone.clone_from(time_zone),
         }
     }
 
@@ -575,6 +591,26 @@ impl Account {
                     return Err(AccountError::NotRegistered);
                 }
                 Ok(vec![AccountEvent::InferenceSourceSet { source, at_ms }])
+            }
+
+            // HELD TO THE ZONE DATABASE HERE, as a schedule's cron is held to its parser: a zone
+            // nothing can compute a wake in would be stored, and every routine defaulting to it
+            // would fail later where nobody asked. Unchanged is no event, as the client sends its
+            // zone whenever it starts, and the log would gain a line a launch saying nothing.
+            AccountCommand::SetTimeZone { time_zone, at_ms } => {
+                if !self.registered {
+                    return Err(AccountError::NotRegistered);
+                }
+                let time_zone = time_zone.map(|zone| zone.trim().to_string());
+                if let Some(zone) = &time_zone
+                    && zone.parse::<chrono_tz::Tz>().is_err()
+                {
+                    return Err(AccountError::UnknownTimeZone(zone.clone()));
+                }
+                if time_zone == self.time_zone {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![AccountEvent::TimeZoneSet { time_zone, at_ms }])
             }
         }
     }

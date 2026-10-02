@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::coworker::{Coworker, Effort};
+
 /// Where a turn's model calls go. The gateway is the default and is exactly what every turn did
 /// before a person could choose, so an account that never set one, and a run logged before this
 /// existed, read as it.
@@ -180,6 +182,56 @@ pub struct InferenceSource {
     /// not the loopback's, and need not serve the same ids. Held to `subscription_model` too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_model: Option<String>,
+    /// What a bot is born on when its hire and its template name no model (#318). Absent from
+    /// the log until set, so every event from before it reads as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_bot_default: Option<NewBotDefault>,
+}
+
+/// A person's default for new bots: the door, the model and how hard it thinks, ALL WRITTEN ONTO
+/// THE BOT AT ITS HIRE, so nothing about a bot is read from its owner's account afterwards and a
+/// changed default moves only the bots hired after it. The words are the ones agreed with
+/// NativeChat on 2 Oct 2026; NativeChat's Fast is the `--fast` id, not a field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewBotDefault {
+    pub source: SourceKind,
+    pub model: String,
+    #[serde(default)]
+    pub effort: Effort,
+}
+
+impl NewBotDefault {
+    /// `newBotDefault` as a `PUT /account/inference-source` names it: null is none, and an object
+    /// is held to what its parts are held to elsewhere, in their words: on the gateway its model
+    /// to what a hire's is, on a person's own plan to `subscription_model` (as a `localModel` is),
+    /// and its effort to a coworker's words. Refused whole, before anything is saved.
+    pub fn named(value: &Value) -> Result<Option<Self>, String> {
+        let object = match value {
+            Value::Null => return Ok(None),
+            Value::Object(object) => object,
+            _ => return Err("newBotDefault must be an object or null".to_string()),
+        };
+        let source = SourceKind::named(object.get("source")).ok().flatten();
+        let source = source.ok_or("newBotDefault.source must be \"gateway\" or \"local_proxy\"")?;
+        let model = object
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let model = match source {
+            SourceKind::Gateway => {
+                Coworker::non_blank(model.to_string()).map_err(|e| e.to_string())
+            }
+            SourceKind::LocalProxy => subscription_model(model).map(|()| model.trim().to_string()),
+        };
+        let model = model.map_err(|why| format!("newBotDefault.model: {why}"))?;
+        let effort = Effort::named(object.get("effort"));
+        let effort = effort.map_err(|why| format!("newBotDefault.effort {why}"))?;
+        Ok(Some(Self {
+            source,
+            model,
+            effort: effort.unwrap_or_default(),
+        }))
+    }
 }
 
 impl InferenceSource {

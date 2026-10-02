@@ -21,6 +21,7 @@ use axum::{Json, Router};
 use opengrok_store::auto_review::AutoReviewRow;
 
 use crate::AuthState;
+use crate::now_ms;
 
 /// `machine` is deliberately absent — see the module note. A client that still sends it gets a
 /// 422 naming the two scopes that exist, never a silently ignored row.
@@ -138,10 +139,6 @@ pub async fn load_effective(
 // ---------------------------------------------------------------------------------------------
 // The account-facing management API — `docs/AUTO-REVIEW.md` §6. Account-authed like `/local-exec/*`.
 // ---------------------------------------------------------------------------------------------
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
 
 pub fn router(state: AuthState) -> Router {
     Router::new()

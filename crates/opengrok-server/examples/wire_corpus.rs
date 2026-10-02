@@ -240,6 +240,28 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "the_sender_s_chat_gets_its_messaged_row_live_and_on_replay",
         "/ag-ui/threads/{thread_id}",
     ),
+    // The account's time zone (#316): its save, shaped like any other read of the account, and
+    // its 422, shaped like any refusal. Each test makes one call on `/account`.
+    (
+        "a_person_keeps_their_time_zone_on_their_account",
+        "/account",
+    ),
+    ("an_unknown_time_zone_is_refused_in_words", "/account"),
+    // A person's default for new bots (#318): the save that names one and its 400 for a model the
+    // person's plan cannot answer, shaped like the setting's other saves and refusals, and a hire
+    // born on it, shaped like any hire. Each test makes one call on the route it is kept for.
+    (
+        "a_person_names_the_model_new_bots_are_born_on",
+        "/account/inference-source",
+    ),
+    (
+        "a_default_for_new_bots_on_the_persons_plan_is_refused_a_model_it_cannot_answer",
+        "/account/inference-source",
+    ),
+    (
+        "a_bot_hired_with_no_model_is_born_on_its_hirers_default",
+        "/coworkers",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

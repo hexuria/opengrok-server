@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use opengrok_core::account::AccountCommand;
 use opengrok_core::id::AccountId;
-use opengrok_core::inference::{InferenceSource, TurnSource};
+use opengrok_core::inference::{InferenceSource, NewBotDefault, TurnSource};
 use opengrok_harness::local_proxy::{self, KeyChange};
 use opengrok_harness::relay::{Piped, Refused};
 use serde_json::{Value, json};
@@ -116,6 +116,27 @@ fn key_id(account: &AccountId) -> String {
     format!("inference-proxy-key:{}", account.as_str())
 }
 
+/// The model a hire is pinned to: the one it `named` (its own, else its template's), else its
+/// hirer's default for new bots, which it is then born on whole (`Coworker::born_on`), else the
+/// deployment's (#318). A default that cannot be read refuses the hire rather than guess one.
+pub(crate) async fn hire_model(
+    state: &AgUiState,
+    account: &AccountId,
+    named: Option<String>,
+) -> Result<(String, Option<NewBotDefault>), Response> {
+    if let Some(model) = named {
+        return Ok((model, None));
+    }
+    let Some(setting) = local_proxy::Saved::setting(state, account).await else {
+        let why = "your default for new bots could not be read, so nobody was hired; try again";
+        return Err(refuse(StatusCode::SERVICE_UNAVAILABLE, why));
+    };
+    Ok(match setting.new_bot_default {
+        Some(default) => (default.model.clone(), Some(default)),
+        None => (state.model.clone(), None),
+    })
+}
+
 /// A source a request names (`inferenceSource`, `?source=`), or the 400 saying what it may name.
 pub(crate) fn named(
     value: Option<&Value>,
@@ -124,7 +145,7 @@ pub(crate) fn named(
     TurnSource::named(value, field).map_err(|why| Box::new(refuse(StatusCode::BAD_REQUEST, why)))
 }
 
-fn refuse(status: StatusCode, sentence: impl Into<String>) -> Response {
+pub(crate) fn refuse(status: StatusCode, sentence: impl Into<String>) -> Response {
     (status, Json(json!({ "error": sentence.into() }))).into_response()
 }
 
@@ -182,8 +203,8 @@ async fn described(state: &AgUiState, id: &AccountId, source: &InferenceSource) 
     Json(local_proxy::described(source, mac(state, id).await).await).into_response()
 }
 
-/// `PUT /account/inference-source` — `{kind, via?, baseUrl?, localModel?, apiKey?, relay?}` (what
-/// each does is `local_proxy::apply`), answered as `GET` answers.
+/// `PUT /account/inference-source` — `{kind, via?, baseUrl?, localModel?, apiKey?, relay?,
+/// newBotDefault?}` (what each does is `local_proxy::apply`), answered as `GET` answers.
 async fn put_source(
     State(state): State<AgUiState>,
     headers: HeaderMap,

@@ -1,0 +1,9 @@
+{
+  "method": "POST",
+  "path": "/ag-ui",
+  "status": 403,
+  "body": {
+    "error": "This side thread is between two of your Bots. You can read it, not write in it.",
+    "code": "read-only-thread"
+  }
+}
