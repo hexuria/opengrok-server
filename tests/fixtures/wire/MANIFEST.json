@@ -1,5 +1,5 @@
 {
-  "server_sha": "6b43f128de5e91eec0f2b7f75fcb7a5d870b572f",
+  "server_sha": "53a8c49e150ef8febd689a0449b3e588a01d95bf",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -1172,20 +1172,28 @@
       "source": "GET /schedules, recorded from the test another_account_sees_neither_the_routine_nor_its_key (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_webhook_routine_is_minted_with_a_url_and_a_key.json",
-      "source": "GET /schedules, recorded from the test a_webhook_routine_is_minted_with_a_url_and_a_key (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
-    },
-    {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row.json",
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__schedules/200-a_rotated_key_works_and_the_old_one_stops.json",
+      "source": "GET /schedules, recorded from the test a_rotated_key_works_and_the_old_one_stops (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
+      "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__schedules/200-a_retired_coworker_can_neither_take_nor_run_a_routine.json",
       "source": "GET /schedules, recorded from the test a_retired_coworker_can_neither_take_nor_run_a_routine (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__schedules/200-a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing.json",
+      "source": "GET /schedules, recorded from the test a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_routine_above_the_ceiling_is_refused_naming_it.json",
@@ -1196,11 +1204,7 @@
       "source": "GET /schedules, recorded from the test run_now_starts_a_run_the_history_calls_manual (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing.json",
-      "source": "GET /schedules, recorded from the test a_routine_for_a_coworker_on_its_own_plan_is_refused_in_words_and_asks_nothing (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
-    },
-    {
-      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
+      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-2.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
