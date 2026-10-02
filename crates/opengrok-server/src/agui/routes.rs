@@ -3173,7 +3173,7 @@ async fn start_claimed_turn(
         account_id: account_id.clone(),
         coworker_id: run_coworker,
         model: Some(request.model.clone()),
-        effort,
+        effort: request.effort,
         inference_source: source,
         system,
         skill_id: recorded_skill,
@@ -3251,6 +3251,7 @@ pub(crate) async fn turn_request(
     system: Option<String>,
     messages: Vec<ChatMessage>,
 ) -> ModelRequest {
+    let (effort, fallback_for) = route.fallback(effort);
     let (model, endpoint) = route.asked(pin);
     let gateway_key = match (&endpoint, coworker, account) {
         (None, Some(coworker), Some(account)) => {
@@ -3272,6 +3273,7 @@ pub(crate) async fn turn_request(
         messages,
         tools: Vec::new(),
         endpoint,
+        fallback_for,
     }
 }
 

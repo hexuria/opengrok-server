@@ -379,7 +379,7 @@ async fn run_schedule_now(
     let run_id = RunId::new();
     let skip = crate::autonomy::unreachable(&state.agui, &account_id, &coworker_id, &run_id).await;
     let fired = desk::mutate_schedule(&state.agui, &account_id, &id, now_ms(), |loaded| {
-        let firing = crate::autonomy::firing(skip, FireCause::Manual, &run_id);
+        let firing = ScheduleCommand::firing(skip, FireCause::Manual, &run_id, now_ms());
         let refused =
             |why: opengrok_core::schedule::ScheduleError| (StatusCode::CONFLICT, why.to_string());
         loaded.decide(firing).map_err(refused)
@@ -507,7 +507,7 @@ pub(super) fn history(
     let skips = skipped.iter().map(|skip| {
         let row = json!({ "runId": null, "cause": skip.cause.as_str(), "status": null,
             "startedAtMs": null, "endedAtMs": null, "at": skip.at_ms, "state": "skipped",
-            "skipped": skip.code, "reason": crate::autonomy::skip_reason(&skip.code) });
+            "skipped": skip.code, "reason": Skip::reason(&skip.code) });
         (skip.at_ms, row)
     });
     let mut rows: Vec<(i64, Value)> = ran.chain(skips).collect();

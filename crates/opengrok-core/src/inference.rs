@@ -186,6 +186,52 @@ pub struct InferenceSource {
     /// the log until set, so every event from before it reads as none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_bot_default: Option<NewBotDefault>,
+    /// The person switched the relay off (#332): a turn that would go by their Mac goes to the
+    /// gateway on `plan_fallback`, or is refused; the loopback never reads it. Kept as the switch's
+    /// off side, so every event from before it reads as on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub relay_off: bool,
+    /// What answers in the Mac's place while the relay is off (#332). Absent until set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_fallback: Option<PlanFallback>,
+}
+
+/// The Server model a turn by the person's Mac asks while they switched the relay off, and how hard
+/// it thinks (#332): the gateway's, metered there, never written onto a bot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanFallback {
+    pub model: String,
+    #[serde(default)]
+    pub effort: Effort,
+}
+
+impl PlanFallback {
+    /// `planFallback` as a `PUT /account/inference-source` names it: null is none; an object's model
+    /// is held to what a hire's is on the gateway, and its effort to a coworker's words.
+    pub fn named(value: &Value) -> Result<Option<Self>, String> {
+        let object = match value {
+            Value::Null => return Ok(None),
+            Value::Object(object) => object,
+            _ => return Err("planFallback must be an object or null".to_string()),
+        };
+        let model = object
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let model = Coworker::non_blank(model.to_string());
+        let model = model.map_err(|why| format!("planFallback.model: {why}"))?;
+        let effort = Effort::named(object.get("effort"));
+        let effort = effort.map_err(|why| format!("planFallback.effort {why}"))?;
+        let effort = effort.unwrap_or_default();
+        Ok(Some(Self { model, effort }))
+    }
+}
+
+/// What saving a setting does to the proxy's key. No `Debug`: `Set` holds the key.
+pub enum KeyChange {
+    Keep,
+    Set(String),
+    Clear,
 }
 
 /// A person's default for new bots: the door, the model and how hard it thinks, ALL WRITTEN ONTO
@@ -252,9 +298,96 @@ impl InferenceSource {
 
     /// Whether a turn that named `chosen`, with a coworker whose own source is `coworker`, goes
     /// by the person's Mac over this setting: the question a queued send asks to know whether it
-    /// waits for one (opengrok-server `pending::Held`), resolved as the turn itself is.
+    /// waits for one (opengrok-server `pending::Held`), resolved as the turn itself is. Never
+    /// while the relay is off (#332): such a turn goes to the fallback or is refused, at once.
     pub fn by_mac(&self, chosen: Option<TurnSource>, coworker: Option<SourceKind>) -> bool {
-        self.resolve(TurnSource::picked(chosen, coworker)) == (SourceKind::LocalProxy, Via::Mac)
+        let way = self.resolve(TurnSource::picked(chosen, coworker));
+        !self.relay_off && way == (SourceKind::LocalProxy, Via::Mac)
+    }
+
+    /// The setting a `PUT /account/inference-source` body asks for over this one, and what it does
+    /// to the key, or the sentence it is refused with; `base` judges an address
+    /// (`opengrok_harness::local_proxy::loopback_base`). A field absent keeps what is saved; `null`
+    /// or blank clears it, and so for `via`, `relay.localModel`, `newBotDefault` and
+    /// `planFallback` (null only); `relayEnabled` is true or false, and SWITCHES NO WAY: the app
+    /// sends `via` beside it when it means one (#332). EVERY RULE IS ASKED HERE, BEFORE ANYTHING IS
+    /// WRITTEN: an address that is not this machine, or a model the terms forbid, beside a fresh
+    /// key saves neither. The key goes out in a header, so it is printable and bounded or refused
+    /// now, not at a turn.
+    pub fn applied(
+        &self,
+        body: &Value,
+        base: impl Fn(&str) -> Result<String, String>,
+    ) -> Result<(Self, KeyChange), String> {
+        let text = |object: &Value, field: &str| -> Result<Option<Option<String>>, String> {
+            match object.get(field) {
+                None => Ok(None),
+                Some(Value::Null) => Ok(Some(None)),
+                Some(Value::String(text)) => Ok(Some(
+                    Some(text.trim().to_string()).filter(|t| !t.is_empty()),
+                )),
+                Some(_) => Err(format!("{field} must be a string or null")),
+            }
+        };
+        let model =
+            |model: Option<String>, field: &str| match model.as_deref().map(subscription_model) {
+                Some(Err(why)) => Err(format!("{field}: {why}")),
+                _ => Ok(model),
+            };
+        let mut source = self.clone();
+        source.kind = SourceKind::named(body.get("kind"))
+            .ok()
+            .flatten()
+            .ok_or("kind must be \"gateway\" or \"local_proxy\"")?;
+        if let Some(chosen) = text(body, "baseUrl")? {
+            source.base_url = chosen
+                .as_deref()
+                .map(&base)
+                .transpose()
+                .map_err(|why| format!("baseUrl: {why}"))?;
+        }
+        if let Some(chosen) = text(body, "localModel")? {
+            source.local_model = model(chosen, "localModel")?;
+        }
+        if let Some(via) = body.get("via") {
+            source.via = Via::named(Some(via)).map_err(|why| format!("via {why}"))?;
+        }
+        // THE MAC'S MODEL IS ITS OWN, held to the same allowlist: the Mac's opencodex is not this
+        // machine's, and need not serve the ids the loopback's does.
+        match body.get("relay") {
+            None => {}
+            Some(Value::Null) => source.relay_model = None,
+            Some(relay @ Value::Object(_)) => {
+                let chosen = text(relay, "localModel").map_err(|why| format!("relay.{why}"))?;
+                if let Some(chosen) = chosen {
+                    source.relay_model = model(chosen, "relay.localModel")?;
+                }
+            }
+            Some(_) => return Err("relay must be an object or null".to_string()),
+        }
+        if let Some(chosen) = body.get("newBotDefault") {
+            source.new_bot_default = NewBotDefault::named(chosen)?;
+        }
+        if let Some(on) = body.get("relayEnabled") {
+            source.relay_off = !on.as_bool().ok_or("relayEnabled must be true or false")?;
+        }
+        if let Some(chosen) = body.get("planFallback") {
+            source.plan_fallback = PlanFallback::named(chosen)?;
+        }
+        let key = match text(body, "apiKey")? {
+            None => KeyChange::Keep,
+            Some(None) => KeyChange::Clear,
+            Some(Some(key)) if key.len() <= 512 && key.bytes().all(|b| b.is_ascii_graphic()) => {
+                KeyChange::Set(key)
+            }
+            Some(Some(_)) => return Err("apiKey must be printable ASCII, 512 at most".to_string()),
+        };
+        source.has_key = match key {
+            KeyChange::Keep => source.has_key,
+            KeyChange::Set(_) => true,
+            KeyChange::Clear => false,
+        };
+        Ok((source, key))
     }
 }
 

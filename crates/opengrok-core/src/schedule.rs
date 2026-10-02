@@ -97,6 +97,25 @@ pub struct Skip {
     pub at_ms: i64,
 }
 
+/// A skip's code, and the sentence its row says it in: by the way the plan goes, or for the relay
+/// its person switched off with no fallback (#332).
+pub const SKIPPED: [(&str, &str); 3] = [
+    (
+        "relay_offline",
+        "Skipped: your computer was off, so your plan couldn't answer",
+    ),
+    ("proxy_down", "Skipped: your plan's proxy didn't answer"),
+    ("relay_disabled", "Skipped: Relay is off for your plan"),
+];
+
+impl Skip {
+    /// The sentence a skip's code is said in, on its history row and its `lastRun`.
+    pub fn reason(code: &str) -> &'static str {
+        let said = SKIPPED.iter().find(|(known, _)| *known == code);
+        said.map_or("Skipped", |(_, why)| why)
+    }
+}
+
 /// The zone of every routine written before routines had one, which is what they replay as.
 pub const UTC: &str = "UTC";
 
@@ -449,6 +468,30 @@ pub enum ScheduleCommand {
 
 /// A wake as an event stores it: kind, normalized cron, hook id, hash, key.
 type Stored = (WakeKind, String, String, String, String);
+
+impl ScheduleCommand {
+    /// What a firing writes: its `Fire`, or the `Skip` a plan with nobody to answer it gave the
+    /// code and the words for (opengrok-server `autonomy::unreachable`).
+    pub fn firing(
+        skip: Option<(&str, &str)>,
+        cause: FireCause,
+        run_id: &RunId,
+        at_ms: i64,
+    ) -> Self {
+        match skip {
+            Some((code, _)) => Self::Skip(Skip {
+                cause,
+                code: code.to_string(),
+                at_ms,
+            }),
+            None => Self::Fire {
+                run_id: run_id.clone(),
+                cause,
+                at_ms,
+            },
+        }
+    }
+}
 
 impl Schedule {
     pub fn replay<'a>(events: impl IntoIterator<Item = &'a ScheduleEvent>) -> Self {

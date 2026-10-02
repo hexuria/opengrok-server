@@ -18,8 +18,8 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use opengrok_core::account::AccountCommand;
 use opengrok_core::id::AccountId;
-use opengrok_core::inference::{InferenceSource, NewBotDefault, TurnSource};
-use opengrok_harness::local_proxy::{self, KeyChange};
+use opengrok_core::inference::{InferenceSource, KeyChange, NewBotDefault, TurnSource};
+use opengrok_harness::local_proxy;
 use opengrok_harness::relay::{Piped, Refused};
 use serde_json::{Value, json};
 
@@ -204,7 +204,8 @@ async fn described(state: &AgUiState, id: &AccountId, source: &InferenceSource) 
 }
 
 /// `PUT /account/inference-source` — `{kind, via?, baseUrl?, localModel?, apiKey?, relay?,
-/// newBotDefault?}` (what each does is `local_proxy::apply`), answered as `GET` answers.
+/// newBotDefault?, relayEnabled?, planFallback?}` (what each does is `InferenceSource::applied`),
+/// answered as `GET` answers.
 async fn put_source(
     State(state): State<AgUiState>,
     headers: HeaderMap,
@@ -223,7 +224,8 @@ async fn save(
 ) -> Result<(AccountId, InferenceSource), Response> {
     let caller = crate::account_api::caller(&state.auth, headers).await;
     let (id, account, seq) = caller.map_err(signed_out)?;
-    let (source, key) = local_proxy::apply(&account.inference_source, body)
+    let (source, key) = (account.inference_source)
+        .applied(body, local_proxy::loopback_base)
         .map_err(|why| refuse(StatusCode::BAD_REQUEST, why))?;
     if let KeyChange::Set(key) = &key {
         seal(state, &id, key).await?;

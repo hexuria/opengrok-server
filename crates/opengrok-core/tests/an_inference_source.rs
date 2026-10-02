@@ -6,7 +6,8 @@
 use opengrok_core::account::{Account, AccountCommand, AccountError, Plan};
 use opengrok_core::coworker::Effort;
 use opengrok_core::inference::{
-    InferenceSource, NewBotDefault, SourceKind, TurnSource, Via, subscription_model,
+    InferenceSource, KeyChange, NewBotDefault, PlanFallback, SourceKind, TurnSource, Via,
+    subscription_model,
 };
 use opengrok_core::run::{Run, RunCommand, RunEvent};
 use serde_json::json;
@@ -222,6 +223,11 @@ fn an_account_keeps_the_setting_it_was_given_and_starts_on_the_gateway() {
             source: SourceKind::LocalProxy,
             model: "gpt-6-sol--fast".to_string(),
             effort: Effort::High,
+        }),
+        relay_off: true,
+        plan_fallback: Some(PlanFallback {
+            model: "xai/grok-4.6".to_string(),
+            effort: Effort::Low,
         }),
     };
     let events = account
@@ -484,6 +490,117 @@ fn a_default_for_new_bots_is_named_whole_or_refused_in_its_parts_words() {
     let stored = serde_json::to_value(&fast).unwrap();
     let wire = json!({ "source": "local_proxy", "model": "gpt-6-sol--fast", "effort": "xhigh" });
     assert_eq!(stored, wire, "the log and the wire spell it alike");
+}
+
+/// A SETTING FROM BEFORE THE SWITCH HAS THE RELAY ON (#332), with no fallback, and one that never
+/// touched either logs neither, so an old log and an older replica read as they did.
+#[test]
+fn a_setting_from_before_the_relay_switch_has_the_relay_on_and_no_fallback() {
+    let logged = json!({ "type": "inference-source-set", "at_ms": 2,
+                         "source": { "kind": "local_proxy", "via": "mac", "has_key": false } });
+    let account = Account::replay(&[serde_json::from_value(logged).expect("an event from before")]);
+    let setting = &account.inference_source;
+    assert_eq!((setting.relay_off, &setting.plan_fallback), (false, &None));
+    assert!(setting.by_mac(None, None), "on, it goes by the Mac");
+    let unset = serde_json::to_value(InferenceSource::default()).unwrap();
+    assert!(unset.get("relay_off").is_none() && unset.get("plan_fallback").is_none());
+}
+
+/// A FALLBACK IS NAMED WHOLE OR REFUSED in its parts' words: its model as a hire's pin is on the
+/// gateway, its effort as a coworker's. Null is none, and an effort left out is inherit.
+#[test]
+fn a_plan_fallback_is_named_whole_or_refused_in_its_parts_words() {
+    let named = |value| PlanFallback::named(&value);
+    assert_eq!(named(json!(null)), Ok(None));
+    let grok = named(json!({ "model": " xai/grok-4.6 " }))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (grok.model.as_str(), grok.effort),
+        ("xai/grok-4.6", Effort::Inherit)
+    );
+    let high = named(json!({ "model": "oag/cheap", "effort": "high" }))
+        .unwrap()
+        .unwrap();
+    assert_eq!(high.effort, Effort::High);
+    assert_eq!(
+        named(json!({ "model": "  " })),
+        Err("planFallback.model: a coworker needs a model to think with".to_string())
+    );
+    let loud = named(json!({ "model": "m", "effort": "loud" })).unwrap_err();
+    assert!(
+        loud.starts_with("planFallback.effort must be one of inherit, none"),
+        "{loud}"
+    );
+    let refused = Err("planFallback must be an object or null".to_string());
+    assert_eq!(named(json!("xai/grok-4.6")), refused);
+    let stored = serde_json::to_value(&high).unwrap();
+    assert_eq!(
+        stored,
+        json!({ "model": "oag/cheap", "effort": "high" }),
+        "log and wire alike"
+    );
+}
+
+/// THE SWITCH MOVES NO WAY (#332): `relayEnabled` turns the relay off and on and leaves `via` as
+/// it was, which only a `via` in the body changes; a fallback absent is kept and null clears it.
+/// Off, a turn no longer goes by the Mac, so a queued send does not wait for one. A body refused
+/// in any part saves none of itself.
+#[test]
+fn switching_the_relay_moves_no_way_and_a_fallback_is_kept_until_cleared() {
+    let loopback = |raw: &str| Ok(raw.to_string());
+    let by_mac = InferenceSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Mac),
+        ..Default::default()
+    };
+    let apply = |current: &InferenceSource, body| {
+        let (setting, key) = current.applied(&body, loopback).expect("applied");
+        assert!(matches!(key, KeyChange::Keep));
+        setting
+    };
+    let fallback = json!({ "model": "xai/grok-4.6", "effort": "low" });
+    let body = json!({ "kind": "local_proxy", "relayEnabled": false, "planFallback": fallback });
+    let off = apply(&by_mac, body);
+    assert_eq!(
+        (off.relay_off, off.via),
+        (true, Some(Via::Mac)),
+        "no way moved"
+    );
+    let kept = PlanFallback::named(&fallback).unwrap();
+    assert_eq!(off.plan_fallback, kept);
+    assert!(!off.by_mac(None, None), "off, nothing waits for the Mac");
+
+    let on = apply(&off, json!({ "kind": "local_proxy", "relayEnabled": true }));
+    assert_eq!(
+        (on.relay_off, on.via, &on.plan_fallback),
+        (false, Some(Via::Mac), &kept)
+    );
+    let loopback_way = apply(&on, json!({ "kind": "local_proxy", "via": "loopback" }));
+    assert_eq!(
+        (loopback_way.relay_off, loopback_way.via),
+        (false, Some(Via::Loopback))
+    );
+    let cleared = apply(&off, json!({ "kind": "local_proxy", "planFallback": null }));
+    assert_eq!((cleared.relay_off, cleared.plan_fallback), (true, None));
+
+    for (body, why) in [
+        (
+            json!({ "kind": "local_proxy", "relayEnabled": "no" }),
+            "relayEnabled must be true or false",
+        ),
+        (
+            json!({ "kind": "local_proxy", "relayEnabled": null }),
+            "relayEnabled must be true or false",
+        ),
+        (
+            json!({ "kind": "local_proxy", "relayEnabled": false, "planFallback": { "model": "" } }),
+            "planFallback.model: a coworker needs a model to think with",
+        ),
+    ] {
+        let refused = by_mac.applied(&body, loopback).map(|_| ()).unwrap_err();
+        assert_eq!(refused, why, "{body}");
+    }
 }
 
 /// A person's time zone is an IANA name or nothing: an unknown one is refused before it is logged,

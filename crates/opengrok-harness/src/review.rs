@@ -263,7 +263,6 @@ impl ReviewJudge for ModelJudge {
             gateway_key: self.key.clone(),
             spend_scope: self.scope.clone(),
             spend_actor: self.actor.clone(),
-            context_tokens: None,
             model: self.model.clone(),
             // A coworker's effort is for its own turns; a one-word verdict thinks at the route's.
             effort: Default::default(),
@@ -272,7 +271,7 @@ impl ReviewJudge for ModelJudge {
             // Deliberately empty: the door then sends no tool fields at all, and the judge is a
             // plain completion that cannot call anything.
             tools: Vec::new(),
-            endpoint: None,
+            ..ModelRequest::default()
         };
         // A JUDGE ASKS WHERE ITS TURN ASKS. On a person's own subscription the whole turn stays
         // off the gateway, its safety check included: judged on the deployment's route, every

@@ -37,7 +37,7 @@ use opengrok_core::coworker::Coworker;
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::inference::SourceKind;
 use opengrok_core::limits::RunLimits;
-use opengrok_core::schedule::{FireCause, ScheduleCommand, ScheduleView, Skip};
+use opengrok_core::schedule::{SKIPPED, ScheduleView, Skip};
 use opengrok_harness::ModelEndpoint;
 use opengrok_harness::local_proxy::{self, Route, Saved};
 use opengrok_harness::{ChatMessage, RunBudget, RunContext, run_conversation_within};
@@ -106,7 +106,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         opengrok_policy::Action::UseCoworker,
         &policy,
     );
-    let refused = |why: String| crate::pairs::refused(&state, message, why);
+    let refused = |why: String| crate::pairs::refused(&state, message, why, None);
     if let Some(reason) = decision.reason() {
         tracing::warn!(%origin, coworker = %coworker_id, %reason, "a firing was refused by policy");
         return refused(format!("This message was not delivered: {reason}.")).await;
@@ -158,7 +158,20 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     let (route, line, asked, said) = match message {
         Some(row) => match crate::pairs::opening(&state, row, &hirer).await {
             Some((line, said)) => {
-                let route = Route::for_message(coworker.source, &coworker.model);
+                // Its own rule (#314), unless the person switched the relay off: then its plan's
+                // fallback answers, or it is skipped as a routine's firing is (#332).
+                let route = match routine_route(&state, (&account_id, &run_id), &coworker).await {
+                    route @ Route::Fallback(_) => route,
+                    Route::LocalProxy {
+                        endpoint: ModelEndpoint::Unavailable { why, .. },
+                        ..
+                    } if why.starts_with(local_proxy::RELAY_OFF) => {
+                        let (code, why) = SKIPPED[2];
+                        return crate::pairs::refused(&state, message, why.into(), Some(code))
+                            .await;
+                    }
+                    _ => Route::for_message(coworker.source, &coworker.model),
+                };
                 (route, line, crate::pairs::prompt(row, &run_id), said)
             }
             None => {
@@ -211,7 +224,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
     let request = crate::agui::routes::turn_request(&state, who, asked, Some(system), said).await;
     // The model the run asks, as a live turn captures it: on the person's plan it may be the
     // setting's rather than the pin (#316), and a carry-on asks again what was captured.
-    journal.model = Some(request.model.clone());
+    (journal.model, journal.effort) = (Some(request.model.clone()), request.effort);
 
     // THE CLAIM, as a turn's: a message's run id is its row's, which a drain and the sweep may
     // both reach for, and only the one whose `Started` commits runs it (`PairDelivery` Start).
@@ -351,18 +364,10 @@ pub(crate) async fn routine_route(
     }
 }
 
-/// A skipped firing's code, and the sentence its row says it in, by the way its plan goes.
-pub(crate) const SKIPPED: [(&str, &str); 2] = [
-    (
-        "relay_offline",
-        "Skipped: your computer was off, so your plan couldn't answer",
-    ),
-    ("proxy_down", "Skipped: your plan's proxy didn't answer"),
-];
-
 /// Why `route` would find nobody to answer a firing now, as its skip's code and sentence: the
-/// person's Mac holds no relay stream, or their proxy does not answer `/healthz`. `None` on the
-/// gateway, and for a refusal in words, which a live turn on that setting gets too.
+/// person's Mac holds no relay stream, their proxy does not answer `/healthz`, or they switched the
+/// relay off with no fallback. `None` on the gateway, their fallback included, and for any other
+/// refusal in words, which a live turn on that setting gets too.
 pub(crate) async fn unreachable_by(route: &Route) -> Option<(&'static str, &'static str)> {
     let Route::LocalProxy { endpoint, .. } = route else {
         return None;
@@ -370,7 +375,7 @@ pub(crate) async fn unreachable_by(route: &Route) -> Option<(&'static str, &'sta
     let (up, way) = match endpoint {
         ModelEndpoint::Relay(to) => (to.broker.connected(&to.account).is_some(), 0),
         ModelEndpoint::Proxy { base_url, .. } => (local_proxy::healthy(base_url).await, 1),
-        ModelEndpoint::Unavailable { .. } => (true, 0),
+        ModelEndpoint::Unavailable { why, .. } => (!why.starts_with(local_proxy::RELAY_OFF), 2),
     };
     (!up).then_some(SKIPPED[way])
 }
@@ -386,33 +391,6 @@ pub(crate) async fn unreachable(
 ) -> Option<(&'static str, &'static str)> {
     let (coworker, _) = state.auth.store.load_coworker(coworker_id).await.ok()?;
     unreachable_by(&routine_route(state, (account_id, run_id), &coworker).await).await
-}
-
-/// What a firing writes: its `Fired`, or the `Skipped` that `unreachable` gave the words for.
-pub(crate) fn firing(
-    skip: Option<(&str, &str)>,
-    cause: FireCause,
-    run_id: &RunId,
-) -> ScheduleCommand {
-    let at_ms = now_ms();
-    match skip {
-        Some((code, _)) => ScheduleCommand::Skip(Skip {
-            cause,
-            code: code.to_string(),
-            at_ms,
-        }),
-        None => ScheduleCommand::Fire {
-            run_id: run_id.clone(),
-            cause,
-            at_ms,
-        },
-    }
-}
-
-/// The sentence a skip's code is said in, on its history row and its `lastRun`.
-pub(crate) fn skip_reason(code: &str) -> &'static str {
-    let said = SKIPPED.iter().find(|(known, _)| *known == code);
-    said.map_or("Skipped", |(_, why)| why)
 }
 
 /// A routine's newest run, or its newest skipped firing when that came after it (#316), as its
@@ -436,7 +414,7 @@ pub(crate) async fn last_run(
     let newest = newest.into_iter().next();
     let ran_at = newest.as_ref().map_or(i64::MIN, |run| run.started_at_ms);
     if let Some(skip) = view.last_skip.as_ref().filter(|skip| skip.at_ms > ran_at) {
-        let why = skip_reason(&skip.code);
+        let why = Skip::reason(&skip.code);
         return Ok(Some(serde_json::json!({ "runId": null, "status": null,
             "startedAtMs": null, "finishedAtMs": null, "summary": why, "at": skip.at_ms,
             "cause": skip.cause.as_str(), "state": "skipped", "skipped": skip.code,

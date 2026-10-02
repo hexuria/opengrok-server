@@ -316,9 +316,14 @@ pub(crate) fn prompt(row: &BotMessageRow, run_id: &RunId) -> Vec<Value> {
 }
 
 /// A message that cannot be had: its run, started and failed at once, saying why in the pair's
-/// thread, which is how the person sees it was refused. Its ending drains the pair as any does.
-/// Nothing for a firing that carries none, a routine's.
-pub(crate) async fn refused(state: &AgUiState, message: Option<&BotMessageRow>, why: String) {
+/// thread, with `code` beside it on a skip (#332), which is how the person sees it was refused. Its
+/// ending drains the pair as any does. Nothing for a firing that carries none, a routine's.
+pub(crate) async fn refused(
+    state: &AgUiState,
+    message: Option<&BotMessageRow>,
+    why: String,
+    code: Option<&'static str>,
+) {
     let Some(row) = message else { return };
     let run_id = RunId::from_stored(row.run_id.clone());
     let journal = StoreJournal {
@@ -341,6 +346,7 @@ pub(crate) async fn refused(state: &AgUiState, message: Option<&BotMessageRow>, 
     }
     let mut projection = opengrok_harness::Projection::new(&row.thread_id, &row.run_id, now_ms());
     let mut frames = projection.start();
+    projection.failing_with(code);
     frames.extend(projection.fail(why));
     use opengrok_harness::RunJournal as _;
     if let Err(error) = journal.record(run_id.as_str(), &frames).await {

@@ -290,6 +290,31 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_bots_ceiling_lists_its_routines_as_one_row",
         "/coworkers/{coworker_id}/ceiling",
     ),
+    // The relay's switch and its fallback (#332): the save that names both and its read, shaped
+    // like the setting's others; the replay of a turn on the fallback, whose frame says
+    // `fallbackFor`; a plan routine's history with its `relay_disabled` skips; and a resume that
+    // does not fire, with the list read after it. Each test makes one call of each kind on the
+    // route it is kept for.
+    (
+        "a_person_switches_the_relay_off_and_names_a_fallback_in_one_save",
+        "/account/inference-source",
+    ),
+    (
+        "a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_and_says_so",
+        "/ag-ui/threads/{thread_id}",
+    ),
+    (
+        "a_plan_bots_routine_is_skipped_while_the_relay_is_off_with_no_fallback",
+        "/schedules/{id}/runs",
+    ),
+    (
+        "a_resumed_routine_never_fires_at_once_and_records_nothing_it_missed",
+        "/schedules/{id}/resume",
+    ),
+    (
+        "a_resumed_routine_never_fires_at_once_and_records_nothing_it_missed",
+        "/schedules",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

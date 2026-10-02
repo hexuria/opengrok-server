@@ -928,6 +928,139 @@ async fn a_bot_on_its_own_plan_is_refused_in_words_in_the_pair_thread() {
     assert!(h.asked_for(&luna).is_empty(), "no model asked");
 }
 
+/// The person's setting by their Mac, its relay switched off (#332), with `fallback` or none.
+async fn relay_off(h: &Harness, who: &Person, fallback: Value) {
+    let body = json!({ "kind": "local_proxy", "via": "mac", "relay": { "localModel": "gpt-5.5" },
+                       "relayEnabled": false, "planFallback": fallback });
+    let path = "/account/inference-source";
+    let (status, saved) = h.call(who, "PUT", path, Some(body)).await;
+    assert_eq!(status, 200, "{saved}");
+}
+
+/// A Bot of `who`'s whose own door is the gateway, whatever their setting says: the sender, whose
+/// turn must answer however the relay is set.
+async fn on_the_gateway(h: &Harness, who: &Person, name: &str) -> String {
+    let bot = h.hire(who, name).await;
+    let body = json!({ "source": "gateway" });
+    let (status, patched) = h
+        .call(who, "PATCH", &format!("/coworkers/{bot}"), Some(body))
+        .await;
+    assert_eq!(status, 200, "{patched}");
+    bot
+}
+
+/// A Bot of `who`'s put on their own plan, on `pin`.
+async fn on_its_plan(h: &Harness, who: &Person, name: &str) -> String {
+    let bot = h.hire(who, name).await;
+    let body = json!({ "source": "local_proxy", "model": "gpt-6-luna" });
+    let (status, patched) = h
+        .call(who, "PATCH", &format!("/coworkers/{bot}"), Some(body))
+        .await;
+    assert_eq!(status, 200, "{patched}");
+    bot
+}
+
+/// RELAY OFF, A FALLBACK SET (#332): a Bot on its person's own plan answers another Bot's message
+/// on the gateway, at the fallback's model and effort, as its own spend, and says why; its own pin
+/// and door are untouched.
+#[tokio::test]
+async fn a_bot_on_its_own_plan_answers_on_the_fallback_while_the_relay_is_off() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let uriah = h.person("Uriah").await;
+    let ada = on_the_gateway(&h, &uriah, "Ada").await;
+    let luna = on_its_plan(&h, &uriah, "Luna").await;
+    relay_off(
+        &h,
+        &uriah,
+        json!({ "model": "oag/fallback", "effort": "low" }),
+    )
+    .await;
+    h.script(
+        &ada,
+        vec![json!({ "to": ["Luna"], "message": "the report?" })],
+    );
+    h.turn(&uriah, &ada, "ask Luna").await;
+    let pair = pair_thread(&ada, &luna);
+    let runs = h.ended(&uriah, &pair, 1).await;
+    let (_, run) = &runs[0];
+    assert_eq!(run.status, opengrok_core::run::RunStatus::Finished);
+    let said =
+        json!({ "kind": "gateway", "model": "oag/fallback", "fallbackFor": "relay_disabled" });
+    let frame = run
+        .emitted
+        .iter()
+        .find(|f| f["name"] == "opengrok.inferenceSource");
+    assert_eq!(frame.map(|f| &f["value"]), Some(&said), "{:?}", run.emitted);
+    let asked = h.asked_for(&luna);
+    assert_eq!(asked.len(), 1, "one round");
+    let asked = &asked[0];
+    let to = (asked.model.as_str(), asked.effort, asked.endpoint.is_none());
+    use opengrok_core::coworker::Effort;
+    assert_eq!(
+        to,
+        ("oag/fallback", Effort::Low, true),
+        "the gateway, on the fallback"
+    );
+    assert_eq!(
+        asked.spend_actor.as_deref(),
+        Some(uriah.id.as_str()),
+        "its person pays"
+    );
+    let id = CoworkerId::from_stored(luna.clone());
+    let (bot, _) = h.store.load_coworker(&id).await.expect("Luna");
+    let own = (bot.model.as_str(), bot.source);
+    use opengrok_core::inference::SourceKind;
+    assert_eq!(
+        own,
+        ("gpt-6-luna", Some(SourceKind::LocalProxy)),
+        "untouched"
+    );
+}
+
+/// RELAY OFF AND NO FALLBACK (#332): a Bot on its person's own plan does not answer another Bot's
+/// message: its turn is skipped in the pair's thread, `relay_disabled` beside the contract's words,
+/// and no model is asked. With the relay on again its own rule (#314) answers, as before.
+#[tokio::test]
+async fn a_bot_on_its_own_plan_is_skipped_while_the_relay_is_off_with_no_fallback() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let uriah = h.person("Uriah").await;
+    let ada = on_the_gateway(&h, &uriah, "Ada").await;
+    let luna = on_its_plan(&h, &uriah, "Luna").await;
+    relay_off(&h, &uriah, Value::Null).await;
+    h.script(
+        &ada,
+        vec![json!({ "to": ["Luna"], "message": "the report?" })],
+    );
+    h.turn(&uriah, &ada, "ask Luna").await;
+    let pair = pair_thread(&ada, &luna);
+    let runs = h.ended(&uriah, &pair, 1).await;
+    let (_, run) = &runs[0];
+    assert_eq!(run.status, opengrok_core::run::RunStatus::Failed);
+    let ended = run.emitted.last().cloned().unwrap();
+    let skipped = (&ended["type"], &ended["message"], &ended["code"]);
+    let words = json!("Skipped: Relay is off for your plan");
+    assert_eq!(
+        skipped,
+        (&json!("RUN_ERROR"), &words, &json!("relay_disabled")),
+        "{ended}"
+    );
+    assert!(h.asked_for(&luna).is_empty(), "no model asked");
+
+    let on = json!({ "kind": "local_proxy", "relayEnabled": true });
+    let (status, saved) = h
+        .call(&uriah, "PUT", "/account/inference-source", Some(on))
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    h.script(&ada, vec![json!({ "to": ["Luna"], "message": "and now?" })]);
+    h.turn(&uriah, &ada, "ask Luna again").await;
+    let runs = h.ended(&uriah, &pair, 2).await;
+    let ended = runs[1].1.emitted.last().cloned().unwrap();
+    assert_eq!(ended["message"], ON_ITS_PLAN, "its own rule: {ended}");
+    assert!(h.asked_for(&luna).is_empty(), "no model asked");
+}
+
 /// A PERSON READS A PAIR'S THREAD AND CANNOT WRITE IN IT. Their words, live or queued, get the
 /// contract's 403, whatever thread a client names that way.
 #[tokio::test]

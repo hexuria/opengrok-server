@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use opengrok_core::id::{HookId, RunId};
-use opengrok_core::schedule::FireCause;
+use opengrok_core::schedule::{FireCause, ScheduleCommand};
 
 use crate::autonomy::desk::mutate_schedule;
 use crate::host_state::HostState;
@@ -237,7 +237,7 @@ async fn inbound(
         {
             return Err((StatusCode::UNAUTHORIZED, "bad token".to_string()));
         }
-        let firing = crate::autonomy::firing(skip, FireCause::Webhook, &run_id);
+        let firing = ScheduleCommand::firing(skip, FireCause::Webhook, &run_id, now_ms());
         loaded.decide(firing).map_err(|reason| {
             let code = if reason == opengrok_core::schedule::ScheduleError::Paused {
                 StatusCode::CONFLICT

@@ -1855,3 +1855,57 @@ async fn an_edit_after_the_last_slot_was_claimed_does_not_fire_it_again() {
         "the one slot this clock had was handed out a second time"
     );
 }
+
+/// A RESUMED ROUTINE NEVER FIRES AT ONCE (#332): its next slot is counted strictly from the resume,
+/// so a slot it missed while paused is dropped and nothing records it. The sweep finds nothing
+/// due, and its history and `lastRun` stay empty; "run now" stays the one wake a person asks for.
+/// One resume and one read of the list, which the corpus keeps.
+#[tokio::test]
+async fn a_resumed_routine_never_fires_at_once_and_records_nothing_it_missed() {
+    use opengrok_core::schedule::next_fire_ms;
+    let database_url = database_or_skip!();
+    let _clock = clock(&database_url, true).await;
+    let h = advertising(&database_url, &email("resumed")).await;
+    let coworker = h.hire().await;
+    let id = h.cron_routine(&coworker).await;
+    let (status, body) = h.post(&format!("/schedules/{id}/pause"), json!({})).await;
+    assert_eq!(status, 204, "{body}");
+    // Paused through a week of its slots: its clock as it stood before the pause, long past.
+    let a_week_ago = now_ms() - 7 * 24 * 60 * 60 * 1000;
+    sqlx::query("update schedule_view set next_due_ms = $2 where id = $1")
+        .bind(&id)
+        .bind(a_week_ago)
+        .execute(h.store.pool())
+        .await
+        .expect("a missed slot");
+
+    let before = now_ms();
+    let (status, body) = h.post(&format!("/schedules/{id}/resume"), json!({})).await;
+    assert_eq!(status, 204, "{body}");
+    let row = h.row(&id).await;
+    let next = row["nextDueMs"].as_i64().expect("its next slot");
+    let normal = [before, now_ms()].map(|from| next_fire_ms("0 9 * * 1", "UTC", from));
+    assert!(next > before && normal.contains(&Some(next)), "{row}");
+    assert_eq!(row["lastRun"], Value::Null, "nothing it missed is recorded");
+    let claimed = h.store.claim_due_schedules(now_ms(), 1_000_000).await;
+    let claimed = claimed.expect("claim");
+    assert!(
+        !claimed.iter().any(|due| due.id.as_str() == id),
+        "it does not fire at once"
+    );
+    let history = h
+        .store
+        .runs_for_thread_owned_by(&id, &h.account, 10)
+        .await
+        .expect("runs");
+    assert!(history.is_empty(), "no run");
+    let (loaded, _) = h
+        .store
+        .load_schedule(&opengrok_core::id::ScheduleId::from_stored(id.as_str()))
+        .await
+        .expect("load");
+    assert!(
+        loaded.skipped.is_empty(),
+        "no skip recorded for what it missed"
+    );
+}
