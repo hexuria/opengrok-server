@@ -99,8 +99,9 @@ pub enum DispatchError {
 
 #[derive(Default)]
 struct Inner {
-    /// machine_id → the frame sink of the daemon currently streaming for it. Last connect wins.
-    providers: HashMap<String, mpsc::UnboundedSender<Value>>,
+    /// machine_id → the account whose daemon opened its stream, and the stream. Last connect
+    /// wins. A machine id is the client's to choose: one account's revoke ends no other's stream.
+    providers: HashMap<String, (String, mpsc::UnboundedSender<Value>)>,
     /// request_id → (the machine it was dispatched to, the caller waiting for its result). The
     /// machine is kept so a result is only ever accepted from the SAME machine — a daemon for one
     /// machine cannot resolve another machine's command.
@@ -108,8 +109,6 @@ struct Inner {
     /// request_id → accumulated (stdout, stderr) for the STREAMING shell, which sends chunks across
     /// several frames before a terminal exit. Dropped when the request resolves.
     streams: HashMap<String, (String, String)>,
-    /// (account_id, machine_id) → session allow patterns. Process memory only.
-    session_allows: HashMap<(String, String), Vec<String>>,
 }
 
 /// The broker. Cheap to clone through an `Arc`; all state is behind one mutex held only for the
@@ -124,26 +123,33 @@ impl LocalExecBroker {
         Self::default()
     }
 
-    pub async fn session_allows(&self, account_id: &str, machine_id: &str) -> Vec<String> {
-        let inner = self.inner.lock().await;
-        inner
-            .session_allows
-            .get(&(account_id.to_string(), machine_id.to_string()))
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// A daemon opened its stream. Returns the receiver the SSE route drains as frames, after a
-    /// `welcome` is queued. Replaces any previous stream for this machine (a reconnect wins), which
-    /// drops the old receiver and ends its route.
-    pub async fn connect(&self, machine_id: &str) -> mpsc::UnboundedReceiver<Value> {
+    /// A daemon opened its stream with `account`'s token. Returns the receiver the SSE route drains
+    /// as frames, after a `welcome` is queued. Replaces any previous stream for this machine (a
+    /// reconnect wins): the old one is sent nothing more and stays open, out of `disconnect`'s
+    /// reach, until its daemon hangs up.
+    pub async fn connect(&self, account: &str, machine_id: &str) -> mpsc::UnboundedReceiver<Value> {
         let (tx, rx) = mpsc::unbounded_channel();
         // The first frame names the provider so the daemon can correlate — mirrors the client's
         // `welcome{providerId}`.
         let _ = tx.send(json!({ "kind": "welcome", "providerId": machine_id }));
         let mut inner = self.inner.lock().await;
-        inner.providers.insert(machine_id.to_string(), tx);
+        inner
+            .providers
+            .insert(machine_id.to_string(), (account.to_string(), tx));
         rx
+    }
+
+    /// `account`'s daemon token for this machine was revoked, or rotated by a re-enrolment (#299):
+    /// its stream ends now, sent no more commands; its results were refused already, as the token
+    /// is checked on every POST. A `null`, which is never a frame, tells the route to end.
+    pub async fn disconnect(&self, account: &str, machine_id: &str) {
+        let mut inner = self.inner.lock().await;
+        if let Some((owner, stream)) = inner.providers.get(machine_id)
+            && owner == account
+        {
+            let _ = stream.send(Value::Null);
+            inner.providers.remove(machine_id);
+        }
     }
 
     /// Is a daemon currently connected for this machine?
@@ -152,7 +158,7 @@ impl LocalExecBroker {
         inner
             .providers
             .get(machine_id)
-            .is_some_and(|tx| !tx.is_closed())
+            .is_some_and(|(_, tx)| !tx.is_closed())
     }
 
     /// Push an already-approved exec frame to a machine's daemon and return the channel its result
@@ -167,7 +173,7 @@ impl LocalExecBroker {
     ) -> Result<oneshot::Receiver<ExecOutcome>, DispatchError> {
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().await;
-        let Some(provider) = inner.providers.get(machine_id) else {
+        let Some((_, provider)) = inner.providers.get(machine_id) else {
             return Err(DispatchError::NoDaemon);
         };
         let frame = json!({
@@ -271,7 +277,7 @@ impl LocalExecBroker {
         let mut inner = self.inner.lock().await;
         inner.waiters.remove(request_id);
         inner.streams.remove(request_id);
-        if let Some(provider) = inner.providers.get(machine_id) {
+        if let Some((_, provider)) = inner.providers.get(machine_id) {
             let _ = provider.send(json!({ "kind": "cancel", "requestId": request_id }));
         }
     }

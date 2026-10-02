@@ -24,7 +24,7 @@ async fn dispatch_refuses_when_no_daemon_is_connected() {
 #[tokio::test]
 async fn a_connected_daemon_receives_the_exec_frame_and_the_caller_gets_the_result() {
     let broker = LocalExecBroker::new();
-    let mut stream = broker.connect("mac_a").await;
+    let mut stream = broker.connect("acct_a", "mac_a").await;
 
     // First frame down the stream is the welcome.
     let welcome = stream.recv().await.expect("welcome");
@@ -54,9 +54,9 @@ async fn a_connected_daemon_receives_the_exec_frame_and_the_caller_gets_the_resu
 #[tokio::test]
 async fn a_reconnect_replaces_the_old_stream() {
     let broker = LocalExecBroker::new();
-    let mut first = broker.connect("mac_a").await;
+    let mut first = broker.connect("acct_a", "mac_a").await;
     let _ = first.recv().await; // welcome
-    let mut second = broker.connect("mac_a").await;
+    let mut second = broker.connect("acct_a", "mac_a").await;
     let _ = second.recv().await; // welcome
 
     broker
@@ -66,6 +66,27 @@ async fn a_reconnect_replaces_the_old_stream() {
     // The exec frame goes to the NEW stream, not the retired one.
     let frame = second.recv().await.expect("exec on second");
     assert_eq!(frame["requestId"], "req-1");
+}
+
+/// A retired token's stream is ended with a `null` its route stops at (#299), and only by its own
+/// account: a revoke names a machine id the client chose, which another account may share.
+#[tokio::test]
+async fn disconnect_ends_the_stream_only_for_the_account_that_opened_it() {
+    let broker = LocalExecBroker::new();
+    let mut stream = broker.connect("acct_a", "mac_a").await;
+    let _ = stream.recv().await; // welcome
+
+    broker.disconnect("acct_b", "mac_a").await;
+    let shell = json!({ "shellArgs": {} });
+    let held = broker.dispatch("mac_a", "req-1", "req-1", shell.clone());
+    held.await.expect("another account's revoke leaves it");
+    assert_eq!(stream.recv().await.expect("exec")["kind"], "exec");
+
+    broker.disconnect("acct_a", "mac_a").await;
+    assert_eq!(stream.recv().await, Some(Value::Null));
+    assert_eq!(stream.recv().await, None, "nothing is sent after the end");
+    let gone = broker.dispatch("mac_a", "req-2", "req-2", shell).await;
+    assert_eq!(gone.unwrap_err(), DispatchError::NoDaemon);
 }
 
 #[tokio::test]
@@ -91,7 +112,7 @@ fn render_shows_exit_and_streams_for_a_run_and_the_case_for_a_refusal() {
 #[tokio::test]
 async fn a_streaming_shell_accumulates_chunks_and_resolves_on_exit() {
     let broker = LocalExecBroker::new();
-    let mut stream = broker.connect("mac_a").await;
+    let mut stream = broker.connect("acct_a", "mac_a").await;
     let _ = stream.recv().await; // welcome
     let rx = broker
         .dispatch(
@@ -119,7 +140,7 @@ async fn a_streaming_shell_accumulates_chunks_and_resolves_on_exit() {
 #[tokio::test]
 async fn a_stream_chunk_from_the_wrong_machine_is_dropped() {
     let broker = LocalExecBroker::new();
-    let mut a = broker.connect("mac_a").await;
+    let mut a = broker.connect("acct_a", "mac_a").await;
     let _ = a.recv().await;
     let rx = broker
         .dispatch("mac_a", "req-1", "req-1", json!({ "shellStreamArgs": {} }))

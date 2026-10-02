@@ -169,11 +169,11 @@ fn auth_state(store: PgStore) -> AuthState {
 
 /// A fake daemon: connect to the broker for `machine` NOW (so the provider is registered before we
 /// enqueue), then in the background reply to the first `exec` frame with the given outcome.
-async fn fake_daemon(state: &AuthState, machine: &str, reply: ExecOutcome) {
+async fn fake_daemon(state: &AuthState, account: &str, machine: &str, reply: ExecOutcome) {
     let broker = state.local_exec.clone();
     let machine = machine.to_string();
     // Connect synchronously — the provider must exist before enqueue dispatches, or it refuses.
-    let mut stream = broker.connect(&machine).await;
+    let mut stream = broker.connect(account, &machine).await;
     tokio::spawn(async move {
         while let Some(frame) = stream.recv().await {
             if frame["kind"] == "exec" {
@@ -214,7 +214,7 @@ async fn a_bot_allowlisted_command_runs_and_audits_success() {
         .await
         .expect("allow");
 
-    fake_daemon(&state, &machine, success()).await;
+    fake_daemon(&state, &account, &machine, success()).await;
     let result = enqueue_and_wait(
         &state,
         &account,
@@ -286,7 +286,7 @@ async fn a_user_direct_command_skips_ask_and_runs() {
         .await
         .expect("mode");
 
-    fake_daemon(&state, &machine, success()).await;
+    fake_daemon(&state, &account, &machine, success()).await;
     let result = enqueue_and_wait(
         &state,
         &account,
@@ -469,7 +469,7 @@ async fn a_bot_chained_command_after_an_allow_needs_approval() {
 
     // A connected daemon that would run it: the only thing between `; rm -rf ~` and the Mac is
     // the gate asking a person.
-    fake_daemon(&state, &machine, success()).await;
+    fake_daemon(&state, &account, &machine, success()).await;
     let result = enqueue_and_wait(
         &state,
         &account,
@@ -504,7 +504,7 @@ async fn the_daemon_is_sent_the_servers_own_split() {
 
     // Capture the exec frame the daemon would receive, then answer it.
     let broker = state.local_exec.clone();
-    let mut stream = broker.connect(&machine).await;
+    let mut stream = broker.connect(&account, &machine).await;
     let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
     let daemon_machine = machine.clone();
     tokio::spawn(async move {
