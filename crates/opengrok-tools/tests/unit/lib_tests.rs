@@ -1382,12 +1382,14 @@ async fn user_machine_shell_refuses_cleanly_when_no_sink_is_attached() {
 struct CountingJudge {
     verdict: ReviewVerdict,
     shown: std::sync::Mutex<Vec<String>>,
+    lists: std::sync::Mutex<Vec<[String; 3]>>,
 }
 impl CountingJudge {
     fn new(verdict: ReviewVerdict) -> Arc<Self> {
         Arc::new(Self {
             verdict,
             shown: std::sync::Mutex::new(Vec::new()),
+            lists: std::sync::Mutex::new(Vec::new()),
         })
     }
     fn calls(&self) -> usize {
@@ -1400,6 +1402,13 @@ impl CountingJudge {
             .and_then(|shown| shown.first().cloned())
             .unwrap_or_default()
     }
+    /// The allow, ask-first and block texts of the first question.
+    fn first_lists(&self) -> [String; 3] {
+        let lists = self.lists.lock().ok();
+        lists
+            .and_then(|lists| lists.first().cloned())
+            .unwrap_or_default()
+    }
 }
 #[async_trait]
 impl ReviewJudge for CountingJudge {
@@ -1407,15 +1416,40 @@ impl ReviewJudge for CountingJudge {
         if let Ok(mut shown) = self.shown.lock() {
             shown.push(ask.arguments.to_string());
         }
+        if let Ok(mut lists) = self.lists.lock() {
+            let texts = [
+                ask.allow_instructions,
+                ask.ask_instructions,
+                ask.block_instructions,
+            ];
+            lists.push(texts.map(str::to_string));
+        }
         self.verdict
     }
 }
 
+/// Only a block list: a match refuses.
 fn blocking_policy() -> ReviewPolicy {
     ReviewPolicy {
-        allow_instructions: String::new(),
-        ask_instructions: String::new(),
         block_instructions: "never touch prod".to_string(),
+        ..ReviewPolicy::default()
+    }
+}
+
+/// Only an ask-first list: a match raises a card that quotes it.
+fn asking_policy() -> ReviewPolicy {
+    ReviewPolicy {
+        ask_instructions: "check with me before touching prod".to_string(),
+        ..ReviewPolicy::default()
+    }
+}
+
+/// All three lists, each in words of its own, so which one a refusal or a card quotes shows.
+fn layered_policy() -> ReviewPolicy {
+    ReviewPolicy {
+        allow_instructions: "reading files is fine".to_string(),
+        ask_instructions: "check with me before touching prod".to_string(),
+        block_instructions: "never delete backups".to_string(),
     }
 }
 
@@ -1918,33 +1952,158 @@ async fn an_approved_call_is_never_re_judged() {
     assert_eq!(judge.calls(), 0, "a person already answered this call");
 }
 
+/// A block match is a REFUSAL the model can read and reason about, not a card and not an
+/// exception: the run goes on, and nothing reaches the box.
 #[tokio::test]
-async fn a_review_block_asks_and_touches_no_box() {
-    // Settings stores "Ask first" in blockInstructions; a match is a card, not a refuse.
+async fn a_review_block_refuses_naming_the_rule_and_touches_no_box() {
     let spy = Arc::new(SpyComputer::default());
     let judge = CountingJudge::new(ReviewVerdict::Block);
     let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge.clone());
     let result = executor
         .execute(&context_with_box("box_mine"), &shell_call("c1"))
         .await;
-    assert!(result.awaiting_approval);
+    assert!(!result.ok && !result.awaiting_approval, "{result:?}");
+    assert!(result.content.starts_with("refused: "), "{result:?}");
+    assert!(
+        result.content.contains("auto-review blocked this")
+            && result.content.contains("never touch prod"),
+        "{result:?}"
+    );
+    assert_eq!(
+        spy.last_box(),
+        None,
+        "a blocked call must not reach the box"
+    );
+    assert_eq!(judge.calls(), 1);
+}
+
+/// An ask-first match raises the auto-review card, and the card quotes the instruction.
+#[tokio::test]
+async fn a_review_ask_raises_a_card_that_quotes_the_ask_first_instruction() {
+    let spy = Arc::new(SpyComputer::default());
+    let judge = CountingJudge::new(ReviewVerdict::Ask);
+    let executor = allowing(spy.clone()).with_auto_review(asking_policy(), judge.clone());
+    let result = executor
+        .execute(&context_with_box("box_mine"), &shell_call("c1"))
+        .await;
+    assert!(result.awaiting_approval, "{result:?}");
     assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
-    assert!(result.content.contains("never touch prod"), "{result:?}");
+    assert!(
+        result.content.contains("asked to check this first")
+            && result
+                .content
+                .contains("check with me before touching prod"),
+        "{result:?}"
+    );
     assert_eq!(spy.last_box(), None, "an ask must not reach the box");
     assert_eq!(judge.calls(), 1);
 }
 
+/// An allow match runs the call, once the judge has been asked.
 #[tokio::test]
-async fn a_review_ask_suspends_with_the_auto_review_reason() {
+async fn a_review_allow_runs_the_call() {
     let spy = Arc::new(SpyComputer::default());
-    let judge = CountingJudge::new(ReviewVerdict::Ask);
-    let executor = allowing(spy.clone()).with_auto_review(blocking_policy(), judge);
+    let judge = CountingJudge::new(ReviewVerdict::Allow);
+    let executor = allowing(spy.clone()).with_auto_review(layered_policy(), judge.clone());
     let result = executor
         .execute(&context_with_box("box_mine"), &shell_call("c1"))
         .await;
-    assert!(result.awaiting_approval);
-    assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
-    assert_eq!(spy.last_box(), None);
+    assert!(result.ok && !result.awaiting_approval, "{result:?}");
+    assert_eq!(spy.last_box().as_deref(), Some("box_mine"));
+    assert_eq!(judge.calls(), 1);
+}
+
+/// "Unsure", and a bare "ask" with no ask-first list behind it, are cards that say nothing
+/// clearly allowed the call. They must not quote a list that did not match, and a "block" with
+/// no block list behind it must not refuse: a refusal names a rule the person wrote.
+#[tokio::test]
+async fn a_guess_asks_in_the_generic_words_and_never_quotes_or_refuses() {
+    for (verdict, policy) in [
+        (ReviewVerdict::Unsure, asking_policy()),
+        (ReviewVerdict::Unsure, layered_policy()),
+        (ReviewVerdict::Ask, blocking_policy()),
+        (ReviewVerdict::Block, asking_policy()),
+    ] {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(verdict);
+        let executor = allowing(spy.clone()).with_auto_review(policy, judge);
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(result.awaiting_approval, "{verdict:?}: {result:?}");
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
+        assert!(
+            result.content.contains(review::REVIEW_ASK_REASON),
+            "{verdict:?}: {result:?}"
+        );
+        assert!(!result.content.contains("check this first"), "{result:?}");
+        assert_eq!(spy.last_box(), None);
+    }
+}
+
+/// With all three lists written, the judge's word decides which list is quoted: a refusal
+/// quotes the block list alone, a card the ask-first list alone.
+#[tokio::test]
+async fn each_word_acts_on_its_own_list_when_all_three_are_written() {
+    for (verdict, quoted, not_quoted) in [
+        (
+            ReviewVerdict::Block,
+            "never delete backups",
+            "check with me",
+        ),
+        (ReviewVerdict::Ask, "check with me", "never delete backups"),
+    ] {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(verdict);
+        let executor = allowing(spy.clone()).with_auto_review(layered_policy(), judge.clone());
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        let asked = verdict == ReviewVerdict::Ask;
+        assert_eq!(result.awaiting_approval, asked, "{result:?}");
+        assert!(result.content.contains(quoted), "{verdict:?}: {result:?}");
+        assert!(
+            !result.content.contains(not_quoted),
+            "{verdict:?}: {result:?}"
+        );
+        assert!(
+            !result.content.contains("reading files is fine"),
+            "{result:?}"
+        );
+        assert_eq!(spy.last_box(), None);
+    }
+}
+
+/// The judge is shown all three lists, as written, and the executor never reads one for another.
+#[tokio::test]
+async fn the_judge_is_shown_the_allow_ask_first_and_block_lists() {
+    let judge = CountingJudge::new(ReviewVerdict::Allow);
+    let executor = allowing(Arc::new(SpyComputer::default()))
+        .with_auto_review(layered_policy(), judge.clone());
+    executor
+        .execute(&context_with_box("box_mine"), &shell_call("c1"))
+        .await;
+    assert_eq!(
+        judge.first_lists(),
+        [
+            "reading files is fine".to_string(),
+            "check with me before touching prod".to_string(),
+            "never delete backups".to_string(),
+        ]
+    );
+}
+
+/// A policy with only an ask-first list is still a policy: the judge is asked.
+#[tokio::test]
+async fn an_ask_first_list_alone_activates_the_judge() {
+    let judge = CountingJudge::new(ReviewVerdict::Allow);
+    let executor =
+        allowing(Arc::new(SpyComputer::default())).with_auto_review(asking_policy(), judge.clone());
+    let result = executor
+        .execute(&context_with_box("box_mine"), &shell_call("c1"))
+        .await;
+    assert!(result.ok, "{result:?}");
+    assert_eq!(judge.calls(), 1);
 }
 
 /// The card says WHY the judge did not answer: a capped coworker's judge is refused on
@@ -1969,6 +2128,24 @@ async fn a_judge_outage_asks_rather_than_allows_and_names_its_cause() {
         "{result:?}"
     );
     assert_eq!(spy.last_box(), None);
+}
+
+/// A judge that cannot answer asks, whichever lists are written: a block rule nobody read is not
+/// a refusal, and an unread ask-first or allow rule is not a yes.
+#[tokio::test]
+async fn a_judge_outage_asks_whichever_lists_are_written() {
+    for policy in [blocking_policy(), asking_policy(), layered_policy()] {
+        let spy = Arc::new(SpyComputer::default());
+        let judge = CountingJudge::new(ReviewVerdict::Unavailable(JudgeFailure::Unreachable));
+        let executor = allowing(spy.clone()).with_auto_review(policy, judge);
+        let result = executor
+            .execute(&context_with_box("box_mine"), &shell_call("c1"))
+            .await;
+        assert!(result.awaiting_approval, "{result:?}");
+        assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
+        assert!(result.content.contains("did not answer"), "{result:?}");
+        assert_eq!(spy.last_box(), None);
+    }
 }
 
 /// Every cause reads differently, and none of them reads as an allow.
@@ -2078,14 +2255,29 @@ async fn a_machine_ask_plus_review_ask_is_one_card_the_exec_one() {
 #[tokio::test]
 async fn a_machine_ask_plus_review_ask_first_is_one_card_the_exec_one() {
     let sink = FakeSink::new(UserMachineReply::NeedsApproval);
+    let judge = CountingJudge::new(ReviewVerdict::Ask);
+    let executor = allowing(Arc::new(SpyComputer::default()))
+        .with_user_machine(sink.clone())
+        .with_auto_review(asking_policy(), judge);
+    let result = executor.execute(&no_box_context(), &machine_call()).await;
+    assert!(result.awaiting_approval);
+    assert_eq!(result.awaiting_reason, Some(AwaitingReason::ExecConsent));
+    assert_eq!(sink.seen.lock().map(|seen| seen.len()).unwrap_or(0), 1);
+}
+
+/// A written block outranks the machine's pending consent: refused, with no card and nothing
+/// dispatched, because a standing rule is not a click away from being overridden.
+#[tokio::test]
+async fn a_machine_ask_plus_review_block_refuses_without_dispatch() {
+    let sink = FakeSink::new(UserMachineReply::NeedsApproval);
     let judge = CountingJudge::new(ReviewVerdict::Block);
     let executor = allowing(Arc::new(SpyComputer::default()))
         .with_user_machine(sink.clone())
         .with_auto_review(blocking_policy(), judge);
     let result = executor.execute(&no_box_context(), &machine_call()).await;
-    assert!(result.awaiting_approval);
-    assert_eq!(result.awaiting_reason, Some(AwaitingReason::ExecConsent));
-    assert_eq!(sink.seen.lock().map(|seen| seen.len()).unwrap_or(0), 1);
+    assert!(!result.ok && !result.awaiting_approval, "{result:?}");
+    assert!(result.content.contains("never touch prod"), "{result:?}");
+    assert!(sink_saw_nothing(&sink));
 }
 
 #[tokio::test]
@@ -2094,7 +2286,7 @@ async fn a_machine_allow_plus_review_ask_raises_the_review_card() {
     let judge = CountingJudge::new(ReviewVerdict::Ask);
     let executor = allowing(Arc::new(SpyComputer::default()))
         .with_user_machine(sink.clone())
-        .with_auto_review(blocking_policy(), judge);
+        .with_auto_review(asking_policy(), judge);
     let result = executor.execute(&no_box_context(), &machine_call()).await;
     assert!(result.awaiting_approval);
     assert_eq!(result.awaiting_reason, Some(AwaitingReason::AutoReview));
@@ -2125,26 +2317,13 @@ async fn the_judge_sees_redacted_arguments() {
 async fn nothing_offered_escapes_an_ask_first_judge() {
     let spy = Arc::new(SpyComputer::default());
     let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
-    let judge = CountingJudge::new(ReviewVerdict::Block);
+    let judge = CountingJudge::new(ReviewVerdict::Ask);
     let executor = allowing(spy.clone())
         .with_user_machine(sink.clone())
-        .with_auto_review(blocking_policy(), judge);
+        .with_auto_review(asking_policy(), judge);
     let context = context_with_box("box_mine");
     for name in executor.tool_names() {
-        let result = executor
-            .execute(
-                &context,
-                &call(
-                    &name,
-                    json!({
-                        "command": "ls",
-                        "path": "/tmp/a",
-                        "content": "x",
-                        "origin": "accounts.google.com"
-                    }),
-                ),
-            )
-            .await;
+        let result = executor.execute(&context, &every_tool_call(&name)).await;
         assert!(
             result.awaiting_approval,
             "{name} ran without a card: {result:?}"
@@ -2154,16 +2333,59 @@ async fn nothing_offered_escapes_an_ask_first_judge() {
     assert!(sink_saw_nothing(&sink));
 }
 
+/// Nothing escapes the gate: every tool this executor offers, including the reverse-exec tool
+/// and the box tools, is refused under an always-block judge, and none of them touches a
+/// machine on the way.
+#[tokio::test]
+async fn nothing_offered_escapes_an_always_block_judge() {
+    let spy = Arc::new(SpyComputer::default());
+    let sink = FakeSink::new(UserMachineReply::Ran("exit 0".into()));
+    let judge = CountingJudge::new(ReviewVerdict::Block);
+    let executor = allowing(spy.clone())
+        .with_user_machine(sink.clone())
+        .with_auto_review(blocking_policy(), judge);
+    let context = context_with_box("box_mine");
+    for name in executor.tool_names() {
+        let result = executor.execute(&context, &every_tool_call(&name)).await;
+        if name == REQUEST_USER_FORM {
+            // A form is the person's to fill in, not a call to review: it waits for them before
+            // the judge is asked, so that auto-review never steals its card.
+            assert!(result.awaiting_approval, "{result:?}");
+            continue;
+        }
+        assert!(!result.ok, "{name} slipped past the judge: {result:?}");
+        assert!(
+            !result.awaiting_approval && result.content.contains("auto-review blocked"),
+            "{name}: {result:?}"
+        );
+    }
+    assert_eq!(spy.last_box(), None);
+    assert!(sink_saw_nothing(&sink));
+}
+
+/// One call to `name` with arguments every offered tool can parse.
+fn every_tool_call(name: &str) -> ToolCall {
+    call(
+        name,
+        json!({
+            "command": "ls",
+            "path": "/tmp/a",
+            "content": "x",
+            "origin": "accounts.google.com"
+        }),
+    )
+}
+
 /// A review-card approval skips the judge and NOTHING else: if the machine now asks for its
 /// owner's consent, the sink is not told the call was approved.
 #[tokio::test]
 async fn a_review_approval_never_releases_the_machines_own_consent() {
     let sink = FakeSink::new(UserMachineReply::NeedsApproval);
-    let judge = CountingJudge::new(ReviewVerdict::Block);
+    let judge = CountingJudge::new(ReviewVerdict::Ask);
     let executor = allowing(Arc::new(SpyComputer::default()))
         .with_user_machine(sink.clone())
         .with_review_approved(["m1".to_string()])
-        .with_auto_review(blocking_policy(), judge.clone());
+        .with_auto_review(asking_policy(), judge.clone());
     let result = executor.execute(&no_box_context(), &machine_call()).await;
     assert_eq!(judge.calls(), 0, "the review answer stands");
     assert!(result.awaiting_approval);

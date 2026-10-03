@@ -40,16 +40,19 @@ pub struct ReviewAsk<'a> {
     pub tool: &'a str,
     pub arguments: &'a str,
     pub allow_instructions: &'a str,
+    pub ask_instructions: &'a str,
     pub block_instructions: &'a str,
 }
 
-/// The judge's word. `Unavailable` is a judge that could not answer — it lands on the same rung
-/// as `Ask`, with a different explanation that names the cause.
+/// The judge's word: the highest list that covers the call (block over ask over allow), or
+/// `Unsure` when none clearly does. `Unavailable` is a judge that could not answer — it lands on
+/// the same rung as `Ask`, with a different explanation that names the cause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewVerdict {
     Allow,
     Ask,
     Block,
+    Unsure,
     Unavailable(JudgeFailure),
 }
 
@@ -83,7 +86,9 @@ impl JudgeFailure {
             Self::Unreachable => "the model gateway could not be reached".to_string(),
             Self::StreamBroke => "its reply broke off part-way".to_string(),
             Self::TimedOut => "it timed out".to_string(),
-            Self::Unparseable => "it replied with something other than allow or ask".to_string(),
+            Self::Unparseable => {
+                "it replied with something other than allow, ask, block or unsure".to_string()
+            }
         }
     }
 }
@@ -145,18 +150,17 @@ pub enum Outcome {
     Refuse(String),
 }
 
-/// The paragraph a card shows when the judge itself said "ask".
+/// The paragraph a card shows when no list clearly covers the call, or the judge could not tell.
 pub const REVIEW_ASK_REASON: &str = "Your auto-review instructions did not clearly allow this, so it is being asked rather than allowed.";
 /// Leave-box tools on the prod egress tunnel, before any standing auto-review allow exists.
 /// The Review-an-action card (Always allow / Allow once / Deny) is the Grok Bot chrome.
 pub const EGRESS_TUNNEL_ASK_REASON: &str =
     "This action would use your network through the egress tunnel. Review it before it runs.";
-/// The paragraph a card shows when the judge matched an Ask-first instruction.
-/// The Settings UI stores those in `blockInstructions` but labels them "Ask first".
-pub fn ask_first_reason(block_instructions: &str) -> String {
+/// The paragraph a card shows when the judge matched an ask-first instruction.
+pub fn ask_first_reason(ask_instructions: &str) -> String {
     format!(
         "Your auto-review instructions asked to check this first: \"{}\"",
-        clip(block_instructions.trim(), 200)
+        clip(ask_instructions.trim(), 200)
     )
 }
 /// How every judge-failure card opens. The server counts a run's failures in a row by it, from

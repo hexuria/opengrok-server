@@ -133,3 +133,14 @@ fn an_ask_first_reason_names_the_instruction() {
         "Your auto-review instructions asked to check this first: \"always ask about rm -rf\""
     );
 }
+
+/// A long list is quoted in part, and the card or refusal says how much was left out.
+#[test]
+fn a_quoted_list_is_clipped_and_says_so() {
+    let long = "x".repeat(300);
+    for text in [ask_first_reason(&long), block_refusal(&long)] {
+        assert!(text.contains(&"x".repeat(200)), "{text}");
+        assert!(!text.contains(&"x".repeat(201)), "{text}");
+        assert!(text.contains("…[clipped 100 chars]"), "{text}");
+    }
+}

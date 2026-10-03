@@ -16,8 +16,16 @@ judge at the tool seam (§4) in `crates/opengrok-tools/src/review.rs` (`combine`
 > `expired` with a 410; a call id the run is not waiting on answers 409. §1 and §5's verb and its
 > 410 are the record of how it was built; the card's shape, the tiers, the gate and the
 > management API stand.
+
+> **Since 3 Oct 2026 (#354): three lists, not two.** An "Ask first" list (`askInstructions`) sits
+> beside allow and block, global and per Bot, with the same inheritance. Precedence is **block >
+> ask > allow**. From 1 Sep 2026 (`3747165`) the Settings UI had stored its "Ask first" list as
+> `blockInstructions` and a block match raised a card instead of refusing, so §4's refusal was not
+> what a person got. Now block refuses, ask-first raises the card, and one boot moved every stored
+> `block_instructions` into `ask_instructions` (§2), so what people wrote behaves as it did.
+
 Tests: unit (ladder, redaction, judge parsing, cards) and Postgres-backed (tiers, resolve verb).
-`OG_AUTO_REVIEW_MODEL` picks the judge's route; `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask`
+`OG_AUTO_REVIEW_MODEL` picks the judge's route; `OG_AUTO_REVIEW_MOCK_VERDICT=allow|ask|block|unsure`
 cans the judge under a mock door. The audit of what existed before is §1; the consent model this
 sits inside is §0.
 
@@ -30,7 +38,7 @@ Running a bot command on the user's own machine passes through these controls, a
 | The machine's switch | does this computer accept bot commands at all? | the daemon, on the machine | on / off | on after enrol |
 | Remote control | may bots reach this machine, and how? | the server, per machine (`local_exec`) | off / ask / always (stored `never`/`ask`/`bypass`) + a visible, deletable list of standing rules | off |
 | The card | consent for THIS command | the server; answerable from any device | allow once / always / deny / never — **never expires** | — |
-| Auto-review | what may bots do? | the server, global → per coworker | on/off + allow/block instructions, judged by a model across ALL tools | off |
+| Auto-review | what may bots do? | the server, global → per coworker | on/off + allow/ask-first/block instructions, judged by a model across ALL tools | off |
 
 Rules that follow from it:
 
@@ -65,7 +73,7 @@ The `gateway/` files named here were deleted in P0-E.
 ## 2. Storage
 
 One table, one row per (account, scope). Not lists of pattern rows like `local_exec_rule` —
-the client shape is two instruction *texts* plus a toggle, and a tier **overrides** the tier
+the client shape is three instruction *texts* plus a toggle, and a tier **overrides** the tier
 below it per-field rather than merging.
 
 ```sql
@@ -75,6 +83,7 @@ create table if not exists auto_review_policy (
     scope_id           text   not null,          -- '' for global; coworker_id
     enabled            boolean,                  -- null = inherit from the tier below
     allow_instructions text,                     -- null = inherit; '' = explicitly none
+    ask_instructions   text,                     -- null = inherit; '' = explicitly none (#354)
     block_instructions text,                     -- null = inherit; '' = explicitly none
     updated_at_ms      bigint not null,
     primary key (account_id, scope_kind, scope_id)
@@ -86,11 +95,26 @@ restores full inheritance for that scope. The column is plain text and the store
 it; the **server** is what refuses any scope kind but the two, and the tier query never returns
 another kind (a legacy `machine` row is invisible to resolution and purged by the schema script).
 
+**The ask-first column and its one-time pass (#354).** Rows are plain rows, not events, so the
+move is one `UPDATE` in `SCHEMA`, recorded in `schema_migrations` as
+`the-list-that-asks-is-its-own-column`. It adds `ask_instructions` (null on every old row, so
+every old row reads as "inherits"), then moves what was stored as `block_instructions`: the text
+goes to `ask_instructions`, after any text already there and a blank line between, and
+`block_instructions` becomes null. An explicit `''` moves as an explicit `''` (a scope that had
+cleared its ask-first rules must not start inheriting global's). `enabled`, the allow list and
+`updated_at_ms` are not touched. It runs once because a second pass would turn a block written
+since into an ask. **The cost of once, said plainly:** an older replica still running reads a moved
+row's `block_instructions` as empty, so its ask-first rules go unasked until it is replaced, and a
+row it writes after the pass is read by a newer one as a block. Stop older replicas before a newer
+one boots, or keep the overlap short; likewise an older NativeChat, which saves its "Ask first"
+list as `blockInstructions` and leaves `askInstructions` out (stored null), so one save from it
+loses the moved list.
+
 ## 3. Effective policy (resolution)
 
 ```
 effective(account, coworker_id):
-    for each field in (enabled, allow_instructions, block_instructions):
+    for each field in (enabled, allow_instructions, ask_instructions, block_instructions):
         coworker row's field  ??  global row's field  ??  default
     defaults: enabled = false, instructions = ''
 ```
@@ -106,7 +130,7 @@ call").** The tier walk happens **once per run**, when the runner is built — t
 runner. Per tool call the check is one in-memory test:
 
 ```
-!effective.enabled || (effective.allow == "" && effective.block == "")  ⇒  skip entirely
+!effective.enabled || (effective.allow == "" && effective.ask == "" && effective.block == "")  ⇒  skip entirely
 ```
 
 No DB read, no judge call. A run that started before a `PUT`/`DELETE` keeps the policy it
@@ -136,23 +160,37 @@ route (`OG_AUTO_REVIEW_MODEL`, default the server's own model), never the cowork
 one call per tool call must be cheap and the reviewer must not be the reviewed. It is billed and
 capped on the coworker's own key and spend scope, though, so a coworker at its cap has its judge
 refused on every call. Given ONLY the tool name, redacted arguments, and the
-effective instruction texts, it returns one word of `allow | block | ask`. Fail-closed ladder
-(non-negotiable #8):
+effective instruction texts (all three lists), it returns one word of
+`block | ask | allow | unsure`. Fail-closed ladder (non-negotiable #8):
 
-- block instructions apply → **block**: the tool call returns a refusal *result* naming the
-  instruction (the model can reason about it; the run does not die).
-- else allow instructions apply → **allow**.
-- else, or the judge is uncertain, or both sides apply → **ask** (ask beats allow).
+- a block instruction applies → **block**: the tool call returns a refusal *result* naming the
+  instruction (the model can reason about it; the run does not die). No card: a block is not a
+  question, and nothing a person clicks releases it.
+- else an ask-first instruction applies → **ask**: the auto-review card, its reason quoting the
+  ask-first list ("Your auto-review instructions asked to check this first: …", clipped at 200
+  characters, as the refusal's quote of the block list is).
+- else an allow instruction applies → **allow**.
+- else, or the judge is uncertain → **unsure**: a card in the generic words ("did not clearly
+  allow this"), never a quote of a list that did not match.
 - judge call fails, times out, or answers anything but one bare word → **ask** (never silently
   allow; never hard-fail the run). The card's reason names the cause — the coworker's spend
   limit, a refused route and its status, an unreachable gateway, a broken reply, a timeout, a
   stray answer — and the judge logs it with the coworker, the model and the call id (#201).
+  Whatever lists are written, an outage is a card, never a refusal.
 - the judge has failed `JUDGE_DOWN_AFTER` (3) times in a row in this run → the next reviewed call
   is **refused** without asking the judge, in words telling the model to tell the person the
   reviewer is down. Narrower than an ask, so still fail-closed; a capped key is not billed
   another attempt; the person's next message starts a run that asks the judge afresh. The count
   is read back from the run's journal on every resume (`judge_failure_streak`), because each
   failure parks the run and the rebuilt executor would otherwise always start at zero.
+
+**Precedence, block > ask > allow, is the order of the judge's words.** The judge's instructions
+(`JUDGE_SYSTEM`) list the words in that order and tell the model to answer the first that fits, so
+a call both blocked and ask-first is `block`, and one both ask-first and allowed is `ask`, without
+the model weighing two lists that both apply. That order is pinned by a test; whether a given model
+follows it is its behaviour, not the code's. The executor reads each word against the list it
+names: a refusal or a card only quotes a list that is written, so a `block` with no block list, or
+an `ask` with no ask-first list, is the judge's guess and gets the generic card.
 
 An ask suspends the run through the proven machinery: `RunCommand::Suspend` →
 `AwaitingApproval`, no expiry ever — the card answers whenever the user returns.
@@ -171,7 +209,7 @@ below is invented):
       "status": "pending | approved | always | denied | expired",
       "surface": "host_shell | box_shell | mcp | computer | automation_write | cloud_agent",
       "summary": "<required string>",
-      "reason": "<optional paragraph — judge uncertainty goes here>",
+      "reason": "<optional paragraph — the ask-first list quoted, or why the judge was unsure or did not answer>",
       "command": "<optional; when set the card shows it and HIDES summary>",
       "proposedRule": "<optional pre-filled Always text; client redacts secrets>" } } }
 ```
@@ -204,7 +242,8 @@ Account-authed like `/local-exec/*` (Bearer-or-cookie). Scope addressing is unif
 
 ```
 GET    /auto-review/policy
-       → { "global":    { "enabled": …, "allowInstructions": …, "blockInstructions": …, "updatedAtMs": … } | null,
+       → { "global":    { "enabled": …, "allowInstructions": …, "askInstructions": …,
+                           "blockInstructions": …, "updatedAtMs": … } | null,
            "coworkers": { "<coworkerId>": { …same fields… }, … } }
        Rows as stored: null field = inherits. Absent row = null. The client renders inheritance
        itself; nothing here is pre-resolved.
@@ -214,18 +253,22 @@ PUT    /auto-review/policy
          "scopeId":   "" | "<coworkerId>",
          "enabled": true | false | null,
          "allowInstructions": "<text>" | null,
+         "askInstructions":   "<text>" | null,
          "blockInstructions": "<text>" | null }
-       Upsert of the whole row (all three fields every time — null means inherit, not "keep").
+       Upsert of the whole row (all four fields every time — null means inherit, not "keep", and
+       a key left out is null). Text is trimmed; "" is an explicit "none" that stops inheritance.
        422 on an unknown scopeKind (including "machine"), on a coworkerId that isn't the
-       account's, on global with a scopeId, or on more than 20 000 characters of instructions.
+       account's, on global with a scopeId, or on more than 20 000 characters of instructions in
+       all three lists together.
        → 204
 
 DELETE /auto-review/policy   { "scopeKind": …, "scopeId": … }
        Remove the row entirely (full inheritance). → 204
 
 GET    /auto-review/effective?coworkerId=…
-       → { "enabled": bool, "allowInstructions": "…", "blockInstructions": "…",
-           "decidedBy": { "enabled": "coworker|global|default", … per field } }
+       → { "enabled": bool, "allowInstructions": "…", "askInstructions": "…",
+           "blockInstructions": "…",
+           "decidedBy": { "enabled": "coworker|global|default", … per field, "askInstructions" too } }
        The resolved view + which tier decided each field — for the settings UI to show "inherited
        from global" honestly instead of re-implementing precedence.
 ```
@@ -234,30 +277,33 @@ Wiring: General tab → `PUT {scopeKind:"global", scopeId:""}` (in addition to i
 `setHostSettings` write, which stays untouched for Cursor); the agent's settings →
 `scopeKind:"coworker"`.
 
-**One example** — global blocks installs; one trusted coworker overrides nothing but is switched
-off, another inherits everything:
+**One example** — global blocks installs and asks first about email; one trusted coworker
+overrides nothing but is switched off, another inherits everything:
 
 ```
 PUT /auto-review/policy
 { "scopeKind": "global", "scopeId": "",
   "enabled": true, "allowInstructions": null,
+  "askInstructions": "anything that sends an email",
   "blockInstructions": "anything that installs software or changes system settings" }
 → 204
 
 PUT /auto-review/policy
 { "scopeKind": "coworker", "scopeId": "cw_01a0562a-…", "enabled": false,
-  "allowInstructions": null, "blockInstructions": null }
+  "allowInstructions": null, "askInstructions": null, "blockInstructions": null }
 → 204
 
 GET /auto-review/effective?coworkerId=cw_01a0562a-…
-→ { "enabled": false, "allowInstructions": "", "blockInstructions": "anything that installs…",
+→ { "enabled": false, "allowInstructions": "", "askInstructions": "anything that sends an email",
+    "blockInstructions": "anything that installs…",
     "decidedBy": { "enabled": "coworker", "allowInstructions": "default",
-                   "blockInstructions": "global" } }
+                   "askInstructions": "global", "blockInstructions": "global" } }
 ```
 
 `brew install jq` from any *other* coworker → judge says block → the tool call returns the
-refusal as a result; the bot tells the user which instruction stopped it. From `cw_01a0562a-…`
-auto-review is off, so only the remote-control gate speaks.
+refusal as a result; the bot tells the user which instruction stopped it. Sending an email from
+it → judge says ask → the auto-review card, quoting "anything that sends an email". From
+`cw_01a0562a-…` auto-review is off, so only the remote-control gate speaks.
 
 ## 7. Explicitly not in v1
 

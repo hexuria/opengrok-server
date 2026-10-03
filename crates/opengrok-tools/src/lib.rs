@@ -805,6 +805,7 @@ impl AutoReview {
                 tool,
                 arguments: &redacted,
                 allow_instructions: &self.policy.allow_instructions,
+                ask_instructions: &self.policy.ask_instructions,
                 block_instructions: &self.policy.block_instructions,
             })
             .await;
@@ -813,14 +814,23 @@ impl AutoReview {
         } else {
             failures.store(0, Ordering::Relaxed);
         }
+        let (ask, block) = (
+            &self.policy.ask_instructions,
+            &self.policy.block_instructions,
+        );
         match verdict {
             ReviewVerdict::Allow => ReviewOutcome::Allow,
-            // The Settings UI labels this list "Ask first" and stores it as
-            // blockInstructions. A match must raise a card, not refuse.
-            ReviewVerdict::Block => {
-                ReviewOutcome::Ask(ask_first_reason(&self.policy.block_instructions))
+            // A refusal names a rule the person wrote. A "block" or "ask" with no such list
+            // behind it is the judge's guess, and a guess asks; it never refuses.
+            ReviewVerdict::Block if !block.trim().is_empty() => {
+                ReviewOutcome::Block(review::block_refusal(block))
             }
-            ReviewVerdict::Ask => ReviewOutcome::Ask(review::REVIEW_ASK_REASON.to_string()),
+            ReviewVerdict::Ask if !ask.trim().is_empty() => {
+                ReviewOutcome::Ask(ask_first_reason(ask))
+            }
+            ReviewVerdict::Block | ReviewVerdict::Ask | ReviewVerdict::Unsure => {
+                ReviewOutcome::Ask(review::REVIEW_ASK_REASON.to_string())
+            }
             ReviewVerdict::Unavailable(cause) => {
                 ReviewOutcome::Ask(review::unavailable_reason(cause))
             }

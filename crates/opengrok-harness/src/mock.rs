@@ -204,8 +204,8 @@ impl MockDoor {
         )
     }
 
-    /// Answer judge requests with this word ("allow" | "block" | "ask"); anything else parses to
-    /// `Unavailable`, which is also a rung worth reaching.
+    /// Answer judge requests with this word ("allow" | "ask" | "block" | "unsure"); anything else
+    /// parses to `Unavailable`, which is also a rung worth reaching.
     #[must_use]
     pub fn with_judge_verdict(mut self, word: impl Into<String>) -> Self {
         self.judge_verdict = Some(word.into());
