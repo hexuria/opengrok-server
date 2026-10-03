@@ -177,9 +177,32 @@ fn thread_settled(run: &Journal, coworker: &CoworkerId) -> Value {
     json!({ "threadId": run.thread, "coworkerId": coworker.as_str(), "runId": null })
 }
 
+/// The note a park leaves: the ids and the run's own word for what its card asks, in the order
+/// the contract lists them.
+fn run_waiting(run: &Journal, coworker: &CoworkerId, reason: &str) -> Value {
+    json!({ "runId": run.id.as_str(), "threadId": run.thread, "coworkerId": coworker.as_str(),
+            "reason": reason })
+}
+
+/// What the run's own loop writes to raise a card: its frame and the suspension, together. The
+/// words on the card are in the frame and the call's arguments, and none may reach the stream.
+fn card(call: &str, reason: SuspendReason) -> Vec<RunCommand> {
+    let frame = json!({ "type": "CUSTOM", "name": "run-awaiting-approval", "callId": call,
+                        "why": "words only the card may carry" });
+    let park = RunCommand::Suspend {
+        call_id: call.into(),
+        tool: "shell".into(),
+        arguments: json!({ "command": "arguments only the card may carry" }),
+        reason,
+        at_ms: 3,
+    };
+    vec![Journal::frame(frame), park]
+}
+
 /// A CHAT TURN IS TOLD AS IT BEGINS, GOES ON AND ENDS, and no more than that: its first batch is
-/// `run.started` and `thread.changed`, each round after is a `thread.changed`, a card is not an
-/// ending, and the end is `thread.changed` and then `run.finished` with the history's word.
+/// `run.started` and `thread.changed`, each round after is a `thread.changed`, a card is a
+/// `run.waiting` beside it and not an ending, and the end is `thread.changed` and then
+/// `run.finished` with the history's word.
 #[tokio::test]
 async fn a_chat_turn_is_told_as_it_begins_goes_on_and_ends() {
     let url = database_or_skip!();
@@ -201,18 +224,15 @@ async fn a_chat_turn_is_told_as_it_begins_goes_on_and_ends() {
     let changed = note("thread.changed", thread_changed(&run, &luna));
     assert_eq!(since(&store, &ada, &mut seen).await, vec![changed.clone()]);
 
-    // A card: the run is waiting on a person, which is a change to the thread and not an ending.
-    // The loop writes the card's frame and the suspension together.
-    let card = Journal::frame(json!({ "type": "CUSTOM", "name": "run-awaiting-approval" }));
-    let park = RunCommand::Suspend {
-        call_id: "call_1".into(),
-        tool: "shell".into(),
-        arguments: json!({}),
-        reason: SuspendReason::ExecConsent,
-        at_ms: 3,
-    };
-    run.round(vec![card, park], Some(&ada)).await;
-    assert_eq!(since(&store, &ada, &mut seen).await, vec![changed.clone()]);
+    // A card: the run is waiting on a person, which is a change to the thread, and the run says
+    // so; it is not an ending. The loop writes the card's frame and the suspension together.
+    run.round(card("call_1", SuspendReason::ExecConsent), Some(&ada))
+        .await;
+    let waiting = note("run.waiting", run_waiting(&run, &luna, "exec-consent"));
+    assert_eq!(
+        since(&store, &ada, &mut seen).await,
+        vec![changed.clone(), waiting]
+    );
 
     // The person settles it: no run's commit, so the change names none.
     let answer = RunCommand::Answer {
@@ -332,6 +352,214 @@ async fn a_failed_run_and_a_stopped_one_end_in_error() {
         assert_eq!(data["state"], json!("error"), "{thread}");
         assert!(data.get("cause").is_none(), "{data}");
     }
+}
+
+/// A RUN THAT PARKS ON A CARD SAYS IT IS WAITING, in ids and the run's own word for what the card
+/// asks (the one `GET /ag-ui/approvals` says), for each of the four kinds of card there are. Once
+/// for the park, after the thread's change, and not a word of the card or of the call's arguments
+/// is in it.
+#[tokio::test]
+async fn a_run_that_parks_on_a_card_says_it_is_waiting_in_the_words_of_its_card() {
+    let url = database_or_skip!();
+    let store = store(&url).await;
+    let (ada, luna) = (AccountId::new(), CoworkerId::new());
+    let mut seen = 0;
+    for (reason, word) in [
+        (SuspendReason::ExecConsent, "exec-consent"),
+        (SuspendReason::PolicyApproval, "policy-approval"),
+        (SuspendReason::AutoReview, "auto-review"),
+        (SuspendReason::UserForm, "user-form"),
+    ] {
+        let mut run = Journal::on(&store, reason.as_str());
+        run.start(Some(&luna), Some(&ada)).await;
+        since(&store, &ada, &mut seen).await;
+
+        run.round(card("call_1", reason), Some(&ada)).await;
+        let told = since(&store, &ada, &mut seen).await;
+        let waiting = note("run.waiting", run_waiting(&run, &luna, word));
+        let changed = note("thread.changed", thread_changed(&run, &luna));
+        assert_eq!(told, [changed, waiting], "{reason:?}");
+        let said = told[1].1.to_string();
+        for card_text in ["only the card may carry", "shell", "call_1"] {
+            assert!(!said.contains(card_text), "{card_text:?} is in {said}");
+        }
+    }
+}
+
+/// A RUN THAT PARKS AGAIN SAYS SO AGAIN, AND GOING ON SAYS NOTHING. The person's answer, the
+/// frames that follow it and the sweep's carrying a run on are not parks: each is a change to the
+/// thread and no more, and only the batch that parks the run again is told as one.
+#[tokio::test]
+async fn a_run_that_parks_again_says_so_again_and_going_on_says_nothing() {
+    let url = database_or_skip!();
+    let store = store(&url).await;
+    let (ada, luna) = (AccountId::new(), CoworkerId::new());
+    let mut seen = 0;
+    let mut run = Journal::on(&store, "thread-twice");
+    run.start(Some(&luna), Some(&ada)).await;
+    since(&store, &ada, &mut seen).await;
+    let (own, settled) = (thread_changed(&run, &luna), thread_settled(&run, &luna));
+    let waiting = |run: &Journal, word| note("run.waiting", run_waiting(run, &luna, word));
+
+    run.round(card("call_1", SuspendReason::PolicyApproval), Some(&ada))
+        .await;
+    let first = since(&store, &ada, &mut seen).await;
+    assert_eq!(first[1], waiting(&run, "policy-approval"));
+
+    // The person says yes: the run is back to running, and the stream says the thread changed.
+    let yes = RunCommand::Answer {
+        call_id: "call_1".into(),
+        approved: true,
+        by: ada.to_string(),
+        at_ms: 4,
+    };
+    run.append(yes, Some(&ada)).await;
+    assert_eq!(
+        since(&store, &ada, &mut seen).await,
+        [note("thread.changed", settled.clone())]
+    );
+    // What the run does with the answer, and the sweep carrying it on after a restart.
+    run.say(Some(&ada)).await;
+    let resume = RunCommand::Resume {
+        reason: "interrupted by a restart".into(),
+        at_ms: 5,
+    };
+    run.append(resume, None).await;
+    assert_eq!(
+        since(&store, &ada, &mut seen).await,
+        [
+            note("thread.changed", own.clone()),
+            note("thread.changed", settled.clone())
+        ]
+    );
+
+    // It parks again, on a form this time: told again.
+    run.round(card("call_2", SuspendReason::UserForm), Some(&ada))
+        .await;
+    let second = since(&store, &ada, &mut seen).await;
+    let again = waiting(&run, "user-form");
+    assert_eq!(second, [note("thread.changed", own), again]);
+
+    let no = RunCommand::Answer {
+        call_id: "call_2".into(),
+        approved: false,
+        by: ada.to_string(),
+        at_ms: 6,
+    };
+    run.append(no, Some(&ada)).await;
+    run.finish(Some(&ada)).await;
+    let all = heard(&store, &ada).await;
+    let waits: Vec<&Value> = all
+        .iter()
+        .filter(|(event, _)| event == "run.waiting")
+        .map(|(_, data)| data)
+        .collect();
+    let one = run_waiting(&run, &luna, "policy-approval");
+    let two = run_waiting(&run, &luna, "user-form");
+    assert_eq!(waits, [&one, &two], "two parks, two notes, in order");
+}
+
+/// WAITING IS WHAT A BATCH LEAVES THE RUN AS. A park that rode with an ending left nothing to
+/// answer; a frame written to a run already waiting parked nothing; and a round that stacks cards
+/// is one park, told with the reason of the call the run now waits on.
+#[tokio::test]
+async fn only_a_batch_that_leaves_the_run_waiting_says_so() {
+    let url = database_or_skip!();
+    let store = store(&url).await;
+    let (ada, luna) = (AccountId::new(), CoworkerId::new());
+    let mut seen = 0;
+
+    // A park and a failure in one write: the run is over, and that is all the stream says.
+    let mut run = Journal::on(&store, "thread-parked-and-lost");
+    run.start(Some(&luna), Some(&ada)).await;
+    since(&store, &ada, &mut seen).await;
+    let mut commands = card("call_1", SuspendReason::ExecConsent);
+    commands.push(RunCommand::Fail {
+        reason: "the box went away".into(),
+        at_ms: 4,
+    });
+    run.round(commands, Some(&ada)).await;
+    let told = since(&store, &ada, &mut seen).await;
+    let words: Vec<&str> = told.iter().map(|(event, _)| event.as_str()).collect();
+    assert_eq!(words, ["thread.changed", "run.finished"]);
+
+    // A frame written to a run that is already waiting (a form's own, say).
+    let mut run = Journal::on(&store, "thread-already-waiting");
+    run.start(Some(&luna), Some(&ada)).await;
+    run.round(card("call_1", SuspendReason::UserForm), Some(&ada))
+        .await;
+    since(&store, &ada, &mut seen).await;
+    run.say(Some(&ada)).await;
+    let changed = note("thread.changed", thread_changed(&run, &luna));
+    assert_eq!(since(&store, &ada, &mut seen).await, [changed]);
+
+    // Two cards in one round: one park, and the run waits on the last.
+    let mut run = Journal::on(&store, "thread-stacked");
+    run.start(Some(&luna), Some(&ada)).await;
+    since(&store, &ada, &mut seen).await;
+    let mut commands = card("call_1", SuspendReason::PolicyApproval);
+    commands.extend(card("call_2", SuspendReason::UserForm));
+    run.round(commands, Some(&ada)).await;
+    let told = since(&store, &ada, &mut seen).await;
+    let waiting = note("run.waiting", run_waiting(&run, &luna, "user-form"));
+    let changed = note("thread.changed", thread_changed(&run, &luna));
+    assert_eq!(told, [changed, waiting]);
+}
+
+/// A PARK IS TOLD TO THE RUN'S OWNER, whoever writes it, and to no one else; a run with no owner or
+/// no coworker is told to nobody. The thread id is a Bot's chat, which two people share, and says
+/// nothing about whose run it is.
+#[tokio::test]
+async fn a_park_is_told_to_the_runs_owner_and_to_no_one_else() {
+    let url = database_or_skip!();
+    let store = store(&url).await;
+    let (ada, bob, luna) = (AccountId::new(), AccountId::new(), CoworkerId::new());
+
+    let mut run = Journal::on(&store, "thread-shared");
+    run.start(Some(&luna), Some(&ada)).await;
+    run.round(card("call_1", SuspendReason::PolicyApproval), Some(&bob))
+        .await;
+    let theirs =
+        |told: Vec<(String, Value)>| told.iter().filter(|(e, _)| e == "run.waiting").count();
+    assert_eq!(
+        theirs(heard(&store, &ada).await),
+        1,
+        "ada's run, bob wrote it"
+    );
+    assert!(
+        heard(&store, &bob).await.is_empty(),
+        "bob took nothing by writing"
+    );
+
+    let mut bobs = Journal::on(&store, "thread-shared");
+    bobs.start(Some(&luna), Some(&bob)).await;
+    bobs.round(card("call_1", SuspendReason::UserForm), Some(&bob))
+        .await;
+    assert_eq!(theirs(heard(&store, &bob).await), 1);
+    assert_eq!(theirs(heard(&store, &ada).await), 1, "and nothing of bob's");
+
+    // Told to nobody, not even to an account that is not there: no note names these runs at all.
+    let nobody = AccountId::new();
+    let mut unowned = Journal::on(&store, "thread-unowned");
+    unowned.start(Some(&luna), None).await;
+    unowned
+        .round(card("call_1", SuspendReason::UserForm), None)
+        .await;
+    let mut unplaced = Journal::on(&store, "thread-unplaced");
+    unplaced.start(None, Some(&nobody)).await;
+    unplaced
+        .round(card("call_1", SuspendReason::UserForm), Some(&nobody))
+        .await;
+    let anywhere = "select count(*) from account_event where payload->>'runId' = $1";
+    for run in [&unowned, &unplaced] {
+        let told: i64 = sqlx::query_scalar(anywhere)
+            .bind(run.id.as_str())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(told, 0, "{}", run.thread);
+    }
+    assert!(heard(&store, &nobody).await.is_empty());
 }
 
 /// THE LOG'S OWN BOOKKEEPING IS NOT A CHANGE: a round's `ToolStarted` and `Spent` are written

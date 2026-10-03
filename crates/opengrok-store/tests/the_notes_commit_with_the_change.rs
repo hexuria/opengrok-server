@@ -9,7 +9,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use opengrok_core::id::{AccountId, CoworkerId, RunId, ScheduleId};
-use opengrok_core::run::{Run, RunCommand, RunView};
+use opengrok_core::run::{Run, RunCommand, RunView, SuspendReason};
 use opengrok_core::schedule::{Schedule, ScheduleCommand, Wake};
 use opengrok_store::{PgStore, StoreError};
 
@@ -41,6 +41,22 @@ async fn refuse_notes_for(store: &PgStore, account: &AccountId) -> String {
     let name = format!("refuse_{}", uuid::Uuid::now_v7().simple());
     let add = format!(
         "alter table account_event add constraint {name} check (account_id <> '{account}') not valid"
+    );
+    sqlx::query(sqlx::AssertSqlSafe(add))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    name
+}
+
+/// Make writing a `run.waiting` for this account fail and nothing else of its notes: a park whose
+/// own note is refused must not land, which a refusal of every note cannot show (the park's
+/// `thread.changed` would be the one to fail first).
+async fn refuse_waiting_for(store: &PgStore, account: &AccountId) -> String {
+    let name = format!("refuse_{}", uuid::Uuid::now_v7().simple());
+    let add = format!(
+        "alter table account_event add constraint {name}
+         check (not (account_id = '{account}' and kind = 'run.waiting')) not valid"
     );
     sqlx::query(sqlx::AssertSqlSafe(add))
         .execute(store.pool())
@@ -120,6 +136,74 @@ async fn a_run_whose_note_cannot_be_written_is_not_written() {
     let appended = store.append_run(&id, 0, &events, &view, Some(&ada)).await;
     assert_eq!(appended.unwrap(), 1);
     assert_eq!(count(&store, notes, ada.as_str()).await, 2);
+}
+
+/// NO PARK WITHOUT ITS NOTE. The batch that parks a run is written with the `run.waiting` that
+/// says so, or not at all: with that one note impossible to write, the park does not land, and the
+/// run is as it was. Nothing of the park is in its log, its view still says it is running, and the
+/// stream has not heard of it. A `run.waiting` written after the commit would leave a run waiting
+/// on a person who is never told.
+#[tokio::test]
+async fn a_park_whose_note_cannot_be_written_is_not_written() {
+    let url = database_or_skip!();
+    let store = store(&url).await;
+    let (ada, luna) = (AccountId::new(), CoworkerId::new());
+    let id = RunId::new();
+    let mut run = Run::default();
+    let started = run.decide(start("thread-parked", &luna)).unwrap();
+    started.iter().for_each(|event| run.apply(event));
+    let view = RunView {
+        id: id.clone(),
+        thread_id: "thread-parked".into(),
+        status: run.status,
+        event_count: 0,
+        updated_at_ms: 1,
+    };
+    let seq = store
+        .append_run(&id, 0, &started, &view, Some(&ada))
+        .await
+        .unwrap();
+
+    let park = RunCommand::Suspend {
+        call_id: "call_1".into(),
+        tool: "shell".into(),
+        arguments: serde_json::json!({}),
+        reason: SuspendReason::PolicyApproval,
+        at_ms: 2,
+    };
+    let parked = run.decide(park).unwrap();
+    parked.iter().for_each(|event| run.apply(event));
+    let waiting = RunView {
+        status: run.status,
+        updated_at_ms: 2,
+        ..view
+    };
+
+    let refusal = refuse_waiting_for(&store, &ada).await;
+    let appended = store
+        .append_run(&id, seq, &parked, &waiting, Some(&ada))
+        .await;
+    allow_notes_again(&store, &refusal).await;
+
+    assert!(
+        matches!(appended, Err(StoreError::Database(_))),
+        "{appended:?}"
+    );
+    let log = "select count(*) from events where stream_id = $1";
+    assert_eq!(count(&store, log, &format!("run/{id}")).await, 1);
+    let running = "select count(*) from run_view where id = $1 and status = 'running'";
+    assert_eq!(count(&store, running, id.as_str()).await, 1);
+    let notes = "select count(*) from account_event where account_id = $1";
+    assert_eq!(count(&store, notes, ada.as_str()).await, 2, "the start's");
+
+    // And once the note can be written the same write lands, with its two.
+    let appended = store
+        .append_run(&id, seq, &parked, &waiting, Some(&ada))
+        .await;
+    assert_eq!(appended.unwrap(), seq + 1);
+    assert_eq!(count(&store, notes, ada.as_str()).await, 4);
+    let waits = "select count(*) from account_event where account_id = $1 and kind = 'run.waiting'";
+    assert_eq!(count(&store, waits, ada.as_str()).await, 1);
 }
 
 /// The same for a routine: a write whose note cannot be written does not land, the row included.
