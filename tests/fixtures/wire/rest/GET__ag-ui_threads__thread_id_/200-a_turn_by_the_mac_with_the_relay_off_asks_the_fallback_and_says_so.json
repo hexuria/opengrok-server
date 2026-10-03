@@ -9,7 +9,7 @@
     "coworkers": [
       {
         "id": "cw_0199bb4e-0000-7000-8000-000000000002",
-        "name": "Luna"
+        "name": "Ada"
       }
     ],
     "runs": [
@@ -37,7 +37,7 @@
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "messageId": "m1",
-            "delta": "first",
+            "delta": "hello",
             "timestamp": 100
           },
           {
@@ -51,7 +51,8 @@
             "runId": "0199bb4e-0000-7000-8000-000000000003",
             "value": {
               "kind": "gateway",
-              "model": "gpt-6-luna"
+              "model": "oag/cheap",
+              "fallbackFor": "relay_disabled"
             },
             "threadId": "thr-0199bb4e000070008000000000000001",
             "timestamp": 100
@@ -117,53 +118,7 @@
     ],
     "hiddenRunIds": [],
     "timeline": [],
-    "pendingUserMessages": [
-      {
-        "v": 1,
-        "id": "pum_0199bb4e-0000-7000-8000-000000000004",
-        "threadId": "thr-0199bb4e000070008000000000000001",
-        "content": "then this, on my plan",
-        "replyTo": null,
-        "recipeId": null,
-        "recipeValues": null,
-        "skillId": null,
-        "clientMessageId": "m2",
-        "status": "pending",
-        "createdAtMs": 1790000002000,
-        "updatedAtMs": 1790000002000,
-        "drainedAtMs": null,
-        "drainedRunId": null,
-        "heldFor": "relay_offline"
-      }
-    ],
-    "pendingEvents": [
-      {
-        "type": "CUSTOM",
-        "timestamp": 100,
-        "name": "pending-user-message",
-        "value": {
-          "v": 1,
-          "op": "snapshot",
-          "threadId": "thr-0199bb4e000070008000000000000001",
-          "message": {
-            "v": 1,
-            "id": "pum_0199bb4e-0000-7000-8000-000000000004",
-            "threadId": "thr-0199bb4e000070008000000000000001",
-            "content": "then this, on my plan",
-            "replyTo": null,
-            "recipeId": null,
-            "recipeValues": null,
-            "skillId": null,
-            "clientMessageId": "m2",
-            "status": "pending",
-            "createdAtMs": 1790000002000,
-            "updatedAtMs": 1790000002000,
-            "drainedAtMs": null,
-            "drainedRunId": null,
-            "heldFor": "relay_offline"
-          }
-        }
-      }
-    ]
+    "pendingUserMessages": [],
+    "pendingEvents": []
   }
 }

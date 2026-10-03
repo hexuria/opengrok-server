@@ -1242,11 +1242,14 @@ async fn converse_raw(
             Some(_) => SourceKind::LocalProxy,
             None => SourceKind::Gateway,
         };
-        let said = match request.endpoint.as_ref().and_then(ModelEndpoint::via) {
+        let mut said = match request.endpoint.as_ref().and_then(ModelEndpoint::via) {
             Some(via) => serde_json::json!({ "kind": kind.as_str(), "via": via.as_str(),
                                              "model": request.model }),
             None => serde_json::json!({ "kind": kind.as_str(), "model": request.model }),
         };
+        if let Some(why) = request.fallback_for {
+            said["fallbackFor"] = why.into();
+        }
         opening.push(projection.custom(INFERENCE_SOURCE_NAME, said));
     }
     let opened_ok = journal.record(run_id, &opening).await;

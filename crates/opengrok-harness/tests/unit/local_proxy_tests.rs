@@ -244,6 +244,147 @@ async fn a_turns_source_is_resolved_in_one_place_and_never_guessed() {
     assert_eq!(asked(routed), ("xai/grok-4.6".to_string(), None), "named");
 }
 
+/// RELAY OFF (#332): a fresh turn that would go by the Mac asks the person's fallback on the
+/// gateway instead, on its model and effort, whatever the coworker is pinned to, and says why; a
+/// carry-on of a turn the Mac started never changes door, and with no fallback the turn is refused
+/// in words, `plan_unavailable`. The switch is the relay's alone: the loopback ignores it, and a
+/// fallback is never asked while the relay is on.
+#[tokio::test]
+async fn a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_or_is_refused() {
+    let ada = AccountId::new();
+    let fallback = PlanFallback {
+        model: "xai/grok-4.6".to_string(),
+        effort: Effort::Low,
+    };
+    let off = InferenceSource {
+        kind: SourceKind::LocalProxy,
+        base_url: Some("http://127.0.0.1:8080".to_string()),
+        local_model: Some("gpt-5.5".to_string()),
+        via: Some(Via::Mac),
+        relay_model: Some("gpt-6-sol".to_string()),
+        relay_off: true,
+        plan_fallback: Some(fallback.clone()),
+        ..Default::default()
+    };
+    let luna = (Some(SourceKind::LocalProxy), Some("gpt-6-luna".to_string()));
+    for (bot, pin) in [(NO_BOT, "oag/cheap"), (luna, "gpt-6-luna")] {
+        let routed = route(
+            &stored(Some(off.clone())),
+            Some(&ada),
+            None,
+            None,
+            "r1",
+            bot,
+        )
+        .await;
+        assert_eq!(routed.source(), SourceKind::Gateway.into(), "{pin}");
+        assert_eq!(
+            routed.asks(pin),
+            Some(("xai/grok-4.6", SourceKind::Gateway))
+        );
+        assert_eq!(
+            routed.fallback(Effort::High),
+            (Effort::Low, Some("relay_disabled"))
+        );
+        let asked = routed.asked(pin.to_string());
+        assert_eq!(
+            asked,
+            ("xai/grok-4.6".to_string(), None),
+            "the fallback's, not {pin}"
+        );
+    }
+
+    let refused_off = |routed: Route| {
+        let (_, endpoint) = routed.asked(String::new());
+        let Some(ModelEndpoint::Unavailable { why, via, unset }) = endpoint else {
+            return Err(format!("{endpoint:?}"));
+        };
+        let said = why.starts_with(RELAY_OFF) && via == Some(Via::Mac) && unset;
+        said.then_some(why)
+            .ok_or("not the relay's refusal".to_string())
+    };
+    let mac = TurnSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Mac),
+    };
+    let carried = Some("gpt-6-sol");
+    let saved = stored(Some(off.clone()));
+    let carry_on = route(&saved, Some(&ada), Some(mac), carried, "r2", NO_BOT).await;
+    assert!(
+        refused_off(carry_on).is_ok(),
+        "a carry-on never changes door"
+    );
+    let none = stored(Some(InferenceSource {
+        plan_fallback: None,
+        ..off.clone()
+    }));
+    let why = refused_off(route(&none, Some(&ada), None, None, "r3", NO_BOT).await);
+    assert_eq!(
+        why.as_deref(),
+        Ok(
+            "Relay is off for your plan, so the turn was not sent. Turn Relay on, or choose a \
+            Server model to answer while it is off, or switch this turn to the gateway."
+        )
+    );
+
+    let loopback = stored(Some(InferenceSource {
+        via: Some(Via::Loopback),
+        ..off.clone()
+    }));
+    let routed = route(&loopback, Some(&ada), None, None, "r4", NO_BOT).await;
+    let (model, endpoint) = routed.asked(String::new());
+    assert_eq!(model, "gpt-5.5", "the loopback ignores the switch");
+    assert!(
+        matches!(endpoint, Some(ModelEndpoint::Proxy { .. })),
+        "{endpoint:?}"
+    );
+    let on = stored(Some(InferenceSource {
+        relay_off: false,
+        ..off.clone()
+    }));
+    let routed = route(&on, Some(&ada), None, None, "r5", NO_BOT).await;
+    let (model, endpoint) = routed.asked(String::new());
+    assert_eq!(
+        model, "gpt-6-sol",
+        "on, the Mac answers and the fallback waits"
+    );
+    assert!(
+        matches!(endpoint, Some(ModelEndpoint::Relay(_))),
+        "{endpoint:?}"
+    );
+    let gateway = Some(SourceKind::Gateway.into());
+    let named = route(&saved, Some(&ada), gateway, None, "r6", NO_BOT).await;
+    assert_eq!(
+        named.fallback(Effort::High),
+        (Effort::High, None),
+        "the turn's own gateway"
+    );
+}
+
+/// GET SAYS THE SWITCH AND THE FALLBACK ALWAYS (#332): on and null until a person sets them.
+#[tokio::test]
+async fn the_setting_reads_back_the_relay_switch_and_the_fallback() {
+    let unset = described(&InferenceSource::default(), None).await;
+    assert_eq!(
+        (&unset["relayEnabled"], &unset["planFallback"]),
+        (&serde_json::json!(true), &serde_json::Value::Null)
+    );
+    let off = InferenceSource {
+        relay_off: true,
+        plan_fallback: Some(PlanFallback {
+            model: "xai/grok-4.6".to_string(),
+            effort: Effort::High,
+        }),
+        ..Default::default()
+    };
+    let said = described(&off, None).await;
+    let fallback = serde_json::json!({ "model": "xai/grok-4.6", "effort": "high" });
+    assert_eq!(
+        (&said["relayEnabled"], &said["planFallback"]),
+        (&serde_json::json!(false), &fallback)
+    );
+}
+
 /// THE MAC IS A WAY, NOT A SOURCE: `via: "mac"` over the same `local_proxy` kind resolves to the
 /// account's relay for this run, on the Mac's own model, and never the loopback's address, model
 /// or key. The turn's own way beats the setting's, as its kind does, and a carry-on keeps the way
@@ -258,7 +399,7 @@ async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
         has_key: true,
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
-        new_bot_default: None,
+        ..Default::default()
     };
     let saved = stored(Some(by_mac.clone()));
     let relayed = |run: &str| {

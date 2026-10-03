@@ -487,11 +487,7 @@ impl RoutineDesk for Tools {
                 // A Bot on the person's own plan runs a routine only while the plan can answer.
                 if bot.on_plan {
                     let setting = opengrok_harness::local_proxy::Saved::setting(state, account);
-                    let plan = Some(opengrok_core::inference::SourceKind::LocalProxy);
-                    let by_mac = setting
-                        .await
-                        .is_some_and(|setting| setting.by_mac(None, plan));
-                    row["note"] = json!(routine::ONLY_WHILE[usize::from(!by_mac)]);
+                    row["note"] = json!(routine::note(&setting.await.unwrap_or_default()));
                 }
                 Ok(row)
             }

@@ -15,9 +15,10 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use opengrok_core::coworker::Effort;
 use opengrok_core::id::{AccountId, RunId};
 use opengrok_core::inference::{
-    InferenceSource, NewBotDefault, SourceKind, TurnSource, Via, subscription_model,
+    InferenceSource, PlanFallback, SourceKind, TurnSource, Via, subscription_model,
 };
 use opengrok_core::run::Run;
 
@@ -149,89 +150,6 @@ pub(crate) fn allowed_ids(body: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// What saving a setting does to the proxy's key. No `Debug`: `Set` holds the key.
-pub enum KeyChange {
-    Keep,
-    Set(String),
-    Clear,
-}
-
-/// The setting a `PUT /account/inference-source` body asks for over `current`, and what it does
-/// to the key, or the sentence it is refused with. A field absent keeps what is saved; `null` or
-/// blank clears it, and so for `via`, `relay.localModel` and `newBotDefault` (null only). EVERY
-/// RULE IS ASKED HERE, BEFORE ANYTHING IS WRITTEN: an address that is not this machine, or a model
-/// the terms forbid, beside a fresh key saves neither. The key goes out in a header, so it is
-/// printable and bounded or refused now, not at a turn.
-pub fn apply(
-    current: &InferenceSource,
-    body: &serde_json::Value,
-) -> Result<(InferenceSource, KeyChange), String> {
-    let text =
-        |object: &serde_json::Value, field: &str| -> Result<Option<Option<String>>, String> {
-            match object.get(field) {
-                None => Ok(None),
-                Some(serde_json::Value::Null) => Ok(Some(None)),
-                Some(serde_json::Value::String(text)) => Ok(Some(
-                    Some(text.trim().to_string()).filter(|t| !t.is_empty()),
-                )),
-                Some(_) => Err(format!("{field} must be a string or null")),
-            }
-        };
-    let model = |model: Option<String>, field: &str| match model.as_deref().map(subscription_model)
-    {
-        Some(Err(why)) => Err(format!("{field}: {why}")),
-        _ => Ok(model),
-    };
-    let mut source = current.clone();
-    source.kind = SourceKind::named(body.get("kind"))
-        .ok()
-        .flatten()
-        .ok_or("kind must be \"gateway\" or \"local_proxy\"")?;
-    if let Some(base) = text(body, "baseUrl")? {
-        source.base_url = base
-            .as_deref()
-            .map(loopback_base)
-            .transpose()
-            .map_err(|why| format!("baseUrl: {why}"))?;
-    }
-    if let Some(chosen) = text(body, "localModel")? {
-        source.local_model = model(chosen, "localModel")?;
-    }
-    if let Some(via) = body.get("via") {
-        source.via = Via::named(Some(via)).map_err(|why| format!("via {why}"))?;
-    }
-    // THE MAC'S MODEL IS ITS OWN, held to the same allowlist: the Mac's opencodex is not this
-    // machine's, and need not serve the ids the loopback's does.
-    match body.get("relay") {
-        None => {}
-        Some(serde_json::Value::Null) => source.relay_model = None,
-        Some(relay @ serde_json::Value::Object(_)) => {
-            let chosen = text(relay, "localModel").map_err(|why| format!("relay.{why}"))?;
-            if let Some(chosen) = chosen {
-                source.relay_model = model(chosen, "relay.localModel")?;
-            }
-        }
-        Some(_) => return Err("relay must be an object or null".to_string()),
-    }
-    if let Some(chosen) = body.get("newBotDefault") {
-        source.new_bot_default = NewBotDefault::named(chosen)?;
-    }
-    let key = match text(body, "apiKey")? {
-        None => KeyChange::Keep,
-        Some(None) => KeyChange::Clear,
-        Some(Some(key)) if key.len() <= 512 && key.bytes().all(|b| b.is_ascii_graphic()) => {
-            KeyChange::Set(key)
-        }
-        Some(Some(_)) => return Err("apiKey must be printable ASCII, 512 at most".to_string()),
-    };
-    source.has_key = match key {
-        KeyChange::Keep => source.has_key,
-        KeyChange::Set(_) => true,
-        KeyChange::Clear => false,
-    };
-    Ok((source, key))
-}
-
 /// The reads the server makes for a person's source: their setting, their proxy's key, and the
 /// relay their Mac holds. A trait so what decides where a turn asks lives here, beside what dials
 /// it, and the server reads.
@@ -257,13 +175,21 @@ pub enum Route {
         model: String,
         endpoint: ModelEndpoint,
     },
+    /// The gateway on the person's `planFallback`: a fresh turn by their Mac while they switched
+    /// the relay off (#332), its frame saying so (`fallbackFor`), the coworker's own pin untouched.
+    Fallback(PlanFallback),
 }
+
+/// What a turn by the Mac is refused with while the relay is off and no fallback is set (#332),
+/// `plan_unavailable`; a routine's firing and a Bot's reply are skipped in its place.
+pub const RELAY_OFF: &str = "Relay is off for your plan, so the turn was not sent. Turn Relay on, \
+                             or choose a Server model to answer while it is off";
 
 impl Route {
     /// What a run captures on `RunEvent::Started`, and a carry-on is resolved by.
     pub fn kind(&self) -> SourceKind {
         match self {
-            Self::Gateway => SourceKind::Gateway,
+            Self::Gateway | Self::Fallback(_) => SourceKind::Gateway,
             Self::LocalProxy { .. } => SourceKind::LocalProxy,
         }
     }
@@ -271,7 +197,7 @@ impl Route {
     /// The kind with the way it goes, as a run captures them.
     pub fn source(&self) -> TurnSource {
         match self {
-            Self::Gateway => SourceKind::Gateway.into(),
+            Self::Gateway | Self::Fallback(_) => SourceKind::Gateway.into(),
             Self::LocalProxy { endpoint, .. } => TurnSource {
                 kind: SourceKind::LocalProxy,
                 via: endpoint.via(),
@@ -285,6 +211,15 @@ impl Route {
         match self {
             Self::Gateway => (pin, None),
             Self::LocalProxy { model, endpoint } => (model, Some(endpoint)),
+            Self::Fallback(fallback) => (fallback.model, None),
+        }
+    }
+
+    /// How hard the turn thinks, `effort` unless the fallback says, and why it is the gateway.
+    pub fn fallback(&self, effort: Effort) -> (Effort, Option<&'static str>) {
+        match self {
+            Self::Fallback(fallback) => (fallback.effort, Some("relay_disabled")),
+            _ => (effort, None),
         }
     }
 
@@ -294,6 +229,7 @@ impl Route {
     pub fn asks<'a>(&'a self, pin: &'a str) -> Option<(&'a str, SourceKind)> {
         match self {
             Self::Gateway => Some((pin, SourceKind::Gateway)),
+            Self::Fallback(fallback) => Some((&fallback.model, SourceKind::Gateway)),
             Self::LocalProxy {
                 endpoint: ModelEndpoint::Unavailable { .. },
                 ..
@@ -365,7 +301,7 @@ pub async fn route(
     run_id: &str,
     (source, pin): (Option<SourceKind>, Option<String>),
 ) -> Route {
-    let chosen = TurnSource::picked(chosen, source);
+    let (chosen, fresh) = (TurnSource::picked(chosen, source), captured.is_none());
     let named_gateway = chosen.is_some_and(|chosen| chosen.kind == SourceKind::Gateway);
     let (Some(account), false) = (account, named_gateway) else {
         return Route::Gateway;
@@ -383,6 +319,14 @@ pub async fn route(
     let base = match setting.resolve(chosen) {
         (SourceKind::Gateway, _) => return Route::Gateway,
         (SourceKind::LocalProxy, Via::Loopback) => setting.base_url.as_deref(),
+        // RELAY OFF (#332): a fresh turn asks the person's fallback; a carry-on never changes door
+        // mid-run, and with no fallback the turn is refused in words.
+        (SourceKind::LocalProxy, Via::Mac) if setting.relay_off => {
+            let model = captured.or(setting.relay_model).unwrap_or_default();
+            let (endpoint, fallback) = (refused(RELAY_OFF, Via::Mac), setting.plan_fallback);
+            let fallback = fallback.filter(|_| fresh);
+            return fallback.map_or(Route::LocalProxy { model, endpoint }, Route::Fallback);
+        }
         (SourceKind::LocalProxy, Via::Mac) => {
             let model = captured.or(setting.relay_model).unwrap_or_default();
             let endpoint = if model.is_empty() {
@@ -488,7 +432,8 @@ pub async fn listed(
 /// `apply`. Never the key, only whether there is one; `healthy` is a live `/healthz` on every read,
 /// whatever the kind, and false with no address. `mac` is the account's connected Mac and its
 /// enrolled label, for `relay`: an account with none reads `connected: false` and nulls, whole.
-/// `newBotDefault` is always there, null until set: a missing key reads as a server from before.
+/// `newBotDefault` and `planFallback` are always there, null until set, and `relayEnabled` too: a
+/// missing key reads as a server from before.
 pub async fn described(
     source: &InferenceSource,
     mac: Option<(String, Option<String>)>,
@@ -512,6 +457,8 @@ pub async fn described(
             "localModel": source.relay_model,
         },
         "newBotDefault": source.new_bot_default,
+        "relayEnabled": !source.relay_off,
+        "planFallback": source.plan_fallback,
     })
 }
 

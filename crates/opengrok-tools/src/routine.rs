@@ -16,6 +16,7 @@
 //! NativeChat on 2 Oct 2026, and the owner's rules after it): the names, the arguments, and the
 //! refusals below. One cron per routine until #315 gives a routine several wakes.
 
+use opengrok_core::inference::{InferenceSource, SourceKind, TurnSource, Via};
 use serde_json::{Value, json};
 
 use crate::{ToolContext, ToolResult};
@@ -47,11 +48,21 @@ pub const ONE_SCHEDULE: &str =
 pub const NO_WEBHOOK: &str = "a Bot can't make a webhook trigger: its key must not pass through \
      chat. Ask the person to add one in Routines.";
 /// What a routine made for a Bot on the person's own plan says (#316): it runs only while the
-/// plan can answer, by the way the plan goes, and is skipped otherwise.
-pub const ONLY_WHILE: [&str; 2] = [
-    "runs only while your computer is on",
-    "runs only while your plan's proxy answers",
-];
+/// plan can answer, by the way the plan goes, and is skipped otherwise; while the person switched
+/// the relay off, it runs on their fallback or is skipped every time (#332).
+pub fn note(setting: &InferenceSource) -> &'static str {
+    let plan = TurnSource::picked(None, Some(SourceKind::LocalProxy));
+    match (
+        setting.resolve(plan).1,
+        setting.relay_off,
+        &setting.plan_fallback,
+    ) {
+        (Via::Loopback, ..) => "runs only while your plan's proxy answers",
+        (Via::Mac, false, _) => "runs only while your computer is on",
+        (Via::Mac, true, Some(_)) => "runs on your Server fallback model while Relay is off",
+        (Via::Mac, true, None) => "is skipped while Relay is off for your plan",
+    }
+}
 
 /// A routine id the person does not own, answered as unknown whether or not it exists.
 pub fn not_yours(routine: &str) -> String {

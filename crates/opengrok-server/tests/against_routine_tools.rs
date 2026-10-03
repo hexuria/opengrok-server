@@ -792,12 +792,39 @@ async fn a_routine_for_a_bot_on_its_persons_plan_says_when_it_runs() {
         )
         .await;
     assert_eq!(status, 200, "{row}");
-    for (via, note) in [
-        ("loopback", "runs only while your plan's proxy answers"),
-        ("mac", "runs only while your computer is on"),
+    let fallback = json!({ "model": "xai/grok-4.6" });
+    for (via, (on, fallback), note) in [
+        (
+            "loopback",
+            (true, Value::Null),
+            "runs only while your plan's proxy answers",
+        ),
+        (
+            "mac",
+            (true, Value::Null),
+            "runs only while your computer is on",
+        ),
+        // While the relay is off (#332): on the fallback, or skipped with none.
+        (
+            "mac",
+            (false, fallback),
+            "runs on your Server fallback model while Relay is off",
+        ),
+        (
+            "mac",
+            (false, Value::Null),
+            "is skipped while Relay is off for your plan",
+        ),
+        // The switch is the Mac's alone: the loopback never reads it.
+        (
+            "loopback",
+            (false, Value::Null),
+            "runs only while your plan's proxy answers",
+        ),
     ] {
         let setting = json!({ "kind": "local_proxy", "via": via,
-            "baseUrl": "http://127.0.0.1:9", "localModel": "gpt-5.5" });
+            "baseUrl": "http://127.0.0.1:9", "localModel": "gpt-5.5",
+            "relayEnabled": on, "planFallback": fallback });
         let path = "/account/inference-source";
         let (status, saved) = h
             .send(&ada, reqwest::Method::PUT, path, Some(setting))

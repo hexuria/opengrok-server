@@ -2,7 +2,7 @@ use super::*;
 
 use std::sync::Arc;
 
-use opengrok_core::inference::{InferenceSource, Via};
+use opengrok_core::inference::{InferenceSource, PlanFallback, Via};
 use opengrok_harness::relay::RelayBroker;
 
 /// A person's saved setting; its key is always `k`.
@@ -127,4 +127,35 @@ async fn a_firing_on_the_plan_is_unreachable_while_its_mac_or_proxy_is_away() {
     let refused = routine_route(&gap, (&ada, &run), &luna).await;
     let unsaid = unreachable_by(&refused).await;
     assert_eq!(unsaid, None, "refused in words instead");
+}
+
+/// RELAY OFF (#332): a firing by the Mac with no fallback is skipped `relay_disabled`, though its
+/// Mac is connected; with a fallback it asks the gateway, which nothing skips.
+#[tokio::test]
+async fn a_firing_by_the_mac_with_the_relay_off_is_skipped_unless_a_fallback_answers() {
+    let (ada, run) = (AccountId::new(), RunId::new());
+    let luna = coworker(Some(SourceKind::LocalProxy), "gpt-6-luna");
+    let off = InferenceSource {
+        kind: SourceKind::LocalProxy,
+        via: Some(Via::Mac),
+        relay_model: Some("gpt-5.5".to_string()),
+        relay_off: true,
+        ..Default::default()
+    };
+    let saved = stored(off.clone());
+    let _stream = saved.1.connect(ada.as_str(), "mac-1");
+    let routed = routine_route(&saved, (&ada, &run), &luna).await;
+    let skipped = Some(("relay_disabled", "Skipped: Relay is off for your plan"));
+    assert_eq!(unreachable_by(&routed).await, skipped);
+    let fallback = PlanFallback {
+        model: "xai/grok-4.6".to_string(),
+        effort: Default::default(),
+    };
+    let with = stored(InferenceSource {
+        plan_fallback: Some(fallback),
+        ..off
+    });
+    let routed = routine_route(&with, (&ada, &run), &luna).await;
+    assert!(matches!(routed, Route::Fallback(_)), "{routed:?}");
+    assert_eq!(unreachable_by(&routed).await, None);
 }

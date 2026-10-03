@@ -364,6 +364,7 @@ async fn a_run_through_the_mock_door_is_well_formed() {
             messages: to_chat_messages(&input(vec![message("user", Some("ping"))])),
             tools: Vec::new(),
             endpoint: None,
+            fallback_for: None,
         },
         "t1",
         "r1",

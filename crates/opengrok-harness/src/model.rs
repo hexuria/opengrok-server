@@ -190,6 +190,9 @@ pub struct ModelRequest {
     /// which is every request but those. Filled where `gateway_key` is, and on a proxy turn
     /// `gateway_key` is `None` and `model` is the proxy's own id, never a gateway pin.
     pub endpoint: Option<ModelEndpoint>,
+    /// Why a gateway turn is the person's fallback for their plan (`"relay_disabled"`, #332):
+    /// its `opengrok.inferenceSource` frame says it as `fallbackFor`.
+    pub fallback_for: Option<&'static str>,
 }
 
 /// One message of a conversation, in the OpenAI chat dialect the gateway speaks.

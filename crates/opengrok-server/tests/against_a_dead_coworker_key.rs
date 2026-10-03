@@ -141,6 +141,7 @@ fn a_turn(coworker: &CoworkerId, payer: &AccountId) -> ModelRequest {
         messages: vec![ChatMessage::text("user", "ok")],
         tools: Vec::new(),
         endpoint: None,
+        fallback_for: None,
     }
 }
 
