@@ -198,6 +198,34 @@ async fn an_id_below_the_floor_is_a_reset_even_when_its_rows_are_gone() {
     assert_eq!((first.id, first.event.as_str()), (21, "thread.changed"));
 }
 
+/// WHAT RETENTION PRUNES UNDER A STREAM IS NOT SILENTLY SKIPPED. A resume at 1 is valid when it
+/// opens; the notes after it are pruned before it reads them (as a replay slower than ten thousand
+/// notes would find); the page it then reads begins at 4, not 2, and the stream says `reset`
+/// rather than hand over the rest as if nothing was missing.
+#[tokio::test]
+async fn notes_pruned_before_they_were_read_are_a_reset_and_not_a_silent_gap() {
+    let Some(pool) = pool().await else { return };
+    let (hub, ada) = (hub(&pool), account());
+    for n in 0..5 {
+        note(&pool, &ada, changed(&format!("t{n}"))).await;
+    }
+    let mut frames = hub.follow(&ada, Some("1")).await.unwrap();
+    let prune = "delete from account_event where account_id = $1 and id in (2, 3)";
+    sqlx::query(prune).bind(&ada).execute(&pool).await.unwrap();
+    let floor = "update account_event_head set floor = 3 where account_id = $1";
+    sqlx::query(floor).bind(&ada).execute(&pool).await.unwrap();
+
+    let first = must(&mut frames).await;
+    assert_eq!((first.id, first.event.as_str()), (5, "reset"));
+    assert_eq!(
+        block(&mut frames, 300).await,
+        None,
+        "and not the notes after the gap"
+    );
+    note(&pool, &ada, changed("after")).await;
+    assert_eq!(must(&mut frames).await.id, 6);
+}
+
 /// A LONG REPLAY IS PAGES: all of it, in order, each once, and the live notes after.
 #[tokio::test]
 async fn a_long_replay_comes_whole_and_in_order() {
@@ -257,6 +285,25 @@ async fn one_accounts_notes_never_reach_anothers_stream() {
     }
     assert_eq!(heard, ["bob-before", "bob-live"]);
     assert_eq!(block(&mut for_bob, 400).await, None);
+}
+
+/// AN ACCOUNT THAT CONNECTED ONCE LEAVES NOTHING BEHIND: its room is dropped with the last stream
+/// in it, and kept while one is left, so a long-lived process does not keep an entry for everyone
+/// who ever opened the app.
+#[tokio::test]
+async fn a_room_goes_with_the_last_stream_in_it() {
+    let Some(pool) = pool().await else { return };
+    let (hub, ada, bob) = (hub(&pool), account(), account());
+    let first = hub.follow(&ada, None).await.unwrap();
+    let second = hub.follow(&ada, None).await.unwrap();
+    let others = hub.follow(&bob, None).await.unwrap();
+    assert_eq!(hub.open_rooms(), 2);
+    drop(first);
+    assert_eq!(hub.open_rooms(), 2, "one is left in ada's");
+    drop(second);
+    assert_eq!(hub.open_rooms(), 1);
+    drop(others);
+    assert_eq!(hub.open_rooms(), 0);
 }
 
 /// A QUIET STREAM SAYS SO: a `: ping` comment, on the clock the hub is tuned to, again and again.

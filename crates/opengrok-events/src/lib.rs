@@ -46,12 +46,15 @@ create table if not exists account_event_head (
 
 -- `payload` is the frame's `data:` line as written, so it is `json` and not `jsonb`: jsonb sorts a
 -- note's keys, and the order the contract lists them in is the order NativeChat's fixtures show.
+-- `created_at` is the clock at the insert, not the transaction's start (`now()`): the insert runs
+-- under the head lock, so time then only goes up with the id, and what retention removes by age
+-- is always the oldest ids, never a hole.
 create table if not exists account_event (
     account_id text        not null,
     id         bigint      not null,
     kind       text        not null,
     payload    json        not null,
-    created_at timestamptz not null default now(),
+    created_at timestamptz not null default clock_timestamp(),
     primary key (account_id, id)
 );
 

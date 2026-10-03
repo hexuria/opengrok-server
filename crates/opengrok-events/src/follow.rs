@@ -95,6 +95,12 @@ struct Follow {
     poll: Interval,
 }
 
+impl Drop for Follow {
+    fn drop(&mut self) {
+        self.hub.leave(&self.account);
+    }
+}
+
 impl Follow {
     async fn next(&mut self) -> Option<String> {
         loop {
@@ -102,7 +108,7 @@ impl Follow {
                 return Some(frame);
             }
             if self.dirty && Instant::now() >= self.gate {
-                self.read().await;
+                self.read().await?;
                 continue;
             }
             tokio::select! {
@@ -120,7 +126,12 @@ impl Follow {
 
     /// Read the next page after the cursor. Once caught up, the next read waits out the window, so
     /// a burst of notes is read together; while a page comes back full there is more, and no wait.
-    async fn read(&mut self) {
+    ///
+    /// AN ACCOUNT'S RETAINED IDS ARE CONSECUTIVE, so a page that does not begin right after the
+    /// cursor means retention pruned notes this stream had not read yet (a replay that took longer
+    /// than ten thousand notes): it is told `reset` rather than handed the rest as if nothing was
+    /// missing.
+    async fn read(&mut self) -> Option<()> {
         let replay = self.replaying;
         self.dirty = false;
         let page = outbox::page(self.hub.pool(), &self.account, self.cursor, PAGE).await;
@@ -130,9 +141,15 @@ impl Follow {
             Err(error) => {
                 tracing::warn!(%error, "the events outbox could not be read; reading again soon");
                 (self.dirty, self.gate) = (true, now + RETRY);
-                return;
+                return Some(());
             }
         };
+        if notes
+            .first()
+            .is_some_and(|first| first.id != self.cursor + 1)
+        {
+            return self.lagged().await;
+        }
         let more = notes.len() as i64 == PAGE;
         self.replaying = replay && more;
         (self.dirty, self.gate) = (more, if more { now } else { now + self.window });
@@ -144,14 +161,15 @@ impl Follow {
             .iter()
             .map(|note| block(note.id, &note.kind, &note.payload.to_string()));
         self.ready.extend(blocks);
+        Some(())
     }
 
-    /// The room dropped wakes this stream was too slow to take. It is told to forget what it holds
-    /// and read everything again, and what it had not yet been sent is not sent: that read covers
-    /// it. `None` ends the stream when the head cannot be read, and the client reconnects.
+    /// This stream missed notes it can no longer be given: the room dropped wakes it was too slow
+    /// to take, or retention pruned what it had yet to read. It is told to forget what it holds and
+    /// read everything again, and follows on from the head. `None` ends the stream when the head
+    /// cannot be read, and the client reconnects.
     async fn lagged(&mut self) -> Option<()> {
         let (head, _) = outbox::bounds(self.hub.pool(), &self.account).await.ok()?;
-        self.ready.clear();
         self.ready.push_back(block(head, RESET, "{}"));
         (self.cursor, self.dirty, self.replaying) = (head, false, false);
         Some(())

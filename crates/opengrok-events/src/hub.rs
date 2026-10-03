@@ -100,6 +100,23 @@ impl Hub {
             .subscribe()
     }
 
+    /// A stream is going away: the account's room goes with it if it was the last seat, so an
+    /// account that connected once does not keep an entry for as long as the process lives.
+    pub(crate) fn leave(&self, account: &str) {
+        let mut rooms = self.rooms();
+        if rooms
+            .get(account)
+            .is_some_and(|room| room.receiver_count() <= 1)
+        {
+            rooms.remove(account);
+        }
+    }
+
+    /// How many accounts have a stream open on this hub.
+    pub fn open_rooms(&self) -> usize {
+        self.rooms().len()
+    }
+
     fn wake(&self, account: &str, id: i64) {
         let mut rooms = self.rooms();
         if rooms
