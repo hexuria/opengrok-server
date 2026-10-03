@@ -399,10 +399,10 @@ impl RelayBroker {
         ))
     }
 
-    /// The ids the account's Mac says its opencodex serves that a subscription may use
-    /// (`local_proxy::allowed_ids`). None when no Mac is connected, or it does not answer within
+    /// The models the account's Mac says its opencodex serves that a subscription may use
+    /// (`local_proxy::allowed`). None when no Mac is connected, or it does not answer within
     /// `Clocks::listing`: a list is never an error, and never waits long.
-    pub async fn models(self: &Arc<Self>, account: &str) -> Vec<String> {
+    pub async fn models(self: &Arc<Self>, account: &str) -> Vec<opengrok_core::catalogue::Model> {
         let asked = self.ask(account, None, |request_id| RelayFrame::Models {
             request_id,
         });
@@ -412,7 +412,7 @@ impl RelayBroker {
         match tokio::time::timeout(self.clocks.listing, call.pieces.recv()).await {
             Ok(Some(Piece::Json(listed))) => {
                 call.finished = true;
-                crate::local_proxy::allowed_ids(&listed)
+                crate::local_proxy::allowed(&listed)
             }
             _ => Vec::new(),
         }

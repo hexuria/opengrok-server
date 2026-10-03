@@ -978,10 +978,9 @@ async fn the_proxy_is_asked_whether_it_is_up_and_what_it_serves() {
     ))
     .await;
     assert!(healthy(&proxy).await);
-    assert_eq!(
-        models(&proxy, Some("proxy-key-1")).await.unwrap(),
-        ["gpt-5.5", "gpt-5-codex", "o3"]
-    );
+    let listed = models(&proxy, Some("proxy-key-1")).await.unwrap();
+    let ids: Vec<&str> = listed.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(ids, ["gpt-5.5", "gpt-5-codex", "o3"]);
     let sent = seen.lock().unwrap().join("\n").to_ascii_lowercase();
     assert!(sent.contains("get /healthz "), "{sent}");
     assert!(sent.contains("get /v1/models "), "{sent}");

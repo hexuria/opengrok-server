@@ -21,6 +21,7 @@ use opengrok_wire::agui::{Event, RunAgentInput};
 
 use super::provision;
 use crate::auth::AuthState;
+use crate::inference::effort_refused;
 use opengrok_core::coworker::{CoworkerCommand, CoworkerView, Effort};
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
 use opengrok_core::inference::{SourceKind, TurnSource};
@@ -1020,30 +1021,24 @@ pub async fn list_models(
         (_, Some(catalogue)) => {
             let listing = catalogue.list().await;
             let points = crate::points::models_points(&state).await;
-            serde_json::json!({
-                "models": listing
-                    .models
-                    .iter()
-                    .map(|model| serde_json::json!({
-                        "id": model.id,
-                        // Points multipliers (`points.rs`): null on a gateway with no reference
-                        // price or older than open-ai-gateway #52; the picker shows ×N after the id.
-                        "points": crate::points::points_json(
-                            points.as_ref().and_then(|p| p.get(crate::points::base_model(&model.id))),
-                        ),
-                        "source": "gateway",
-                    }))
-                    .collect::<Vec<_>>(),
-                "note": listing.note,
-            })
+            // Points multipliers (`points.rs`): null on a gateway with no reference price or older
+            // than open-ai-gateway #52; the picker shows ×N after the id.
+            let entry = |model: &opengrok_core::catalogue::Model| {
+                let base = crate::points::base_model(&model.id);
+                let points = crate::points::points_json(points.as_ref().and_then(|p| p.get(base)));
+                model.entry(points, SourceKind::Gateway, None)
+            };
+            let models: Vec<_> = listing.models.iter().map(entry).collect();
+            serde_json::json!({ "models": models, "note": listing.note })
         }
     };
     // Whenever an address is stored or a Mac is there to ask, whatever the setting's kind: their
     // models beside the gateway's, and `localProxy`, so a picker can say why they are missing.
     let listing_local = asked != Some(SourceKind::Gateway);
     if let Some((said, local)) = local_proxy::listed(&state, &account, listing_local).await {
+        let plan = local.iter().map(|(via, model)| model.on_the_plan(*via));
         if let Some(models) = listing["models"].as_array_mut() {
-            models.extend(local);
+            models.extend(plan);
         }
         listing["localProxy"] = said;
     }
@@ -1350,6 +1345,12 @@ pub async fn repin_coworker(
         && let Err(why) = opengrok_core::inference::subscription_model(&after.model)
     {
         return refuse(format!("model: {why}"));
+    }
+    let chosen = (after.source, after.model.as_str());
+    if let Some(effort) = effort
+        && let Some(why) = effort_refused(&state, &account_id, chosen, effort).await
+    {
+        return refuse(format!("effort: {why}"));
     }
     // The stored stamp when nothing is appended (a decoration- or hide-only PATCH): the
     // projection is only rewritten with events, and a reply stamped `now` over an unchanged

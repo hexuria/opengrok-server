@@ -793,7 +793,10 @@ async fn the_model_list_carries_both_sources_when_a_proxy_is_stored() {
         .cloned();
     assert_eq!(
         entry,
-        Some(json!({"id": "gpt-5.5", "points": null, "source": "local_proxy", "via": "loopback"})),
+        Some(
+            json!({"id": "gpt-5.5", "points": null, "source": "local_proxy", "via": "loopback",
+                    "efforts": null, "ownEffort": null})
+        ),
         "the gateway's entry shape, and its source"
     );
 
@@ -1977,7 +1980,7 @@ async fn a_default_for_new_bots_is_held_to_the_rules_of_its_parts() {
     let no_pin = "newBotDefault.model: a coworker needs a model to think with";
     let no_source = "newBotDefault.source must be \"gateway\" or \"local_proxy\"";
     let efforts =
-        "newBotDefault.effort must be one of inherit, none, low, medium, high, xhigh, max";
+        "newBotDefault.effort must be one of inherit, none, low, medium, high, xhigh, max, ultra";
     for (default, why) in [
         (json!({ "source": "gateway", "model": "  " }), no_pin),
         (json!({ "source": "gateway" }), no_pin),

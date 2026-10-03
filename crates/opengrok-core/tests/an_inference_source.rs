@@ -603,6 +603,37 @@ fn switching_the_relay_moves_no_way_and_a_fallback_is_kept_until_cleared() {
     }
 }
 
+/// The efforts a save names, each with where it is held: the default's on its own door, the
+/// fallback's on the gateway whatever the default's door, and neither when the body leaves its
+/// field out, so a saved one is never judged again.
+#[test]
+fn a_save_names_the_efforts_it_sets_and_where_each_is_held() {
+    let default = json!({ "source": "local_proxy", "model": "gpt-6-sol", "effort": "ultra" });
+    let fallback = json!({ "model": "openai/gpt-6-luna", "effort": "high" });
+    let setting = InferenceSource {
+        kind: SourceKind::LocalProxy,
+        new_bot_default: NewBotDefault::named(&default).unwrap(),
+        plan_fallback: PlanFallback::named(&fallback).unwrap(),
+        ..Default::default()
+    };
+    let both = json!({ "kind": "local_proxy", "newBotDefault": default, "planFallback": fallback });
+    let named = setting.named_efforts(&both);
+    let plan = Some(SourceKind::LocalProxy);
+    let gateway = Some(SourceKind::Gateway);
+    assert_eq!(
+        named,
+        [
+            Some(("newBotDefault", (plan, "gpt-6-sol", Effort::Ultra))),
+            Some(("planFallback", (gateway, "openai/gpt-6-luna", Effort::High))),
+        ]
+    );
+    let neither = setting.named_efforts(&json!({ "kind": "local_proxy" }));
+    assert_eq!(neither, [None, None], "a saved one stands");
+    let cleared = InferenceSource::default();
+    let named = cleared.named_efforts(&json!({ "kind": "gateway", "planFallback": null }));
+    assert_eq!(named, [None, None], "null names nothing to hold");
+}
+
 /// A person's time zone is an IANA name or nothing: an unknown one is refused before it is logged,
 /// the same one again is no event, and none clears it. An account that never set one has none.
 #[test]

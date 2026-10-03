@@ -4,6 +4,7 @@
 //! and a principal *are* without depending on a database, an HTTP client, or each other.
 
 pub mod account;
+pub mod catalogue;
 pub mod connection;
 pub mod coworker;
 pub mod id;
