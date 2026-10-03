@@ -2097,21 +2097,33 @@ pub(crate) async fn owned_coworker(
     }
 }
 
+/// The caller and the coworker in the path, when it is the caller's own: 401 without a bearer,
+/// 404 for anyone else's — the opening of every owner-only coworker route.
+async fn owner_of(
+    state: &AgUiState,
+    headers: &axum::http::HeaderMap,
+    coworker_id: String,
+) -> Result<(AccountId, CoworkerId), Response> {
+    let Some(account_id) = account_from_bearer(state, headers) else {
+        return Err((StatusCode::UNAUTHORIZED, "sign in first").into_response());
+    };
+    let coworker_id = CoworkerId::from_stored(coworker_id);
+    match owned_coworker(state, &account_id, &coworker_id).await? {
+        true => Ok((account_id, coworker_id)),
+        false => Err((StatusCode::NOT_FOUND, "no such coworker").into_response()),
+    }
+}
+
 /// `GET /coworkers/{id}/computer` — live box state and noVNC URL for NativeChat's Open button.
 async fn computer_status(
     State(state): State<AgUiState>,
     headers: axum::http::HeaderMap,
     Path(coworker_id): Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     Json(provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await)
         .into_response()
 }
@@ -2131,15 +2143,7 @@ async fn egress_policy_box(
     headers: &axum::http::HeaderMap,
     coworker_id: String,
 ) -> Result<(AccountId, CoworkerId, provision::ScopedBoxRow), Response> {
-    let Some(account_id) = account_from_bearer(state, headers) else {
-        return Err((StatusCode::UNAUTHORIZED, "sign in first").into_response());
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return Err((StatusCode::NOT_FOUND, "no such coworker").into_response()),
-        Err(refusal) => return Err(refusal),
-    }
+    let (account_id, coworker_id) = owner_of(state, headers, coworker_id).await?;
     match provision::scoped_box_row_for(state, &account_id, &coworker_id).await {
         Some(row) => Ok((account_id, coworker_id, row)),
         None => Err((StatusCode::NOT_FOUND, "this coworker has no computer").into_response()),
@@ -2231,15 +2235,10 @@ async fn list_tools(
     headers: axum::http::HeaderMap,
     Path(coworker_id): Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     // No approvals are pending on a listing, so the two gates are empty; the patience is short
     // because nobody is waiting on a turn — a sleeping box should not hold a menu open. No
     // computer is no box tools, and still `use_skill` when a turn would offer it (#270).
@@ -2296,15 +2295,10 @@ async fn computer_screen(
     headers: axum::http::HeaderMap,
     Path(coworker_id): Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     match provision::coworker_screenshot(&state, &account_id, &coworker_id).await {
         Ok(shot) => Json(serde_json::json!({
             "mime": shot.mime,
@@ -2328,15 +2322,10 @@ async fn computer_update(
     headers: axum::http::HeaderMap,
     Path(coworker_id): Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     let update = match provision::begin_update_for_coworker(&state, &account_id, &coworker_id).await
     {
         Ok(update) => update,
@@ -2353,15 +2342,10 @@ async fn computer_reset(
     headers: axum::http::HeaderMap,
     Path(coworker_id): Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     if let Err((code, message)) =
         provision::reset_for_coworker(&state, &account_id, &coworker_id).await
     {
@@ -2381,15 +2365,10 @@ async fn ensure_computer(
     headers: axum::http::HeaderMap,
     Path(coworker_id): Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     let Ok((mut coworker, seq)) = state.auth.store.load_coworker(&coworker_id).await else {
         return (StatusCode::NOT_FOUND, "no such coworker").into_response();
     };
@@ -2422,15 +2401,10 @@ async fn get_spend(
     headers: axum::http::HeaderMap,
     Path(coworker_id): Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     match crate::spend::spend_for(&state, &account_id, &coworker_id).await {
         Ok(spend) => Json(spend).into_response(),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
@@ -2449,15 +2423,10 @@ async fn get_usage(
     Path(coworker_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<UsageQuery>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     let window = query.window.as_deref().unwrap_or("month");
     match crate::points::usage_for(&state, &account_id, &coworker_id, window).await {
         Ok(usage) => Json(usage).into_response(),
@@ -2476,15 +2445,10 @@ async fn get_limit(
     headers: axum::http::HeaderMap,
     Path(coworker_id): Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     match crate::points::limit_for(&state, &account_id, &coworker_id).await {
         Ok(limit) => Json(limit).into_response(),
         Err(error) => (
@@ -2502,15 +2466,10 @@ async fn set_limit(
     Path(coworker_id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     match crate::points::set_limit(&state, &account_id, &coworker_id, &body).await {
         Ok(limit) => Json(limit).into_response(),
         Err((code, error)) => (
@@ -2530,15 +2489,10 @@ async fn list_bot_keys(
     headers: axum::http::HeaderMap,
     axum::extract::Path(coworker_id): axum::extract::Path<String>,
 ) -> Response {
-    let Some(account_id) = account_from_bearer(&state, &headers) else {
-        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
-    };
-    let coworker_id = CoworkerId::from_stored(coworker_id);
-    match owned_coworker(&state, &account_id, &coworker_id).await {
-        Ok(true) => {}
-        Ok(false) => return (StatusCode::NOT_FOUND, "no such coworker").into_response(),
+    let (account_id, coworker_id) = match owner_of(&state, &headers, coworker_id).await {
+        Ok(owner) => owner,
         Err(refusal) => return refusal,
-    }
+    };
     match state
         .auth
         .store
@@ -5375,9 +5329,8 @@ async fn egress_tunnel_available_for(
     let Some(scoped) = provision::scoped_box_for(state, account_id, &coworker_id).await else {
         return false;
     };
-    state
-        .egress_tunnel_for(scoped.computer.as_ref(), &scoped.box_id)
-        .await
+    let cap = opengrok_box::shown_egress(scoped.computer.as_ref(), &scoped.box_id).await;
+    opengrok_box::EgressTunnel::advertised(true, cap)
 }
 
 /// The message a reply points at, as the one bracketed line `reply_context` writes for the

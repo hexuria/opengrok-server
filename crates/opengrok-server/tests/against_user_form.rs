@@ -53,6 +53,9 @@ struct FillStub {
     resumes: Mutex<u32>,
     egress: Mutex<Option<EgressTunnel>>,
     last_egress_box: Mutex<Option<String>>,
+    /// How long the guest takes to answer `/v1/info`, and how often it was asked.
+    egress_takes: Mutex<std::time::Duration>,
+    egress_asked: Mutex<u32>,
 }
 
 impl FillStub {
@@ -152,6 +155,9 @@ impl Computer for FillStub {
     }
     async fn egress_tunnel(&self, box_id: &str) -> Option<EgressTunnel> {
         *self.last_egress_box.lock().expect("egress box") = Some(box_id.to_string());
+        *self.egress_asked.lock().expect("asked") += 1;
+        let takes = *self.egress_takes.lock().expect("takes");
+        tokio::time::sleep(takes).await;
         *self.egress.lock().expect("egress")
     }
 }
@@ -1538,6 +1544,44 @@ async fn computer_json_stamps_the_scoped_box_live_egress() {
         "{body}"
     );
     assert_eq!(body["shareScope"], "user", "{body}");
+}
+
+/// The pane polls `/computer`, `/screen` and the host settings every two seconds, and a guest
+/// that spent the probe's whole patience saying nothing cost every one of them that wait (3 Oct
+/// 2026). Once it has, a status within `SILENT_GUEST_FOR` does not ask it again, and still says
+/// the tunnel is not there; a turn's own probe is not this one.
+#[tokio::test]
+async fn a_status_does_not_wait_on_a_guest_that_said_nothing() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-silent-guest-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "silent-guest").await;
+    h.patch_host_settings(&token, json!({ "egressTunnelEnabled": true }))
+        .await;
+    *h.stub.egress_takes.lock().expect("takes") = opengrok_box::GUEST_INFO_PATIENCE;
+
+    let (status, body) = h.computer_json(&token, &agent).await;
+    assert_eq!(status, 200, "{body}");
+    let asked = *h.stub.egress_asked.lock().expect("asked");
+    let began = std::time::Instant::now();
+    for _ in 0..3 {
+        let (status, body) = h.computer_json(&token, &agent).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["isEgressTunnelAvailable"], false, "{body}");
+        assert!(body.get("egress_tunnel").is_none(), "{body}");
+        let record = h.host_settings(&token, &format!("?coworker={agent}")).await;
+        assert_eq!(record["egressTunnelAvailable"], false, "{record}");
+    }
+    let waited = began.elapsed();
+    assert_eq!(*h.stub.egress_asked.lock().expect("asked"), asked);
+    assert!(
+        waited < 3 * opengrok_box::GUEST_INFO_PATIENCE,
+        "six reads took {waited:?}: they waited on the silent guest"
+    );
 }
 
 fn sse_events(sse: &str) -> Vec<Value> {
