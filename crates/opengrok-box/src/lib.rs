@@ -46,29 +46,32 @@ pub const GUEST_INFO_PATIENCE: std::time::Duration = std::time::Duration::from_s
 pub const SILENT_GUEST_FOR: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The guest's tunnel answer for a status to SHOW (the Computer pane, the settings page): asked
-/// on every read, except of a guest that spent the whole `GUEST_INFO_PATIENCE` without answering
-/// in the last `SILENT_GUEST_FOR` — the pane polls three routes every two seconds, and each one
-/// paid that wait again (3 Oct 2026). Never for a decision: a turn asks
+/// on every read, except of a guest that let `/v1/info` take all of `GUEST_INFO_PATIENCE` in the
+/// last `SILENT_GUEST_FOR` — the pane polls three routes every two seconds, and each one paid that
+/// wait again (3 Oct 2026). Only that wait is silence (`Computer::egress_probe`): timing the whole
+/// probe called a slow `docker inspect` a silent guest. A box stopped, reset or woken since is a
+/// new guest (`Computer::generation`). Never for a decision: a turn asks
 /// `Computer::egress_tunnel` itself, as a remembered "no" there would skip the consent card.
 pub async fn shown_egress(computer: &dyn Computer, box_id: &str) -> Option<EgressTunnel> {
     use std::sync::{LazyLock, Mutex};
     use std::time::Instant;
-    type Silent = std::collections::HashMap<String, Instant>;
+    type Silent = std::collections::HashMap<String, (Instant, u64)>;
     static SILENT: LazyLock<Mutex<Silent>> = LazyLock::new(Mutex::default);
+    let generation = computer.generation(box_id);
     if let Ok(silent) = SILENT.lock()
-        && let Some(since) = silent.get(box_id)
+        && let Some((since, of)) = silent.get(box_id)
+        && *of == generation
         && since.elapsed() < SILENT_GUEST_FOR
     {
         return None;
     }
-    let asked = Instant::now();
-    let cap = computer.egress_tunnel(box_id).await;
-    let waited = asked.elapsed() >= GUEST_INFO_PATIENCE;
+    let (cap, said_nothing) = computer.egress_probe(box_id).await;
     if let Ok(mut silent) = SILENT.lock() {
-        match cap {
-            None if waited => silent.insert(box_id.to_string(), Instant::now()),
-            _ => silent.remove(box_id),
-        };
+        if said_nothing {
+            silent.insert(box_id.to_string(), (Instant::now(), generation));
+        } else {
+            silent.remove(box_id);
+        }
     }
     cap
 }
@@ -497,6 +500,21 @@ pub trait Computer: Send + Sync {
     async fn egress_tunnel(&self, _box_id: &str) -> Option<EgressTunnel> {
         None
     }
+
+    /// `egress_tunnel`, and whether the guest was reached and then let its `/v1/info` take all
+    /// of `GUEST_INFO_PATIENCE` — the one silence `shown_egress` remembers. Getting to the guest
+    /// (its ports, its token) is not the guest's silence. Default: never silent.
+    async fn egress_probe(&self, box_id: &str) -> (Option<EgressTunnel>, bool) {
+        (self.egress_tunnel(box_id).await, false)
+    }
+
+    /// How many times this provider has stopped, started, rebuilt or removed the box in this
+    /// process. What was learned of a box under one count (its screen's port, a guest that said
+    /// nothing) is not the box's under the next: Docker gives a box new ports at every start and
+    /// frees them at every stop. `0` from a provider that cannot tell.
+    fn generation(&self, _box_id: &str) -> u64 {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -505,15 +523,18 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// A box whose reported states are scripted: the last one repeats forever.
     struct Scripted {
         states: Mutex<VecDeque<&'static str>>,
         resumes: AtomicUsize,
-        /// What its guest says of the tunnel and after how long, and how often it was asked.
-        guest: (Option<EgressTunnel>, std::time::Duration),
+        /// What its guest says of the tunnel, after how long, and whether that wait was the
+        /// guest's own silence; how often it was asked; its generation, counted as Docker's is.
+        guest: (Option<EgressTunnel>, std::time::Duration, bool),
         asked: AtomicUsize,
+        generation: AtomicU64,
     }
 
     impl Scripted {
@@ -521,14 +542,19 @@ mod tests {
             Self {
                 states: Mutex::new(states.iter().copied().collect()),
                 resumes: AtomicUsize::new(0),
-                guest: (None, std::time::Duration::ZERO),
+                guest: (None, std::time::Duration::ZERO, false),
                 asked: AtomicUsize::new(0),
+                generation: AtomicU64::new(0),
             }
         }
 
-        fn with_guest(mut self, says: Option<EgressTunnel>, after: std::time::Duration) -> Self {
-            self.guest = (says, after);
+        fn with_guest(mut self, says: Option<EgressTunnel>, after: Duration, silent: bool) -> Self {
+            self.guest = (says, after, silent);
             self
+        }
+
+        fn asked(&self) -> usize {
+            self.asked.load(Ordering::SeqCst)
         }
     }
 
@@ -556,13 +582,16 @@ mod tests {
             Err(BoxError::NoSuchBox)
         }
         async fn stop(&self, _b: &str) -> BoxResult<()> {
+            self.generation.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn resume(&self, _b: &str) -> BoxResult<()> {
             self.resumes.fetch_add(1, Ordering::SeqCst);
+            self.generation.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn destroy(&self, _b: &str) -> BoxResult<()> {
+            self.generation.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn state(&self, _b: &str) -> BoxResult<String> {
@@ -579,6 +608,12 @@ mod tests {
             tokio::time::sleep(self.guest.1).await;
             self.guest.0
         }
+        async fn egress_probe(&self, b: &str) -> (Option<EgressTunnel>, bool) {
+            (self.egress_tunnel(b).await, self.guest.2)
+        }
+        fn generation(&self, _b: &str) -> u64 {
+            self.generation.load(Ordering::SeqCst)
+        }
     }
 
     /// The pane polls three routes every two seconds, and a guest that spent the probe's whole
@@ -587,7 +622,7 @@ mod tests {
     /// tunnel as it is now.
     #[tokio::test]
     async fn a_status_does_not_wait_again_on_a_guest_that_said_nothing() {
-        let silent = Scripted::new(&["running"]).with_guest(None, GUEST_INFO_PATIENCE);
+        let silent = Scripted::new(&["running"]).with_guest(None, GUEST_INFO_PATIENCE, true);
         assert_eq!(shown_egress(&silent, "bx_silent").await, None);
         let began = std::time::Instant::now();
         for _ in 0..3 {
@@ -598,17 +633,55 @@ mod tests {
             waited < GUEST_INFO_PATIENCE,
             "waited {waited:?} on a silent guest"
         );
-        assert_eq!(silent.asked.load(Ordering::SeqCst), 1);
+        assert_eq!(silent.asked(), 1);
 
         let ready = Some(EgressTunnel {
             enabled: true,
             ready: true,
         });
-        let answering = Scripted::new(&["running"]).with_guest(ready, std::time::Duration::ZERO);
+        let answering = Scripted::new(&["running"]).with_guest(ready, Duration::ZERO, false);
         for _ in 0..3 {
             assert_eq!(shown_egress(&answering, "bx_answering").await, ready);
         }
-        assert_eq!(answering.asked.load(Ordering::SeqCst), 3);
+        assert_eq!(answering.asked(), 3);
+    }
+
+    /// Reaching the guest is a `docker inspect` before `/v1/info` is asked, and on a loaded host
+    /// that alone can take longer than the guest is given. Timing the whole probe called that a
+    /// silent guest and stopped asking it for ten seconds; only the guest's own wait counts.
+    #[tokio::test]
+    async fn a_slow_way_to_the_guest_is_not_a_silent_guest() {
+        let slow = Duration::from_millis(1200);
+        let unreached = Scripted::new(&["running"]).with_guest(None, slow, false);
+        assert_eq!(shown_egress(&unreached, "bx_slow_inspect").await, None);
+        assert_eq!(shown_egress(&unreached, "bx_slow_inspect").await, None);
+        assert_eq!(unreached.asked(), 2, "a slow way there is asked again");
+    }
+
+    /// A box stopped, reset or woken has a guest that has not been asked yet: what the last one
+    /// did not say is not remembered against it. Each silence here takes the whole patience,
+    /// as a real one does.
+    #[tokio::test]
+    async fn a_silent_guest_is_asked_again_once_its_box_is_stopped_reset_or_woken() {
+        let silent = Scripted::new(&["exited", "running"]);
+        let boxes = silent.with_guest(None, GUEST_INFO_PATIENCE, true);
+        let read = || shown_egress(&boxes, "bx_lifecycle");
+        assert_eq!((read().await, read().await), (None, None));
+        assert_eq!(boxes.asked(), 1, "remembered as silent");
+        boxes.stop("bx_lifecycle").await.unwrap();
+        assert_eq!((read().await, read().await), (None, None));
+        assert_eq!(
+            boxes.asked(),
+            2,
+            "asked again after a stop, then remembered"
+        );
+        boxes.destroy("bx_lifecycle").await.unwrap();
+        read().await;
+        assert_eq!(boxes.asked(), 3, "asked again after a reset's destroy");
+        let woke = boxes.wake("bx_lifecycle", Duration::from_secs(10)).await;
+        assert_eq!(woke.unwrap(), "running");
+        read().await;
+        assert_eq!(boxes.asked(), 4, "asked again after a wake started the box");
     }
 
     /// A stopped box is started once and the wake returns as soon as it is running.

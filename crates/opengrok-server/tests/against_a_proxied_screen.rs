@@ -21,7 +21,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -49,23 +49,56 @@ macro_rules! database_or_skip {
     };
 }
 
-/// A Local VM whose screen is the stand-in noVNC on `port`, which moves as a restarted
-/// container's does, counting how often it is asked where its screen is.
+/// A Local VM whose screen is the stand-in noVNC on `port`, counting how often it is asked where
+/// its screen is. A box made, rebuilt or started again comes up on `next_port` when one is set,
+/// as a container comes up on new ports; a rebuild fails while `rebuild_fails`. Its PNG is its id.
 struct ScreenBox {
     port: AtomicU16,
     asked: AtomicUsize,
+    next_port: AtomicU16,
+    rebuild_fails: AtomicBool,
 }
 
 impl ScreenBox {
     fn asked(&self) -> usize {
         self.asked.load(Ordering::SeqCst)
     }
+
+    /// The box's screen is on `port` from its next create, rebuild or start.
+    fn moves_to(&self, port: u16) {
+        self.next_port.store(port, Ordering::SeqCst);
+    }
+
+    fn comes_up(&self) {
+        let next = self.next_port.swap(0, Ordering::SeqCst);
+        if next != 0 {
+            self.port.store(next, Ordering::SeqCst);
+        }
+    }
 }
 
 #[async_trait]
 impl Computer for ScreenBox {
     async fn create(&self, _ttl_seconds: Option<u64>) -> BoxResult<String> {
+        self.comes_up();
         Ok(format!("bx_screen_{}", uuid::Uuid::now_v7().simple()))
+    }
+    async fn recreate(&self, _old_box_id: &str) -> BoxResult<String> {
+        if self.rebuild_fails.load(Ordering::SeqCst) {
+            return Err(opengrok_box::BoxError::Refused {
+                status: 500,
+                body: "the copy failed".to_string(),
+            });
+        }
+        self.create(None).await
+    }
+    async fn screenshot(&self, box_id: &str) -> BoxResult<opengrok_box::Screenshot> {
+        Ok(opengrok_box::Screenshot {
+            mime: "image/png".to_string(),
+            png_base64: box_id.to_string(),
+            width: 1,
+            height: 1,
+        })
     }
     async fn run(&self, _box_id: &str, _command: &str, _timeout: u32) -> BoxResult<CommandOutput> {
         Ok(CommandOutput {
@@ -102,6 +135,7 @@ impl Computer for ScreenBox {
         Ok(())
     }
     async fn resume(&self, _box_id: &str) -> BoxResult<()> {
+        self.comes_up();
         Ok(())
     }
     async fn destroy(&self, _box_id: &str) -> BoxResult<()> {
@@ -275,6 +309,29 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
     id
 }
 
+/// A group of `account`'s with `member` in it, written as a hire of one writes it.
+async fn seed_group(store: &PgStore, account: &AccountId, member: &str) -> String {
+    use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
+    let id = opengrok_core::id::CoworkerId::new();
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let events = Coworker::default()
+        .decide(CoworkerCommand::HireGroup {
+            name: "The desk".to_string(),
+            members: vec![opengrok_core::id::CoworkerId::from_stored(
+                member.to_string(),
+            )],
+            at_ms,
+        })
+        .expect("hire a group");
+    let group = Coworker::replay(&events);
+    let view = CoworkerView::of(id.clone(), &group, at_ms);
+    store
+        .append_coworker(&id, account, 0, &events, &view)
+        .await
+        .expect("append the group");
+    id.as_str().to_string()
+}
+
 struct Harness {
     base: String,
     port: u16,
@@ -285,6 +342,7 @@ struct Harness {
     box_saw: Arc<Mutex<Vec<String>>>,
     screen: Arc<ScreenBox>,
     novnc: tokio::task::JoinHandle<()>,
+    pool: sqlx::PgPool,
 }
 
 async fn harness(database_url: &str) -> Harness {
@@ -302,10 +360,12 @@ async fn harness(database_url: &str) -> Harness {
     let screen = Arc::new(ScreenBox {
         port: AtomicU16::new(novnc_port),
         asked: AtomicUsize::new(0),
+        next_port: AtomicU16::new(0),
+        rebuild_fails: AtomicBool::new(false),
     });
     let state = AgUiState {
         auth: AuthState::new(
-            PgStore::new(pool),
+            PgStore::new(pool.clone()),
             Arc::new(TokenMinter::new(b"proxied-screen-test-secret")),
             "host@og.local".to_string(),
         ),
@@ -340,14 +400,56 @@ async fn harness(database_url: &str) -> Harness {
         box_saw,
         screen,
         novnc,
+        pool,
     }
 }
 
 impl Harness {
     async fn person(&self) -> String {
+        self.person_and_account().await.0
+    }
+
+    /// Another stand-in noVNC, on a port of its own, keeping its own log of what it was asked:
+    /// where a box's screen comes up when it moves, while the old listener stays up as whatever
+    /// took the freed port.
+    async fn another_screen(&self) -> (u16, Arc<Mutex<Vec<String>>>) {
+        let saw = Arc::new(Mutex::new(Vec::new()));
+        let (port, _listening) = start_novnc(self.decoy, saw.clone()).await;
+        (port, saw)
+    }
+
+    /// `GET /coworkers/{id}/screen`: its status, and its body as text (the stand-in PNG is the
+    /// box's id).
+    async fn png(&self, token: &str, coworker: &str) -> (u16, String) {
+        let response = self
+            .client
+            .get(format!("{}/coworkers/{coworker}/screen", self.base))
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("screen png");
+        let status = response.status().as_u16();
+        (status, response.text().await.expect("body"))
+    }
+
+    /// The coworker's status once an update has ended, done or failed.
+    async fn settled_update(&self, token: &str, coworker: &str) -> Value {
+        for _ in 0..200 {
+            let (status, screen) = self.screen(token, coworker).await;
+            assert_eq!(status, 200, "{screen}");
+            if screen["update"].is_null() || screen["update"]["phase"] == "failed" {
+                return screen;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the update did not end");
+    }
+
+    async fn person_and_account(&self) -> (String, AccountId) {
         let email = format!("screen-{}@og.local", uuid::Uuid::now_v7().simple());
         let account = seed_account(&self.state.auth.store, &email).await;
-        self.state
+        let token = self
+            .state
             .auth
             .minter
             .mint_access(
@@ -358,7 +460,8 @@ impl Harness {
                 chrono::Utc::now().timestamp(),
                 3600,
             )
-            .expect("mint access")
+            .expect("mint access");
+        (token, account)
     }
 
     async fn hire(&self, token: &str) -> String {
@@ -446,8 +549,8 @@ impl Harness {
 
 /// A page's ~80 files and its websocket each asked the provider where the box's screen was —
 /// two `docker` processes apiece, 160 at once, 3.7 s a file and 5 s before the window painted
-/// (3 Oct 2026). The status that hands the ticket out finds the port; every file and the socket
-/// after it use that port, and the account's right to the coworker is still asked each time.
+/// (3 Oct 2026). The page's first file finds the port; every file and the socket after it use
+/// that port, and the account's right to the coworker is still asked each time.
 #[tokio::test]
 async fn a_page_and_its_files_ask_where_the_screen_is_once() {
     let database_url = database_or_skip!();
@@ -462,7 +565,11 @@ async fn a_page_and_its_files_ask_where_the_screen_is_once() {
     }
     let opened = h.websocket(&ticket_path).await;
     assert!(opened.starts_with("HTTP/1.1 101"), "{opened}");
-    assert_eq!(h.screen.asked(), asked, "the ticket's port is found once");
+    assert_eq!(
+        h.screen.asked(),
+        asked + 1,
+        "the ticket's port is found once"
+    );
 
     // The right to the coworker is not remembered with the port: once it is retired, the very
     // next file and handshake are refused.
@@ -514,18 +621,20 @@ async fn a_screen_that_came_back_on_another_port_is_found_again() {
     assert!(opened.starts_with("HTTP/1.1 101"), "{opened}");
 }
 
-/// The box a ticket names is checked against the coworker's computer every few seconds rather
-/// than on each file: after a reset gives the coworker a new box, the old ticket stops within
-/// that, while its owner's next status hands out a ticket for the new one.
+/// A reset destroys the box, and Docker may hand its freed loopback port to anything. The old
+/// ticket's remembered port goes with the box on the reset itself, never dialled while a place
+/// check is due: the old listener stays up here as whatever took the port, and is never asked.
 #[tokio::test]
-async fn a_ticket_for_a_box_that_is_no_longer_the_coworkers_stops() {
+async fn a_reset_drops_the_old_boxs_port_at_once() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let ada = h.person().await;
     let coworker = h.hire(&ada).await;
-    let ticket_path = h.ticket_path(&ada, &coworker).await;
-    assert_eq!(h.open(&format!("{ticket_path}/app/ui.js")).await.0, 200);
+    let old = h.ticket_path(&ada, &coworker).await;
+    assert_eq!(h.open(&format!("{old}/app/ui.js")).await.0, 200);
 
+    let (moved, fresh_saw) = h.another_screen().await;
+    h.screen.moves_to(moved);
     let reset = h
         .client
         .post(format!("{}/coworkers/{coworker}/computer/reset", h.base))
@@ -534,14 +643,159 @@ async fn a_ticket_for_a_box_that_is_no_longer_the_coworkers_stops() {
         .await
         .expect("reset");
     assert_eq!(reset.status().as_u16(), 200, "reset");
-    let fresh = h.ticket_path(&ada, &coworker).await;
-    assert_ne!(fresh, ticket_path, "the new box is a new ticket");
-    assert_eq!(h.open(&format!("{fresh}/app/ui.js")).await.0, 200);
+    let taken = h.box_saw.lock().expect("saw").len();
+    assert_eq!(h.open(&format!("{old}/app/ui.js")).await.0, 404);
+    assert!(h.websocket(&old).await.starts_with("HTTP/1.1 404"));
+    assert_eq!(
+        h.box_saw.lock().expect("saw").len(),
+        taken,
+        "the reset box's freed port was dialled"
+    );
 
-    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    assert_eq!(h.open(&format!("{ticket_path}/app/ui.js")).await.0, 404);
-    assert!(h.websocket(&ticket_path).await.starts_with("HTTP/1.1 404"));
+    let fresh = h.ticket_path(&ada, &coworker).await;
+    assert_ne!(fresh, old, "the new box is a new ticket");
     assert_eq!(h.open(&format!("{fresh}/app/ui.js")).await.0, 200);
+    let fresh_saw = fresh_saw.lock().expect("saw").len();
+    assert_eq!(fresh_saw, 1, "on the new box's port");
+}
+
+/// An update stops the old box for the copy and removes it once the new one runs: the old
+/// ticket's port is dropped with it, rather than dialled until a place check notices.
+#[tokio::test]
+async fn an_update_drops_the_old_boxs_port_at_once() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada).await;
+    let old = h.ticket_path(&ada, &coworker).await;
+    assert_eq!(h.open(&format!("{old}/app/ui.js")).await.0, 200);
+
+    let (moved, fresh_saw) = h.another_screen().await;
+    h.screen.moves_to(moved);
+    let update = h
+        .client
+        .post(format!("{}/coworkers/{coworker}/computer/update", h.base))
+        .bearer_auth(&ada)
+        .send()
+        .await
+        .expect("update");
+    assert_eq!(update.status().as_u16(), 202, "update");
+    let settled = h.settled_update(&ada, &coworker).await;
+    assert!(
+        settled["update"].is_null(),
+        "the update finished: {settled}"
+    );
+    let taken = h.box_saw.lock().expect("saw").len();
+    assert_eq!(h.open(&format!("{old}/app/ui.js")).await.0, 404);
+    assert_eq!(
+        h.box_saw.lock().expect("saw").len(),
+        taken,
+        "the updated box's freed port was dialled"
+    );
+
+    let fresh = h.ticket_path(&ada, &coworker).await;
+    assert_eq!(h.open(&format!("{fresh}/app/ui.js")).await.0, 200);
+    let fresh_saw = fresh_saw.lock().expect("saw").len();
+    assert_eq!(fresh_saw, 1, "on the new box's port");
+}
+
+/// A rebuild that fails starts the old box again, on new ports, and it stays the coworker's
+/// computer under the same ticket. That ticket's next file is fetched from where the box is
+/// now, never from the port it had before the update.
+#[tokio::test]
+async fn a_failed_rebuild_drops_the_port_its_box_came_back_without() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada).await;
+    let ticket = h.ticket_path(&ada, &coworker).await;
+    assert_eq!(h.open(&format!("{ticket}/app/ui.js")).await.0, 200);
+
+    let (moved, fresh_saw) = h.another_screen().await;
+    h.screen.moves_to(moved);
+    h.screen.rebuild_fails.store(true, Ordering::SeqCst);
+    let update = h
+        .client
+        .post(format!("{}/coworkers/{coworker}/computer/update", h.base))
+        .bearer_auth(&ada)
+        .send()
+        .await
+        .expect("update");
+    assert_eq!(update.status().as_u16(), 202, "update");
+    let settled = h.settled_update(&ada, &coworker).await;
+    assert_eq!(settled["update"]["phase"], "failed", "{settled}");
+    let taken = h.box_saw.lock().expect("saw").len();
+    assert_eq!(
+        h.open(&format!("{ticket}/app/ui.js")).await,
+        (200, "ui-script".to_string())
+    );
+    assert_eq!(
+        h.box_saw.lock().expect("saw").len(),
+        taken,
+        "the port the box had before the failed rebuild was dialled"
+    );
+    let fresh_saw = fresh_saw.lock().expect("saw").len();
+    assert_eq!(fresh_saw, 1, "on the port it came back on");
+}
+
+/// The place check every few seconds asks for the box's port as well as its place: a box that
+/// came back on another port behind this server's back (a restart by hand) is found there, and
+/// the port it left is not handed back because the box is still the coworker's.
+#[tokio::test]
+async fn a_place_check_asks_for_the_port_again() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada).await;
+    let ticket = h.ticket_path(&ada, &coworker).await;
+    assert_eq!(h.open(&format!("{ticket}/app/ui.js")).await.0, 200);
+
+    let (moved, fresh_saw) = h.another_screen().await;
+    h.screen.port.store(moved, Ordering::SeqCst);
+    opengrok_server::agui::screen_proxy::screen_tickets_due();
+    let taken = h.box_saw.lock().expect("saw").len();
+    assert_eq!(h.open(&format!("{ticket}/app/ui.js")).await.0, 200);
+    assert_eq!(h.box_saw.lock().expect("saw").len(), taken, "the old port");
+    let fresh_saw = fresh_saw.lock().expect("saw").len();
+    assert_eq!(fresh_saw, 1, "the port the box is on");
+}
+
+/// A group's computer is its own, and its owner's is another: when the group's event stream
+/// cannot be read, /screen says it has no computer, as the pane does, instead of reading the
+/// group as a plain coworker and showing its owner's own box.
+#[tokio::test]
+async fn a_coworker_that_cannot_be_read_shows_no_screen() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (ada, account) = h.person_and_account().await;
+    let member = h.hire(&ada).await;
+    let group = seed_group(&h.state.auth.store, &account, &member).await;
+    let given = h
+        .client
+        .post(format!("{}/coworkers/{group}/computer", h.base))
+        .bearer_auth(&ada)
+        .send()
+        .await
+        .expect("give the group a computer");
+    assert_eq!(given.status().as_u16(), 200);
+    let (_, own) = h.screen(&ada, &member).await;
+    let own = own["boxId"].as_str().expect("the owner's box").to_string();
+    let (status, desk) = h.png(&ada, &group).await;
+    assert_eq!(status, 200, "{desk}");
+    assert!(!desk.contains(&own), "the group's desk is its own: {desk}");
+
+    let id = opengrok_core::id::CoworkerId::from_stored(group.clone());
+    sqlx::query("update events set payload = '{\"type\": \"NotAnEvent\"}' where stream_id = $1")
+        .bind(opengrok_store::coworker_stream(&id))
+        .execute(&h.pool)
+        .await
+        .expect("spoil the group's stream");
+    let (status, body) = h.png(&ada, &group).await;
+    assert_eq!(status, 404, "another computer's PNG: {body}");
+    assert!(!body.contains(&own), "{body}");
+    let (status, pane) = h.screen(&ada, &group).await;
+    assert_eq!(status, 200, "{pane}");
+    assert_eq!(pane["state"], "absent", "as the pane says: {pane}");
 }
 
 #[tokio::test]

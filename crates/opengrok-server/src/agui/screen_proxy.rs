@@ -10,8 +10,8 @@
 //! fetches its own scripts by relative path and its websocket by the `path` it is given: a token
 //! in the query would be gone by the first asset. The ticket names one account, one coworker and
 //! one box, and expires; the account's right to the coworker is checked again on every request,
-//! and the box's place as its computer every `PLACE_FOR` (`UPSTREAMS`), so a retired coworker
-//! stops the next asset and reconnect, and a computer that moved stops within seconds.
+//! and the box's place as its computer, with its port, every `PLACE_FOR` (`UPSTREAMS`), so a
+//! retired coworker stops the next asset and reconnect, and a computer that moved within seconds.
 //!
 //! THE TICKET IS STABLE WITHIN A WINDOW. The pane polls the status, and a `vncUrl` that changed on
 //! every poll would reload the desktop each time; the same claims sign to the same token, so the
@@ -37,6 +37,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::agui::AgUiState;
 use crate::auth::TokenMinter;
+pub use crate::seams::screen_tickets_due;
 
 /// What a ticket is for; an access token (same key) never verifies as one, nor this as that.
 const PURPOSE: &str = "screen";
@@ -45,34 +46,31 @@ const WINDOW_SECONDS: i64 = 6 * 60 * 60;
 /// The most of the box's handshake reply that is read before giving up on it.
 const HEAD_LIMIT: usize = 16 * 1024;
 
-/// Each ticket's box, its noVNC port and when its place was last checked, until the ticket
-/// expires: asking for these on each of a page's ~80 files and its websocket was 160 `docker`
-/// processes and 500 queries at once, 3.7 s a file and 5 s to paint (3 Oct 2026). Re-learned by
-/// each status that hands the ticket out; dropped when a dial to it fails (the box came back on
-/// another port) and when the box is stopped here (`forget_box`), so a freed port is not dialled.
-type Upstream = (String, u16, i64, Instant);
-static UPSTREAMS: LazyLock<Mutex<HashMap<String, Upstream>>> = LazyLock::new(Mutex::default);
+/// Each ticket's box, its noVNC port, the box's `Computer::generation` it was learned under and
+/// when, until the ticket expires: asking on each of a page's ~80 files and its websocket was 160
+/// `docker` processes and 500 queries at once, 3.7 s a file and 5 s to paint (3 Oct 2026). A port
+/// is the box's only in that generation: a stop, start, rebuild or removal frees it for anything
+/// to take. Stamped once the check that found it has finished, never before, so one cut short
+/// leaves the next request to make its own.
+type Upstream = (String, u16, i64, Instant, u64);
+pub(crate) static UPSTREAMS: LazyLock<Mutex<HashMap<String, Upstream>>> =
+    LazyLock::new(Mutex::default);
 
 /// How long a ticket's box is taken to still be its coworker's computer (`scoped_box_row_for`,
-/// five queries) between checks; the ticket and the account's right are checked every request.
+/// five queries) between checks; past it, the place and the port are both asked again.
 const PLACE_FOR: Duration = Duration::from_secs(5);
 
-fn remember(ticket: &str, box_id: &str, port: u16, until: i64) {
+fn remember(ticket: &str, box_id: &str, port: u16, until: i64, generation: u64) {
     let now = chrono::Utc::now().timestamp();
     if let Ok(mut known) = UPSTREAMS.lock() {
         known.retain(|_, upstream| upstream.2 > now);
-        known.insert(ticket.into(), (box_id.into(), port, until, Instant::now()));
+        let upstream = (box_id.into(), port, until, Instant::now(), generation);
+        known.insert(ticket.into(), upstream);
     }
 }
 
-fn forget(ticket: &str) {
-    if let Ok(mut known) = UPSTREAMS.lock() {
-        known.remove(ticket);
-    }
-}
-
-/// Forget the port of every ticket for a box just stopped here: it gets new ports when it starts
-/// again, and the old ones may by then be another box's.
+/// Forget the port of every ticket for a box stopped, reset or rebuilt here, or whose port went
+/// dead or that is no longer its coworker's: the old ports may by then be another box's.
 pub fn forget_box(box_id: &str) {
     if let Ok(mut known) = UPSTREAMS.lock() {
         known.retain(|_, (bx, ..)| bx != box_id);
@@ -120,19 +118,15 @@ pub fn proxied_page(
     now_seconds: i64,
 ) -> Option<String> {
     let (_, settings) = local_page.split_once('?')?;
-    let exp = (now_seconds.div_euclid(WINDOW_SECONDS) + 2) * WINDOW_SECONDS;
     let ticket = minter
         .mint_claims(&Ticket {
             sub: account.as_str().to_string(),
             cw: coworker.as_str().to_string(),
             bx: box_id.to_string(),
-            exp,
+            exp: (now_seconds.div_euclid(WINDOW_SECONDS) + 2) * WINDOW_SECONDS,
             purpose: PURPOSE.to_string(),
         })
         .ok()?;
-    if let Some(port) = loopback_port(local_page) {
-        remember(&ticket, box_id, port, exp);
-    }
     let base = format!("coworkers/{}/computer/vnc/{ticket}", coworker.as_str());
     Some(format!(
         "{origin}/{base}/vnc.html?{settings}&path={base}/websockify"
@@ -146,10 +140,11 @@ fn loopback_port(page: &str) -> Option<u16> {
     rest.split(['/', '?']).next()?.parse().ok()
 }
 
-/// The box behind a ticket, as its noVNC port — re-authorised now, not at mint time. The port is
-/// the remembered one; when the box's place is due a check, the first request past `PLACE_FOR`
-/// moves the stamp, so a page's burst of files sends one check, not eighty.
-async fn upstream_for(state: &AgUiState, cw: &str, ticket: &str) -> Option<u16> {
+/// The box behind a ticket, and its noVNC port — re-authorised now, not at mint time. The port
+/// is the remembered one while the box is in the generation it was learned in and its place was
+/// checked within `PLACE_FOR`; otherwise the place and the port are both asked again, the
+/// generation read first, so a stop or removal during the asking is seen by the next request.
+async fn upstream_for(state: &AgUiState, cw: &str, ticket: &str) -> Option<(u16, String)> {
     let claims: Ticket = state.auth.minter.verify_claims(ticket).ok()?;
     if claims.purpose != PURPOSE || claims.cw != cw {
         return None;
@@ -162,29 +157,24 @@ async fn upstream_for(state: &AgUiState, cw: &str, ticket: &str) -> Option<u16> 
     ) {
         return None;
     }
-    let known = UPSTREAMS.lock().ok().and_then(|mut known| {
-        let (_, port, _, checked) = known.get_mut(ticket)?;
-        let due = checked.elapsed() >= PLACE_FOR;
-        *checked = if due { Instant::now() } else { *checked };
-        Some((*port, due))
-    });
-    if let Some((port, false)) = known {
-        return Some(port);
+    let docker = crate::agui::provision::provider_for(state, None, "local-docker").await?;
+    let generation = docker.generation(&claims.bx);
+    if let Ok(known) = UPSTREAMS.lock()
+        && let Some((_, port, _, checked, of)) = known.get(ticket)
+        && *of == generation
+        && checked.elapsed() < PLACE_FOR
+    {
+        return Some((*port, claims.bx));
     }
     let row = crate::agui::provision::scoped_box_row_for(state, &account, &coworker).await;
     let Some(row) = row.filter(|row| row.box_id == claims.bx && row.kind == "local-docker") else {
-        forget(ticket);
+        forget_box(&claims.bx);
         return None;
     };
-    if let Some((port, _)) = known {
-        return Some(port);
-    }
-    let lookup = crate::agui::provision::lookup_provider(state, row.org_id.as_deref(), &row.kind);
-    let computer = lookup.await.computer?;
-    let page = computer.screen_url(&row.box_id).await.ok()??;
+    let page = docker.screen_url(&row.box_id).await.ok()??;
     let port = loopback_port(&page)?;
-    remember(ticket, &row.box_id, port, claims.exp);
-    Some(port)
+    remember(ticket, &row.box_id, port, claims.exp, generation);
+    Some((port, row.box_id))
 }
 
 /// `GET /coworkers/{id}/computer/vnc/{ticket}/{*rest}` — noVNC's files, and its websocket.
@@ -200,7 +190,7 @@ pub async fn serve(
         .get(header::UPGRADE)
         .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"));
     for _ in 0..2 {
-        let Some(port) = upstream_for(&state, &coworker_id, &ticket).await else {
+        let Some((port, box_id)) = upstream_for(&state, &coworker_id, &ticket).await else {
             return confined((StatusCode::NOT_FOUND, "no such screen").into_response());
         };
         if upgrade {
@@ -211,7 +201,7 @@ pub async fn serve(
         } else if let Some(fetched) = fetch(port, &rest).await {
             return confined(fetched);
         }
-        forget(&ticket);
+        forget_box(&box_id);
     }
     let silent = (StatusCode::BAD_GATEWAY, SILENT).into_response();
     if upgrade { silent } else { confined(silent) }
