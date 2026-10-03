@@ -16,7 +16,7 @@
       "localModel": null
     },
     "newBotDefault": null,
-    "relayEnabled": true,
+    "relayEnabled": false,
     "planFallback": null
   }
 }

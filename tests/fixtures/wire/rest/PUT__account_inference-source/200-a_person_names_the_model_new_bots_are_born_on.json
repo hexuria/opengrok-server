@@ -20,7 +20,7 @@
       "model": "gpt-6-sol--fast",
       "effort": "high"
     },
-    "relayEnabled": true,
+    "relayEnabled": false,
     "planFallback": null
   }
 }

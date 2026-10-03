@@ -6,7 +6,7 @@
     "kind": "local_proxy",
     "via": "loopback",
     "baseUrl": "http://127.0.0.1:1447",
-    "localModel": "gpt-5.5",
+    "localModel": "xai/grok-4.6",
     "healthy": true,
     "hasApiKey": false,
     "relay": {
@@ -17,10 +17,10 @@
     },
     "newBotDefault": {
       "source": "local_proxy",
-      "model": "gpt-6-sol--fast",
-      "effort": "high"
+      "model": "gpt-6-luna",
+      "effort": "max"
     },
-    "relayEnabled": true,
+    "relayEnabled": false,
     "planFallback": null
   }
 }

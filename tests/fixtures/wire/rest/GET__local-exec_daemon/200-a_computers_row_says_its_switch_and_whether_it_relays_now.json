@@ -1,0 +1,27 @@
+{
+  "method": "GET",
+  "path": "/local-exec/daemon",
+  "status": 200,
+  "body": {
+    "machines": [
+      {
+        "machineId": "mac_0199bb4e000070008000000000000001",
+        "label": "Ada's iMac",
+        "enrolledAtMs": 1790000000000,
+        "revoked": false,
+        "connected": false,
+        "relayEnabled": true,
+        "relaying": false
+      },
+      {
+        "machineId": "mac_0199bb4e000070008000000000000002",
+        "label": "Ada's MacBook",
+        "enrolledAtMs": 1790000001000,
+        "revoked": false,
+        "connected": false,
+        "relayEnabled": true,
+        "relaying": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "method": "GET",
+  "path": "/models",
+  "status": 200,
+  "body": {
+    "models": [
+      {
+        "id": "gpt-6-sol",
+        "points": null,
+        "source": "local_proxy",
+        "efforts": [
+          {
+            "value": "low",
+            "label": "Low Effort"
+          },
+          {
+            "value": "medium",
+            "label": "Medium Effort"
+          },
+          {
+            "value": "high",
+            "label": "High Effort"
+          },
+          {
+            "value": "xhigh",
+            "label": "Xhigh Effort"
+          },
+          {
+            "value": "max",
+            "label": "Max Effort"
+          },
+          {
+            "value": "ultra",
+            "label": "Ultra Effort"
+          }
+        ],
+        "ownEffort": "medium",
+        "via": "loopback"
+      },
+      {
+        "id": "gpt-6-luna",
+        "points": null,
+        "source": "local_proxy",
+        "efforts": [
+          {
+            "value": "low",
+            "label": "Low Effort"
+          },
+          {
+            "value": "medium",
+            "label": "Medium Effort"
+          },
+          {
+            "value": "high",
+            "label": "High Effort"
+          },
+          {
+            "value": "xhigh",
+            "label": "Xhigh Effort"
+          },
+          {
+            "value": "max",
+            "label": "Max Effort"
+          }
+        ],
+        "ownEffort": "medium",
+        "via": "loopback"
+      },
+      {
+        "id": "xai/grok-4.6",
+        "points": null,
+        "source": "local_proxy",
+        "efforts": null,
+        "ownEffort": null,
+        "via": "loopback"
+      }
+    ],
+    "note": null,
+    "localProxy": {
+      "healthy": true,
+      "relayConnected": false
+    }
+  }
+}

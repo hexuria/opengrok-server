@@ -1,0 +1,37 @@
+{
+  "method": "GET",
+  "path": "/models",
+  "status": 200,
+  "body": {
+    "models": [
+      {
+        "id": "openai/gpt-6-luna",
+        "points": null,
+        "source": "gateway",
+        "efforts": [
+          {
+            "value": "low",
+            "label": "Low Effort"
+          },
+          {
+            "value": "medium",
+            "label": "Medium Effort"
+          },
+          {
+            "value": "high",
+            "label": "High Effort"
+          }
+        ],
+        "ownEffort": "medium"
+      },
+      {
+        "id": "xai/grok-4.6",
+        "points": null,
+        "source": "gateway",
+        "efforts": null,
+        "ownEffort": null
+      }
+    ],
+    "note": null
+  }
+}

@@ -141,7 +141,7 @@
             "limit": 128000,
             "left_out": 0,
             "estimated": [
-              5364
+              5533
             ]
           },
           "model_ms": [
@@ -168,7 +168,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
-        "durationMs": 2,
+        "durationMs": 0,
         "toolCallId": "shell-1"
       },
       {
@@ -365,7 +365,7 @@
             "limit": 128000,
             "left_out": 0,
             "estimated": [
-              4979
+              5148
             ]
           },
           "model_ms": [

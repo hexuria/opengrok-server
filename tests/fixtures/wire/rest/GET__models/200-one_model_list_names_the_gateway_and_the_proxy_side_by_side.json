@@ -7,29 +7,39 @@
       {
         "id": "xai/grok-4.6",
         "points": null,
-        "source": "gateway"
+        "source": "gateway",
+        "efforts": null,
+        "ownEffort": null
       },
       {
         "id": "openai/gpt-5.5",
         "points": null,
-        "source": "gateway"
+        "source": "gateway",
+        "efforts": null,
+        "ownEffort": null
       },
       {
         "id": "gpt-5.5",
         "points": null,
         "source": "local_proxy",
+        "efforts": null,
+        "ownEffort": null,
         "via": "loopback"
       },
       {
         "id": "gpt-6-sol--fast",
         "points": null,
         "source": "local_proxy",
+        "efforts": null,
+        "ownEffort": null,
         "via": "loopback"
       },
       {
         "id": "xai/grok-4.7",
         "points": null,
         "source": "local_proxy",
+        "efforts": null,
+        "ownEffort": null,
         "via": "loopback"
       }
     ],

@@ -1,5 +1,5 @@
 {
-  "method": "PUT",
+  "method": "GET",
   "path": "/account/inference-source",
   "status": 200,
   "body": {
@@ -12,14 +12,11 @@
     "relay": {
       "connected": true,
       "machineId": "mac_0199bb4e000070008000000000000001",
-      "machineLabel": "Ada's MacBook",
+      "machineLabel": "Ada's iMac",
       "localModel": "gpt-5.5"
     },
     "newBotDefault": null,
-    "relayEnabled": false,
-    "planFallback": {
-      "model": "oag/cheap",
-      "effort": "low"
-    }
+    "relayEnabled": true,
+    "planFallback": null
   }
 }

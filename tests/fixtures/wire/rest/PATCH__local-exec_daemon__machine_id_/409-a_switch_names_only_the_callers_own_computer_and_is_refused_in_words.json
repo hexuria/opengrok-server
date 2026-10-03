@@ -1,0 +1,9 @@
+{
+  "method": "PATCH",
+  "path": "/local-exec/daemon/mac_0199bb4e000070008000000000000001",
+  "status": 409,
+  "body": {
+    "error": "this computer was revoked; enrol it again to use it",
+    "code": "revoked"
+  }
+}

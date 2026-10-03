@@ -39,7 +39,9 @@
         "status": "finished",
         "startedAtMs": 1790000001000,
         "finishedAtMs": 1790000002000,
-        "summary": "Routine Weekly ran: from the proxy"
+        "summary": "Routine Weekly ran: from the proxy",
+        "cause": "manual",
+        "by": null
       },
       "tz": "UTC"
     }

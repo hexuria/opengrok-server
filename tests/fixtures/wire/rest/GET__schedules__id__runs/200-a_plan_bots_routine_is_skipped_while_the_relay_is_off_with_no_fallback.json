@@ -12,7 +12,8 @@
       "at": 1790000000000,
       "state": "skipped",
       "skipped": "relay_disabled",
-      "reason": "Skipped: Relay is off for your plan"
+      "reason": "Skipped: Relay is off for your plan",
+      "by": null
     },
     {
       "runId": null,
@@ -23,7 +24,8 @@
       "at": 1790000001000,
       "state": "skipped",
       "skipped": "relay_disabled",
-      "reason": "Skipped: Relay is off for your plan"
+      "reason": "Skipped: Relay is off for your plan",
+      "by": null
     }
   ]
 }

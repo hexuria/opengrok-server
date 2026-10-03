@@ -1,0 +1,22 @@
+{
+  "method": "PUT",
+  "path": "/account/inference-source",
+  "status": 200,
+  "body": {
+    "kind": "local_proxy",
+    "via": "loopback",
+    "baseUrl": "http://127.0.0.1:1447",
+    "localModel": "gpt-5.5",
+    "healthy": true,
+    "hasApiKey": true,
+    "relay": {
+      "connected": true,
+      "machineId": "mac_0199bb4e000070008000000000000001",
+      "machineLabel": "Ada's MacBook",
+      "localModel": "gpt-5.5"
+    },
+    "newBotDefault": null,
+    "relayEnabled": true,
+    "planFallback": null
+  }
+}

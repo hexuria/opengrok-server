@@ -5,9 +5,9 @@
   "body": {
     "id": "sched_0199bb4e-0000-7000-8000-000000000001",
     "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
-    "name": "Weekly",
-    "cron": "0 0 9 * * MON",
-    "prompt": "write the weekly report",
+    "name": "Loop",
+    "cron": "0 0 9 * * MON-FRI",
+    "prompt": "{\"tool\":\"run_routine\",\"arguments\":{\"routine\":\"sched_0199bb4e-0000-7000-8000-000000000001\"}}",
     "kind": "cron",
     "active": true,
     "nextDueMs": 1790000000000,

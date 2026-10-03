@@ -21,7 +21,7 @@
     "inferenceRouterUsage": null,
     "sidebarSections": [],
     "hasSeenOnboarding": true,
-    "egressTunnelEnabled": false,
+    "egressTunnelEnabled": true,
     "egressTunnelAvailable": false
   }
 }

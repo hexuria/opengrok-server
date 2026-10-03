@@ -1,0 +1,9 @@
+{
+  "method": "PATCH",
+  "path": "/local-exec/daemon/mac_0199bb4e000070008000000000000001",
+  "status": 400,
+  "body": {
+    "error": "relayEnabled must be true or false",
+    "code": "bad_request"
+  }
+}
