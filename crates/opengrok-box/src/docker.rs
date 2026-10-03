@@ -161,6 +161,8 @@ struct Seen {
     boxes: Mutex<HashMap<String, Slot>>,
     /// Image name → when it was resolved, and its id.
     latest: tokio::sync::Mutex<HashMap<String, (Instant, String)>>,
+    /// Each box's `Computer::generation`: one more at every stop, start, rebuild and removal.
+    generations: Mutex<HashMap<String, u64>>,
 }
 
 /// Opaque, so a `DockerComputer` printed with `{:?}` never carries a box's secrets into a log.
@@ -319,10 +321,14 @@ impl DockerComputer {
         seen.ok_or(BoxError::NoSuchBox)
     }
 
-    /// Drop what was seen of a box this provider just started, stopped, rebuilt or removed.
+    /// Drop what was seen of a box this provider just started, stopped, rebuilt or removed, and
+    /// count it, straight after the `docker` call returns: its old ports are free from here.
     fn forget(&self, box_id: &str) {
         if let Ok(mut boxes) = self.seen.boxes.lock() {
             boxes.remove(box_id);
+        }
+        if let Ok(mut generations) = self.seen.generations.lock() {
+            *generations.entry(box_id.to_string()).or_default() += 1;
         }
     }
 
@@ -856,6 +862,12 @@ impl Computer for DockerComputer {
     }
 
     async fn egress_tunnel(&self, box_id: &str) -> Option<EgressTunnel> {
+        self.egress_probe(box_id).await.0
+    }
+
+    /// Silent only when `/v1/info` itself took all of `GUEST_INFO_PATIENCE`: finding the guest's
+    /// ports and token is an inspect, and a slow one is Docker's, not the guest's.
+    async fn egress_probe(&self, box_id: &str) -> (Option<EgressTunnel>, bool) {
         let guest = match self.guest(box_id).await {
             Ok(guest) => guest,
             Err(error) => {
@@ -864,28 +876,34 @@ impl Computer for DockerComputer {
                     %box_id,
                     "guest /v1/info unreachable; egress tunnel not ready"
                 );
-                return None;
+                return (None, false);
             }
         };
-        let info = match tokio::time::timeout(crate::GUEST_INFO_PATIENCE, guest.info()).await {
-            Ok(Ok(info)) => info,
+        match tokio::time::timeout(crate::GUEST_INFO_PATIENCE, guest.info()).await {
+            Ok(Ok(info)) => (EgressTunnel::from_info(&info), false),
             Ok(Err(error)) => {
                 tracing::debug!(
                     %error,
                     %box_id,
                     "guest /v1/info refused; egress tunnel not ready"
                 );
-                return None;
+                (None, false)
             }
             Err(_) => {
                 tracing::debug!(
                     %box_id,
                     "guest /v1/info timed out; egress tunnel not ready"
                 );
-                return None;
+                (None, true)
             }
-        };
-        EgressTunnel::from_info(&info)
+        }
+    }
+
+    fn generation(&self, box_id: &str) -> u64 {
+        let generations = self.seen.generations.lock();
+        generations.map_or(0, |generations| {
+            generations.get(box_id).copied().unwrap_or(0)
+        })
     }
 }
 

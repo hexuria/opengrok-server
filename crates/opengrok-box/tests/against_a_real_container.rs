@@ -141,6 +141,9 @@ async fn run_lifecycle(computer: &DockerComputer, box_id: &str) -> Result<(), St
     if state("before the stop").await? != "running" {
         return Err("a fresh box should be running".to_string());
     }
+    // The generation moves with each, so a screen port or a silent guest learned before is not
+    // taken for the box after: its ports are freed at the stop and new at the start.
+    let born = computer.generation(box_id);
     computer
         .stop(box_id)
         .await
@@ -151,6 +154,7 @@ async fn run_lifecycle(computer: &DockerComputer, box_id: &str) -> Result<(), St
             "a stopped box read as {stopped}, as it was before the stop"
         ));
     }
+    let after_stop = computer.generation(box_id);
     computer
         .resume(box_id)
         .await
@@ -158,6 +162,12 @@ async fn run_lifecycle(computer: &DockerComputer, box_id: &str) -> Result<(), St
     let resumed = state("after the start").await?;
     if resumed != "running" {
         return Err(format!("a started box read as {resumed}"));
+    }
+    let generations = [born, after_stop, computer.generation(box_id)];
+    if generations[0] == generations[1] || generations[1] == generations[2] {
+        return Err(format!(
+            "a stop and a start must each move the generation: {generations:?}"
+        ));
     }
     let screen = computer.screen_url(box_id).await;
     if !matches!(screen, Ok(None)) || computer.offers_a_screen(box_id).await {
@@ -193,10 +203,16 @@ async fn a_destroyed_box_reports_itself_as_missing() {
         .create(Some(60))
         .await
         .expect("a box should be created");
+    let born = computer.generation(&box_id);
     computer
         .destroy(&box_id)
         .await
         .expect("the box should be destroyed");
+    assert_ne!(
+        computer.generation(&box_id),
+        born,
+        "a removal frees the box's ports, so it moves the generation"
+    );
 
     let error = computer
         .run(&box_id, "echo anything", 10)
