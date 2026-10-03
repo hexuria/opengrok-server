@@ -1,0 +1,6 @@
+{
+  "method": "GET",
+  "path": "/auto-review/policy",
+  "status": 401,
+  "body": "sign in first"
+}

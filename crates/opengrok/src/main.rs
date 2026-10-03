@@ -580,8 +580,8 @@ fn second_cron(value: Option<&str>, door: &DoorChoice) -> anyhow::Result<bool> {
     }
 }
 
-/// `OG_AUTO_REVIEW_MOCK_VERDICT=allow|block|ask` makes a mock door answer the auto-review judge
-/// with that word, so the card and the refusal can be driven in the real app with no provider.
+/// `OG_AUTO_REVIEW_MOCK_VERDICT=allow|ask|block|unsure` makes a mock door answer the auto-review
+/// judge with that word, so the card and the refusal can be driven in the real app with no provider.
 fn with_mock_verdict(door: MockDoor) -> MockDoor {
     match std::env::var("OG_AUTO_REVIEW_MOCK_VERDICT") {
         Ok(word) if !word.trim().is_empty() => {

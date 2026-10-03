@@ -1275,6 +1275,17 @@ update local_exec_daemon d set relay_enabled = false
            and e.event_type = 'account-inference-source-set'
          order by e.stream_seq desc limit 1) = 'true';
 insert into schema_migrations (name) values ('the-relay-switch-is-each-computers') on conflict do nothing;
+-- Auto-review's "Ask first" list, beside allow and block (#354). Until now it was stored in
+-- block_instructions and a match raised a card; block now refuses, so what is written there moves
+-- to the column that asks ONCE (a second pass would turn a block written since into an ask). An
+-- explicit '' moves too, or global's ask-first text would reach a scope that had cleared it.
+alter table auto_review_policy add column if not exists ask_instructions text;
+update auto_review_policy set block_instructions = null,
+       ask_instructions = case when block_instructions = '' then coalesce(ask_instructions, '')
+         else concat_ws(E'\n\n', nullif(ask_instructions, ''), block_instructions) end
+ where block_instructions is not null
+   and not exists (select 1 from schema_migrations where name = 'the-list-that-asks-is-its-own-column');
+insert into schema_migrations (name) values ('the-list-that-asks-is-its-own-column') on conflict do nothing;
 "#;
 
 /// Run on EVERY boot, after `SCHEMA`, whether or not the schema itself was replayed.

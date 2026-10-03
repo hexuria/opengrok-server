@@ -1,0 +1,6 @@
+{
+  "method": "PUT",
+  "path": "/auto-review/policy",
+  "status": 204,
+  "body": ""
+}

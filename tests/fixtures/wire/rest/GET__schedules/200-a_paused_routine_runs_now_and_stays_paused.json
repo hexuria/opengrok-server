@@ -17,15 +17,7 @@
         "maxComputerRounds": null,
         "maxWallMs": null
       },
-      "lastRun": {
-        "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "running",
-        "startedAtMs": 1790000000000,
-        "finishedAtMs": null,
-        "summary": "Routine Weekly is running.",
-        "cause": "manual",
-        "by": null
-      },
+      "lastRun": null,
       "tz": "UTC"
     }
   ]

@@ -54,6 +54,8 @@ const REST_PREFIXES: &[&str] = &[
     // The Mac relay (#292): the answers a person's Mac posts. Its stream's frames are kept apart,
     // under `relay/<type>/` (see `frame`): they are not AG-UI, and the Mac, not the chat, reads them.
     "/inference-relay",
+    // The Auto-review modal's policy: its rows by scope and the resolved view (#354).
+    "/auto-review",
 ];
 
 /// Routes under those prefixes that are not JSON NativeChat reads: the screen proxy serves noVNC's
@@ -379,6 +381,18 @@ const ALSO_KEEP: &[(&str, &str)] = &[
     (
         "a_switch_names_only_the_callers_own_computer_and_is_refused_in_words",
         "/local-exec/daemon/{machine_id}",
+    ),
+    // Auto-review's third list (#354): the rows as stored and the view resolved, each with an
+    // "Ask first" list written and a global row beside a Bot's own. Their shapes match the same
+    // reads with the list null, so only a pin keeps the one NativeChat's modal is built from.
+    // The test makes one read of each route after its saves.
+    (
+        "a_person_writes_an_ask_first_list_and_reads_it_back_stored_and_resolved",
+        "/auto-review/policy",
+    ),
+    (
+        "a_person_writes_an_ask_first_list_and_reads_it_back_stored_and_resolved",
+        "/auto-review/effective",
     ),
 ];
 
@@ -849,6 +863,15 @@ fn walk(
             for child_key in keys {
                 if let Some(child) = object.get_mut(&child_key) {
                     walk(child, Some(&child_key), ids, clocks);
+                }
+                // A MAP KEYED BY ID (auto-review's rows by coworker, #354) names its ids in its
+                // keys, and `check` compares field paths, keys included: left as recorded, every
+                // recording would show a path the committed corpus lacks.
+                let fixed = placeholder_ids(&child_key, ids);
+                if fixed != child_key
+                    && let Some(child) = object.remove(&child_key)
+                {
+                    object.insert(fixed, child);
                 }
             }
         }

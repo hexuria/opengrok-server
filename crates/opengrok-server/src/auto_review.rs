@@ -1,17 +1,13 @@
-//! Auto-review: two tiers, one gate. Design and rationale: `docs/AUTO-REVIEW.md`.
-//!
-//! This is the ADDITIVE half — the tier rows, their resolution, and the account-facing endpoints
-//! the settings surfaces write against. Enforcement (the judge in the tool executor and a real
-//! `resolveAutoReviewApproval`) is the second half and lands separately.
+//! Auto-review: two tiers, one gate — the tier rows, their resolution, and the endpoints the
+//! settings surfaces write against. Design: `docs/AUTO-REVIEW.md`; the judge is in `opengrok-tools`.
 //!
 //! TWO tiers, not three: global, overridden per coworker. "What may bots do on THIS machine" is
 //! already that machine's standing rules in the local-exec policy; a device tier here would be a
 //! second answer to the same question, and the user asked for one answer per question.
 //!
 //! Precedence is per FIELD, not per row: a coworker row that sets only `enabled` still inherits
-//! its instructions from the global tier. That is what "override" means for a settings UI with
-//! independent controls — and it is the only reading under which "clear this override" (store
-//! null) is expressible.
+//! its instructions from the global tier, the only reading under which "clear this override"
+//! (store null) is expressible.
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -47,6 +43,7 @@ pub enum DecidedBy {
 pub struct Decided {
     pub enabled: DecidedBy,
     pub allow_instructions: DecidedBy,
+    pub ask_instructions: DecidedBy,
     pub block_instructions: DecidedBy,
 }
 
@@ -56,6 +53,7 @@ pub struct Decided {
 pub struct EffectivePolicy {
     pub enabled: bool,
     pub allow_instructions: String,
+    pub ask_instructions: String,
     pub block_instructions: String,
     pub decided_by: Decided,
 }
@@ -65,16 +63,18 @@ impl EffectivePolicy {
     /// written, means no judge call and no DB read per tool call. Resolved once per run; this is
     /// the one in-memory test each call pays.
     pub fn is_active(&self) -> bool {
-        self.enabled && !(self.allow_instructions.is_empty() && self.block_instructions.is_empty())
+        self.review_policy().is_some()
     }
 
     /// What the executor carries — `Some` only when there is something to judge with, so an
     /// inactive policy attaches nothing and costs nothing per call.
     pub fn review_policy(&self) -> Option<opengrok_tools::ReviewPolicy> {
-        self.is_active().then(|| opengrok_tools::ReviewPolicy {
+        let policy = opengrok_tools::ReviewPolicy {
             allow_instructions: self.allow_instructions.clone(),
+            ask_instructions: self.ask_instructions.clone(),
             block_instructions: self.block_instructions.clone(),
-        })
+        };
+        (self.enabled && policy.is_active()).then_some(policy)
     }
 }
 
@@ -104,15 +104,19 @@ pub fn resolve(
     let (enabled, enabled_by) = pick(&tiers, |row| row.enabled, false);
     let (allow_instructions, allow_by) =
         pick(&tiers, |row| row.allow_instructions.clone(), String::new());
+    let (ask_instructions, ask_by) =
+        pick(&tiers, |row| row.ask_instructions.clone(), String::new());
     let (block_instructions, block_by) =
         pick(&tiers, |row| row.block_instructions.clone(), String::new());
     EffectivePolicy {
         enabled,
         allow_instructions,
+        ask_instructions,
         block_instructions,
         decided_by: Decided {
             enabled: enabled_by,
             allow_instructions: allow_by,
+            ask_instructions: ask_by,
             block_instructions: block_by,
         },
     }
@@ -150,10 +154,20 @@ pub fn router(state: AuthState) -> Router {
         .with_state(state)
 }
 
+/// The two refusals this API gives, each in one sentence a person can read.
+fn unprocessable(why: &'static str) -> Response {
+    (StatusCode::UNPROCESSABLE_ENTITY, why).into_response()
+}
+
+fn failed(why: &'static str) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, why).into_response()
+}
+
 fn row_json(row: &AutoReviewRow) -> serde_json::Value {
     serde_json::json!({
         "enabled": row.enabled,
         "allowInstructions": row.allow_instructions,
+        "askInstructions": row.ask_instructions,
         "blockInstructions": row.block_instructions,
         "updatedAtMs": row.updated_at_ms,
     })
@@ -172,19 +186,14 @@ async fn get_policy(State(state): State<AuthState>, headers: HeaderMap) -> Respo
         .auto_review_rows(account_id.as_str())
         .await
         .unwrap_or_default();
-    let mut global = serde_json::Value::Null;
-    let mut coworkers = serde_json::Map::new();
-    for row in &rows {
-        match row.scope_kind.as_str() {
-            "global" => global = row_json(row),
-            "coworker" => {
-                coworkers.insert(row.scope_id.clone(), row_json(row));
-            }
-            _ => {}
-        }
-    }
+    let global = rows.iter().find(|row| row.scope_kind == "global");
+    let coworkers: serde_json::Map<_, _> = rows
+        .iter()
+        .filter(|row| row.scope_kind == "coworker")
+        .map(|row| (row.scope_id.clone(), row_json(row)))
+        .collect();
     Json(serde_json::json!({
-        "global": global,
+        "global": global.map(row_json),
         "coworkers": coworkers,
     }))
     .into_response()
@@ -200,6 +209,8 @@ struct PolicyBody {
     enabled: Option<bool>,
     #[serde(default)]
     allow_instructions: Option<String>,
+    #[serde(default)]
+    ask_instructions: Option<String>,
     #[serde(default)]
     block_instructions: Option<String>,
 }
@@ -222,7 +233,7 @@ async fn refuse_scope(
     scope_kind: &str,
     scope_id: &str,
 ) -> Option<Response> {
-    let refuse = |why: &'static str| Some((StatusCode::UNPROCESSABLE_ENTITY, why).into_response());
+    let refuse = |why: &'static str| Some(unprocessable(why));
     if !SCOPE_KINDS.contains(&scope_kind) {
         return refuse("scopeKind must be global|coworker");
     }
@@ -261,16 +272,15 @@ async fn set_policy(
     if let Some(refusal) = refuse_scope(&state, &account_id, &body.scope_kind, scope_id).await {
         return refusal;
     }
-    let allow = body.allow_instructions.as_deref().map(str::trim);
-    let block = body.block_instructions.as_deref().map(str::trim);
-    let chars =
-        allow.map_or(0, |text| text.chars().count()) + block.map_or(0, |text| text.chars().count());
-    if chars > MAX_INSTRUCTIONS_CHARS {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "instructions are too long for one scope",
-        )
-            .into_response();
+    let [allow, ask, block] = [
+        &body.allow_instructions,
+        &body.ask_instructions,
+        &body.block_instructions,
+    ]
+    .map(|text| text.as_deref().map(str::trim));
+    let lists = [allow, ask, block].into_iter().flatten();
+    if lists.map(|text| text.chars().count()).sum::<usize>() > MAX_INSTRUCTIONS_CHARS {
+        return unprocessable("instructions are too long for one scope");
     }
     match state
         .store
@@ -280,17 +290,14 @@ async fn set_policy(
             scope_id,
             body.enabled,
             allow,
+            ask,
             block,
             now_ms(),
         )
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not save the policy",
-        )
-            .into_response(),
+        Err(_) => failed("could not save the policy"),
     }
 }
 
@@ -305,11 +312,7 @@ async fn delete_policy(
         Err(refusal) => return refusal,
     };
     if !SCOPE_KINDS.contains(&body.scope_kind.as_str()) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "scopeKind must be global|coworker",
-        )
-            .into_response();
+        return unprocessable("scopeKind must be global|coworker");
     }
     match state
         .store
@@ -317,11 +320,7 @@ async fn delete_policy(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(_) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "could not delete the policy",
-        )
-            .into_response(),
+        Err(_) => failed("could not delete the policy"),
     }
 }
 

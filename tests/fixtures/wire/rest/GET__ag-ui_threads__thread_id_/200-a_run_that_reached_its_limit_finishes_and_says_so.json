@@ -78,7 +78,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "ran",
             "timestamp": 100,
-            "durationMs": 4,
+            "durationMs": 1,
             "toolCallId": "c1"
           },
           {

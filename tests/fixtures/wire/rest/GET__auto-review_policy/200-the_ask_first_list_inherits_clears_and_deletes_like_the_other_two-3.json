@@ -1,0 +1,9 @@
+{
+  "method": "GET",
+  "path": "/auto-review/policy",
+  "status": 200,
+  "body": {
+    "global": null,
+    "coworkers": {}
+  }
+}

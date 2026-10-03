@@ -10,6 +10,7 @@ fn exactly_one_bare_word_parses() {
         ("`block`", ReviewVerdict::Block),
         ("ask.", ReviewVerdict::Ask),
         ("  Block  ", ReviewVerdict::Block),
+        (" Unsure.\n", ReviewVerdict::Unsure),
     ] {
         assert_eq!(parse_verdict(text), verdict, "{text:?}");
     }
@@ -19,6 +20,9 @@ fn exactly_one_bare_word_parses() {
         "allow block",
         "allowed",
         "allow, but carefully",
+        // The list's label is not its word: a judge that answers in it did not follow the contract.
+        "ask first",
+        "ask-first",
     ] {
         assert_eq!(
             parse_verdict(text),
@@ -34,8 +38,62 @@ fn ask<'a>() -> ReviewAsk<'a> {
         tool: "shell",
         arguments: r#"{"command":"brew install jq"}"#,
         allow_instructions: "",
+        ask_instructions: "anything that sends email",
         block_instructions: "anything that installs software",
     }
+}
+
+/// PRECEDENCE LIVES IN THE JUDGE'S INSTRUCTIONS: the model answers the first word that fits, so
+/// the order the words are listed in IS block over ask over allow. Reordering them, or dropping
+/// the sentence that says so, changes what two lists that both apply to one action decide.
+#[test]
+fn the_judges_words_are_listed_block_then_ask_then_allow_and_it_says_so() {
+    let line_of = |word: &str| {
+        let lines = JUDGE_SYSTEM.lines();
+        let at = lines
+            .enumerate()
+            .find(|(_, line)| line.split_whitespace().next() == Some(word));
+        at.expect("the instructions list every word").0
+    };
+    let order = ["block", "ask", "allow", "unsure"].map(line_of);
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+    assert!(JUDGE_SYSTEM.contains("block beats ask, and ask beats allow"));
+    assert!(JUDGE_SYSTEM.contains("the first that fits"));
+    // Every word the prompt offers is one the parser takes, and the parser takes no other.
+    for word in ["block", "ask", "allow", "unsure"] {
+        assert!(
+            !matches!(parse_verdict(word), ReviewVerdict::Unavailable(_)),
+            "{word}"
+        );
+    }
+}
+
+/// The question carries each list under its own label, in the same order, and a list nobody
+/// wrote is "(none)" under its label rather than a blank the model could fill in.
+#[test]
+fn the_question_shows_each_list_under_its_own_label_in_precedence_order() {
+    let mut question = ask();
+    question.allow_instructions = "git is fine";
+    let prompt = ModelJudge::prompt_for(&question);
+    let at = |label: &str| prompt.find(label).expect("the question has every label");
+    let (block, ask_first, allow) = (
+        at("BLOCK INSTRUCTIONS:"),
+        at("ASK-FIRST INSTRUCTIONS:"),
+        at("ALLOW INSTRUCTIONS:"),
+    );
+    assert!(block < ask_first && ask_first < allow, "{prompt}");
+    let section = |from: usize, to: usize| prompt[from..to].to_string();
+    assert!(section(block, ask_first).contains("anything that installs software"));
+    assert!(section(ask_first, allow).contains("anything that sends email"));
+    assert!(prompt[allow..].contains("git is fine"));
+
+    let mut bare = ask();
+    bare.ask_instructions = "  ";
+    let prompt = ModelJudge::prompt_for(&bare);
+    assert!(
+        prompt.contains("ASK-FIRST INSTRUCTIONS:\n(none)\nALLOW INSTRUCTIONS:\n(none)"),
+        "{prompt}"
+    );
 }
 
 #[tokio::test]
@@ -100,7 +158,7 @@ async fn a_refusing_door_keeps_its_cause() {
 
 #[tokio::test]
 async fn the_mock_doors_canned_verdict_is_honoured() {
-    for word in ["allow", "block", "ask"] {
+    for word in ["allow", "block", "ask", "unsure"] {
         let judge = ModelJudge::new(
             Arc::new(MockDoor::echoing().with_judge_verdict(word)),
             "oag/cheap",
