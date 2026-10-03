@@ -285,11 +285,15 @@ async fn harness(database_url: &str) -> Harness {
     let box_saw = Arc::new(Mutex::new(Vec::new()));
     let novnc = start_novnc(decoy, box_saw.clone()).await;
     let state = AgUiState {
+        // OG_PUBLIC_GATEWAY_URL as it was when the screen went blank (3 Oct 2026): an https front
+        // nobody runs. The test talks to plain loopback, as that app did, so it must be sent back
+        // there to load anything.
         auth: AuthState::new(
             PgStore::new(pool),
             Arc::new(TokenMinter::new(b"proxied-screen-test-secret")),
             "host@og.local".to_string(),
-        ),
+        )
+        .with_resend(None, "https://uriahs-MacBook-Pro.local:1447".to_string()),
         door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),

@@ -52,10 +52,14 @@ struct Ticket {
     purpose: String,
 }
 
-/// Where the person's app reached this server. `OG_PUBLIC_GATEWAY_URL` when it names a real host;
-/// its default, `http://{OG_BIND}`, is usually a listen address (`0.0.0.0`, `[::]`) no webview can open,
-/// so then the `Host` the request came in on, which is by construction one the app can reach.
+/// Where the person's app reached this server: `loopback_origin`, or else `OG_PUBLIC_GATEWAY_URL`
+/// when it names a real host, whatever the `Host` (behind a proxy, a name only the proxy knows).
+/// Its default, `http://{OG_BIND}`, is usually a listen address (`0.0.0.0`, `[::]`) no webview can
+/// open, so then the `Host` the request came in on, by construction one the app can reach.
 pub fn public_origin(configured: &str, headers: &HeaderMap) -> Option<String> {
+    if let Some(origin) = loopback_origin(headers) {
+        return Some(origin);
+    }
     let configured = configured.trim_end_matches('/');
     let listen_address = configured.contains("://0.0.0.0") || configured.contains("://[::]");
     if configured.starts_with("http") && !listen_address {
@@ -70,6 +74,24 @@ pub fn public_origin(configured: &str, headers: &HeaderMap) -> Option<String> {
         .get("x-forwarded-proto")
         .is_some_and(|proto| proto.as_bytes() == b"https");
     Some(format!("{}://{host}", if https { "https" } else { "http" }))
+}
+
+/// `http://` and a `Host` of `127.0.0.1`, `localhost` or `[::1]`, any port, where an app on this
+/// machine just reached this plain listener; `OG_PUBLIC_GATEWAY_URL` can name a front that is down
+/// (an `https://….local` with no Caddy blanked every screen). REBUILT, NEVER ECHOED: it outranks
+/// that in a URL with a ticket in it. Not after a front proxy (`Forwarded`, `X-Forwarded-*`,
+/// `X-Real-IP`; noticed, never read): its `Host` is the proxy's (nginx sends its upstream's).
+fn loopback_origin(headers: &HeaderMap) -> Option<String> {
+    let proxied = |name: &str| name.contains("forwarded") || name == "x-real-ip";
+    let direct = !headers.keys().any(|name| proxied(name.as_str()));
+    let host = headers.get(header::HOST)?.to_str().ok()?;
+    let names = ["127.0.0.1", "localhost", "[::1]"];
+    let name = names.into_iter().find(|n| direct && host.starts_with(n))?;
+    let port = match host.strip_prefix(name)? {
+        "" => return Some(format!("http://{name}")),
+        rest => rest.strip_prefix(':')?.parse::<u16>().ok()?,
+    };
+    Some(format!("http://{name}:{port}"))
 }
 
 /// `local_page` (the box's own noVNC URL on this host) as a URL on `origin`, carrying the same
@@ -114,12 +136,9 @@ async fn upstream_for(state: &AgUiState, coworker_id: &str, ticket: &str) -> Opt
     }
     let account = AccountId::from_stored(claims.sub);
     let coworker = CoworkerId::from_stored(claims.cw);
-    if !matches!(
-        crate::agui::routes::owned_coworker(state, &account, &coworker).await,
-        Ok(true)
-    ) {
+    let Ok(true) = crate::agui::routes::owned_coworker(state, &account, &coworker).await else {
         return None;
-    }
+    };
     let scoped = crate::agui::provision::scoped_box_for(state, &account, &coworker).await?;
     if scoped.box_id != claims.bx || scoped.kind != "local-docker" {
         return None;
@@ -163,37 +182,27 @@ static DIAL: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
         .ok()
 });
 
+fn refused(why: &'static str) -> Response {
+    (StatusCode::BAD_GATEWAY, why).into_response()
+}
+
 /// One of noVNC's files from the box on `port`, with only its status, body and `Content-Type`.
 async fn fetch(port: u16, rest: &str) -> Response {
-    let silent = || {
-        (
-            StatusCode::BAD_GATEWAY,
-            "the computer's screen did not answer",
-        )
-            .into_response()
-    };
-    if rest
-        .split('/')
-        .any(|segment| segment == ".." || segment.is_empty())
-    {
+    let silent = || refused("the computer's screen did not answer");
+    if rest.split('/').any(|part| part == ".." || part.is_empty()) {
         return (StatusCode::NOT_FOUND, "no such file").into_response();
     }
     let Some(client) = DIAL.as_ref() else {
         return silent();
     };
-    let Ok(fetched) = client
-        .get(format!("http://127.0.0.1:{port}/{rest}"))
-        .send()
-        .await
-    else {
+    let url = format!("http://127.0.0.1:{port}/{rest}");
+    let Ok(fetched) = client.get(url).send().await else {
         return silent();
     };
     if fetched.status().is_redirection() {
-        return (
-            StatusCode::BAD_GATEWAY,
+        return refused(
             "the computer's screen answered with a redirect, which this server does not follow",
-        )
-            .into_response();
+        );
     }
     let status = StatusCode::from_u16(fetched.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let kind = fetched.headers().get(header::CONTENT_TYPE).cloned();
@@ -287,11 +296,8 @@ fn confined(mut response: Response) -> Response {
 /// REMADE: the box answers the key the browser sent, so its `Sec-WebSocket-Accept` is the one the
 /// browser checks, and the frames pass through untouched in both directions.
 async fn tunnel(port: u16, mut request: Request) -> Response {
-    let refused = |why: &'static str| (StatusCode::BAD_GATEWAY, why).into_response();
-    let [key, protocol] = ["sec-websocket-key", "sec-websocket-protocol"].map(|name| {
-        let value = request.headers().get(name)?.to_str().ok()?;
-        Some(value.to_string())
-    });
+    let [key, protocol] = ["sec-websocket-key", "sec-websocket-protocol"]
+        .map(|name| Some(request.headers().get(name)?.to_str().ok()?.to_string()));
     let Some(key) = key else {
         return (StatusCode::BAD_REQUEST, "not a websocket handshake").into_response();
     };
@@ -357,13 +363,8 @@ async fn read_head(upstream: &mut tokio::net::TcpStream) -> Option<(String, Vec<
     let mut seen = Vec::new();
     let mut chunk = [0u8; 2048];
     loop {
-        let read = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            upstream.read(&mut chunk),
-        )
-        .await
-        .ok()?
-        .ok()?;
+        let waited = tokio::time::timeout(Duration::from_secs(10), upstream.read(&mut chunk));
+        let read = waited.await.ok()?.ok()?;
         if read == 0 {
             return None;
         }
@@ -379,6 +380,5 @@ async fn read_head(upstream: &mut tokio::net::TcpStream) -> Option<(String, Vec<
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 #[path = "../../tests/unit/screen_proxy.rs"]
 mod tests;
