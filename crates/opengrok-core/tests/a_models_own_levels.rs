@@ -185,6 +185,30 @@ fn an_own_level_no_write_takes_is_null() {
     assert_eq!(inherit, Levels::default());
 }
 
+/// A NAMED LEVEL NO WRITE TAKES HIDES NO MARKED ONE (Cursor's review of #344): `ownEffort` is the
+/// named level if a write takes it, else the first entry marked `default: true` that one does,
+/// else null. A listing naming `minimal` beside a `high` marked default read as no own level, and
+/// the slider started on none though the listing said where.
+#[test]
+fn a_named_level_no_write_takes_gives_way_to_the_marked_one() {
+    let entries = json!([{ "value": "low", "label": "Low Effort" },
+                         { "value": "high", "label": "High Effort", "default": true }]);
+    let body = json!({ "data": [{ "id": "m", "reasoning_efforts": entries,
+                                  "reasoning_effort": "minimal" }] });
+    let listed = models(&body);
+    assert_eq!(listed[0].levels, levels(&["low", "high"], Some("high")));
+    assert_eq!(listed[0].on_the_plan(Via::Mac)["ownEffort"], "high");
+    let entries = json!([{ "value": "minimal", "label": "Minimal", "default": true },
+                         { "value": "low", "label": "Low Effort" },
+                         { "value": "high", "label": "High Effort", "default": true }]);
+    let past = row(json!({ "id": "m", "reasoning_efforts": entries }));
+    assert_eq!(
+        past,
+        levels(&["low", "high"], Some("high")),
+        "the first marked one a write takes, past one it does not"
+    );
+}
+
 #[test]
 fn each_row_is_the_wire_agreed_with_nativechat() {
     let listed = models(&captured());
