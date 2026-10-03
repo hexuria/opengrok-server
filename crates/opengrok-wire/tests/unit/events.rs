@@ -36,6 +36,19 @@ fn every_note_says_what_changed_in_ids_and_the_contracts_names() {
                 "routineId": "sched_1", "cause": "bot" })
     );
 
+    let waiting = Note::RunWaiting {
+        run_id: "run_1",
+        thread_id: "sched_1",
+        coworker_id: "cw_1",
+        reason: SuspendReason::PolicyApproval,
+    };
+    assert_eq!(waiting.event(), "run.waiting");
+    assert_eq!(
+        waiting.data(),
+        r#"{"runId":"run_1","threadId":"sched_1","coworkerId":"cw_1","reason":"policy-approval"}"#,
+        "the keys in the order the contract lists them"
+    );
+
     let finished = Note::RunFinished {
         run_id: "run_1",
         thread_id: "sched_1",
@@ -100,6 +113,44 @@ fn a_change_no_run_caused_has_a_null_run_id_and_not_a_missing_one() {
     );
 }
 
+/// `reason` is the run's own word for what its card asks, the one the approvals queue already says
+/// (`SuspendReason::as_str`), so the app reads one vocabulary. The field is that type and not a
+/// string: nothing a card says can be put on the stream by it.
+#[test]
+fn a_run_waits_in_the_words_the_approvals_queue_uses_and_the_note_holds_no_text() {
+    let words = [
+        (SuspendReason::ExecConsent, "exec-consent"),
+        (SuspendReason::PolicyApproval, "policy-approval"),
+        (SuspendReason::AutoReview, "auto-review"),
+        (SuspendReason::UserForm, "user-form"),
+    ];
+    for (reason, word) in words {
+        let waiting = Note::RunWaiting {
+            run_id: "run_1",
+            thread_id: "t",
+            coworker_id: "cw_1",
+            reason,
+        };
+        assert_eq!(reason.as_str(), word);
+        assert_eq!(data(&waiting)["reason"], word);
+    }
+
+    let waiting = Note::RunWaiting {
+        run_id: "run_1",
+        thread_id: "t",
+        coworker_id: "cw_1",
+        reason: SuspendReason::UserForm,
+    };
+    let mut keys: Vec<String> = data(&waiting)
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["coworkerId", "reason", "runId", "threadId"]);
+}
+
 /// Five changes, in the contract's words.
 #[test]
 fn a_routine_changes_in_five_words() {
@@ -143,6 +194,7 @@ fn the_list_of_names_is_every_kind_and_the_reset() {
         [
             "thread.changed",
             "run.started",
+            "run.waiting",
             "run.finished",
             "routine.changed",
             "reset"
