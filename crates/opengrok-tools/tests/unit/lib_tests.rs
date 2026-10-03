@@ -1414,6 +1414,7 @@ impl ReviewJudge for CountingJudge {
 fn blocking_policy() -> ReviewPolicy {
     ReviewPolicy {
         allow_instructions: String::new(),
+        ask_instructions: String::new(),
         block_instructions: "never touch prod".to_string(),
     }
 }

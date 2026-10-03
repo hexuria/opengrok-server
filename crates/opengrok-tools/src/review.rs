@@ -14,6 +14,7 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReviewPolicy {
     pub allow_instructions: String,
+    pub ask_instructions: String,
     pub block_instructions: String,
 }
 
@@ -21,7 +22,13 @@ impl ReviewPolicy {
     /// The per-call short-circuit (`docs/AUTO-REVIEW.md` §3): nothing written means no judge
     /// call. One in-memory test; no DB read.
     pub fn is_active(&self) -> bool {
-        !(self.allow_instructions.trim().is_empty() && self.block_instructions.trim().is_empty())
+        [
+            &self.allow_instructions,
+            &self.ask_instructions,
+            &self.block_instructions,
+        ]
+        .iter()
+        .any(|text| !text.trim().is_empty())
     }
 }
 

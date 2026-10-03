@@ -72,20 +72,15 @@ fn allow_all_round_runs() {
 #[test]
 fn a_policy_with_nothing_written_is_inactive() {
     assert!(!ReviewPolicy::default().is_active());
-    assert!(
-        !ReviewPolicy {
-            allow_instructions: "  ".into(),
-            block_instructions: String::new()
-        }
-        .is_active()
-    );
-    assert!(
-        ReviewPolicy {
-            allow_instructions: String::new(),
-            block_instructions: "never touch prod".into()
-        }
-        .is_active()
-    );
+    let only = |allow: &str, ask: &str, block: &str| ReviewPolicy {
+        allow_instructions: allow.into(),
+        ask_instructions: ask.into(),
+        block_instructions: block.into(),
+    };
+    assert!(!only("  ", "\n", "").is_active());
+    assert!(only("", "", "never touch prod").is_active());
+    assert!(only("", "check with me first", "").is_active());
+    assert!(only("git is fine", "", "").is_active());
 }
 
 #[test]
