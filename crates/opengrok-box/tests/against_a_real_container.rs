@@ -132,15 +132,37 @@ async fn run_lifecycle(computer: &DockerComputer, box_id: &str) -> Result<(), St
     }
 
     // THE PROMISE THAT MAKES THIS A COWORKER AND NOT A SESSION: the filesystem survives the
-    // machine being stopped and started again.
+    // machine being stopped and started again. And what a status reads is the box as it is now:
+    // one `docker inspect` answers for a second, but a stop or start made here forgets it.
+    let state = |when: &'static str| async move {
+        let state = computer.state(box_id).await;
+        state.map_err(|error| format!("state {when}: {error}"))
+    };
+    if state("before the stop").await? != "running" {
+        return Err("a fresh box should be running".to_string());
+    }
     computer
         .stop(box_id)
         .await
         .map_err(|error| format!("stop: {error}"))?;
+    let stopped = state("after the stop").await?;
+    if stopped != "exited" {
+        return Err(format!(
+            "a stopped box read as {stopped}, as it was before the stop"
+        ));
+    }
     computer
         .resume(box_id)
         .await
         .map_err(|error| format!("resume: {error}"))?;
+    let resumed = state("after the start").await?;
+    if resumed != "running" {
+        return Err(format!("a started box read as {resumed}"));
+    }
+    let screen = computer.screen_url(box_id).await;
+    if !matches!(screen, Ok(None)) || computer.offers_a_screen(box_id).await {
+        return Err(format!("a headless box has no screen: {screen:?}"));
+    }
     let after_resume = computer
         .read_file(box_id, "/tmp/nested/dir/note.txt")
         .await

@@ -21,7 +21,7 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -49,9 +49,17 @@ macro_rules! database_or_skip {
     };
 }
 
-/// A Local VM whose screen is the stand-in noVNC on `port`.
+/// A Local VM whose screen is the stand-in noVNC on `port`, which moves as a restarted
+/// container's does, counting how often it is asked where its screen is.
 struct ScreenBox {
-    port: u16,
+    port: AtomicU16,
+    asked: AtomicUsize,
+}
+
+impl ScreenBox {
+    fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
 }
 
 #[async_trait]
@@ -103,9 +111,10 @@ impl Computer for ScreenBox {
         Ok("running".to_string())
     }
     async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+        self.asked.fetch_add(1, Ordering::SeqCst);
         Ok(Some(format!(
             "http://127.0.0.1:{}/vnc.html?autoconnect=true&resize=scale&reconnect=true&password=pw4boxA1",
-            self.port
+            self.port.load(Ordering::SeqCst)
         )))
     }
 }
@@ -155,13 +164,16 @@ async fn start_decoy() -> (u16, Arc<AtomicUsize>) {
 
 /// noVNC as websockify serves it: the page over HTTP, and a websocket on `/websockify` that
 /// speaks first and then echoes. Plus what a hostile box adds: a page of script, and a redirect
-/// to `decoy`. Every request line it is sent is kept in `saw`.
-async fn start_novnc(decoy: u16, saw: Arc<Mutex<Vec<String>>>) -> u16 {
+/// to `decoy`. Every request line it is sent is kept in `saw`. Aborting the task closes the port.
+async fn start_novnc(
+    decoy: u16,
+    saw: Arc<Mutex<Vec<String>>>,
+) -> (u16, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(async move {
+    let listening = tokio::spawn(async move {
         loop {
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
@@ -223,7 +235,7 @@ async fn start_novnc(decoy: u16, saw: Arc<Mutex<Vec<String>>>) -> u16 {
             });
         }
     });
-    port
+    (port, listening)
 }
 
 async fn seed_account(store: &PgStore, email: &str) -> AccountId {
@@ -268,8 +280,11 @@ struct Harness {
     port: u16,
     state: AgUiState,
     client: reqwest::Client,
+    decoy: u16,
     decoy_hits: Arc<AtomicUsize>,
     box_saw: Arc<Mutex<Vec<String>>>,
+    screen: Arc<ScreenBox>,
+    novnc: tokio::task::JoinHandle<()>,
 }
 
 async fn harness(database_url: &str) -> Harness {
@@ -283,7 +298,11 @@ async fn harness(database_url: &str) -> Harness {
         .expect("migrations");
     let (decoy, decoy_hits) = start_decoy().await;
     let box_saw = Arc::new(Mutex::new(Vec::new()));
-    let novnc = start_novnc(decoy, box_saw.clone()).await;
+    let (novnc_port, novnc) = start_novnc(decoy, box_saw.clone()).await;
+    let screen = Arc::new(ScreenBox {
+        port: AtomicU16::new(novnc_port),
+        asked: AtomicUsize::new(0),
+    });
     let state = AgUiState {
         // OG_PUBLIC_GATEWAY_URL as it was when the screen went blank (3 Oct 2026): an https front
         // nobody runs. The test talks to plain loopback, as that app did, so it must be sent back
@@ -297,7 +316,7 @@ async fn harness(database_url: &str) -> Harness {
         door: Arc::new(MockDoor::echoing()),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
-        computer: Some(Arc::new(ScreenBox { port: novnc })),
+        computer: Some(screen.clone()),
         vault: None,
         connectors: Connectors {
             providers: Arc::new(BTreeMap::new()),
@@ -320,8 +339,11 @@ async fn harness(database_url: &str) -> Harness {
         port,
         state,
         client: reqwest::Client::new(),
+        decoy,
         decoy_hits,
         box_saw,
+        screen,
+        novnc,
     }
 }
 
@@ -408,6 +430,122 @@ impl Harness {
             .expect("the page")
             .to_string()
     }
+
+    /// The first line of the answer to noVNC's websocket handshake under `ticket_path`.
+    async fn websocket(&self, ticket_path: &str) -> String {
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", self.port))
+            .await
+            .expect("dial");
+        let path = ticket_path.trim_start_matches(&self.base);
+        let hello = format!(
+            "GET {path}/websockify HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nUpgrade: websocket\r\n\
+             Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: a2V5\r\n\r\n",
+            self.port
+        );
+        socket.write_all(hello.as_bytes()).await.expect("hello");
+        let (head, _) = read_head(&mut socket).await;
+        head.lines().next().unwrap_or_default().to_string()
+    }
+}
+
+/// A page's ~80 files and its websocket each asked the provider where the box's screen was —
+/// two `docker` processes apiece, 160 at once, 3.7 s a file and 5 s before the window painted
+/// (3 Oct 2026). The status that hands the ticket out finds the port; every file and the socket
+/// after it use that port, and the account's right to the coworker is still asked each time.
+#[tokio::test]
+async fn a_page_and_its_files_ask_where_the_screen_is_once() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada).await;
+    let ticket_path = h.ticket_path(&ada, &coworker).await;
+    let asked = h.screen.asked();
+    for file in ["vnc.html", "app/ui.js", "app/ui.js", "vnc.html"] {
+        let (status, body) = h.open(&format!("{ticket_path}/{file}")).await;
+        assert_eq!(status, 200, "{file}: {body}");
+    }
+    let opened = h.websocket(&ticket_path).await;
+    assert!(opened.starts_with("HTTP/1.1 101"), "{opened}");
+    assert_eq!(h.screen.asked(), asked, "the ticket's port is found once");
+
+    // The right to the coworker is not remembered with the port: once it is retired, the very
+    // next file and handshake are refused.
+    let retired = h
+        .client
+        .delete(format!("{}/coworkers/{coworker}", h.base))
+        .bearer_auth(&ada)
+        .send()
+        .await
+        .expect("retire");
+    assert!(retired.status().is_success(), "{}", retired.status());
+    assert_eq!(h.open(&format!("{ticket_path}/app/ui.js")).await.0, 404);
+    assert!(h.websocket(&ticket_path).await.starts_with("HTTP/1.1 404"));
+}
+
+/// Docker gives a box new ports each time it starts, so a remembered one can go dead under a
+/// ticket that is still good. Nothing answering on it is the sign: the port is asked for again
+/// and the same request is served, file or websocket.
+#[tokio::test]
+async fn a_screen_that_came_back_on_another_port_is_found_again() {
+    let database_url = database_or_skip!();
+    let mut h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada).await;
+    let ticket_path = h.ticket_path(&ada, &coworker).await;
+    assert_eq!(h.open(&format!("{ticket_path}/app/ui.js")).await.0, 200);
+
+    let gone = h.screen.port.load(Ordering::SeqCst);
+    h.novnc.abort();
+    let _ = (&mut h.novnc).await;
+    let moved = loop {
+        let (port, _restarted) = start_novnc(h.decoy, h.box_saw.clone()).await;
+        if port != gone {
+            break port;
+        }
+    };
+    h.screen.port.store(moved, Ordering::SeqCst);
+    let asked = h.screen.asked();
+    assert_eq!(
+        h.open(&format!("{ticket_path}/app/ui.js")).await,
+        (200, "ui-script".to_string())
+    );
+    assert_eq!(
+        h.screen.asked(),
+        asked + 1,
+        "the dead port is asked for once"
+    );
+    let opened = h.websocket(&ticket_path).await;
+    assert!(opened.starts_with("HTTP/1.1 101"), "{opened}");
+}
+
+/// The box a ticket names is checked against the coworker's computer every few seconds rather
+/// than on each file: after a reset gives the coworker a new box, the old ticket stops within
+/// that, while its owner's next status hands out a ticket for the new one.
+#[tokio::test]
+async fn a_ticket_for_a_box_that_is_no_longer_the_coworkers_stops() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada).await;
+    let ticket_path = h.ticket_path(&ada, &coworker).await;
+    assert_eq!(h.open(&format!("{ticket_path}/app/ui.js")).await.0, 200);
+
+    let reset = h
+        .client
+        .post(format!("{}/coworkers/{coworker}/computer/reset", h.base))
+        .bearer_auth(&ada)
+        .send()
+        .await
+        .expect("reset");
+    assert_eq!(reset.status().as_u16(), 200, "reset");
+    let fresh = h.ticket_path(&ada, &coworker).await;
+    assert_ne!(fresh, ticket_path, "the new box is a new ticket");
+    assert_eq!(h.open(&format!("{fresh}/app/ui.js")).await.0, 200);
+
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    assert_eq!(h.open(&format!("{ticket_path}/app/ui.js")).await.0, 404);
+    assert!(h.websocket(&ticket_path).await.starts_with("HTTP/1.1 404"));
+    assert_eq!(h.open(&format!("{fresh}/app/ui.js")).await.0, 200);
 }
 
 #[tokio::test]

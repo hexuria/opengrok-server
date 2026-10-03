@@ -38,6 +38,41 @@ pub struct EgressTunnel {
     pub ready: bool,
 }
 
+/// How long a guest's `/v1/info` is waited on before the tunnel counts as not there.
+pub const GUEST_INFO_PATIENCE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a guest that spent all of `GUEST_INFO_PATIENCE` without answering is not asked again
+/// by `shown_egress`.
+pub const SILENT_GUEST_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The guest's tunnel answer for a status to SHOW (the Computer pane, the settings page): asked
+/// on every read, except of a guest that spent the whole `GUEST_INFO_PATIENCE` without answering
+/// in the last `SILENT_GUEST_FOR` — the pane polls three routes every two seconds, and each one
+/// paid that wait again (3 Oct 2026). Never for a decision: a turn asks
+/// `Computer::egress_tunnel` itself, as a remembered "no" there would skip the consent card.
+pub async fn shown_egress(computer: &dyn Computer, box_id: &str) -> Option<EgressTunnel> {
+    use std::sync::{LazyLock, Mutex};
+    use std::time::Instant;
+    type Silent = std::collections::HashMap<String, Instant>;
+    static SILENT: LazyLock<Mutex<Silent>> = LazyLock::new(Mutex::default);
+    if let Ok(silent) = SILENT.lock()
+        && let Some(since) = silent.get(box_id)
+        && since.elapsed() < SILENT_GUEST_FOR
+    {
+        return None;
+    }
+    let asked = Instant::now();
+    let cap = computer.egress_tunnel(box_id).await;
+    let waited = asked.elapsed() >= GUEST_INFO_PATIENCE;
+    if let Ok(mut silent) = SILENT.lock() {
+        match cap {
+            None if waited => silent.insert(box_id.to_string(), Instant::now()),
+            _ => silent.remove(box_id),
+        };
+    }
+    cap
+}
+
 impl EgressTunnel {
     /// `None` when the capability is absent or malformed. Both booleans must be
     /// present; a partial object is not `ready: false` and is not available.
@@ -476,6 +511,9 @@ mod tests {
     struct Scripted {
         states: Mutex<VecDeque<&'static str>>,
         resumes: AtomicUsize,
+        /// What its guest says of the tunnel and after how long, and how often it was asked.
+        guest: (Option<EgressTunnel>, std::time::Duration),
+        asked: AtomicUsize,
     }
 
     impl Scripted {
@@ -483,7 +521,14 @@ mod tests {
             Self {
                 states: Mutex::new(states.iter().copied().collect()),
                 resumes: AtomicUsize::new(0),
+                guest: (None, std::time::Duration::ZERO),
+                asked: AtomicUsize::new(0),
             }
+        }
+
+        fn with_guest(mut self, says: Option<EgressTunnel>, after: std::time::Duration) -> Self {
+            self.guest = (says, after);
+            self
         }
     }
 
@@ -529,6 +574,41 @@ mod tests {
             };
             Ok(next.to_string())
         }
+        async fn egress_tunnel(&self, _b: &str) -> Option<EgressTunnel> {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.guest.1).await;
+            self.guest.0
+        }
+    }
+
+    /// The pane polls three routes every two seconds, and a guest that spent the probe's whole
+    /// patience saying nothing cost each of them that wait (3 Oct 2026). Shown, it is asked once
+    /// in `SILENT_GUEST_FOR`; a guest that answers is asked on every read, as the pane shows the
+    /// tunnel as it is now.
+    #[tokio::test]
+    async fn a_status_does_not_wait_again_on_a_guest_that_said_nothing() {
+        let silent = Scripted::new(&["running"]).with_guest(None, GUEST_INFO_PATIENCE);
+        assert_eq!(shown_egress(&silent, "bx_silent").await, None);
+        let began = std::time::Instant::now();
+        for _ in 0..3 {
+            assert_eq!(shown_egress(&silent, "bx_silent").await, None);
+        }
+        let waited = began.elapsed();
+        assert!(
+            waited < GUEST_INFO_PATIENCE,
+            "waited {waited:?} on a silent guest"
+        );
+        assert_eq!(silent.asked.load(Ordering::SeqCst), 1);
+
+        let ready = Some(EgressTunnel {
+            enabled: true,
+            ready: true,
+        });
+        let answering = Scripted::new(&["running"]).with_guest(ready, std::time::Duration::ZERO);
+        for _ in 0..3 {
+            assert_eq!(shown_egress(&answering, "bx_answering").await, ready);
+        }
+        assert_eq!(answering.asked.load(Ordering::SeqCst), 3);
     }
 
     /// A stopped box is started once and the wake returns as soon as it is running.

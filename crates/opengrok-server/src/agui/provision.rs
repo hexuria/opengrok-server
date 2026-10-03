@@ -97,6 +97,9 @@ pub async fn lookup_provider(
 pub const NO_LOCAL_VM: &str = "this server does not run Local VMs on its own host, so this \
 computer cannot be used here — an admin can set up box.ascii.dev on the dashboard";
 
+/// A recorded computer whose kind has no provider here, as the pane, the tile and an update say.
+const NO_PROVIDER: &str = "the computer's provider is not available";
+
 async fn lookup_ascii(state: &AgUiState, org_id: Option<&str>) -> ProviderLookup {
     let Some(org) = org_id else {
         return ascii_missing();
@@ -676,9 +679,9 @@ pub async fn teardown_computer_for(
 }
 
 /// NativeChat (tip `729bdd9`) gates Route traffic from **only** this JSON —
-/// `isEgressTunnelAvailable` or nested `egress_tunnel.ready`. It does not call
-/// Box `/v1/info`. Probe the scoped live `boxId` already in the payload (never
-/// a frozen coworker-row id) on every status read. Do not invent `ready`.
+/// `isEgressTunnelAvailable` or nested `egress_tunnel.ready`. It does not call Box `/v1/info`.
+/// Probe the scoped live `boxId` already in the payload (never a frozen coworker-row id) on every
+/// status read, bar a guest just silent (`shown_egress`). Do not invent `ready`.
 fn stamp_egress_fields(screen: &mut Value, host_wants: bool, cap: Option<EgressTunnel>) {
     screen["isEgressTunnelAvailable"] = json!(EgressTunnel::advertised(host_wants, cap));
     if let Some(cap) = cap {
@@ -900,12 +903,8 @@ pub async fn coworker_screen(
     };
     let lookup = lookup_provider(state, org_id.as_deref(), &kind).await;
     let Some(provider) = lookup.computer else {
-        let (code, message) = lookup.error.unwrap_or_else(|| {
-            (
-                "unknown".into(),
-                "the computer's provider is not available".into(),
-            )
-        });
+        let unknown = || ("unknown".into(), NO_PROVIDER.into());
+        let (code, message) = lookup.error.unwrap_or_else(unknown);
         let at_ms = chrono::Utc::now().timestamp_millis();
         let mut body = json!({
             "agentId": agent_id,
@@ -918,10 +917,11 @@ pub async fn coworker_screen(
         stamp_egress_policy(state, &mut body, scope, &scope_id).await;
         return body;
     };
-    let live_state = provider
-        .state(&box_id)
-        .await
-        .unwrap_or_else(|_| "unknown".to_string());
+    // Live `/v1/info` of THIS scoped box — NativeChat never probes the guest itself. Asked beside
+    // the box's state, not after it: a guest can take the probe's whole patience to say nothing.
+    let probe = opengrok_box::shown_egress(provider.as_ref(), &box_id);
+    let (live_state, cap) = tokio::join!(provider.state(&box_id), probe);
+    let live_state = live_state.unwrap_or_else(|_| "unknown".to_string());
     let (mut vnc_url, image) = if live_state == "running" {
         (
             provider.screen_url(&box_id).await.ok().flatten(),
@@ -948,8 +948,6 @@ pub async fn coworker_screen(
             )
         });
     }
-    // Live `/v1/info` of THIS scoped box — NativeChat never probes the guest itself.
-    let cap = provider.egress_tunnel(&box_id).await;
     let mut screen = json!({
         "agentId": agent_id,
         "state": live_state,
@@ -990,47 +988,23 @@ pub async fn coworker_screenshot(
     coworker_id: &CoworkerId,
 ) -> Result<opengrok_box::Screenshot, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
-    let group = match state.auth.store.load_coworker(coworker_id).await {
-        Ok((coworker, _)) if !coworker.name.is_empty() => coworker.is_group(),
-        _ => return Err((StatusCode::NOT_FOUND, "no such coworker".into())),
-    };
-    let (mode, org_id) = resolve_mode(state, account_id).await;
-    let (scope, scope_id, _) = scope_for(
-        &mode,
-        account_id.as_str(),
-        org_id.as_deref(),
-        coworker_id.as_str(),
-        group,
-    );
-    let Ok(Some((box_id, kind, _stopped))) = state
-        .auth
-        .store
-        .scoped_computer_full(scope, &scope_id)
-        .await
-    else {
+    let Some(row) = scoped_box_row_for(state, account_id, coworker_id).await else {
         return Err((
             StatusCode::NOT_FOUND,
             "this coworker has no computer".into(),
         ));
     };
-    let Some(provider) = lookup_provider(state, org_id.as_deref(), &kind)
-        .await
-        .computer
-    else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "the computer's provider is not available".into(),
-        ));
+    let lookup = lookup_provider(state, row.org_id.as_deref(), &row.kind).await;
+    let Some(provider) = lookup.computer else {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, NO_PROVIDER.into()));
     };
-    provider
-        .screenshot(&box_id)
-        .await
-        .map_err(|error| match error {
-            opengrok_box::BoxError::Refused { status: 501, .. } => {
-                (StatusCode::NOT_FOUND, "this computer has no screen".into())
-            }
-            other => (StatusCode::SERVICE_UNAVAILABLE, other.to_string()),
-        })
+    let shot = provider.screenshot(&row.box_id).await;
+    shot.map_err(|error| match error {
+        opengrok_box::BoxError::Refused { status: 501, .. } => {
+            (StatusCode::NOT_FOUND, "this computer has no screen".into())
+        }
+        other => (StatusCode::SERVICE_UNAVAILABLE, other.to_string()),
+    })
 }
 
 /// How long an update waits for the new box to come up and show a screen.
@@ -1118,7 +1092,7 @@ pub async fn update_scope_box(
         return fail("this scope has no computer to update".into()).await;
     };
     let Some(provider) = provider_for(&state, org_id.as_deref(), &kind).await else {
-        return fail("the computer's provider is not available".into()).await;
+        return fail(NO_PROVIDER.into()).await;
     };
 
     if let Err(error) = provider.pull_latest().await {
@@ -1317,6 +1291,7 @@ pub async fn idle_stop_once(state: &AgUiState, before_ms: i64) -> usize {
         };
         match provider.stop(&box_id).await {
             Ok(()) => {
+                super::screen_proxy::forget_box(&box_id);
                 let _ = state
                     .auth
                     .store
