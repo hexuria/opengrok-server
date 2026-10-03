@@ -58,10 +58,16 @@ pinned by the `server_sha` in its `MANIFEST.json`, and parses every file.
   only noted: some tests read a routine while its run is still in flight, and whether a field
   is `null` or an object depends on timing.
 - `MANIFEST.json`'s `emits` is every AG-UI type, CUSTOM name, approval reason and form resolution
-  the server CAN send. It comes from `opengrok_wire::agui::SENT_TYPES` and `CUSTOM_NAMES` and
-  from the enums, not from what the tests happened to reach. `the_wire_names_are_all_listed`
-  scans the source and fails when a producer sends a name those lists do not hold. A word with no
-  fixture is listed in `unrecorded`.
+  the server CAN send, and the five blocks of the account events stream (`events`, from
+  `opengrok_wire::events::EVENTS`). It comes from `opengrok_wire::agui::SENT_TYPES` and
+  `CUSTOM_NAMES` and from the enums, not from what the tests happened to reach.
+  `the_wire_names_are_all_listed` scans the source and fails when a producer sends a name those
+  lists do not hold. A word with no fixture is listed in `unrecorded`.
+- The account events stream's blocks (`GET /ag-ui/events`, #348) are not AG-UI frames: their name
+  is on the `event:` line, not in their data. They are kept whole, as `{id, event, data}`, under
+  `events/<name>/`, one file per shape of each name (`routineId` there or not, `runId` an id or
+  `null`), `reset` included. The recorder (`tests/support/wire_record.rs`) tells them by their
+  `id:` and `event:` lines. The id is a placeholder: an account's ids say nothing alone.
 - Ids and clocks are placeholders in the server's own formats. Secrets are `«redacted»`: keys
   named like tokens, keys and passwords, `Bearer` values, gateway keys, and any JWT anywhere in
   a string.

@@ -1,0 +1,9 @@
+{
+  "id": "1",
+  "event": "routine.changed",
+  "data": {
+    "routineId": "sched_0199bb4e-0000-7000-8000-000000000001",
+    "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+    "change": "updated"
+  }
+}

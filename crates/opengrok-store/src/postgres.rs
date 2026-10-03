@@ -25,6 +25,8 @@ use crate::{StoreError, StoreResult, account_stream};
 #[derive(Debug, Clone)]
 pub struct PgStore {
     pool: PgPool,
+    /// The account events stream: `append_run` and `append_schedule` write its notes.
+    pub events: opengrok_events::Hub,
 }
 
 /// An enrolled machine (`local_exec_daemon`), as `GET /local-exec/daemon` lists it.
@@ -85,7 +87,8 @@ fn thread_run_from_row(row: sqlx::postgres::PgRow) -> StoreResult<ThreadRun> {
 
 impl PgStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        let events = opengrok_events::Hub::new(pool.clone());
+        Self { events, pool }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -418,7 +421,7 @@ impl PgStore {
             .await?;
         }
 
-        sqlx::query(
+        let owner = sqlx::query_scalar::<_, Option<String>>(
             "insert into run_view
                (id, thread_id, status, event_count, updated_at_ms, account_id, started_at_ms)
              values ($1, $2, $3, $4, $5, $6, $5)
@@ -432,7 +435,8 @@ impl PgStore {
                -- somebody else must not take it (a POST used to, with nothing but the run id).
                account_id = coalesce(run_view.account_id, excluded.account_id),
                -- The start is the first append's stamp, kept for good.
-               started_at_ms = coalesce(run_view.started_at_ms, excluded.started_at_ms)",
+               started_at_ms = coalesce(run_view.started_at_ms, excluded.started_at_ms)
+             returning account_id",
         )
         .bind(view.id.as_str())
         .bind(&view.thread_id)
@@ -440,9 +444,12 @@ impl PgStore {
         .bind(view.event_count)
         .bind(view.updated_at_ms)
         .bind(account_id.map(|id| id.as_str()))
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
 
+        // LAST here and in `append_schedule`: the account's head lock is held to the commit.
+        // The owner is the view's, not the call's.
+        opengrok_events::run_appended(&mut tx, events, view, owner.as_deref()).await?;
         tx.commit().await?;
         Ok(seq)
     }
@@ -1429,10 +1436,8 @@ impl PgStore {
 
         // Loans are rewritten wholesale from the aggregate rather than patched per event: the
         // aggregate is the truth, and reconstructing beats trying to keep two views in step.
-        sqlx::query("delete from connection_loan where connection_id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        let unlend = sqlx::query("delete from connection_loan where connection_id = $1");
+        unlend.bind(id).execute(&mut *tx).await?;
         for coworker in &state.loans {
             sqlx::query(
                 "insert into connection_loan (connection_id, coworker_id, updated_at_ms)
@@ -1568,10 +1573,8 @@ impl PgStore {
 
     /// Drop a sealed secret by id. Idempotent: a secret already gone is the outcome asked for.
     pub async fn delete_secret(&self, id: &str) -> StoreResult<()> {
-        sqlx::query("delete from secret_store where id = $1")
-            .bind(id)
-            .execute(self.pool())
-            .await?;
+        let delete = sqlx::query("delete from secret_store where id = $1");
+        delete.bind(id).execute(self.pool()).await?;
         Ok(())
     }
 
@@ -1906,11 +1909,8 @@ impl PgStore {
     }
 
     pub async fn clear_sharing_mode(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
-        sqlx::query("delete from computer_sharing where scope = $1 and scope_id = $2")
-            .bind(scope)
-            .bind(scope_id)
-            .execute(&self.pool)
-            .await?;
+        let clear = sqlx::query("delete from computer_sharing where scope = $1 and scope_id = $2");
+        clear.bind(scope).bind(scope_id).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -2328,11 +2328,8 @@ impl PgStore {
     }
 
     pub async fn clear_box_update(&self, scope: &str, scope_id: &str) -> StoreResult<()> {
-        sqlx::query("delete from box_update where scope = $1 and scope_id = $2")
-            .bind(scope)
-            .bind(scope_id)
-            .execute(&self.pool)
-            .await?;
+        let clear = sqlx::query("delete from box_update where scope = $1 and scope_id = $2");
+        clear.bind(scope).bind(scope_id).execute(&self.pool).await?;
         Ok(())
     }
 

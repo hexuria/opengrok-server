@@ -1,5 +1,5 @@
 {
-  "server_sha": "58700de4ee1ea2c74c61cf420f4b5159fe84b10a",
+  "server_sha": "85ce00c3f00377272c4fd5f55351c8ff7efccac1",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -28,6 +28,13 @@
       "credential.offer_save",
       "opengrok.inferenceSource",
       "opengrok.timeline"
+    ],
+    "events": [
+      "thread.changed",
+      "run.started",
+      "run.finished",
+      "routine.changed",
+      "reset"
     ],
     "approval_reasons": [
       "exec-consent",
@@ -324,6 +331,10 @@
       "source": "streamed or replayed by /ag-ui, recorded from the test a_delete_asks_first_naming_the_routine_as_stored (crates/opengrok-server/tests/against_routine_tools.rs); ids and times are placeholders"
     },
     {
+      "file": "agui/custom/run-awaiting-approval/a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_under_its_own.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_under_its_own (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
       "file": "agui/custom/run-stopped/stopping_a_run_mid_relay_cancels_the_call_on_the_mac.json",
       "source": "streamed or replayed by /ag-ui, recorded from the test stopping_a_run_mid_relay_cancels_the_call_on_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
@@ -374,6 +385,38 @@
     {
       "file": "agui/custom/user-form/a_handed_back_form_replays_as_handed_back_and_leaves_the_approvals_queue.json",
       "source": "streamed or replayed by /ag-ui/runs/{run_id}, recorded from the test a_handed_back_form_replays_as_handed_back_and_leaves_the_approvals_queue (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "events/reset/a_bots_run_routine_is_told_bot.json",
+      "source": "streamed or replayed by /ag-ui/events, recorded from the test a_bots_run_routine_is_told_bot (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "events/routine.changed/a_bots_run_routine_is_told_bot.json",
+      "source": "streamed or replayed by /ag-ui/events, recorded from the test a_bots_run_routine_is_told_bot (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "events/run.finished/a_bots_run_routine_is_told_bot.json",
+      "source": "streamed or replayed by /ag-ui/events, recorded from the test a_bots_run_routine_is_told_bot (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "events/run.finished/a_bots_run_routine_is_told_bot-2.json",
+      "source": "streamed or replayed by /ag-ui/events, recorded from the test a_bots_run_routine_is_told_bot (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "events/run.started/a_bots_run_routine_is_told_bot.json",
+      "source": "streamed or replayed by /ag-ui/events, recorded from the test a_bots_run_routine_is_told_bot (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "events/run.started/a_bots_run_routine_is_told_bot-2.json",
+      "source": "streamed or replayed by /ag-ui/events, recorded from the test a_bots_run_routine_is_told_bot (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "events/thread.changed/a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_under_its_own.json",
+      "source": "streamed or replayed by /ag-ui/events, recorded from the test a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_under_its_own (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "events/thread.changed/a_bots_run_routine_is_told_bot.json",
+      "source": "streamed or replayed by /ag-ui/events, recorded from the test a_bots_run_routine_is_told_bot (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
     },
     {
       "file": "relay/cancel/a_mac_that_never_starts_or_goes_quiet_times_out_and_is_told_to_cancel.json",
@@ -570,6 +613,18 @@
     {
       "file": "rest/GET__ag-ui_approvals/200-a_delete_asks_first_naming_the_routine_as_stored.json",
       "source": "GET /ag-ui/approvals, recorded from the test a_delete_asks_first_naming_the_routine_as_stored (crates/opengrok-server/tests/against_routine_tools.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__ag-ui_approvals/200-a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_under_its_own.json",
+      "source": "GET /ag-ui/approvals, recorded from the test a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_under_its_own (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__ag-ui_events/401-a_stream_is_for_a_signed_in_person_by_header_or_by_the_consoles_cookie.json",
+      "source": "GET /ag-ui/events, recorded from the test a_stream_is_for_a_signed_in_person_by_header_or_by_the_consoles_cookie (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__ag-ui_events/503-a_store_that_cannot_be_read_is_a_503_in_words.json",
+      "source": "GET /ag-ui/events, recorded from the test a_store_that_cannot_be_read_is_a_503_in_words (crates/opengrok-server/tests/against_the_events_stream.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__ag-ui_host-settings/200-a_status_does_not_wait_on_a_guest_that_said_nothing.json",
@@ -1032,6 +1087,10 @@
       "source": "GET /coworkers/{coworker_id}/computer, recorded from the test a_failed_rebuild_drops_the_port_its_box_came_back_without (crates/opengrok-server/tests/against_a_proxied_screen.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__coworkers__coworker_id__computer/200-a_failed_rebuild_drops_the_port_its_box_came_back_without-2.json",
+      "source": "GET /coworkers/{coworker_id}/computer, recorded from the test a_failed_rebuild_drops_the_port_its_box_came_back_without (crates/opengrok-server/tests/against_a_proxied_screen.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__coworkers__coworker_id__computer/200-a_hosted_hire_whose_ascii_create_fails_records_why_and_makes_no_box.json",
       "source": "GET /coworkers/{coworker_id}/computer, recorded from the test a_hosted_hire_whose_ascii_create_fails_records_why_and_makes_no_box (crates/opengrok-server/tests/against_a_hosted_computer.rs); ids and times are placeholders"
     },
@@ -1280,6 +1339,10 @@
       "source": "GET /recipes/{id}, recorded from the test a_recipients_runs_neither_evict_the_owners_history_nor_list_pictures_they_cannot_open (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__recipes__id_/200-a_chat_play_is_refused_while_a_page_run_holds_the_bot_and_finishes_its_own_row-2.json",
+      "source": "GET /recipes/{id}, recorded from the test a_chat_play_is_refused_while_a_page_run_holds_the_bot_and_finishes_its_own_row (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__recipes__id_/200-a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route.json",
       "source": "GET /recipes/{id}, recorded from the test a_share_taken_back_leaves_the_next_turns_offers_and_the_run_route (crates/opengrok-server/tests/against_a_recipe_in_two_hands.rs); ids and times are placeholders"
     },
@@ -1308,24 +1371,24 @@
       "source": "GET /schedules, recorded from the test a_bot_cannot_aim_a_routine_at_another_bot_by_any_argument (crates/opengrok-server/tests/against_routine_tools.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row.json",
-      "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_webhook_for_a_plan_bot_with_no_mac_is_skipped.json",
+      "source": "GET /schedules, recorded from the test a_webhook_for_a_plan_bot_with_no_mac_is_skipped (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_bot_lists_only_its_own_routines.json",
       "source": "GET /schedules, recorded from the test a_bot_lists_only_its_own_routines (crates/opengrok-server/tests/against_routine_tools.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row.json",
+      "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-2.json",
       "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_fired_routine_reports_its_last_run_on_its_row-3.json",
-      "source": "GET /schedules, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
-    },
-    {
-      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
-      "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-an_update_changes_the_name_the_cron_and_the_zone.json",
+      "source": "GET /schedules, recorded from the test an_update_changes_the_name_the_cron_and_the_zone (crates/opengrok-server/tests/against_routine_tools.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_bot_cannot_aim_a_routine_at_another_bot_by_any_argument-2.json",
@@ -1344,19 +1407,23 @@
       "source": "GET /schedules, recorded from the test after_relay_offline_skips_the_next_due_is_the_normal_next_tick (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused.json",
+      "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__schedules/200-a_plan_bots_routine_runs_on_the_fallback_while_the_relay_is_off.json",
+      "source": "GET /schedules, recorded from the test a_plan_bots_routine_runs_on_the_fallback_while_the_relay_is_off (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__schedules/200-a_routine_for_a_coworker_on_its_own_plan_runs_on_the_persons_proxy-2.json",
+      "source": "GET /schedules, recorded from the test a_routine_for_a_coworker_on_its_own_plan_runs_on_the_persons_proxy (crates/opengrok-server/tests/against_an_inference_source.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-2.json",
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_due_routine_on_a_plan_bot_runs_through_the_mac.json",
-      "source": "GET /schedules, recorded from the test a_due_routine_on_a_plan_bot_runs_through_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
-    },
-    {
-      "file": "rest/GET__schedules/200-a_paused_routine_runs_now_and_stays_paused-3.json",
-      "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
-    },
-    {
-      "file": "rest/GET__schedules/200-a_due_routine_on_a_plan_bot_runs_through_the_mac-2.json",
       "source": "GET /schedules, recorded from the test a_due_routine_on_a_plan_bot_runs_through_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {

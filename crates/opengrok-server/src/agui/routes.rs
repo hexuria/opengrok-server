@@ -12,7 +12,7 @@
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
-use axum::http::{HeaderName, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -922,6 +922,7 @@ pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/ag-ui/runs/{run_id}", get(replay_run))
         .route("/ag-ui/runs/{run_id}/hide", post(hide_run))
+        .route("/ag-ui/events", get(account_events))
         .route("/ag-ui/threads", get(list_threads))
         .route("/ag-ui/threads/{thread_id}", get(replay_thread))
         .route("/ag-ui/approvals", get(list_awaiting))
@@ -1878,12 +1879,8 @@ pub(crate) async fn refuse_use(
     coworker_id: &CoworkerId,
     reason: &str,
 ) -> (StatusCode, String) {
-    match state
-        .auth
-        .store
-        .may_use_coworker(account_id, coworker_id)
-        .await
-    {
+    let may = state.auth.store.may_use_coworker(account_id, coworker_id);
+    match may.await {
         Ok(false) => (StatusCode::NOT_FOUND, "no such coworker".to_string()),
         Ok(true) | Err(_) => (StatusCode::FORBIDDEN, reason.to_string()),
     }
@@ -2494,12 +2491,8 @@ async fn list_bot_keys(
         Ok(owner) => owner,
         Err(refusal) => return refusal,
     };
-    match state
-        .auth
-        .store
-        .bot_keys_for(&account_id, &coworker_id)
-        .await
-    {
+    let keys = state.auth.store.bot_keys_for(&account_id, &coworker_id);
+    match keys.await {
         Ok(keys) => Json(keys).into_response(),
         Err(error) => {
             tracing::error!(%error, "could not list bot keys");
@@ -4374,15 +4367,25 @@ pub async fn hide_run(
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return (StatusCode::NOT_FOUND, "no such run").into_response();
     };
-    match state
-        .auth
-        .store
-        .hide_run(&RunId::from_stored(run_id), &account_id, now_ms())
-        .await
-    {
+    let id = RunId::from_stored(run_id);
+    match state.auth.store.hide_run(&id, &account_id, now_ms()).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "no such run").into_response(),
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
+}
+
+/// `GET /ag-ui/events`: the account's change notes (`opengrok_events`), ids only. The account is
+/// the token's and nothing else; `Last-Event-ID` resumes, and an id it cannot starts with `reset`.
+pub async fn account_events(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
+    let Some(account) = account_from_bearer(&state, &headers) else {
+        return unauthorized("sign in first");
+    };
+    let last = headers.get("last-event-id").and_then(|id| id.to_str().ok());
+    let followed = state.auth.store.events.follow(account.as_str(), last);
+    match followed.await {
+        Ok(frames) => streaming(axum::body::Body::from_stream(frames)),
+        Err(error) => unavailable(error),
     }
 }
 
@@ -5602,19 +5605,19 @@ where
         })
     });
 
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/event-stream"),
-            // Without this a proxy may buffer the whole run and deliver it at the end, which looks
-            // exactly like a server that never streamed.
-            (header::CACHE_CONTROL, "no-cache"),
-            (header::CONNECTION, "keep-alive"),
-            (HeaderName::from_static("x-accel-buffering"), "no"),
-        ],
-        axum::body::Body::from_stream(body),
-    )
-        .into_response()
+    streaming(axum::body::Body::from_stream(body))
+}
+
+/// An SSE response. Without these headers a proxy may buffer the whole run and deliver it at the
+/// end, which looks exactly like a server that never streamed.
+fn streaming(body: axum::body::Body) -> Response {
+    let headers = [
+        (header::CONTENT_TYPE, "text/event-stream"),
+        (header::CACHE_CONTROL, "no-cache"),
+        (header::CONNECTION, "keep-alive"),
+        (HeaderName::from_static("x-accel-buffering"), "no"),
+    ];
+    (StatusCode::OK, headers, body).into_response()
 }
 
 #[cfg(test)]

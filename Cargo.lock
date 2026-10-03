@@ -2268,6 +2268,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengrok-events"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "opengrok-core",
+ "opengrok-testdb",
+ "opengrok-wire",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "opengrok-harness"
 version = "0.1.0"
 dependencies = [
@@ -2340,6 +2355,7 @@ dependencies = [
  "lopdf",
  "opengrok-box",
  "opengrok-core",
+ "opengrok-events",
  "opengrok-harness",
  "opengrok-plugins",
  "opengrok-policy",
@@ -2376,6 +2392,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "opengrok-core",
+ "opengrok-events",
  "opengrok-policy",
  "opengrok-testdb",
  "opengrok-wire",

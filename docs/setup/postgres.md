@@ -161,6 +161,14 @@ that already went through it and must be safe to. An unchanged schema is not rep
 bare `alter` takes ACCESS EXCLUSIVE before finding nothing to do and held it for the whole script,
 which deadlocked live reads against every boot. `EVERY_BOOT` runs after it on every boot: the
 UPDATEs that must also catch rows an older replica writes mid-deploy, which take row locks only.
+The two tables of the account events stream's outbox (`account_event_head`, `account_event`) are
+the `opengrok-events` crate's own script (`opengrok_events::SCHEMA`), applied right after `SCHEMA`
+under the same lock and one digest of both. A replica from before the stream writes no notes, so
+runs and routines it handles during a deploy are not told to a connected app; the app reads them
+the next time it opens, as it did before. The stream listens on one connection of its own
+(`LISTEN opengrok_events`) per process, outside the pool's ten: it needs a session, so behind a
+transaction-pooling proxy the wake-ups never arrive and every stream falls back to reading the
+outbox every 30 s.
 
 A migration that **changes data** follows the same rule. It must be correct on its hundredth run
 and on a database that already went through it:

@@ -15,6 +15,7 @@ members = [
   "crates/opengrok-tools",   # tool definitions and the executor
   "crates/opengrok-recipes", # a taught tape into the box's recipe steps; the lint that keeps them runnable
   "crates/opengrok-policy",  # what a principal may make a coworker do
+  "crates/opengrok-events",  # the account events stream's outbox: notes written with the change they describe
   "crates/opengrok-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
   "crates/opengrok-testdb",  # the gate-database guard; each test binary's own database
   "crates/opengrok-server",  # Axum: the host-facing API and the event stream

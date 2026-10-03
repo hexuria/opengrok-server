@@ -213,6 +213,17 @@ pub async fn purge_accounts_except(
         "delete from events where stream_id = any($1)",
         &streams
     );
+    // The account events stream's notes, and the head its ids count from (`opengrok-events`).
+    delete!(
+        "account_event",
+        "delete from account_event where account_id = any($1)",
+        &accounts
+    );
+    delete!(
+        "account_event_head",
+        "delete from account_event_head where account_id = any($1)",
+        &accounts
+    );
     delete!(
         "monitor_firing",
         "delete from monitor_firing where monitor_id = any($1) or run_id = any($2)",

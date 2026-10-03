@@ -7,7 +7,7 @@
 //! so a newer client than the one we tested against degrades to "rendered as-is" instead of
 //! "rejected".
 //!
-//! Six wires, kept apart on purpose:
+//! Seven wires, kept apart on purpose:
 //!   1. `command` — the host's JSON request/response calls (listAgents, sendPrompt, …).
 //!   2. `transcript` — the durable entries a conversation is made of.
 //!   3. `activity` — the live stream while a coworker is working.
@@ -15,6 +15,7 @@
 //!      that module's note on why its rules differ from the three above.
 //!   5. `relay` — what the server asks a person's own Mac to carry to its opencodex (#292).
 //!   6. `pair` — two Bots' side thread and a Bot's timeline rows (#314).
+//!   7. `events` — the account's change notes, `GET /ag-ui/events` (#348).
 //!
 //! Provenance: shapes derived from the client's own recovered surface in
 //! `opengrok/source/host/gateway-protocol.ts`, `source/shared/transcript.ts` and
@@ -24,6 +25,7 @@
 pub mod activity;
 pub mod agui;
 pub mod command;
+pub mod events;
 pub mod pair;
 pub mod relay;
 pub mod transcript;

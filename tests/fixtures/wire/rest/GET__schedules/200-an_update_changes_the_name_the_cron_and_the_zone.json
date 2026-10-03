@@ -1,0 +1,24 @@
+{
+  "method": "GET",
+  "path": "/schedules",
+  "status": 200,
+  "body": [
+    {
+      "id": "sched_0199bb4e-0000-7000-8000-000000000001",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+      "name": "Morning report",
+      "cron": "0 0 8 * * *",
+      "prompt": "write it",
+      "kind": "cron",
+      "active": false,
+      "nextDueMs": null,
+      "runLimits": {
+        "maxRounds": null,
+        "maxComputerRounds": null,
+        "maxWallMs": null
+      },
+      "lastRun": null,
+      "tz": "Asia/Manila"
+    }
+  ]
+}

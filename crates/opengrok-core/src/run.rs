@@ -76,6 +76,19 @@ impl RunStatus {
             _ => Self::Running,
         }
     }
+
+    /// The word a routine's run history gives this status, which is not `as_str`'s: it folds a
+    /// stop into `error`. The `run.finished` note says it too, so the app reads one vocabulary.
+    /// Exhaustive, so a new status does not compile until it is given a word.
+    #[must_use]
+    pub fn history_word(&self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::AwaitingApproval => "waiting",
+            Self::Finished => "ok",
+            Self::Failed | Self::Stopped => "error",
+        }
+    }
 }
 
 /// Why a run that finished finished, when it was not simply done (#244). A run that reached a

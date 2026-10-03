@@ -1425,13 +1425,13 @@ pub async fn run(pool: &PgPool) -> StoreResult<()> {
 /// site-login saves died (#239), and a recipe's history prune was killed, leaving six runs where
 /// five belong. Guarding each statement one at a time left the next one to be found in CI.
 ///
-/// Keyed by the schema's digest, so any edit to `SCHEMA` replays it once, exactly as before;
-/// only an unchanged schema is skipped. The check runs under the advisory lock, so two replicas
-/// booting a new schema still apply it once and the second finds the digest. What must run on
-/// every boot regardless lives in `EVERY_BOOT`, which never takes a table lock.
+/// Keyed by the digest of `SCHEMA` and the events crate's, so an edit to either replays both once,
+/// as before; only an unchanged schema is skipped. The check runs under the advisory lock, so two
+/// replicas booting a new schema still apply it once and the second finds the digest. What must
+/// run on every boot regardless lives in `EVERY_BOOT`, which never takes a table lock.
 async fn apply_unless_current(conn: &mut sqlx::PgConnection) -> StoreResult<()> {
     use sha2::Digest as _;
-    let digest: String = sha2::Sha256::digest(SCHEMA.as_bytes())
+    let digest: String = sha2::Sha256::digest([SCHEMA, opengrok_events::SCHEMA].concat())
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
@@ -1450,6 +1450,7 @@ async fn apply_unless_current(conn: &mut sqlx::PgConnection) -> StoreResult<()> 
         .await?;
     if current.is_none() {
         sqlx::raw_sql(SCHEMA).execute(&mut *conn).await?;
+        opengrok_events::apply(conn).await?;
         record_applied(conn, &digest).await?;
     }
     sqlx::raw_sql(EVERY_BOOT).execute(&mut *conn).await?;

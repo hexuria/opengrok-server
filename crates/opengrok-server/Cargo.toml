@@ -20,6 +20,8 @@ record-wire = []
 # Builds the PDFs the attachment tests read (#229): the parser `pdf-extract` reads them with.
 lopdf = "0.42"
 opengrok-server = { path = ".", default-features = false, features = ["record-wire"] }
+# The clocks a test shortens on the events stream (`Hub::tune`).
+opengrok-events = { path = "../opengrok-events" }
 sqlx.workspace = true
 base64.workspace = true
 reqwest.workspace = true
