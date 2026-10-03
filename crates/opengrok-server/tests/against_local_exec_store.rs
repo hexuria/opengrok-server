@@ -203,46 +203,90 @@ async fn a_computers_relay_switch_is_its_own_and_outlives_its_re_enrolment() {
     assert!(on(&ada, "mac-a").await && on(&ada, "mac-b").await);
 }
 
+/// Enrol `account`'s `machine`, or enrol it again: whether its relay is then on.
+async fn enrolled_on(store: &PgStore, account: &str, machine: &str) -> bool {
+    let enrolled = store.enrol_daemon(account, machine, "Mac", "jti", 1);
+    enrolled.await.expect("enrol");
+    let row = store.daemon_jti(account, machine).await.expect("read");
+    row.expect("enrolled").2
+}
+
 /// RELAY OFF STICKS ON A NEW COMPUTER, the owner's call (review of #342): enrolled while every
 /// un-revoked computer of its account is off, a computer is enrolled off, or enrolling it would
 /// turn back on the relay its person turned off. With any one on it is on, and with none, an
 /// account's first or one whose computers are all revoked, as before. A revoked one is no
-/// computer either way, and one enrolled again keeps its own switch.
+/// computer either way.
 #[tokio::test]
 async fn a_computer_enrolled_while_every_other_is_off_is_enrolled_off() {
     let database_url = database_or_skip!();
     let store = store(&database_url).await;
     let suffix = uuid::Uuid::now_v7().simple().to_string();
     let [ada, bob] = ["ada", "bob"].map(|who| format!("acct_{who}_{suffix}"));
-    let enrolled_on = |account: &str, machine: &str| {
-        let (store, account, machine) = (store.clone(), account.to_string(), machine.to_string());
-        async move {
-            let enrolled = store.enrol_daemon(&account, &machine, "Mac", "jti", 1);
-            enrolled.await.expect("enrol");
-            let row = store.daemon_jti(&account, &machine).await.expect("read");
-            row.expect("enrolled").2
-        }
-    };
-    assert!(enrolled_on(&ada, "mac-a").await, "no computer: on");
-    assert!(enrolled_on(&ada, "mac-b").await, "one on: on");
+    assert!(enrolled_on(&store, &ada, "mac-a").await, "no computer: on");
+    assert!(enrolled_on(&store, &ada, "mac-b").await, "one on: on");
     store.revoke_daemon(&ada, "mac-b").await.expect("revoke");
     let off = store.set_relay(&ada, "mac-a", false).await.expect("switch");
     assert!(off.is_some_and(|row| !row.relay_enabled));
     assert!(
-        !enrolled_on(&ada, "mac-c").await,
+        !enrolled_on(&store, &ada, "mac-c").await,
         "every one off: off, mac-b on but revoked"
     );
-    let again = enrolled_on(&ada, "mac-b").await;
-    assert!(again, "enrolled again: its own, though every other is off");
-    assert!(enrolled_on(&ada, "mac-d").await, "one on again: on");
 
-    assert!(enrolled_on(&bob, "mac-a").await);
+    assert!(enrolled_on(&store, &bob, "mac-a").await);
     store.set_relay(&bob, "mac-a", false).await.expect("switch");
     store.revoke_daemon(&bob, "mac-a").await.expect("revoke");
     assert!(
-        enrolled_on(&bob, "mac-b").await,
+        enrolled_on(&store, &bob, "mac-b").await,
         "every one revoked: on, as the first"
     );
+}
+
+/// A REVOKED COMPUTER ENROLLED AGAIN IS A NEW ONE (Cursor's review of #344): its switch is set as
+/// a new computer's is, never kept, or one revoked while on came back on beside others all off
+/// and turned back on the relay its person had turned off. One never revoked keeps its own when
+/// enrolled again, whatever the others say.
+#[tokio::test]
+async fn a_revoked_computer_enrolled_again_is_switched_as_a_new_one() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let suffix = uuid::Uuid::now_v7().simple().to_string();
+    let [ada, bob, cyd] = ["ada", "bob", "cyd"].map(|who| format!("acct_{who}_{suffix}"));
+    let machines = [
+        (&ada, "mac-a"),
+        (&ada, "mac-b"),
+        (&bob, "mac-a"),
+        (&bob, "mac-b"),
+        (&cyd, "mac-a"),
+    ];
+    for (account, machine) in machines {
+        assert!(enrolled_on(&store, account, machine).await);
+    }
+    // Ada's mac-b revoked on, then her mac-a switched off; Bob's mac-b switched off and revoked
+    // beside his mac-a on; and Cyd's one computer switched off and revoked.
+    store.revoke_daemon(&ada, "mac-b").await.expect("revoke");
+    store.set_relay(&ada, "mac-a", false).await.expect("switch");
+    store.set_relay(&bob, "mac-b", false).await.expect("switch");
+    store.revoke_daemon(&bob, "mac-b").await.expect("revoke");
+    store.set_relay(&cyd, "mac-a", false).await.expect("switch");
+    store.revoke_daemon(&cyd, "mac-a").await.expect("revoke");
+    let again = [
+        enrolled_on(&store, &ada, "mac-b").await,
+        enrolled_on(&store, &bob, "mac-b").await,
+        enrolled_on(&store, &cyd, "mac-a").await,
+    ];
+    assert_eq!(
+        again,
+        [false, true, true],
+        "as a new one, never its own: off beside every other off, on beside one on, on alone"
+    );
+
+    store.set_relay(&ada, "mac-b", true).await.expect("switch");
+    let own = [
+        enrolled_on(&store, &ada, "mac-a").await,
+        enrolled_on(&store, &ada, "mac-b").await,
+    ];
+    let said = "never revoked, its own: off beside one on, on beside every other off";
+    assert_eq!(own, [false, true], "{said}");
 }
 
 // -------------------------------------------------------------------------------------------------

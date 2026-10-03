@@ -2034,16 +2034,10 @@ impl PgStore {
         kind: &str,
         pattern: &str,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "delete from local_exec_rule
-             where account_id = $1 and machine_id = $2 and kind = $3 and pattern = $4",
-        )
-        .bind(account_id)
-        .bind(machine_id)
-        .bind(kind)
-        .bind(pattern)
-        .execute(&self.pool)
-        .await?;
+        let sql = "delete from local_exec_rule
+                   where account_id = $1 and machine_id = $2 and kind = $3 and pattern = $4";
+        let query = sqlx::query(sql).bind(account_id).bind(machine_id);
+        query.bind(kind).bind(pattern).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -2052,7 +2046,8 @@ impl PgStore {
     /// Enrol (or re-enrol) a machine's daemon: store its token id, clear any prior revocation.
     /// RELAY OFF STICKS (review of #342): a new machine is enrolled off while every un-revoked one
     /// of its account is off, or enrolling it would turn back on the relay its person turned off;
-    /// on with any one on, or none. One enrolled again keeps its own switch, which no update sets.
+    /// on with any one on, or none. One enrolled again keeps its own switch, unless it was revoked:
+    /// then it is a new one (review of #344), or one revoked while on would turn the relay back on.
     pub async fn enrol_daemon(
         &self,
         account_id: &str,
@@ -2061,12 +2056,14 @@ impl PgStore {
         jti: &str,
         at_ms: i64,
     ) -> StoreResult<()> {
-        let sql = "insert into local_exec_daemon
+        let sql = "insert into local_exec_daemon as d
                (account_id, machine_id, label, jti, enrolled_at_ms, revoked, relay_enabled)
              values ($1, $2, $3, $4, $5, false, coalesce((select bool_or(relay_enabled)
                from local_exec_daemon where account_id = $1 and not revoked), true))
              on conflict (account_id, machine_id) do update set label = excluded.label,
-               jti = excluded.jti, enrolled_at_ms = excluded.enrolled_at_ms, revoked = false";
+               jti = excluded.jti, enrolled_at_ms = excluded.enrolled_at_ms, revoked = false,
+               relay_enabled = case when d.revoked then excluded.relay_enabled
+                 else d.relay_enabled end";
         let query = sqlx::query(sql).bind(account_id).bind(machine_id);
         let query = query.bind(label).bind(jti).bind(at_ms);
         query.execute(&self.pool).await?;
@@ -2112,8 +2109,8 @@ impl PgStore {
         Ok(row.fetch_optional(&self.pool).await?)
     }
 
-    /// Every one of the account's machines switched at once, revoked ones too, so one enrolled
-    /// again keeps the switch: the ids switched.
+    /// Every one of the account's machines switched at once, revoked ones too: the ids switched.
+    /// A revoked one's switch is only listed; enrolled again, it is set as a new one's is.
     pub async fn set_relays(&self, account_id: &str, on: bool) -> StoreResult<Vec<String>> {
         let sql = "update local_exec_daemon set relay_enabled = $2 where account_id = $1
                    returning machine_id";
