@@ -466,8 +466,8 @@ pub(crate) async fn view_of(
     view.ok_or_else(|| storage(format!("routine {id} was not read back")))
 }
 
-/// The routine tools' desk (#316): a Bot's calls, answered as the session's account through the
-/// functions above, in their words; `opengrok_tools::routine` has the tools' own.
+/// The routine tools' desk (#316): a Bot's calls, answered as the session's account and Bot alone,
+/// through the functions above, in their words; `opengrok_tools::routine` has the tools' own.
 pub(crate) struct Tools {
     pub state: AgUiState,
 }
@@ -488,22 +488,33 @@ impl Tools {
         Ok(routine::bots(bots.collect()))
     }
 
-    /// A routine of the person's, or the contract's refusal for any other id.
+    /// THIS BOT'S routines, the only ones a tool lists or finds by a name. The person's other Bots'
+    /// are for the Routines pane (`GET /schedules`): not this Bot's to list, change or run.
+    async fn mine(&self, context: &ToolContext) -> Result<Vec<ScheduleView>, String> {
+        let store = &self.state.auth.store;
+        let views = store.schedules_for(&context.account_id).await;
+        let views = views.map_err(|error| said(storage(error)))?.into_iter();
+        let mine = views.filter(|view| view.coworker_id == context.coworker_id);
+        Ok(mine.collect())
+    }
+
+    /// A routine of this Bot's, or the contract's refusal for any other id. A SIBLING'S ROUTINE
+    /// READS AS UNKNOWN, in an unknown id's words, or an id could be probed for another Bot's.
     async fn routine(
         &self,
         context: &ToolContext,
         id: &str,
     ) -> Result<(ScheduleId, Schedule), String> {
-        let id = ScheduleId::from_stored(id);
+        let (id, bot) = (ScheduleId::from_stored(id), Some(&context.coworker_id));
         match owned(&self.state, &context.account_id, &id).await {
-            Ok(loaded) => Ok((id, loaded)),
-            Err((StatusCode::NOT_FOUND, _)) => Err(routine::not_yours(id.as_str())),
+            Ok(loaded) if loaded.coworker_id.as_ref() == bot => Ok((id, loaded)),
+            Ok(_) | Err((StatusCode::NOT_FOUND, _)) => Err(routine::not_yours(id.as_str())),
             Err(refusal) => Err(said(refusal)),
         }
     }
 
-    /// A routine of the person's by its id, or by its name as `list_routines` gives it (#337):
-    /// a name two of theirs share is refused, naming both.
+    /// A routine of this Bot's by its id, or by its name as `list_routines` gives it (#337): a name
+    /// two of ITS routines share is refused, naming both; one a sibling also has is no ambiguity.
     async fn runnable(
         &self,
         context: &ToolContext,
@@ -513,13 +524,7 @@ impl Tools {
         if by_id.is_ok() {
             return by_id;
         }
-        let views = self
-            .state
-            .auth
-            .store
-            .schedules_for(&context.account_id)
-            .await;
-        let views = views.map_err(|error| said(storage(error)))?.into_iter();
+        let views = self.mine(context).await?.into_iter();
         let named: Vec<String> = views.filter(|v| v.name == asked).map(|v| v.id).collect();
         match named.as_slice() {
             [one] => self.routine(context, one).await,
@@ -551,8 +556,7 @@ impl RoutineDesk for Tools {
         };
         match ask {
             Ask::List => {
-                let views = state.auth.store.schedules_for(account).await;
-                let views = views.map_err(|error| said(storage(error)))?;
+                let views = self.mine(context).await?;
                 Ok(json!(
                     views
                         .iter()
@@ -561,7 +565,7 @@ impl RoutineDesk for Tools {
                 ))
             }
             Ask::Create(fields) => {
-                let bot = routine::resolve(&bots, session, fields.bot.as_deref())?;
+                let bot = routine::own(&bots, session)?;
                 let id = create(state, account, draft(fields, Some(bot)))
                     .await
                     .map_err(said)?;
@@ -578,14 +582,10 @@ impl RoutineDesk for Tools {
                 mut fields,
             } => {
                 let (id, loaded) = self.routine(context, &asked).await?;
-                let bot = fields.bot.take();
-                let bot = bot.map(|bot| routine::resolve(&bots, session, Some(&bot)).cloned());
                 let (active, at) = (fields.active.take(), (account, &id));
-                if fields != Fields::default() || bot.is_some() {
-                    let bot = bot.transpose()?;
-                    edit(state, at, &loaded, draft(fields, bot.as_ref()))
-                        .await
-                        .map_err(said)?;
+                if fields != Fields::default() {
+                    let draft = draft(fields, None);
+                    edit(state, at, &loaded, draft).await.map_err(said)?;
                 }
                 // Already where it was asked to be is no change, and no refusal.
                 let command: Option<fn(i64) -> ScheduleCommand> = match active {

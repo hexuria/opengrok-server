@@ -3146,16 +3146,17 @@ async fn a_routine_that_is_not_yours_is_refused_before_any_card() {
     assert_eq!(refused.content, said);
 }
 
-/// THE ACCOUNT IS THE SESSION'S (CLAUDE.md #7): a call that names another account or coworker,
-/// in any spelling, is answered as the context's account, and the coworker it names is not read
-/// as the Bot to wake. Nor does the call need, or wake, a box.
+/// THE ACCOUNT AND THE BOT ARE THE SESSION'S (CLAUDE.md #7): a call that names another account,
+/// coworker or `bot`, in any spelling, is answered as the context's account, and what it names is
+/// not read as the Bot to wake. Nor does the call need, or wake, a box.
 #[tokio::test]
 async fn a_routine_call_runs_as_the_sessions_account_and_never_touches_the_box() {
     let desk = Arc::new(Desk::default());
     let spy = Arc::new(SpyComputer::default());
     let executor = allowing(spy.clone()).with_routines(desk.clone());
     let arguments = json!({ "prompt": "standup", "when": "0 9 * * MON-FRI",
-        "account_id": "acct_other", "accountId": "acct_other", "coworker_id": "cw_other" });
+        "account_id": "acct_other", "accountId": "acct_other", "coworker_id": "cw_other",
+        "coworkerId": "cw_other", "coworker": "cw_other", "bot": "Sol" });
     let create = call(routine::CREATE_ROUTINE, arguments);
     let boxless = ToolContext {
         box_id: None,
@@ -3166,11 +3167,16 @@ async fn a_routine_call_runs_as_the_sessions_account_and_never_touches_the_box()
     assert!(made.ok, "{made:?}");
     let (account, ask) = desk.asked.lock().unwrap()[0].clone();
     assert_eq!(account, "acct_1");
-    let named = match ask {
-        routine::Ask::Create(fields) => fields.bot,
-        other => Some(format!("not a create: {other:?}")),
+    let fields = routine::Fields {
+        prompt: Some("standup".to_string()),
+        when: Some("0 9 * * MON-FRI".to_string()),
+        ..routine::Fields::default()
     };
-    assert_eq!(named, None, "no bot named, so the session's own");
+    let expected = routine::Ask::Create(fields);
+    assert_eq!(
+        ask, expected,
+        "no Bot is named, so the session's own is woken"
+    );
     assert_eq!(spy.last_box(), None, "the box was never reached");
 }
 

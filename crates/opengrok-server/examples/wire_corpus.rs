@@ -334,6 +334,17 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_bot_cannot_run_a_routine_that_is_not_its_persons_or_is_paused",
         "/ag-ui/threads/{thread_id}",
     ),
+    // A Bot's routines are its own (3 Oct 2026): the replay of a turn whose `list_routines` came
+    // back with that Bot's alone, and of one whose `update_routine` on a sibling's was refused as
+    // unknown. Each test makes one read of a thread, on the route it is kept for.
+    (
+        "a_bot_lists_only_its_own_routines",
+        "/ag-ui/threads/{thread_id}",
+    ),
+    (
+        "a_bot_cannot_change_delete_or_run_another_bots_routine",
+        "/ag-ui/threads/{thread_id}",
+    ),
     // A model's own levels (3 Oct 2026): a plan model with levels beside one without, and a
     // gateway model with them, the rows NativeChat builds its effort slider from, kept by name
     // whatever else shares their shape. Each test makes one call on `/models`.

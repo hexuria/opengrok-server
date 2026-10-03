@@ -155,32 +155,45 @@ Work that starts with no client open.
 | `/workflows/{id}/run` | POST | `workflows.rs:62` | see the mount | *unverified* |
 | `/workflows/{id}/versions` | POST | `workflows.rs:61` | see the mount | *unverified* |
 
-A Bot makes, edits, lists and deletes its person's routines in chat through four tools (#316,
-`opengrok-tools` `routine.rs`), over the same desk as `POST`, `PATCH` and `DELETE /schedules`
-(`autonomy/desk.rs`), so they store and refuse alike. `list_routines{}` answers
-`[{id, name, bot, prompt, active, when: [5-field cron], tz, nextDueMs, webhook}]`, never a
-webhook's key or URL; `create_routine{name?, prompt, when, tz?, bot?}` and
-`update_routine{routine, name?, prompt?, bot?, when?, tz?, active?}` answer the routine's entry
-in that shape, a create for a Bot on its person's own plan with `note` ("runs only while your
-computer is on", or "runs only while your plan's proxy answers" on the loopback; while the person
-switched the relay off, "runs on your Server fallback model while Relay is off", or "is skipped
-while Relay is off for your plan" with no fallback, #332);
-`delete_routine{routine}` answers `{deleted, name}`; `run_routine{routine}` (#337) is the person's
-Run now, through the same desk function, and answers `{runId, threadId}`: `routine` an id, or a name
-as `list_routines` gives it, one two routines share refused naming their ids (`more than one of
-your routines is called "X" (id, id); run one by its id.`); a paused one refused in the pause's
-words, and the skips of #316 and #332 in theirs; no card. It is offered only in turns a person
-drives: a run a routine started, and a Bot's turn on another Bot's message, are offered
-`list_routines` alone. `tz` defaults to the person's `timeZone`,
-then UTC; `bot` is one of the person's OWN Bots by name or id, the Bot whose turn it is when left
-out. A delete always parks on the policy card (`reason: "policy-approval"`), whose `why` — on the
-live `run-awaiting-approval` frame and on `GET /ag-ui/approvals` — names the routine as stored:
+A Bot makes, edits, lists, deletes and runs ITS OWN routines in chat through five tools (#316,
+#337, `opengrok-tools` `routine.rs`), over the same desk as `POST`, `PATCH` and `DELETE /schedules`
+(`autonomy/desk.rs`), so they store and refuse alike. **The scope is the calling Bot, not its
+person** (the owner's rule, agreed with NativeChat on 3 Oct 2026, after the red Bot was shown the
+purple one's routines and offered to pause them): a Bot's tools see and act on only the routines
+whose coworker is that Bot, while the person's own routes (`GET /schedules`, `POST
+/schedules/{id}/run`, `PATCH` and `DELETE`) are unchanged and list, run and hand over all of them.
+`list_routines{}` answers
+`[{id, name, bot, prompt, active, when: [5-field cron], tz, nextDueMs, webhook}]` for this Bot's
+alone, never a webhook's key or URL, and `[]` for a Bot with none whatever its person has on other
+Bots (its description says so); `create_routine{name?, prompt, when, tz?}` and
+`update_routine{routine, name?, prompt?, when?, tz?, active?}` answer the routine's entry in that
+shape, a create for a Bot on its person's own plan with `note` ("runs only while your computer is
+on", or "runs only while your plan's proxy answers" on the loopback; while the person switched the
+relay off, "runs on your Server fallback model while Relay is off", or "is skipped while Relay is
+off for your plan" with no fallback, #332). A routine is always made for the Bot whose turn it is:
+the tools take no Bot, and a `bot`, or a coworker under any spelling, that a call writes is not
+read (CLAUDE.md #7), so a Bot cannot make a routine for another or hand one over; the Routines
+pane's `PATCH /schedules/{id}` `coworkerId` still can. A Bot that is not one of its person's own (a
+shared coworker a teammate talks to) is refused a create, `this Bot is not one of your person's own
+Bots, so it cannot hold a routine for them.` `delete_routine{routine}` answers `{deleted, name}`;
+`run_routine{routine}` (#337) is the person's Run now, through the same desk function, and answers
+`{runId, threadId}`: `routine` an id, or a name as `list_routines` gives it, found among this Bot's
+routines only, so a name another Bot's routine shares is no ambiguity, and one two of ITS OWN share
+is refused naming their ids (`more than one of your routines is called "X" (id, id); run one by its
+id.`); a paused one refused in the pause's words, and the skips of #316 and #332 in theirs; no
+card. It is offered only in turns a person drives: a run a routine started, and a Bot's turn on
+another Bot's message, are offered `list_routines` alone. `tz` defaults to the person's `timeZone`,
+then UTC. A delete always parks on the policy card (`reason: "policy-approval"`), whose `why` — on
+the live `run-awaiting-approval` frame and on `GET /ag-ui/approvals` — names the routine as stored:
 `Delete the routine "<name>"? It stops for good.`. Refusals reach the model as results, in these
 words: no `when`, `ask the person for the time and days with request_user_form first.`; more than
 one cron, `a routine has one schedule for now; make a second routine for another time`; a webhook,
 `a Bot can't make a webhook trigger: its key must not pass through chat. Ask the person to add one
-in Routines.`; a routine not the person's, `no routine <id> is yours; call list_routines.`; and the
-floor's and the zone's as on the routes. A run a routine started is offered only `list_routines`.
+in Routines.`; a routine that is not this Bot's, `no routine <id> is yours; call list_routines.`,
+the same words, echoing what was asked, whether it is another of the person's Bots', somebody
+else's or nobody's, so no id can be probed for a sibling's (a delete is refused so before any card
+is raised); and the floor's and the zone's as on the routes. A run a routine started is offered
+only `list_routines`.
 
 ## Computer
 

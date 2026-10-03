@@ -313,6 +313,24 @@ impl Harness {
 
     /// One turn in which `bot` makes the one call `tool(arguments)`.
     async fn call(&self, who: &Person, bot: &str, tool: &str, arguments: Value) -> Called {
+        let props = json!({ "coworkerId": bot });
+        self.turn(who, props, (tool, arguments)).await
+    }
+
+    /// The same turn, asked of the gateway whatever `bot`'s own door is: a Bot on its person's
+    /// plan can make a call while its plan cannot answer, which is what its rules are tried by.
+    async fn call_on_gateway(
+        &self,
+        who: &Person,
+        bot: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Called {
+        let props = json!({ "coworkerId": bot, "inferenceSource": "gateway" });
+        self.turn(who, props, (tool, arguments)).await
+    }
+
+    async fn turn(&self, who: &Person, props: Value, (tool, arguments): (&str, Value)) -> Called {
         let said = json!({ "tool": tool, "arguments": arguments }).to_string();
         let thread = unique("thr");
         let res = self
@@ -323,7 +341,7 @@ impl Harness {
                 "threadId": thread,
                 "runId": uuid::Uuid::now_v7().to_string(),
                 "messages": [{ "id": unique("m"), "role": "user", "content": said }],
-                "forwardedProps": { "coworkerId": bot },
+                "forwardedProps": props,
             }))
             .send()
             .await
@@ -448,22 +466,64 @@ async fn a_bot_makes_a_routine_in_its_persons_zone_and_the_pane_lists_it() {
     assert_eq!(listed, json!([made]), "the list says what the create said");
 }
 
-/// A call may name the zone, and another of the person's own Bots, by name.
+/// A ROUTINE IS MADE FOR THE BOT THAT MAKES IT, whatever the call writes (3 Oct 2026): a `bot` by
+/// name, id or in any case, and a coworker under every spelling, are not read, for a Bot of its
+/// person's and for a Bot of somebody else's alike. An edit that names a `bot` hands nothing over,
+/// and a call may still name the zone.
 #[tokio::test]
-async fn a_bot_names_the_zone_and_another_of_its_persons_bots() {
+async fn a_bot_cannot_aim_a_routine_at_another_bot_by_any_argument() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
-    let ada = h.person().await;
-    let luna = h.hire(&ada, "Luna").await;
-    let sol = h.hire(&ada, "Sol").await;
-    let arguments = json!({ "prompt": "water the plants", "when": "30 7 * * *",
-        "tz": "Europe/London", "bot": "sol" });
-    let (ok, said) = h.answer(&ada, &luna, "create_routine", arguments).await;
+    let (ada, bea) = (h.person().await, h.person().await);
+    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
+    let orion = h.hire(&bea, "Orion").await;
+    let aimed = [
+        ("bot", json!("sol")),
+        ("bot", json!(sol)),
+        ("bot", json!("Orion")),
+        ("bot", json!(orion)),
+        ("coworker", json!(sol)),
+        ("coworker_id", json!(sol)),
+        ("coworkerId", json!(orion)),
+    ];
+    for (key, value) in &aimed {
+        let mut arguments = json!({ "prompt": "water the plants", "when": "30 7 * * *",
+            "tz": "Europe/London" });
+        arguments[*key] = value.clone();
+        let (ok, said) = h.answer(&ada, &luna, "create_routine", arguments).await;
+        assert!(ok, "{key}: {value}: {said}");
+        let made: Value = serde_json::from_str(&said).expect("the routine, as JSON");
+        assert_eq!(made["bot"], "Luna", "{key}: {value}: {made}");
+    }
+    let rows = h.routines(&ada).await;
+    assert_eq!(rows.len(), aimed.len(), "{rows:?}");
+    for row in &rows {
+        assert_eq!(row["coworkerId"], luna, "{row}");
+        assert_eq!(row["tz"], "Europe/London", "{row}");
+        assert_eq!(row["name"], "water the plants", "its prompt's first words");
+    }
+    let (ok, said) = h.answer(&ada, &sol, "list_routines", json!({})).await;
+    assert_eq!((ok, said.as_str()), (true, "[]"), "none for Sol");
+    assert!(h.routines(&bea).await.is_empty(), "none for Bea's Orion");
+
+    let id = rows[0]["id"].as_str().expect("an id");
+    let edit = json!({ "routine": id, "name": "Watering", "bot": "Sol", "coworkerId": sol });
+    let (ok, said) = h.answer(&ada, &luna, "update_routine", edit).await;
     assert!(ok, "{said}");
-    let row = h.routines(&ada).await.pop().expect("a routine");
-    assert_eq!(row["tz"], "Europe/London", "{row}");
-    assert_eq!(row["coworkerId"], sol, "{row}");
-    assert_eq!(row["name"], "water the plants", "its prompt's first words");
+    let row = h.row_of(&ada, id).await;
+    assert_eq!(
+        (&row["name"], &row["coworkerId"]),
+        (&json!("Watering"), &json!(luna))
+    );
+    let alone = json!({ "routine": id, "bot": "Sol" });
+    let (ok, said) = h.answer(&ada, &luna, "update_routine", alone).await;
+    let nothing = "refused: nothing to change: give name, prompt, when, tz or active";
+    assert_eq!((ok, said.as_str()), (false, nothing));
+    assert_eq!(
+        h.row_of(&ada, id).await["coworkerId"],
+        luna,
+        "not handed over"
+    );
 }
 
 /// THE TIME AND DAYS ARE THE PERSON'S: a create with no `when` is sent back to ask them, in the
@@ -562,26 +622,6 @@ async fn an_edit_to_a_cron_under_a_minute_is_refused() {
         )
         .await;
     assert_eq!(status, 200);
-}
-
-/// ONLY THE PERSON'S OWN BOTS: a call that aims a routine at somebody else's Bot, by its id or
-/// its name, is refused with the person's own list, and nothing is made for anybody.
-#[tokio::test]
-async fn a_bot_cannot_aim_a_routine_at_a_bot_its_person_does_not_own() {
-    let database_url = database_or_skip!();
-    let h = harness(&database_url).await;
-    let (ada, bea) = (h.person().await, h.person().await);
-    let luna = h.hire(&ada, "Luna").await;
-    let theirs = h.hire(&bea, "Orion").await;
-    for named in [theirs.as_str(), "Orion"] {
-        let arguments = json!({ "prompt": "p", "when": "0 9 * * 1", "bot": named });
-        let (ok, said) = h.answer(&ada, &luna, "create_routine", arguments).await;
-        assert!(!ok);
-        let expected = format!("refused: no Bot of yours is called \"{named}\"; yours are: Luna");
-        assert_eq!(said, expected);
-    }
-    assert!(h.routines(&ada).await.is_empty());
-    assert!(h.routines(&bea).await.is_empty());
 }
 
 /// A ROUTINE THAT IS NOT THE PERSON'S IS UNKNOWN, whether it is somebody else's or nobody's: an
@@ -788,7 +828,6 @@ async fn a_routine_for_a_bot_on_its_persons_plan_says_when_it_runs() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let ada = h.person().await;
-    let luna = h.hire(&ada, "Luna").await;
     let sol = h.hire(&ada, "Sol").await;
     let plan = Some(json!({ "source": "local_proxy", "model": "gpt-5.5" }));
     let (status, row) = h
@@ -843,9 +882,12 @@ async fn a_routine_for_a_bot_on_its_persons_plan_says_when_it_runs() {
             .send(&ada, reqwest::Method::PUT, path, Some(setting))
             .await;
         assert_eq!(status, 200, "{saved}");
-        // Asked of Luna, who answers on the gateway, for Sol, who answers on the plan.
-        let arguments = json!({ "prompt": "check in", "when": "0 9 * * *", "bot": "Sol" });
-        let (ok, said) = h.answer(&ada, &luna, "create_routine", arguments).await;
+        // Sol makes its own, on a turn the gateway answers; the routine is what runs on the plan.
+        let arguments = json!({ "prompt": "check in", "when": "0 9 * * *" });
+        let called = h
+            .call_on_gateway(&ada, &sol, "create_routine", arguments)
+            .await;
+        let (ok, said) = called.result.expect("a result");
         assert!(ok, "{said}");
         let made: Value = serde_json::from_str(&said).unwrap();
         assert_eq!(made["note"], note, "{made}");
@@ -977,6 +1019,22 @@ impl Harness {
         made["id"].as_str().unwrap().to_string()
     }
 
+    /// The same for a webhook routine, which only the Routines pane may make: its id.
+    async fn made_webhook(&self, who: &Person, bot: &str, name: &str) -> String {
+        let body =
+            json!({ "coworkerId": bot, "kind": "webhook", "name": name, "prompt": "say hi" });
+        let made = self.rest_routine(who, body).await;
+        made["id"].as_str().unwrap().to_string()
+    }
+
+    /// One of `who`'s routines as the Routines pane reads it, whichever Bot it wakes.
+    async fn row_of(&self, who: &Person, routine: &str) -> Value {
+        let rows = self.routines(who).await;
+        rows.into_iter()
+            .find(|row| row["id"] == routine)
+            .expect("the pane lists it")
+    }
+
     /// `who`'s inference source saved as `body`, which must be taken.
     async fn source(&self, who: &Person, body: Value) {
         let path = "/account/inference-source";
@@ -993,6 +1051,15 @@ impl Harness {
         assert_eq!(status, 200, "{row}");
     }
 
+    /// `bot` runs `routine` on a turn the gateway answers: the call's `(ok, content)`.
+    async fn run_on_gateway(&self, who: &Person, bot: &str, routine: &str) -> (bool, String) {
+        let arguments = json!({ "routine": routine });
+        let called = self
+            .call_on_gateway(who, bot, "run_routine", arguments)
+            .await;
+        called.result.expect("a result")
+    }
+
     /// The routine's runs, read from the store, so a wait records no reply.
     async fn runs_of(&self, routine: &str) -> usize {
         let runs =
@@ -1006,18 +1073,18 @@ impl Harness {
     }
 }
 
-/// A BOT RUNS ITS PERSON'S ROUTINE BY ITS ID, AS THEIR RUN NOW DOES (#337): its own Bot is woken
-/// with its prompt on its thread, the call is told `{runId, threadId}`, and the history and the
-/// row's `lastRun` say a Bot pressed it, which, as it was called. The person's own press says
-/// `manual`, `by` null. One read of the history, the list and the call's thread each, which the
-/// corpus keeps.
+/// A BOT RUNS ONE OF ITS OWN ROUTINES BY ITS ID, AS ITS PERSON'S RUN NOW DOES (#337): the Bot is
+/// woken with the routine's prompt on its thread, the call is told `{runId, threadId}`, and the
+/// history and the row's `lastRun` say a Bot pressed it, which, as it was called. The person's own
+/// press says `manual`, `by` null. One read of the history, the list and the call's thread each,
+/// which the corpus keeps.
 #[tokio::test]
 async fn a_bot_runs_a_routine_by_its_id_and_its_history_names_the_bot() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let ada = h.person().await;
-    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
-    let id = h.made(&ada, &sol, "Standup").await;
+    let luna = h.hire(&ada, "Luna").await;
+    let id = h.made(&ada, &luna, "Standup").await;
     let path = format!("/schedules/{id}/run");
     let (status, pressed) = h
         .send(&ada, reqwest::Method::POST, &path, Some(json!({})))
@@ -1044,7 +1111,7 @@ async fn a_bot_runs_a_routine_by_its_id_and_its_history_names_the_bot() {
     let woke = run.coworker_id.as_ref().map(|bot| bot.as_str());
     assert_eq!(
         (woke, run.thread_id.as_str()),
-        (Some(sol.as_str()), id.as_str())
+        (Some(luna.as_str()), id.as_str())
     );
 
     let by = json!({ "coworkerId": luna, "name": "Luna" });
@@ -1151,23 +1218,210 @@ async fn a_bot_cannot_run_a_routine_that_is_not_its_persons_or_is_paused() {
     assert_eq!(h.runs_of(&mine).await, 0, "a pause holds a Bot's press");
 }
 
-/// ITS PLAN'S RULES HOLD (#316, #332, #337): a routine of a Bot on its person's own plan is
-/// skipped in the run now's words while the person's computer is off, or their proxy does not
-/// answer, and its history says a Bot asked; with Relay off it runs on the fallback, or with none
-/// is skipped as Relay off. The calling Bot is on the server, so its own turn is answered.
+/// A BOT LISTS ONLY ITS OWN ROUTINES (3 Oct 2026, when the red Bot was shown the purple one's and
+/// offered to pause them): two Bots of one person, each with routines, one of them a webhook and
+/// one paused. Each is told its own and nothing of the other's, a Bot with none is told `[]`, and
+/// no webhook key reaches any of them; the person's Routines pane still lists all four. One read of
+/// the listing's thread, which the corpus keeps.
+#[tokio::test]
+async fn a_bot_lists_only_its_own_routines() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
+    let zed = h.hire(&ada, "Zed").await;
+    let lunas = (
+        h.made(&ada, &luna, "Standup").await,
+        h.made(&ada, &luna, "Report").await,
+    );
+    let hook = h.made_webhook(&ada, &sol, "Say Hi").await;
+    let paused = h.made(&ada, &sol, "Say hello").await;
+    let pause = format!("/schedules/{paused}/pause");
+    let post = reqwest::Method::POST;
+    let (status, _) = h.send(&ada, post, &pause, Some(json!({}))).await;
+    assert_eq!(status, 204);
+    let ids = |said: &str| -> Vec<String> {
+        let rows: Vec<Value> = serde_json::from_str(said).expect("a list");
+        let mut ids: Vec<String> = rows
+            .iter()
+            .map(|row| row["id"].as_str().unwrap_or_default().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let sorted = |a: &str, b: &str| {
+        let mut both = vec![a.to_string(), b.to_string()];
+        both.sort();
+        both
+    };
+
+    let listing = h.call(&ada, &luna, "list_routines", json!({})).await;
+    let (ok, said) = listing.result.clone().expect("a result");
+    assert!(ok, "{said}");
+    assert_eq!(ids(&said), sorted(&lunas.0, &lunas.1), "{said}");
+    assert!(!said.contains(&hook) && !said.contains(&paused), "{said}");
+
+    let (ok, said) = h.answer(&ada, &sol, "list_routines", json!({})).await;
+    assert!(ok, "{said}");
+    assert_eq!(ids(&said), sorted(&hook, &paused), "{said}");
+    let rows: Vec<Value> = serde_json::from_str(&said).expect("a list");
+    let row = |id: &str| rows.iter().find(|row| row["id"] == id).expect("listed");
+    assert_eq!(
+        (&row(&paused)["active"], &row(&paused)["bot"]),
+        (&json!(false), &json!("Sol"))
+    );
+    assert_eq!(
+        (&row(&hook)["webhook"], &row(&hook)["when"]),
+        (&json!(true), &json!([]))
+    );
+    let key = h.row_of(&ada, &hook).await["webhook"]["key"].clone();
+    let key = key.as_str().expect("the pane shows its person the key");
+    assert!(!said.contains(key), "a webhook's key is never listed");
+
+    let (ok, said) = h.answer(&ada, &zed, "list_routines", json!({})).await;
+    assert_eq!(
+        (ok, said.as_str()),
+        (true, "[]"),
+        "none of its own, whatever its person has"
+    );
+    assert_eq!(
+        h.routines(&ada).await.len(),
+        4,
+        "the pane lists every Bot's"
+    );
+
+    let replay = format!("/ag-ui/threads/{}", listing.thread);
+    let (status, thread) = h.send(&ada, reqwest::Method::GET, &replay, None).await;
+    assert_eq!(status, 200, "{thread}");
+    let thread = thread.to_string();
+    assert!(
+        thread.contains(&lunas.0) && thread.contains(&lunas.1),
+        "{thread}"
+    );
+    assert!(
+        !thread.contains(&hook) && !thread.contains(&paused),
+        "{thread}"
+    );
+}
+
+/// A BOT CANNOT CHANGE, DELETE OR RUN A SIBLING'S ROUTINE (3 Oct 2026): another of its person's
+/// Bots' routine is unknown to an edit, a delete and a run, by id and by name, in the very words an
+/// id that does not exist is refused in, so no id can be probed for. No card is raised, nothing
+/// runs, and the routine reads the same in the person's pane afterwards; its own Bot still can.
+/// One read of a refused call's thread, which the corpus keeps.
+#[tokio::test]
+async fn a_bot_cannot_change_delete_or_run_another_bots_routine() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
+    let theirs = h.made(&ada, &sol, "Say hello").await;
+    let before = h.row_of(&ada, &theirs).await;
+    let mut refusal_thread = None;
+    for tool in ["update_routine", "delete_routine", "run_routine"] {
+        let arguments = json!({ "routine": "sched_nobody", "name": "Mine now" });
+        let nobody = h.call(&ada, &luna, tool, arguments).await;
+        let unknown = "refused: no routine sched_nobody is yours; call list_routines.";
+        assert_eq!(nobody.result, Some((false, unknown.to_string())), "{tool}");
+        for asked in [theirs.as_str(), "Say hello"] {
+            let arguments = json!({ "routine": asked, "name": "Mine now" });
+            let called = h.call(&ada, &luna, tool, arguments).await;
+            assert!(
+                called.parked.is_none(),
+                "{tool} {asked}: a card for another Bot's routine"
+            );
+            let same = (false, unknown.replace("sched_nobody", asked));
+            assert_eq!(called.result, Some(same), "{tool} {asked}");
+            refusal_thread.get_or_insert(called.thread);
+        }
+    }
+    assert_eq!(h.row_of(&ada, &theirs).await, before, "untouched");
+    assert_eq!(h.runs_of(&theirs).await, 0, "nothing ran");
+    let replay = format!("/ag-ui/threads/{}", refusal_thread.expect("a refused call"));
+    let (status, thread) = h.send(&ada, reqwest::Method::GET, &replay, None).await;
+    assert_eq!(status, 200, "{thread}");
+
+    let edit = json!({ "routine": theirs, "name": "Renamed by its own Bot" });
+    let (ok, said) = h.answer(&ada, &sol, "update_routine", edit).await;
+    assert!(ok, "{said}");
+    assert_eq!(
+        h.row_of(&ada, &theirs).await["name"],
+        "Renamed by its own Bot"
+    );
+}
+
+/// A NAME IS AMBIGUOUS ONLY AMONG THE CALLING BOT'S OWN ROUTINES (3 Oct 2026): "Standup" is one of
+/// Luna's and one of Sol's, and each runs its own by it, once, and is never told it is ambiguous;
+/// "Report" is two of Luna's and one of Sol's, and Luna is told of her two, naming Sol's neither,
+/// while Sol runs its one.
+#[tokio::test]
+async fn a_name_shared_with_another_bots_routine_is_not_ambiguous() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
+    let standups = (
+        h.made(&ada, &luna, "Standup").await,
+        h.made(&ada, &sol, "Standup").await,
+    );
+    let lunas = (
+        h.made(&ada, &luna, "Report").await,
+        h.made(&ada, &luna, "Report").await,
+    );
+    let sols = h.made(&ada, &sol, "Report").await;
+
+    for (bot, routine) in [(&luna, &standups.0), (&sol, &standups.1)] {
+        let by_name = json!({ "routine": "Standup" });
+        let (ok, said) = h.answer(&ada, bot, "run_routine", by_name).await;
+        assert!(ok, "{said}");
+        let ran: Value = serde_json::from_str(&said).expect("JSON");
+        assert_eq!(ran["threadId"], routine.as_str(), "{ran}");
+        h.wait_for_ending(&RunId::from_stored(ran["runId"].as_str().unwrap()))
+            .await;
+    }
+    assert_eq!(
+        (h.runs_of(&standups.0).await, h.runs_of(&standups.1).await),
+        (1, 1)
+    );
+
+    let by_name = json!({ "routine": "Report" });
+    let (ok, said) = h.answer(&ada, &luna, "run_routine", by_name.clone()).await;
+    assert!(!ok, "{said}");
+    let start = "refused: more than one of your routines is called \"Report\" (";
+    assert!(
+        said.starts_with(start) && said.ends_with("); run one by its id."),
+        "{said}"
+    );
+    assert!(said.contains(&lunas.0) && said.contains(&lunas.1), "{said}");
+    assert!(!said.contains(&sols), "{said}");
+
+    let (ok, said) = h.answer(&ada, &sol, "run_routine", by_name).await;
+    assert!(ok, "{said}");
+    let ran: Value = serde_json::from_str(&said).expect("JSON");
+    assert_eq!(ran["threadId"], sols.as_str(), "{ran}");
+    h.wait_for_ending(&RunId::from_stored(ran["runId"].as_str().unwrap()))
+        .await;
+    let runs = (
+        h.runs_of(&lunas.0).await,
+        h.runs_of(&lunas.1).await,
+        h.runs_of(&sols).await,
+    );
+    assert_eq!(runs, (0, 0, 1));
+}
+
+/// ITS PLAN'S RULES HOLD (#316, #332, #337): a routine of a Bot on its person's own plan, run by
+/// that Bot, is skipped in the run now's words while the person's computer is off, or their proxy
+/// does not answer, and its history says a Bot asked; with Relay off it runs on the fallback, or
+/// with none is skipped as Relay off. The Bot's turn is sent to the gateway, which answers it
+/// whatever its plan is doing: its routine is its own, so no other Bot is left to ask.
 #[tokio::test]
 async fn a_plan_bots_routine_run_by_a_bot_keeps_its_plans_rules() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let ada = h.person().await;
-    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
-    h.door(&ada, &luna, json!({ "source": "gateway" })).await;
-    h.door(
-        &ada,
-        &sol,
-        json!({ "source": "local_proxy", "model": "gpt-6-luna" }),
-    )
-    .await;
+    let sol = h.hire(&ada, "Sol").await;
+    let plan = json!({ "source": "local_proxy", "model": "gpt-6-luna" });
+    h.door(&ada, &sol, plan).await;
     let id = h.made(&ada, &sol, "Standup").await;
     // A computer of Ada's, asleep: on, so the Mac's way is relay_offline and not Relay off, until
     // `relayEnabled` switches it off with the rest.
@@ -1186,9 +1440,7 @@ async fn a_plan_bots_routine_run_by_a_bot_keeps_its_plans_rules() {
         (down, "Skipped: your plan's proxy didn't answer"),
     ] {
         h.source(&ada, setting).await;
-        let (ok, said) = h
-            .answer(&ada, &luna, "run_routine", json!({ "routine": id }))
-            .await;
+        let (ok, said) = h.run_on_gateway(&ada, &sol, &id).await;
         assert_eq!((ok, said), (false, format!("refused: {words}")));
     }
     assert_eq!(h.runs_of(&id).await, 0, "skipped, never run");
@@ -1201,7 +1453,7 @@ async fn a_plan_bots_routine_run_by_a_bot_keeps_its_plans_rules() {
         )
         .await;
     assert_eq!(status, 200, "{history}");
-    let by = json!({ "coworkerId": luna, "name": "Luna" });
+    let by = json!({ "coworkerId": sol, "name": "Sol" });
     for (row, code) in history
         .as_array()
         .unwrap()
@@ -1216,16 +1468,12 @@ async fn a_plan_bots_routine_run_by_a_bot_keeps_its_plans_rules() {
     off["relayEnabled"] = json!(false);
     off["planFallback"] = json!(null);
     h.source(&ada, off.clone()).await;
-    let (ok, said) = h
-        .answer(&ada, &luna, "run_routine", json!({ "routine": id }))
-        .await;
+    let (ok, said) = h.run_on_gateway(&ada, &sol, &id).await;
     let words = "refused: Skipped: Relay is off for your plan";
     assert_eq!((ok, said.as_str()), (false, words));
     off["planFallback"] = json!({ "model": "oag/fallback", "effort": "low" });
     h.source(&ada, off).await;
-    let (ok, said) = h
-        .answer(&ada, &luna, "run_routine", json!({ "routine": id }))
-        .await;
+    let (ok, said) = h.run_on_gateway(&ada, &sol, &id).await;
     assert!(ok, "{said}");
     let ran: Value = serde_json::from_str(&said).expect("JSON");
     let run_id = RunId::from_stored(ran["runId"].as_str().unwrap());

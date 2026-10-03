@@ -107,6 +107,70 @@ fn an_edit_and_a_delete_name_their_routine() {
     );
 }
 
+/// A ROUTINE IS THE CALLING BOT'S, AND NO ARGUMENT SAYS OTHERWISE (3 Oct 2026): a `bot`, or a
+/// coworker under any spelling, is not read, so a create carries no target and an update that
+/// names only one has nothing to change, which is a refusal, not a hand-over. Nor does the offer
+/// have a place for one.
+#[test]
+fn no_argument_aims_a_routine_at_another_bot() {
+    let aimed = json!({ "prompt": "p", "when": "0 9 * * 1", "bot": "Sol", "coworker": "cw_sol",
+        "coworker_id": "cw_sol", "coworkerId": "cw_sol", "account_id": "acct_x" });
+    let plain = Fields {
+        prompt: Some("p".to_string()),
+        when: Some("0 9 * * 1".to_string()),
+        ..Fields::default()
+    };
+    assert_eq!(read_ok(CREATE_ROUTINE, aimed), Ask::Create(plain));
+    let hand_over = json!({ "routine": "sched_1", "bot": "Sol", "coworkerId": "cw_sol" });
+    assert!(refused(UPDATE_ROUTINE, hand_over).starts_with("nothing to change"));
+    for name in [CREATE_ROUTINE, UPDATE_ROUTINE] {
+        let schema = schema(name).unwrap();
+        let properties = schema["function"]["parameters"]["properties"].as_object();
+        assert!(!properties.unwrap().contains_key("bot"), "{name}");
+    }
+}
+
+/// THE ONLY BOT A ROUTINE IS MADE FOR is the session's own, if it is one of the person's; any
+/// other is refused in words, naming no Bot to try instead.
+#[test]
+fn the_session_bot_must_be_one_of_the_persons_own() {
+    let theirs = bots(vec![
+        ("cw_luna".to_string(), "Luna".to_string(), false),
+        ("cw_sol".to_string(), "Sol".to_string(), true),
+    ]);
+    assert_eq!(own(&theirs, "cw_sol").unwrap().label, "Sol");
+    assert!(own(&theirs, "cw_sol").unwrap().on_plan);
+    let shared = own(&theirs, "cw_someone_elses").unwrap_err();
+    assert!(
+        shared.starts_with("this Bot is not one of your person's own"),
+        "{shared}"
+    );
+    assert!(
+        !shared.contains("Luna") && !shared.contains("Sol"),
+        "{shared}"
+    );
+}
+
+/// THE WORDS THE MODEL READS SAY WHOSE ROUTINES THESE ARE: this Bot's, not the person's. The
+/// listing says what an empty answer means, or a Bot with none tells its person they have none.
+#[test]
+fn the_descriptions_say_these_are_this_bots_routines() {
+    for name in TOOLS {
+        let said = description(name).unwrap();
+        assert!(said.contains("this Bot"), "{name}: {said}");
+        assert!(!said.contains("your person's routines"), "{name}: {said}");
+        assert!(
+            !said.contains("one of your person's Bots"),
+            "{name}: {said}"
+        );
+    }
+    let list = description(LIST_ROUTINES).unwrap();
+    assert!(
+        list.contains("an empty list means this Bot has none"),
+        "{list}"
+    );
+}
+
 /// Every tool has its schema and words; the row's words are the group's, and nothing else is one.
 #[test]
 fn each_tool_is_described_and_the_row_switches_all_five() {

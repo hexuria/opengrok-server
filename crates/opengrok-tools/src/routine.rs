@@ -1,16 +1,19 @@
-//! The routine tools (#316): a Bot lists, makes, edits and deletes its person's routines when
-//! they ask in chat. A Bot that had none faked one with a loop on its box; these are the real
-//! thing, through the one desk `POST`, `PATCH` and `DELETE /schedules` use (opengrok-server
-//! `autonomy/desk.rs`), so a tool may store what the routes may, refused in the same words.
+//! The routine tools (#316): a Bot lists, makes, edits, deletes and runs ITS OWN routines, the ones
+//! that wake it, when its person asks in chat. A Bot that had none faked one with a loop on its
+//! box; these are the real thing, through the one desk `POST`, `PATCH` and `DELETE /schedules`
+//! use (opengrok-server `autonomy/desk.rs`), so a tool may store what the routes may, refused in
+//! the same words.
 //!
 //! RUN INSIDE `Executor::execute`, NOT BESIDE IT: the ceiling, the grant and an ask apply to them
-//! as to every built-in, and none of them touches the box. One ceiling row switches all four
+//! as to every built-in, and none of them touches the box. One ceiling row switches all five
 //! (`ROW`). A delete ALWAYS asks first, on the policy's card, naming the routine as stored —
 //! never by a name the model wrote.
 //!
-//! THE ACCOUNT IS NEVER AN ARGUMENT. The desk is asked as the `ToolContext`'s account, and no key
-//! a call writes can move it (CLAUDE.md #7). The one target a call names is `bot`, which the
-//! desk finds among the Bots that person OWNS, or refuses.
+//! THE ACCOUNT AND THE BOT ARE NEVER ARGUMENTS. The desk is asked as the `ToolContext`'s account
+//! and for its Bot, and no key a call writes can move either (CLAUDE.md #7): a call names no
+//! target, so there is no `bot` to read. A sibling's routine is as unknown to these tools as an id
+//! that does not exist, in the same words: one Bot offered to pause, delete and activate the
+//! other's (3 Oct 2026), and a different refusal would let an id be probed for.
 //!
 //! THE WORDS ARE THE CONTRACT'S (hexuria/opengrok-server#316, "Contract of record", agreed with
 //! NativeChat on 2 Oct 2026, and the owner's rules after it): the names, the arguments, and the
@@ -67,18 +70,19 @@ pub fn note(setting: &InferenceSource) -> &'static str {
     }
 }
 
-/// A name `run_routine` was given that more than one of the person's routines has (#337).
+/// A name `run_routine` was given that more than one of this Bot's routines has (#337).
 pub fn ambiguous(name: &str, ids: &[String]) -> String {
     let ids = ids.join(", ");
     format!("more than one of your routines is called \"{name}\" ({ids}); run one by its id.")
 }
 
-/// A routine id the person does not own, answered as unknown whether or not it exists.
+/// A routine id that is not this Bot's, answered as unknown whether it is a sibling's, somebody
+/// else's, or nobody's.
 pub fn not_yours(routine: &str) -> String {
     format!("no routine {routine} is yours; call list_routines.")
 }
 
-/// One of the person's own Bots, as a call names it: `label` is its name, or `Name (cw_…)` when
+/// One of the person's own Bots, as an answer names it: `label` is its name, or `Name (cw_…)` when
 /// two of theirs share it. `on_plan` is a Bot whose own door is the person's plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bot {
@@ -87,7 +91,7 @@ pub struct Bot {
     pub on_plan: bool,
 }
 
-/// The person's own Bots, `(id, name, on_plan)`, labelled as calls name them.
+/// The person's own Bots, `(id, name, on_plan)`, labelled as answers name them.
 pub fn bots(owned: Vec<(String, String, bool)>) -> Vec<Bot> {
     let shared = |name: &str| owned.iter().filter(|(_, other, _)| other == name).count() > 1;
     let label = |id: &str, name: &str| match shared(name) {
@@ -102,37 +106,14 @@ pub fn bots(owned: Vec<(String, String, bool)>) -> Vec<Bot> {
     bots.collect()
 }
 
-/// The Bot a call names among the person's OWN, by id or label, then in any case when only one
-/// matches; or, named by nobody, the session's own, which must be theirs too. Never a Bot from
-/// anywhere else: the refusal lists theirs.
-pub fn resolve<'a>(bots: &'a [Bot], session: &str, asked: Option<&str>) -> Result<&'a Bot, String> {
-    let found: Vec<&Bot> = match asked {
-        None => bots.iter().filter(|bot| bot.id == session).collect(),
-        Some(asked) => match bots
-            .iter()
-            .find(|bot| bot.id == asked || bot.label == asked)
-        {
-            Some(bot) => vec![bot],
-            None => bots
-                .iter()
-                .filter(|bot| bot.label.eq_ignore_ascii_case(asked))
-                .collect(),
-        },
-    };
-    let yours: Vec<&str> = bots.iter().map(|bot| bot.label.as_str()).collect();
-    let yours = yours.join(", ");
-    match (found.as_slice(), asked) {
-        ([bot], _) => Ok(bot),
-        ([], None) => Err(format!(
-            "this Bot is not yours, so it cannot hold your routine; name one of yours as bot: {yours}"
-        )),
-        ([], Some(asked)) => Err(format!(
-            "no Bot of yours is called \"{asked}\"; yours are: {yours}"
-        )),
-        _ => Err(format!(
-            "more than one of your Bots answers to that; name one by id: {yours}"
-        )),
-    }
+/// The session's own Bot, the only one a routine is ever made for, if it is one of the person's: a
+/// shared Bot a teammate is talking to is not, and holds no routine of theirs.
+pub fn own<'a>(bots: &'a [Bot], session: &str) -> Result<&'a Bot, String> {
+    let found = bots.iter().find(|bot| bot.id == session);
+    found.ok_or_else(|| {
+        "this Bot is not one of your person's own Bots, so it cannot hold a routine for them."
+            .to_string()
+    })
 }
 
 /// One routine as `list_routines` and every other answer carry it: `when` its one cron in the
@@ -151,7 +132,8 @@ pub fn is_routine_tool(name: &str) -> bool {
     TOOLS.contains(&name)
 }
 
-/// What a create or an update says, read: `None` is a field it left out.
+/// What a create or an update says, read: `None` is a field it left out. There is no field for a
+/// Bot: a routine's is the session's, and a call that writes one is not read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Fields {
     pub name: Option<String>,
@@ -159,8 +141,6 @@ pub struct Fields {
     /// One cron, as the person would write it.
     pub when: Option<String>,
     pub tz: Option<String>,
-    /// One of the person's own Bots, by name or id.
-    pub bot: Option<String>,
     pub active: Option<bool>,
 }
 
@@ -182,14 +162,14 @@ pub enum Ask {
     },
 }
 
-/// The person's routines, as the server keeps them. Every call is answered as `context`'s
-/// account, never one an argument names, and a refusal is a sentence the model can act on.
+/// This Bot's routines, as the server keeps them. Every call is answered as `context`'s account
+/// and for its Bot, never ones an argument names, and a refusal is a sentence the model can act on.
 #[async_trait::async_trait]
 pub trait RoutineDesk: Send + Sync {
     /// Carry out `ask`: what the model is told back, or why not.
     async fn answer(&self, context: &ToolContext, ask: Ask) -> Result<Value, String>;
-    /// The name a routine of `context`'s account is stored under, for a delete's card; for any
-    /// other id, the refusal that hides whether it exists.
+    /// The name a routine of `context`'s Bot is stored under, for a delete's card; for any other
+    /// id, a sibling's included, the refusal that hides whether it exists.
     async fn stored_name(&self, context: &ToolContext, routine: &str) -> Result<String, String>;
 }
 
@@ -237,8 +217,8 @@ pub async fn run(
 }
 
 /// A call's arguments, read: the shape each tool takes, and the contract's refusals for a `when`
-/// that is missing, more than one cron, or a webhook. The identity keys `overwrite_identity`
-/// writes are never read: nothing here takes an account or a coworker but `bot`.
+/// that is missing, more than one cron, or a webhook. Nothing here takes an account or a Bot under
+/// any spelling: the keys `overwrite_identity` writes, and a `bot`, are never read.
 fn read(name: &str, arguments: &Value) -> Result<Ask, String> {
     let text = |key: &str| -> Result<Option<String>, String> {
         match arguments.get(key) {
@@ -266,7 +246,6 @@ fn read(name: &str, arguments: &Value) -> Result<Ask, String> {
             prompt: text("prompt")?,
             when: when(arguments.get("when"))?,
             tz: text("tz")?,
-            bot: text("bot")?,
             active,
         })
     };
@@ -290,7 +269,7 @@ fn read(name: &str, arguments: &Value) -> Result<Ask, String> {
         UPDATE_ROUTINE => {
             let (routine, fields) = (routine()?, fields()?);
             if fields == Fields::default() {
-                let why = "nothing to change: give name, prompt, when, tz, bot or active";
+                let why = "nothing to change: give name, prompt, when, tz or active";
                 return Err(why.to_string());
             }
             Ok(Ask::Update { routine, fields })
@@ -349,29 +328,32 @@ fn when(given: Option<&Value>) -> Result<Option<String>, String> {
 pub fn description(name: &str) -> Option<&'static str> {
     Some(match name {
         LIST_ROUTINES => {
-            "List your person's routines: each one's id, name, the Bot it wakes, its prompt, \
-             whether it is on, when it wakes (a 5-field cron), the time zone that is read in, and \
-             nextDueMs (epoch milliseconds). Webhook keys and addresses are never listed."
+            "List this Bot's routines: each one's id, name, the Bot it wakes, its prompt, whether \
+             it is on, when it wakes (a 5-field cron), the time zone that is read in, and \
+             nextDueMs (epoch milliseconds). Only this Bot's own are listed, never your person's \
+             other Bots': an empty list means this Bot has none, not that your person has none. \
+             Webhook keys and addresses are never listed."
         }
         CREATE_ROUTINE => {
-            "Make a routine: one of your person's Bots is woken on a schedule and told its prompt, \
-             with nobody watching. `when` is REQUIRED and is never guessed: if the person has not \
-             said both the time and the days, call request_user_form first with a field for each, \
-             then make it with what they answer. A routine wakes at most once a minute."
+            "Make a routine: this Bot is woken on a schedule and told its prompt, with nobody \
+             watching. A routine is always this Bot's own; it cannot be made for another Bot. \
+             `when` is REQUIRED and is never guessed: if the person has not said both the time \
+             and the days, call request_user_form first with a field for each, then make it with \
+             what they answer. A routine wakes at most once a minute."
         }
         UPDATE_ROUTINE => {
-            "Change one of your person's routines, by its id from list_routines: only what you \
-             pass changes. `when` replaces its schedule; `active` false pauses it, true wakes it."
+            "Change one of this Bot's routines, by its id from list_routines: only what you pass \
+             changes. `when` replaces its schedule; `active` false pauses it, true wakes it."
         }
         DELETE_ROUTINE => {
-            "Delete one of your person's routines for good, by its id from list_routines. It \
-             always asks the person first, naming the routine."
+            "Delete one of this Bot's routines for good, by its id from list_routines. It always \
+             asks the person first, naming the routine."
         }
         RUN_ROUTINE => {
-            "Run one of your person's routines now, as their Run now does, by its id or its name \
-             from list_routines: its own Bot is woken with its prompt, on its own thread, and \
-             you are told the run's id. A paused routine, or one whose plan cannot answer now, is \
-             refused in words."
+            "Run one of this Bot's routines now, as the person's Run now does, by its id or its \
+             name from list_routines: this Bot is woken with the routine's prompt, on the \
+             routine's own thread, and you are told the run's id. A paused routine, or one whose \
+             plan cannot answer now, is refused in words."
         }
         ROW => ROW_DESCRIPTION,
         _ => return None,
@@ -391,8 +373,6 @@ pub fn schema(name: &str) -> Option<Value> {
             day-of-week, like \"0 9 * * MON-FRI\" for 9:00 on weekdays."),
         "tz": string("The IANA time zone the cron is read in, like \"Asia/Manila\". Left out \
             on a new one, your person's own zone."),
-        "bot": string("Which of your person's own Bots it wakes, by name or id. Left out on a \
-            new one, you."),
     });
     let (properties, required) = match name {
         LIST_ROUTINES => (json!({}), json!([])),
