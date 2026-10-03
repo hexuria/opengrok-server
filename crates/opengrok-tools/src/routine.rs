@@ -42,7 +42,7 @@ pub const TOOLS: [&str; 5] = [
 /// The ceiling row that switches all five (`GET`/`PUT /coworkers/{id}/ceiling`).
 pub const ROW: &str = "routines";
 pub const ROW_LABEL: &str = "Routines";
-pub const ROW_DESCRIPTION: &str = "List, make, edit, delete and run your routines when you ask in \
+pub const ROW_DESCRIPTION: &str = "List, make, edit, delete and run this Bot's routines when you ask in \
      chat. Deleting one always asks you first.";
 
 /// A `when` that is missing: the time and days are the person's to say, never the model's to guess.

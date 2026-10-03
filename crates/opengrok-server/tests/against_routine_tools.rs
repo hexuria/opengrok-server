@@ -982,7 +982,7 @@ async fn a_bots_ceiling_lists_its_routines_as_one_row() {
         .find(|row| row["name"] == "routines")
         .cloned();
     let expected = json!({ "name": "routines", "kind": "builtin", "label": "Routines",
-        "enabled": true, "description": "List, make, edit, delete and run your routines when you \
+        "enabled": true, "description": "List, make, edit, delete and run this Bot's routines when you \
         ask in chat. Deleting one always asks you first." });
     assert_eq!(routines, Some(expected));
 }
