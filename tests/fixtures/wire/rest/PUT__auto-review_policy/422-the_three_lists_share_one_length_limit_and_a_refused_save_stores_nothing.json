@@ -1,0 +1,6 @@
+{
+  "method": "PUT",
+  "path": "/auto-review/policy",
+  "status": 422,
+  "body": "instructions are too long for one scope"
+}

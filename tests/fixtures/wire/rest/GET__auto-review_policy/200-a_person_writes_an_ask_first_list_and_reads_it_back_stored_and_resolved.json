@@ -1,0 +1,23 @@
+{
+  "method": "GET",
+  "path": "/auto-review/policy",
+  "status": 200,
+  "body": {
+    "global": {
+      "enabled": true,
+      "allowInstructions": "git is fine",
+      "askInstructions": "check with me before sending email",
+      "blockInstructions": "never delete backups",
+      "updatedAtMs": 1790000000000
+    },
+    "coworkers": {
+      "cw_0199bb4e-0000-7000-8000-000000000001": {
+        "enabled": null,
+        "allowInstructions": null,
+        "askInstructions": "check with me before any purchase",
+        "blockInstructions": null,
+        "updatedAtMs": 1790000001000
+      }
+    }
+  }
+}

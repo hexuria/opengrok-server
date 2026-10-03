@@ -1,0 +1,17 @@
+{
+  "method": "GET",
+  "path": "/auto-review/effective",
+  "status": 200,
+  "body": {
+    "enabled": false,
+    "allowInstructions": "",
+    "askInstructions": "",
+    "blockInstructions": "",
+    "decidedBy": {
+      "enabled": "default",
+      "allowInstructions": "default",
+      "askInstructions": "default",
+      "blockInstructions": "default"
+    }
+  }
+}

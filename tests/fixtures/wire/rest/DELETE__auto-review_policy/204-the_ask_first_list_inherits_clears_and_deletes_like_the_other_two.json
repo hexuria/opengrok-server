@@ -1,0 +1,6 @@
+{
+  "method": "DELETE",
+  "path": "/auto-review/policy",
+  "status": 204,
+  "body": ""
+}

@@ -1,0 +1,17 @@
+{
+  "method": "GET",
+  "path": "/auto-review/effective",
+  "status": 200,
+  "body": {
+    "enabled": true,
+    "allowInstructions": "git is fine",
+    "askInstructions": "check with me before any purchase",
+    "blockInstructions": "never delete backups",
+    "decidedBy": {
+      "enabled": "global",
+      "allowInstructions": "global",
+      "askInstructions": "coworker",
+      "blockInstructions": "global"
+    }
+  }
+}
