@@ -280,6 +280,7 @@ async fn set_policy(
             scope_id,
             body.enabled,
             allow,
+            None,
             block,
             now_ms(),
         )

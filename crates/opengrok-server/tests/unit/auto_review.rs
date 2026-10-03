@@ -11,6 +11,7 @@ fn row(
         scope_id: String::new(),
         enabled,
         allow_instructions: allow.map(str::to_string),
+        ask_instructions: None,
         block_instructions: block.map(str::to_string),
         updated_at_ms: 0,
     }

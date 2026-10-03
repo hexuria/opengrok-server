@@ -371,6 +371,7 @@ async fn a_judge_that_is_down_is_named_then_stops_being_asked() {
             "",
             Some(true),
             None,
+            Some("check with me before touching prod"),
             Some("never touch prod"),
             now_ms(),
         )

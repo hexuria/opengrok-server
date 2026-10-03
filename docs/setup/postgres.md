@@ -214,3 +214,14 @@ under an advisory lock of its own, and writes its row only once every bot is pin
 stops early writes none and the next boot finishes it, each pinned bot having a source by then.
 A bot an older replica hires mid-deploy, after the pass, keeps no source and goes where its owner's
 setting says, as every bot did before.
+
+**A transform that moves what a column means.** #354's `the-list-that-asks-is-its-own-column`
+runs in `SCHEMA`, after the `add column` it fills. Auto-review's "Ask first" list was stored in
+`auto_review_policy.block_instructions`, where a match raised a card; block now refuses, so the
+pass moves every row's text to the new `ask_instructions` (after any already there) and nulls the
+block column, and an explicit `''` moves as `''`. A second pass would turn a block written since
+into an ask, so its row in `schema_migrations` ends it. During a rolling deploy an older replica
+still reads `block_instructions` as the ask-first list, so for a row already moved it finds none
+and does not ask, and a row it writes after the pass is read by a new one as a block: stop the
+older replicas before the new one boots, or keep the overlap short
+(`crates/opengrok-store/tests/the_list_that_asks_is_its_own_column.rs`).

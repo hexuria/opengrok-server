@@ -55,6 +55,7 @@ async fn tiers_round_trip_and_resolve_per_field() {
             "",
             Some(true),
             None,
+            None,
             Some("never touch prod"),
             1,
         )
@@ -67,6 +68,7 @@ async fn tiers_round_trip_and_resolve_per_field() {
             &coworker,
             Some(false),
             Some("git is fine"),
+            None,
             None,
             2,
         )
@@ -101,6 +103,7 @@ async fn tiers_round_trip_and_resolve_per_field() {
             "coworker",
             &coworker,
             Some(true),
+            None,
             None,
             Some(""),
             3,
@@ -149,6 +152,7 @@ async fn a_legacy_machine_row_is_never_resolved() {
             "machine",
             "mac_ghost",
             Some(true),
+            None,
             None,
             Some("haunt"),
             1,
