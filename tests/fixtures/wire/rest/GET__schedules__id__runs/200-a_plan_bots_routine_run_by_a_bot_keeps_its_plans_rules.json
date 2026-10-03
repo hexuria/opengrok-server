@@ -15,7 +15,7 @@
       "reason": "Skipped: your plan's proxy didn't answer",
       "by": {
         "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
-        "name": "Luna"
+        "name": "Sol"
       }
     },
     {
@@ -30,7 +30,7 @@
       "reason": "Skipped: your computer was off, so your plan couldn't answer",
       "by": {
         "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
-        "name": "Luna"
+        "name": "Sol"
       }
     }
   ]

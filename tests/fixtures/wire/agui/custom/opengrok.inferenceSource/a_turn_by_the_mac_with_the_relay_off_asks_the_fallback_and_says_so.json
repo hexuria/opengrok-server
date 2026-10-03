@@ -6,7 +6,7 @@
   "runId": "0199bb4e-0000-7000-8000-000000000002",
   "value": {
     "kind": "gateway",
-    "model": "xai/grok-4.6",
+    "model": "oag/cheap",
     "fallbackFor": "relay_disabled"
   }
 }

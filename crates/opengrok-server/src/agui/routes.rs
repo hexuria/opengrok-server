@@ -612,8 +612,8 @@ pub(crate) async fn tools_for_coworker(
         .with_egress_tunnel_mode(egress_tunnel)
         .with_egress_policy(egress_policy)
         .with_egress_policy_unconfirmed(egress_unconfirmed)
-        // The person's routines (#316), through the desk the routes use; the ceiling's row says
-        // whether they are offered, and the context's account is the only one they answer as.
+        // This Bot's routines (#316), through the desk the routes use; the ceiling's row says
+        // whether they are offered, and the context's account and Bot are all they answer for.
         .with_routines(Arc::new(crate::autonomy::desk::Tools {
             state: state.clone(),
         }));

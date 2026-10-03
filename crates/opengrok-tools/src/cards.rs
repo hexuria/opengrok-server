@@ -254,7 +254,7 @@ pub fn summary_for(tool: &str, arguments: &Value) -> String {
         ),
         // A routine by its id, never by a name the call wrote: a delete's card names the
         // routine as stored, in its reason (#316).
-        crate::routine::LIST_ROUTINES => "List your routines".to_string(),
+        crate::routine::LIST_ROUTINES => "List this Bot's routines".to_string(),
         crate::routine::CREATE_ROUTINE => format!(
             "Make a routine that wakes at {}",
             clip(&arguments["when"].to_string(), 80)

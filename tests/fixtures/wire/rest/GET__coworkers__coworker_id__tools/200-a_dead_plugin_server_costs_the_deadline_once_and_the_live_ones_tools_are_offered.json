@@ -31,7 +31,7 @@
       },
       {
         "name": "routines",
-        "description": "List, make, edit, delete and run your routines when you ask in chat. Deleting one always asks you first.",
+        "description": "List, make, edit, delete and run this Bot's routines when you ask in chat. Deleting one always asks you first.",
         "kind": "builtin"
       }
     ]

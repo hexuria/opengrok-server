@@ -37,7 +37,7 @@
           {
             "type": "TEXT_MESSAGE_CONTENT",
             "messageId": "m-0199bb4e000070008000000000000004",
-            "delta": "{\"tool\":\"run_routine\",\"arguments\":{\"routine\":\"sched_0199bb4e-0000-7000-8000-000000000005\"}}",
+            "delta": "{\"tool\":\"update_routine\",\"arguments\":{\"routine\":\"sched_0199bb4e-0000-7000-8000-000000000005\",\"name\":\"Mine now\"}}",
             "timestamp": 100
           },
           {
@@ -60,11 +60,11 @@
             "type": "TOOL_CALL_START",
             "timestamp": 100,
             "toolCallId": "call-routine",
-            "toolCallName": "run_routine"
+            "toolCallName": "update_routine"
           },
           {
             "type": "TOOL_CALL_ARGS",
-            "delta": "{\"routine\":\"sched_0199bb4e-0000-7000-8000-000000000005\"}",
+            "delta": "{\"routine\":\"sched_0199bb4e-0000-7000-8000-000000000005\",\"name\":\"Mine now\"}",
             "timestamp": 100,
             "toolCallId": "call-routine"
           },
@@ -74,11 +74,11 @@
             "toolCallId": "call-routine"
           },
           {
-            "ok": true,
+            "ok": false,
             "type": "TOOL_CALL_RESULT",
-            "content": "{\"runId\":\"run_0199bb4e-0000-7000-8000-000000000006\",\"threadId\":\"sched_0199bb4e-0000-7000-8000-000000000005\"}",
+            "content": "refused: no routine sched_0199bb4e-0000-7000-8000-000000000005 is yours; call list_routines.",
             "timestamp": 100,
-            "durationMs": 179,
+            "durationMs": 31,
             "toolCallId": "call-routine"
           },
           {
@@ -89,7 +89,7 @@
           },
           {
             "type": "TEXT_MESSAGE_CONTENT",
-            "delta": "result: {\"runId\":\"run_0199bb4e-0000-7000-8000-000000000006\",\"threadId\":\"sched_0199bb4e-0000-7000-8000-000000000005\"}",
+            "delta": "result: refused: no routine sched_0199bb4e-0000-7000-8000-000000000005 is yours; call list_routines.\n\n[harness] That call failed. If a one-step fix is obvious (wrong port, missing flag), retry once with no narration. If it fails again, stop — the harness will report one short failure fact. Do not write a diary of retries.",
             "messageId": "msg_0199bb4e-0000-7000-8000-000000000003_1",
             "timestamp": 100
           },
@@ -106,7 +106,7 @@
               "tools": [
                 {
                   "ms": 3,
-                  "name": "run_routine"
+                  "name": "update_routine"
                 }
               ],
               "budget": {
@@ -120,8 +120,8 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  4611,
-                  4678
+                  4909,
+                  5053
                 ]
               },
               "model_ms": [
