@@ -39,7 +39,7 @@ macro_rules! database_or_skip {
 }
 
 /// The sentence a word outside the list is refused with, as agreed with the client.
-const REFUSAL: &str = "effort must be one of inherit, none, low, medium, high, xhigh, max";
+const REFUSAL: &str = "effort must be one of inherit, none, low, medium, high, xhigh, max, ultra";
 
 fn unique(prefix: &str) -> String {
     format!("{prefix}-{}", uuid::Uuid::now_v7().simple())

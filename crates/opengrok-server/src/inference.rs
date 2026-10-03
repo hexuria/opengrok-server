@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use opengrok_core::account::AccountCommand;
 use opengrok_core::id::AccountId;
-use opengrok_core::inference::{InferenceSource, KeyChange, NewBotDefault, TurnSource};
+use opengrok_core::inference::{InferenceSource, KeyChange, NewBotDefault, SourceKind, TurnSource};
 use opengrok_harness::local_proxy;
 use opengrok_harness::relay::{Piped, Refused};
 use serde_json::{Value, json};
@@ -137,6 +137,27 @@ pub(crate) async fn hire_model(
     })
 }
 
+/// Why an effort a write names is refused on `model` behind `door` (a Bot's, a default's or a
+/// fallback's), before anything is written: held to the levels `GET /models` lists, the gateway's
+/// last listing (`ModelCatalogue::known`) or the person's own plan as saved; a Bot with no door is
+/// held to its pin's, the gateway's. A stored effort is never judged again. A REFUSAL ONLY EVER
+/// NARROWS ON KNOWN DATA: a listing unreadable at write time knows no levels, like a model nothing
+/// lists or lists without them, so any word but `ultra` is taken as before, and `inherit` always.
+pub(crate) async fn effort_refused(
+    state: &AgUiState,
+    account: &AccountId,
+    (door, model): (Option<SourceKind>, &str),
+    effort: opengrok_core::coworker::Effort,
+) -> Option<String> {
+    let rows = match (door, &state.auth.model_catalogue) {
+        _ if effort == opengrok_core::coworker::Effort::Inherit => Vec::new(),
+        (Some(SourceKind::LocalProxy), _) => local_proxy::plan_models(state, account).await,
+        (_, Some(catalogue)) => catalogue.known().await,
+        (_, None) => Vec::new(),
+    };
+    opengrok_core::catalogue::refusal(model, effort, &rows)
+}
+
 /// A source a request names (`inferenceSource`, `?source=`), or the 400 saying what it may name.
 pub(crate) fn named(
     value: Option<&Value>,
@@ -227,6 +248,12 @@ async fn save(
     let (source, key) = (account.inference_source)
         .applied(body, local_proxy::loopback_base)
         .map_err(|why| refuse(StatusCode::BAD_REQUEST, why))?;
+    for (field, (door, model, effort)) in source.named_efforts(body).into_iter().flatten() {
+        if let Some(why) = effort_refused(state, &id, (door, model), effort).await {
+            let why = format!("{field}.effort: {why}");
+            return Err(refuse(StatusCode::BAD_REQUEST, why));
+        }
+    }
     if let KeyChange::Set(key) = &key {
         seal(state, &id, key).await?;
     }

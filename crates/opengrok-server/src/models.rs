@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use opengrok_core::catalogue::{self, Model};
+
 /// How long a listing is considered fresh. A picker showing a slightly stale catalogue is a much
 /// smaller problem than one that re-asks the gateway on every keystroke.
 const FRESH_FOR: Duration = Duration::from_secs(60);
@@ -58,16 +60,6 @@ fn redact_secrets(detail: &str) -> String {
         return format!("{clipped}… (clipped)");
     }
     out
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Model {
-    pub id: String,
-    /// `oag.context_window`: how many tokens the route reads. Null on virtual entries
-    /// (`oag/auto`), whose model is chosen per request.
-    pub context_window: Option<u64>,
-    /// `oag.alias_of`: the canonical id an `@sub`/`@api` entry is a channel of.
-    pub alias_of: Option<String>,
 }
 
 /// The context a turn is held to when the catalogue cannot say: `OG_CONTEXT_TOKENS`.
@@ -202,14 +194,14 @@ impl ModelCatalogue {
         Some(Self::new(base_url, key))
     }
 
-    fn fresh(&self) -> Option<Vec<Model>> {
+    fn fresh(&self, within: Duration) -> Option<Vec<Model>> {
         let cached = match self.cached.lock() {
             Ok(cached) => cached,
             Err(poisoned) => poisoned.into_inner(),
         };
         cached
             .as_ref()
-            .filter(|(at, _)| at.elapsed() < FRESH_FOR)
+            .filter(|(at, _)| at.elapsed() < within)
             .map(|(_, models)| models.clone())
     }
 
@@ -220,8 +212,8 @@ impl ModelCatalogue {
                 Ok(looked_up) => looked_up,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let due =
-                self.fresh().is_none() && looked_up.is_none_or(|at| at.elapsed() >= FRESH_FOR);
+            let due = self.fresh(FRESH_FOR).is_none()
+                && looked_up.is_none_or(|at| at.elapsed() >= FRESH_FOR);
             if due {
                 *looked_up = Some(Instant::now());
             }
@@ -245,6 +237,15 @@ impl ModelCatalogue {
         *cached = Some((Instant::now(), models.to_vec()));
     }
 
+    /// What a write's effort is held to (`inference::effort_refused`): the last listing of any
+    /// age, as `GET /models` showed it, so a save never asks again; else one asked now, or none.
+    pub async fn known(&self) -> Vec<Model> {
+        match self.fresh(Duration::MAX) {
+            Some(models) => models,
+            None => self.list_within(CONTEXT_LOOKUP).await.models,
+        }
+    }
+
     /// The routes this gateway advertises. Never an error: a gateway that cannot be listed yields
     /// an empty catalogue and the reason, because a picker that cannot offer a list must still let
     /// somebody type a route by hand.
@@ -253,7 +254,7 @@ impl ModelCatalogue {
     }
 
     async fn list_within(&self, timeout: Duration) -> Catalogue {
-        if let Some(models) = self.fresh() {
+        if let Some(models) = self.fresh(FRESH_FOR) {
             return Catalogue { models, note: None };
         }
         let response = self
@@ -286,7 +287,7 @@ impl ModelCatalogue {
                 )),
             };
         }
-        let models = parse_models(&body);
+        let models = catalogue::models_in(&body);
         if models.is_empty() {
             return Catalogue {
                 models,
@@ -363,36 +364,6 @@ impl ModelCatalogue {
 pub struct Probed {
     pub served: String,
     pub tool_calls: bool,
-}
-
-/// Ids out of an OpenAI-shaped `/v1/models` body, with the gateway's `oag` window where it gives
-/// one. Unknown fields are ignored, and a body that is not what we expected yields nothing rather
-/// than a guess.
-fn parse_models(body: &str) -> Vec<Model> {
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) else {
-        return Vec::new();
-    };
-    parsed
-        .get("data")
-        .and_then(|data| data.as_array())
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|row| {
-                    let id = row.get("id").and_then(|id| id.as_str())?;
-                    Some(Model {
-                        id: id.to_string(),
-                        context_window: row
-                            .pointer("/oag/context_window")
-                            .and_then(|tokens| tokens.as_u64()),
-                        alias_of: row
-                            .pointer("/oag/alias_of")
-                            .and_then(|alias| alias.as_str())
-                            .map(str::to_string),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

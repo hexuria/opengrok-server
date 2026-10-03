@@ -15,6 +15,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use opengrok_core::catalogue::Model;
 use opengrok_core::coworker::{Coworker, Effort};
 use opengrok_core::id::{AccountId, RunId};
 use opengrok_core::inference::{
@@ -112,9 +113,9 @@ pub async fn healthy(base: &str) -> bool {
         .is_ok_and(|response| response.status().is_success())
 }
 
-/// The ids `GET {base}/v1/models` lists that a person's subscription may use
+/// The models `GET {base}/v1/models` lists that a person's subscription may use
 /// (`opengrok_core::inference::subscription_model`), or why there are none to show.
-pub async fn models(base: &str, key: Option<&str>) -> Result<Vec<String>, String> {
+pub async fn models(base: &str, key: Option<&str>) -> Result<Vec<Model>, String> {
     let base = loopback_base(base)?;
     let mut ask = asking()?.get(format!("{base}/v1/models")).timeout(LISTING);
     if let Some(key) = key {
@@ -134,20 +135,15 @@ pub async fn models(base: &str, key: Option<&str>) -> Result<Vec<String>, String
         .json()
         .await
         .map_err(|_| "your proxy's list of models could not be read".to_string())?;
-    Ok(allowed_ids(&body))
+    Ok(allowed(&body))
 }
 
-/// The ids an opencodex `/v1/models` body lists that a person's subscription may use, wherever
+/// The models an opencodex `/v1/models` body lists that a person's subscription may use, wherever
 /// the list came from: this machine's proxy, or the one on their Mac (`relay`).
-pub(crate) fn allowed_ids(body: &serde_json::Value) -> Vec<String> {
-    body["data"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|model| model["id"].as_str())
-        .filter(|id| subscription_model(id).is_ok())
-        .map(str::to_string)
-        .collect()
+pub(crate) fn allowed(body: &serde_json::Value) -> Vec<Model> {
+    let mut listed = opengrok_core::catalogue::models(body);
+    listed.retain(|model| subscription_model(&model.id).is_ok());
+    listed
 }
 
 /// The reads the server makes for a person's source: their setting, their proxy's key, and the
@@ -415,15 +411,15 @@ fn ahead_of_the_setting(
 
 /// What `GET /models` says of the person's own subscription, whatever their setting's kind:
 /// `localProxy` — whether their proxy answers `/healthz` and whether their Mac holds its relay —
-/// and, when `listing`, the models each serves, in the gateway's entry shape plus `source` and
-/// `via`. `None` when there is nothing to say: no address stored, no Mac connected, and the Mac
-/// not the setting's way. A proxy that is down or a Mac that is away lists nothing, and says so
-/// beside the gateway's list, never as an error over it.
+/// and, when `listing`, the models each serves and the way to each. `None` when there is nothing
+/// to say: no address stored, no Mac connected, and the Mac not the setting's way. A proxy that is
+/// down or a Mac that is away lists nothing, and says so beside the gateway's list, never as an
+/// error over it.
 pub async fn listed(
     saved: &dyn Saved,
     account: &AccountId,
     listing: bool,
-) -> Option<(serde_json::Value, Vec<serde_json::Value>)> {
+) -> Option<(serde_json::Value, Vec<(Via, Model)>)> {
     let setting = saved.setting(account).await?;
     let relay = saved.relay();
     let mac = relay.connected(account.as_str());
@@ -448,16 +444,18 @@ pub async fn listed(
         (true, Some(_)) => relay.models(account.as_str()).await,
         _ => Vec::new(),
     };
-    let entry = |via: Via| {
-        move |id| {
-            serde_json::json!({ "id": id, "points": null, "source": "local_proxy",
-                                      "via": via.as_str() })
-        }
-    };
+    let entry = |via: Via| move |model| (via, model);
     let mut entries: Vec<_> = loopback.into_iter().map(entry(Via::Loopback)).collect();
     entries.extend(from_mac.into_iter().map(entry(Via::Mac)));
     let said = serde_json::json!({ "healthy": up, "relayConnected": mac.is_some() });
     Some((said, entries))
+}
+
+/// The models the person's own plan serves, every way it is reached, as `listed` lists them: what
+/// a write's effort is held to there (opengrok-server `inference::effort_refused`).
+pub async fn plan_models(saved: &dyn Saved, account: &AccountId) -> Vec<Model> {
+    let (_, served) = listed(saved, account, true).await.unwrap_or_default();
+    served.into_iter().map(|(_, model)| model).collect()
 }
 
 /// The setting as `GET` and `PUT /account/inference-source` answer with it — the other half of

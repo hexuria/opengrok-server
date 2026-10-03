@@ -279,7 +279,9 @@ async fn a_macs_model_list_is_kept_to_the_allowlist() {
             futures::stream::iter([Ok::<_, std::io::Error>(&body[..])]),
         )
         .await;
-    assert_eq!(listing.await.unwrap(), ["gpt-6-sol", "xai/grok-4.7"]);
+    let listed = listing.await.unwrap();
+    let ids: Vec<&str> = listed.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(ids, ["gpt-6-sol", "xai/grok-4.7"]);
 }
 
 /// ONE SENDING OF A THREAD'S HELD SENDS AT A TIME, AND NO TRIGGER LOST TO IT: a second claim

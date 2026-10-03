@@ -653,7 +653,7 @@ async fn the_door_sends_reasoning_effort_only_when_the_coworker_chose_one() {
     use opengrok_core::coworker::Effort;
     let (url, bodies) = a_gateway_keeping_bodies().await;
     let door = GatewayDoor::new(url, "k");
-    for effort in [Effort::High, Effort::Inherit, Effort::Off] {
+    for effort in [Effort::High, Effort::Inherit, Effort::Off, Effort::Ultra] {
         let request = ModelRequest {
             effort,
             ..asking(vec![ChatMessage::text("user", "hi")])
@@ -662,7 +662,7 @@ async fn the_door_sends_reasoning_effort_only_when_the_coworker_chose_one() {
         while stream.next().await.is_some() {}
     }
     let bodies = bodies.lock().unwrap().clone();
-    assert_eq!(bodies.len(), 3, "one body per request: {bodies:?}");
+    assert_eq!(bodies.len(), 4, "one body per request: {bodies:?}");
     assert_eq!(bodies[0]["reasoning_effort"], "high", "{}", bodies[0]);
     assert_eq!(bodies[0]["model"], "xai/grok-4.6", "{}", bodies[0]);
     assert!(
@@ -671,4 +671,9 @@ async fn the_door_sends_reasoning_effort_only_when_the_coworker_chose_one() {
         bodies[1]
     );
     assert_eq!(bodies[2]["reasoning_effort"], "none", "{}", bodies[2]);
+    assert_eq!(
+        bodies[3]["reasoning_effort"], "ultra",
+        "sent as any other word: {}",
+        bodies[3]
+    );
 }

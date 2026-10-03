@@ -334,6 +334,17 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_bot_cannot_run_a_routine_that_is_not_its_persons_or_is_paused",
         "/ag-ui/threads/{thread_id}",
     ),
+    // A model's own levels (3 Oct 2026): a plan model with levels beside one without, and a
+    // gateway model with them, the rows NativeChat builds its effort slider from, kept by name
+    // whatever else shares their shape. Each test makes one call on `/models`.
+    (
+        "the_model_list_gives_a_plan_model_its_own_levels_and_none_to_one_without",
+        "/models",
+    ),
+    (
+        "the_model_list_gives_a_gateway_model_the_levels_the_gateway_publishes",
+        "/models",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";
