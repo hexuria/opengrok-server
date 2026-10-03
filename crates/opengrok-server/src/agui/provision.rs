@@ -645,6 +645,7 @@ async fn destroy_and_clear(state: &AgUiState, org_id: Option<&str>, scope: &str,
     {
         tracing::warn!(scope, scope_id, kind = %kind, code = %error.code(), box_id, "could not destroy a scope's box; forgetting it anyway");
     }
+    super::screen_proxy::forget_box(&box_id);
     let _ = store.clear_scoped_computer(scope, scope_id, &box_id).await;
 }
 
@@ -810,14 +811,19 @@ pub async fn scoped_box_row_for(
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) -> Option<ScopedBoxRow> {
-    let (_, org_id, scope, scope_id, _) = scope_of(state, account_id, coworker_id.as_str()).await;
-    let (box_id, kind, _) = state
+    // A coworker whose stream cannot be read has no computer, as on the pane: read as "not a
+    // group", a group's /screen showed its owner's own box.
+    let loaded = state.auth.store.load_coworker(coworker_id).await.ok();
+    let (coworker, _) = loaded.filter(|(coworker, _)| !coworker.name.is_empty())?;
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (owner, id) = (account_id.as_str(), coworker_id.as_str());
+    let (scope, scope_id, _) = scope_for(&mode, owner, org_id.as_deref(), id, coworker.is_group());
+    let row = state
         .auth
         .store
         .scoped_computer_full(scope, &scope_id)
-        .await
-        .ok()
-        .flatten()?;
+        .await;
+    let (box_id, kind, _) = row.ok().flatten()?;
     Some(ScopedBoxRow {
         scope,
         scope_id,
@@ -917,8 +923,7 @@ pub async fn coworker_screen(
         stamp_egress_policy(state, &mut body, scope, &scope_id).await;
         return body;
     };
-    // Live `/v1/info` of THIS scoped box — NativeChat never probes the guest itself. Asked beside
-    // the box's state, not after it: a guest can take the probe's whole patience to say nothing.
+    // Live `/v1/info` of THIS scoped box, beside its state: NativeChat never probes the guest.
     let probe = opengrok_box::shown_egress(provider.as_ref(), &box_id);
     let (live_state, cap) = tokio::join!(provider.state(&box_id), probe);
     let live_state = live_state.unwrap_or_else(|_| "unknown".to_string());
@@ -1108,14 +1113,16 @@ pub async fn update_scope_box(
             chrono::Utc::now().timestamp_millis(),
         )
         .await;
-    let new_box_id = match provider.recreate(&old_box_id).await {
+    let rebuilt = provider.recreate(&old_box_id).await;
+    // The old box was stopped for the copy: brought back if the rebuild failed, so the person is
+    // not left with nothing. Removed or on new ports, its screen moved either way.
+    if rebuilt.is_err() {
+        let _ = provider.resume(&old_box_id).await;
+    }
+    super::screen_proxy::forget_box(&old_box_id);
+    let new_box_id = match rebuilt {
         Ok(id) => id,
-        Err(error) => {
-            // The old box was stopped for the copy; bring it back so the person is not left
-            // with nothing.
-            let _ = provider.resume(&old_box_id).await;
-            return fail(format!("could not rebuild the computer: {error}")).await;
-        }
+        Err(error) => return fail(format!("could not rebuild the computer: {error}")).await,
     };
     let at_ms = chrono::Utc::now().timestamp_millis();
     // Only in place of the box it rebuilt: a reset or takeover meanwhile owns the scope now.

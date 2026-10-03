@@ -160,6 +160,15 @@ impl Computer for FillStub {
         tokio::time::sleep(takes).await;
         *self.egress.lock().expect("egress")
     }
+    /// A guest that took the whole patience is one whose `/v1/info` wait timed out.
+    async fn egress_probe(&self, box_id: &str) -> (Option<EgressTunnel>, bool) {
+        let takes = *self.egress_takes.lock().expect("takes");
+        let cap = self.egress_tunnel(box_id).await;
+        (
+            cap,
+            cap.is_none() && takes >= opengrok_box::GUEST_INFO_PATIENCE,
+        )
+    }
 }
 
 async fn seed_account(store: &PgStore, email: &str) -> AccountId {

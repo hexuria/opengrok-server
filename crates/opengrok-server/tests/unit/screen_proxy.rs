@@ -213,3 +213,216 @@ fn the_storage_shim_goes_first_in_a_page_and_nowhere_else() {
     );
     assert_eq!(placed(""), shim);
 }
+
+/// A Local VM whose screen is always on one loopback port.
+struct OnePort;
+
+const ONE_PORT_PAGE: &str = "http://127.0.0.1:5999/vnc.html?autoconnect=true&password=pw4boxA1";
+
+#[async_trait::async_trait]
+impl opengrok_box::Computer for OnePort {
+    async fn create(&self, _: Option<u64>) -> opengrok_box::BoxResult<String> {
+        Ok("bx".to_string())
+    }
+    async fn run(
+        &self,
+        _: &str,
+        _: &str,
+        _: u32,
+    ) -> opengrok_box::BoxResult<opengrok_box::CommandOutput> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn start(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> opengrok_box::BoxResult<opengrok_box::StartedCommand> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn watch(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> opengrok_box::BoxResult<opengrok_box::StartedCommand> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn read_file(&self, _: &str, _: &str) -> opengrok_box::BoxResult<String> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn write_file(&self, _: &str, _: &str, _: &str) -> opengrok_box::BoxResult<()> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn expose_port(&self, _: &str, _: u16, _: &str) -> opengrok_box::BoxResult<String> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn stop(&self, _: &str) -> opengrok_box::BoxResult<()> {
+        Ok(())
+    }
+    async fn resume(&self, _: &str) -> opengrok_box::BoxResult<()> {
+        Ok(())
+    }
+    async fn destroy(&self, _: &str) -> opengrok_box::BoxResult<()> {
+        Ok(())
+    }
+    async fn state(&self, _: &str) -> opengrok_box::BoxResult<String> {
+        Ok("running".to_string())
+    }
+    async fn screen_url(&self, _: &str) -> opengrok_box::BoxResult<Option<String>> {
+        Ok(Some(ONE_PORT_PAGE.to_string()))
+    }
+}
+
+/// A place check that does not finish leaves its ticket due, so the next request makes its own.
+/// Stamped up front, a check whose request was dropped mid-way (a webview closing, a client
+/// timing out) passed the next five seconds of requests with no check at all, and a box that
+/// moved meanwhile was still served (#341 review). The check is held here on the store with a
+/// table lock, and the request dropped while it waits.
+#[tokio::test]
+async fn a_place_check_cut_short_leaves_the_next_request_to_check() {
+    use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
+    use opengrok_core::coworker::{Coworker, CoworkerCommand, CoworkerView};
+    let Ok(url) = std::env::var("OG_DATABASE_URL") else {
+        eprintln!("skipping: OG_DATABASE_URL is not set");
+        return;
+    };
+    let url = opengrok_store::gate_database_or_panic(url);
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("connect to Postgres");
+    opengrok_store::migrations::run(&pool)
+        .await
+        .expect("migrations");
+    let store = opengrok_store::PgStore::new(pool.clone());
+    let minter = std::sync::Arc::new(TokenMinter::new(b"place-check-cut-short-test-secret"));
+    let state = AgUiState {
+        auth: crate::auth::AuthState::new(store.clone(), minter.clone(), "host@og.local".into()),
+        door: std::sync::Arc::new(opengrok_harness::MockDoor::echoing()),
+        model: "oag/cheap".to_string(),
+        auto_review_model: "oag/cheap".to_string(),
+        computer: Some(std::sync::Arc::new(OnePort)),
+        vault: None,
+        connectors: crate::connections::routes::Connectors {
+            providers: std::sync::Arc::new(std::collections::BTreeMap::new()),
+            redirect_uri: "http://127.0.0.1/callback".to_string(),
+        },
+        plugins: std::sync::Arc::new(std::collections::BTreeMap::new()),
+        host_settings: None,
+    };
+
+    let (account, at_ms) = (AccountId::new(), chrono::Utc::now().timestamp_millis());
+    let email = format!("place-{}@og.local", uuid::Uuid::now_v7().simple());
+    let registered = Account::default()
+        .decide(AccountCommand::Register {
+            email: email.clone(),
+            password_hash: "x".to_string(),
+            first_name: "Place".to_string(),
+            last_name: String::new(),
+            org_id: String::new(),
+            plan: Plan::Ultra,
+            verified: true,
+            enabled: true,
+            at_ms,
+        })
+        .expect("register");
+    let view = AccountView {
+        id: account.clone(),
+        email,
+        plan: Plan::Ultra,
+        trial: false,
+        updated_at_ms: at_ms,
+        password_hash: Some("x".to_string()),
+        first_name: "Place".to_string(),
+        last_name: String::new(),
+        org_id: None,
+        verified: true,
+        enabled: true,
+        avatar_url: None,
+    };
+    store
+        .append_account(&account, 0, &registered, &view)
+        .await
+        .expect("append the account");
+    let coworker = CoworkerId::new();
+    let hired = Coworker::default()
+        .decide(CoworkerCommand::Hire {
+            name: "Place".to_string(),
+            model: "oag/cheap".to_string(),
+            at_ms,
+        })
+        .expect("hire");
+    let view = CoworkerView::of(coworker.clone(), &Coworker::replay(&hired), at_ms);
+    store
+        .append_coworker(&coworker, &account, 0, &hired, &view)
+        .await
+        .expect("append the coworker");
+    let box_id = format!("bx_place_{}", uuid::Uuid::now_v7().simple());
+    let scope = (account.as_str(), "local-docker");
+    store
+        .claim_scoped_computer("account", scope.0, None, &box_id, scope.1, None, at_ms)
+        .await
+        .expect("the account's box");
+
+    let now = chrono::Utc::now().timestamp();
+    let page = proxied_page(
+        &minter,
+        "http://og.test",
+        &account,
+        &coworker,
+        &box_id,
+        ONE_PORT_PAGE,
+        now,
+    );
+    let page = page.expect("a page");
+    let ticket = page.split('/').nth(7).expect("the ticket").to_string();
+    let cw = coworker.as_str();
+    let first = upstream_for(&state, cw, &ticket).await;
+    assert_eq!(first.map(|(port, _)| port), Some(5999), "learned");
+    let long_ago = Duration::from_secs(60 * 60);
+    if let Ok(mut known) = UPSTREAMS.lock()
+        && let Some(upstream) = known.get_mut(&ticket)
+    {
+        upstream.3 = upstream.3.checked_sub(long_ago).expect("an hour ago");
+    }
+
+    let mut held = pool.begin().await.expect("begin");
+    sqlx::query("lock table scoped_computer in access exclusive mode")
+        .execute(&mut *held)
+        .await
+        .expect("hold the place check");
+    let cut = tokio::time::timeout(
+        Duration::from_millis(500),
+        upstream_for(&state, cw, &ticket),
+    );
+    assert!(cut.await.is_err(), "the check waited on the store");
+    let stamp = UPSTREAMS
+        .lock()
+        .expect("known")
+        .get(&ticket)
+        .map(|upstream| upstream.3);
+    let stamp = stamp.expect("still remembered");
+    assert!(
+        stamp.elapsed() >= PLACE_FOR,
+        "a check that never finished stamped its ticket"
+    );
+    held.rollback().await.expect("release");
+
+    store
+        .claim_scoped_computer(
+            "account",
+            scope.0,
+            Some(&box_id),
+            "bx_moved",
+            scope.1,
+            None,
+            at_ms,
+        )
+        .await
+        .expect("the account's box moves");
+    let next = upstream_for(&state, cw, &ticket).await;
+    assert_eq!(
+        next, None,
+        "the next request checked, and the box had moved"
+    );
+}
