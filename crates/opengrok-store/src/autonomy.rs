@@ -92,6 +92,7 @@ impl PgStore {
             .await?;
         }
 
+        let coworker = state.coworker_id.as_ref().map_or("", |c| c.as_str());
         if state.deleted {
             // The log keeps the history; the view only lists what still exists.
             sqlx::query("delete from schedule_view where id = $1")
@@ -117,7 +118,6 @@ impl PgStore {
             };
             let last_skip = serde_json::to_value(state.skipped.last())
                 .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-            let coworker = state.coworker_id.as_ref().map_or("", |c| c.as_str());
             // A firing in this batch stamps last_fired_ms; anything else leaves it alone.
             let fired_at = events.iter().find_map(|event| match event {
                 ScheduleEvent::Fired { at_ms, .. } => Some(*at_ms),
@@ -179,6 +179,7 @@ impl PgStore {
             .await?;
         }
 
+        opengrok_events::routine_appended(&mut tx, account_id, id, coworker, events).await?;
         tx.commit().await?;
         Ok(seq)
     }

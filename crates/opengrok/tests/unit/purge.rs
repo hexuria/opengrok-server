@@ -333,6 +333,16 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
             "select count(*) from site_login where account_id = $1",
             &account,
         ),
+        (
+            "account_event",
+            "select count(*) from account_event where account_id = $1",
+            &account,
+        ),
+        (
+            "account_event_head",
+            "select count(*) from account_event_head where account_id = $1",
+            &account,
+        ),
         ("skill", "select count(*) from skill where id = $1", &skill),
         (
             "skill_version",

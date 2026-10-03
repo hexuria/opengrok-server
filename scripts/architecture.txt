@@ -25,7 +25,7 @@ opengrok-box: opengrok-core
     | axum sqlx
 opengrok-events: opengrok-core opengrok-wire
     | axum reqwest hyper
-opengrok-store: opengrok-core opengrok-policy opengrok-testdb opengrok-wire
+opengrok-store: opengrok-core opengrok-events opengrok-policy opengrok-testdb opengrok-wire
     | axum reqwest hyper
 opengrok-testdb:
     | axum reqwest hyper
