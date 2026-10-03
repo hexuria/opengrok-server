@@ -74,10 +74,23 @@ pub(crate) async fn record(request: Request, next: Next) -> Response {
                 pending.push_str(&String::from_utf8_lossy(bytes));
                 while let Some(end) = pending.find("\n\n") {
                     let event: String = pending.drain(..end + 2).collect();
+                    // A block that names its `event:` and carries an `id:` is the account events
+                    // stream's (#348), kept whole: its name is not in its data. An AG-UI frame's
+                    // type is, and it has neither.
+                    let field = |name: &str| {
+                        let line = event.lines().find_map(|line| line.strip_prefix(name));
+                        line.map(|value| value.trim().to_string())
+                    };
+                    let (id, named) = (field("id:"), field("event:"));
                     for data in event.lines().filter_map(|line| line.strip_prefix("data:")) {
-                        if let Ok(frame) = serde_json::from_str::<Value>(data.trim()) {
-                            write(json!({ "kind": "agui", "route": route, "frame": frame }));
-                        }
+                        let Ok(frame) = serde_json::from_str::<Value>(data.trim()) else {
+                            continue;
+                        };
+                        write(match (&id, &named) {
+                            (Some(id), Some(named)) => json!({ "kind": "event", "route": route,
+                                "id": id, "event": named, "frame": frame }),
+                            _ => json!({ "kind": "agui", "route": route, "frame": frame }),
+                        });
                     }
                 }
             }

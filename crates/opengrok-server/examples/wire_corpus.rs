@@ -10,7 +10,9 @@
 //! `agui/custom/<name>/<slug>.json`, `rest/<METHOD>_<route with / { } as _>/<status>-<slug>.json`
 //! holding `{method, path, status, body}`, and `MANIFEST.json` with `server_sha`, `recorded_by`,
 //! `emits`, `entries` and `unrecorded` (nativechat `src/opengrok/conformance.rs`). The Mac relay's
-//! stream frames are `relay/<type>/<slug>.json` (#292), new with it.
+//! stream frames are `relay/<type>/<slug>.json` (#292), new with it. So are the account events
+//! stream's blocks (#348): `events/<name>/<slug>.json`, each `{id, event, data}`, the whole block
+//! because its name is not in its data, one per shape of each of the five names, `reset` included.
 //!
 //! One file per distinct SHAPE (keys and value types), named after the lexicographically first
 //! test that produced it, so a re-recording names the same shape the same way. Ids and clocks
@@ -27,6 +29,7 @@ use std::path::{Path, PathBuf};
 use opengrok_core::run::SuspendReason;
 use opengrok_tools::FormResolution;
 use opengrok_wire::agui::{CUSTOM_NAMES, SENT_TYPES};
+use opengrok_wire::events::EVENTS;
 use serde_json::{Map, Value, json};
 
 /// The REST routes NativeChat reads (#255's list). Any other route is recorded but not kept.
@@ -460,6 +463,21 @@ fn records(record_dir: &Path) -> Vec<Record> {
                         out.push(record);
                     }
                 }
+                // A block of the account events stream (#348), kept whole as `{id, event, data}`:
+                // what NativeChat parses is the three, and the name is not in the data. Its id is a
+                // placeholder, since an account's ids depend on what else it did and say nothing.
+                Some("event") => {
+                    let name = word("event");
+                    out.push(Record {
+                        dir: format!("events/{name}"),
+                        status: None,
+                        test,
+                        binary,
+                        route,
+                        method: String::new(),
+                        content: json!({ "id": "1", "event": name, "data": raw["frame"] }),
+                    });
+                }
                 Some("rest") => {
                     if !REST_PREFIXES.iter().any(|prefix| route.starts_with(prefix))
                         || REST_LEFT_OUT.iter().any(|part| route.contains(part))
@@ -760,6 +778,8 @@ fn emits() -> Value {
     json!({
         "agui_types": SENT_TYPES.iter().map(type_word).collect::<Vec<_>>(),
         "custom_names": CUSTOM_NAMES,
+        // The account events stream's block names (#348), one fixture dir each under `events/`.
+        "events": EVENTS,
         "approval_reasons": reasons.iter().map(SuspendReason::as_str).collect::<Vec<_>>(),
         "form_resolutions": resolutions.iter().map(|resolution| resolution.as_str()).collect::<Vec<_>>(),
     })
@@ -791,6 +811,11 @@ fn unrecorded(
     }
     for name in words("custom_names") {
         if !dirs.contains(&format!("agui/custom/{name}")) {
+            missing.push(name);
+        }
+    }
+    for name in words("events") {
+        if !dirs.contains(&format!("events/{name}")) {
             missing.push(name);
         }
     }
