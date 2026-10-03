@@ -182,7 +182,7 @@ async fn a_turns_source_is_resolved_in_one_place_and_never_guessed() {
         NO_BOT,
     )
     .await;
-    assert_eq!(routed.kind(), SourceKind::LocalProxy);
+    assert_eq!(routed.source().kind, SourceKind::LocalProxy);
     assert_eq!(
         routed.source().via,
         Some(Via::Loopback),
@@ -201,7 +201,7 @@ async fn a_turns_source_is_resolved_in_one_place_and_never_guessed() {
         NO_BOT,
     )
     .await;
-    assert_eq!(routed.kind(), SourceKind::Gateway);
+    assert_eq!(routed.source().kind, SourceKind::Gateway);
     assert_eq!(asked(routed), ("xai/grok-4.6".to_string(), None), "the pin");
 
     // A carry-on asks on the model its run started on, not the setting's latest.
@@ -262,10 +262,10 @@ async fn a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_or_is_refused() 
         local_model: Some("gpt-5.5".to_string()),
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
-        relay_off: true,
         plan_fallback: Some(fallback.clone()),
         ..Default::default()
     };
+    assert!(off.relays.is_empty(), "none of the person's computers on");
     let luna = (Some(SourceKind::LocalProxy), Some("gpt-6-luna".to_string()));
     for (bot, pin) in [(NO_BOT, "oag/cheap"), (luna, "gpt-6-luna")] {
         let routed = route(
@@ -327,19 +327,25 @@ async fn a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_or_is_refused() 
         )
     );
 
+    // A PLAN ON THIS SERVER'S OWN MACHINE HAS NO COMPUTER TO SWITCH: with none enrolled, and a
+    // fallback set, its turns, its own plan's Bots' included, go to its proxy.
     let loopback = stored(Some(InferenceSource {
         via: Some(Via::Loopback),
         ..off.clone()
     }));
-    let routed = route(&loopback, Some(&ada), None, None, "r4", NO_BOT).await;
-    let (model, endpoint) = routed.asked(String::new());
-    assert_eq!(model, "gpt-5.5", "the loopback ignores the switch");
-    assert!(
-        matches!(endpoint, Some(ModelEndpoint::Proxy { .. })),
-        "{endpoint:?}"
-    );
+    let luna = (Some(SourceKind::LocalProxy), Some("gpt-6-luna".to_string()));
+    for (bot, asks) in [(NO_BOT, "gpt-5.5"), (luna, "gpt-6-luna")] {
+        let routed = route(&loopback, Some(&ada), None, None, "r4", bot).await;
+        assert_eq!(routed.fallback(Effort::High), (Effort::High, None));
+        let (model, endpoint) = routed.asked(String::new());
+        assert_eq!(model, asks, "the loopback ignores the switch");
+        assert!(
+            matches!(endpoint, Some(ModelEndpoint::Proxy { .. })),
+            "never the fallback nor a refusal: {endpoint:?}"
+        );
+    }
     let on = stored(Some(InferenceSource {
-        relay_off: false,
+        relays: vec!["mac-1".to_string()],
         ..off.clone()
     }));
     let routed = route(&on, Some(&ada), None, None, "r5", NO_BOT).await;
@@ -361,27 +367,28 @@ async fn a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_or_is_refused() 
     );
 }
 
-/// GET SAYS THE SWITCH AND THE FALLBACK ALWAYS (#332): on and null until a person sets them.
+/// GET SAYS THE SWITCH AND THE FALLBACK ALWAYS (#332): the switch is whether any of the person's
+/// computers has its relay on, so off with none enrolled; the fallback null until set.
 #[tokio::test]
 async fn the_setting_reads_back_the_relay_switch_and_the_fallback() {
     let unset = described(&InferenceSource::default(), None).await;
     assert_eq!(
         (&unset["relayEnabled"], &unset["planFallback"]),
-        (&serde_json::json!(true), &serde_json::Value::Null)
+        (&serde_json::json!(false), &serde_json::Value::Null)
     );
-    let off = InferenceSource {
-        relay_off: true,
+    let on = InferenceSource {
+        relays: vec!["mac-1".to_string()],
         plan_fallback: Some(PlanFallback {
             model: "xai/grok-4.6".to_string(),
             effort: Effort::High,
         }),
         ..Default::default()
     };
-    let said = described(&off, None).await;
+    let said = described(&on, None).await;
     let fallback = serde_json::json!({ "model": "xai/grok-4.6", "effort": "high" });
     assert_eq!(
         (&said["relayEnabled"], &said["planFallback"]),
-        (&serde_json::json!(false), &fallback)
+        (&serde_json::json!(true), &fallback)
     );
 }
 
@@ -399,6 +406,7 @@ async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
         has_key: true,
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
+        relays: vec!["mac-1".to_string()],
         ..Default::default()
     };
     let saved = stored(Some(by_mac.clone()));
@@ -407,6 +415,7 @@ async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
             broker: saved.1.clone(),
             account: ada.as_str().to_string(),
             run_id: run.to_string(),
+            machines: vec!["mac-1".to_string()],
         }))
     };
     let routed = route(&saved, Some(&ada), None, None, "r1", NO_BOT).await;
@@ -518,7 +527,7 @@ async fn a_coworkers_own_door_and_pin_sit_between_the_turn_and_the_setting() {
     assert_eq!(asked(routed), ("gpt-5.5".to_string(), dialled.clone()));
     // A coworker on the gateway reads no setting, as a turn that named the gateway does.
     let routed = route(&stored(None), Some(&ada), None, None, "r1", door()).await;
-    assert_eq!(routed.kind(), SourceKind::Gateway);
+    assert_eq!(routed.source().kind, SourceKind::Gateway);
     // On its plan a pin the allowlist refuses falls through to the setting's model; the run's
     // captured one beats both.
     let gateway_pin = own("xai/grok-4.6@sub");
@@ -555,7 +564,11 @@ async fn a_coworkers_own_door_and_pin_sit_between_the_turn_and_the_setting() {
     // A teammate with no proxy of their own, on a coworker whose owner has one.
     let teammate = stored(Some(InferenceSource::default()));
     let routed = route(&teammate, Some(&ada), None, None, "r1", own("gpt-6-luna")).await;
-    assert_eq!(routed.kind(), SourceKind::LocalProxy, "never the gateway");
+    assert_eq!(
+        routed.source().kind,
+        SourceKind::LocalProxy,
+        "never the gateway"
+    );
     assert_eq!(
         routed.asks("xai/grok-4.6@sub"),
         None,
@@ -665,6 +678,7 @@ async fn a_coworkers_pin_goes_to_the_mac_only_on_its_own_plan() {
         kind: SourceKind::LocalProxy,
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
+        relays: vec!["mac-1".to_string()],
         ..Default::default()
     }));
     let own = (Some(SourceKind::LocalProxy), Some("gpt-6-luna".to_string()));
@@ -833,7 +847,7 @@ async fn a_proxy_that_redirects_elsewhere_is_not_followed() {
         matches!(&error, ModelError::Proxy(sentence) if sentence.contains("(302)")),
         "{error:?}"
     );
-    assert!(!healthy(&proxy).await, "a 302 is not healthy");
+    assert!(!healthy(Some(&proxy)).await, "a 302 is not healthy");
     assert!(models(&proxy, None).await.is_err(), "nor a list of models");
     assert_eq!(seen.lock().unwrap().len(), 3, "the proxy itself was asked");
     assert!(
@@ -963,7 +977,7 @@ async fn a_proxy_that_is_not_running_is_named_as_the_proxy() {
         "{sentence}"
     );
     assert!(!sentence.contains("gateway could not"), "{sentence}");
-    assert!(!healthy("http://127.0.0.1:1").await);
+    assert!(!healthy(Some("http://127.0.0.1:1")).await);
 }
 
 /// The settings page's two questions: healthy is a 2xx from `/healthz`, and the model list is
@@ -977,7 +991,7 @@ async fn the_proxy_is_asked_whether_it_is_up_and_what_it_serves() {
         listing.len()
     ))
     .await;
-    assert!(healthy(&proxy).await);
+    assert!(healthy(Some(&proxy)).await);
     let listed = models(&proxy, Some("proxy-key-1")).await.unwrap();
     let ids: Vec<&str> = listed.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(ids, ["gpt-5.5", "gpt-5-codex", "o3"]);
@@ -986,7 +1000,7 @@ async fn the_proxy_is_asked_whether_it_is_up_and_what_it_serves() {
     assert!(sent.contains("get /v1/models "), "{sent}");
     assert!(sent.contains("x-opencodex-api-key: proxy-key-1"), "{sent}");
     assert!(
-        !healthy("http://10.0.0.1:8080").await,
+        !healthy(Some("http://10.0.0.1:8080")).await,
         "never asked off this machine"
     );
 }
@@ -1066,12 +1080,16 @@ async fn a_firing_on_the_plan_is_unreachable_while_its_mac_or_proxy_is_away() {
     let by_mac = setting(InferenceSource {
         kind: SourceKind::LocalProxy,
         via: Some(Via::Mac),
+        relays: vec!["mac-1".to_string()],
         ..Default::default()
     });
     let routed = Route::for_routine(&by_mac, (&ada, &run), &luna).await;
     let offline = "Skipped: your computer was off, so your plan couldn't answer";
     let skipped = routed.unreachable().await;
     assert_eq!(skipped, Some(("relay_offline", offline)));
+    // One switched off, though connected, is no Mac to the firing: it is never asked.
+    let _off = by_mac.1.connect(ada.as_str(), "mac-off");
+    assert_eq!(routed.unreachable().await, Some(("relay_offline", offline)));
     let _stream = by_mac.1.connect(ada.as_str(), "mac-1");
     assert_eq!(routed.unreachable().await, None, "a connected Mac answers");
 
@@ -1096,8 +1114,9 @@ async fn a_firing_on_the_plan_is_unreachable_while_its_mac_or_proxy_is_away() {
     assert_eq!(unsaid, None, "refused in words instead");
 }
 
-/// RELAY OFF (#332): a firing by the Mac with no fallback is skipped `relay_disabled`, though its
-/// Mac is connected; with a fallback it asks the gateway, which nothing skips.
+/// RELAY OFF (#332), none of the person's computers on: a firing by the Mac with no fallback is
+/// skipped `relay_disabled`, though its Mac is connected; with a fallback it asks the gateway,
+/// which nothing skips.
 #[tokio::test]
 async fn a_firing_by_the_mac_with_the_relay_off_is_skipped_unless_a_fallback_answers() {
     let (ada, run) = (AccountId::new(), RunId::new());
@@ -1106,7 +1125,7 @@ async fn a_firing_by_the_mac_with_the_relay_off_is_skipped_unless_a_fallback_ans
         kind: SourceKind::LocalProxy,
         via: Some(Via::Mac),
         relay_model: Some("gpt-5.5".to_string()),
-        relay_off: true,
+        relays: Vec::new(),
         ..Default::default()
     };
     let saved = setting(off.clone());

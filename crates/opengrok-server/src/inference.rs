@@ -45,21 +45,35 @@ pub fn relay_router(host: HostState) -> Router {
 
 type Answer = Result<Response, Response>;
 
-/// The account and machine a daemon token names, or the 401 a relay route answers without one.
-async fn machine(host: &HostState, headers: &HeaderMap) -> Result<(String, String), Response> {
+/// The account and machine a daemon token names, and whether its relay is switched on.
+type Named = Result<(String, String, bool), Response>;
+
+/// The machine a daemon token names, or the 401 a relay route answers without one.
+async fn machine(host: &HostState, headers: &HeaderMap) -> Named {
     let named = crate::local_exec::daemon_from_bearer(&host.agui.auth, headers).await;
     named.ok_or_else(|| refuse(StatusCode::UNAUTHORIZED, "enrol this machine first"))
+}
+
+/// The machine a relay stream opens for, or why not: while its relay is switched off, 409
+/// `relay_disabled`, before any frame.
+async fn relaying(host: &HostState, headers: &HeaderMap) -> Named {
+    let named @ (_, _, true) = machine(host, headers).await? else {
+        let off = json!({ "error": opengrok_wire::relay::RELAY_IS_OFF, "code": "relay_disabled" });
+        return Err((StatusCode::CONFLICT, Json(off)).into_response());
+    };
+    Ok(named)
 }
 
 /// `GET /inference-relay/requests` — a person's Mac holds this open to carry their turns
 /// (`RelayFrame`). Opening it is the Mac saying it can: sends held for it go now (`drain_held`).
 async fn relay_requests(State(host): State<HostState>, headers: HeaderMap) -> Answer {
-    let (account, machine) = machine(&host, &headers).await?;
+    let (account, machine, _) = relaying(&host, &headers).await?;
     let frames = host.agui.auth.relay.connect(&account, &machine);
-    // A TOKEN RETIRED AS ITS STREAM OPENED KEEPS NO STREAM: revoke and re-enrolment close the
-    // machine's stream after its row changes, and this connect may have come after that close.
-    // Dropped here, the stream is closed to the broker before it is sent a frame.
-    self::machine(&host, &headers).await?;
+    // A TOKEN RETIRED, OR A RELAY SWITCHED OFF, AS ITS STREAM OPENED KEEPS NO STREAM: revoke,
+    // re-enrolment and the switch close the machine's stream after its row changes, and this
+    // connect may have come after that close. Dropped here, the stream is closed to the broker
+    // before it is sent a frame (`formal/tla/RelayCall.tla`, `Recheck`).
+    relaying(&host, &headers).await?;
     let held = crate::agui::pending::drain_held(host.clone(), AccountId::from_stored(account));
     tokio::spawn(held);
     let frames = frames.map(|frame| Ok::<_, Infallible>(Event::default().data(frame)));
@@ -75,7 +89,7 @@ async fn relay_response(
     Path(request_id): Path<String>,
     body: axum::body::Body,
 ) -> Answer {
-    let (account, machine) = machine(&host, &headers).await?;
+    let (account, machine, _) = machine(&host, &headers).await?;
     let answering = host.agui.auth.relay.answer(&account, &machine, &request_id);
     let answering = answering.map_err(|refused| match refused {
         Refused::Unknown => refuse(StatusCode::NOT_FOUND, "nothing waits on that id"),
@@ -101,12 +115,25 @@ pub(crate) fn streams(headers: &HeaderMap) -> bool {
     head.is_some_and(|head| head.eq_ignore_ascii_case(SSE))
 }
 
-/// The account's connected Mac and the label it was enrolled under, for `relay` on a read.
-async fn mac(state: &AgUiState, account: &AccountId) -> Option<(String, Option<String>)> {
-    let machine = state.auth.relay.connected(account.as_str())?;
-    let enrolled = state.auth.store.list_daemons(account.as_str()).await;
+/// The account's computers whose relay is on (`InferenceSource::relays`): un-revoked and switched
+/// on, read now. `None` when they cannot be read, never an empty list in their place.
+async fn relays(state: &AgUiState, account: &AccountId) -> Option<Vec<String>> {
+    let listed = state.auth.store.list_daemons(account.as_str()).await;
+    let listed = listed.inspect_err(|error| tracing::warn!(%error, "computers were not read"));
+    let on = listed
+        .ok()?
+        .into_iter()
+        .filter(|row| row.relay_enabled && !row.revoked);
+    Some(on.map(|row| row.machine_id).collect())
+}
+
+/// The account's connected Mac, of its computers `on`, and the label it was enrolled under, for
+/// `relay` on a read.
+async fn mac(state: &AgUiState, id: &AccountId, on: &[String]) -> Option<(String, Option<String>)> {
+    let machine = state.auth.relay.connected(id.as_str(), on)?;
+    let enrolled = state.auth.store.list_daemons(id.as_str()).await;
     let mut rows = enrolled.unwrap_or_default().into_iter();
-    let label = rows.find_map(|(id, label, ..)| (id == machine).then_some(label));
+    let label = rows.find_map(|row| (row.machine_id == machine).then_some(row.label));
     Some((machine, label.filter(|label| !label.is_empty())))
 }
 
@@ -185,7 +212,9 @@ impl local_proxy::Saved for AgUiState {
         let read = self.auth.store.load_account(account).await;
         let read =
             read.inspect_err(|error| tracing::warn!(%error, "an inference source was not read"));
-        read.ok().map(|(account, _)| account.inference_source)
+        let mut setting = read.ok()?.0.inference_source;
+        setting.relays = relays(self, account).await?;
+        Some(setting)
     }
 
     /// A store fault stays in the log: the reason a person reads is one they can act on.
@@ -215,13 +244,20 @@ impl local_proxy::Saved for AgUiState {
 /// `GET /account/inference-source` — the signed-in person's own setting (`local_proxy::described`).
 async fn get_source(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
     match crate::account_api::caller(&state.auth, &headers).await {
-        Ok((id, account, _)) => described(&state, &id, &account.inference_source).await,
+        Ok((id, account, _)) => described(&state, &id, account.inference_source).await,
         Err(refusal) => signed_out(refusal),
     }
 }
 
-async fn described(state: &AgUiState, id: &AccountId, source: &InferenceSource) -> Response {
-    Json(local_proxy::described(source, mac(state, id).await).await).into_response()
+/// With its `relays` read now, and `relay` its connected Mac among them.
+async fn described(state: &AgUiState, id: &AccountId, mut source: InferenceSource) -> Response {
+    let Some(on) = relays(state, id).await else {
+        let why = "your computers could not be read; try again in a moment";
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, why);
+    };
+    let mac = mac(state, id, &on).await;
+    source.relays = on;
+    Json(local_proxy::described(&source, mac).await).into_response()
 }
 
 /// `PUT /account/inference-source` — `{kind, via?, baseUrl?, localModel?, apiKey?, relay?,
@@ -233,7 +269,7 @@ async fn put_source(
     Json(body): Json<Value>,
 ) -> Response {
     match save(&state, &headers, &body).await {
-        Ok((id, saved)) => described(&state, &id, &saved).await,
+        Ok((id, saved)) => described(&state, &id, saved).await,
         Err(refusal) => refusal,
     }
 }
@@ -245,7 +281,7 @@ async fn save(
 ) -> Result<(AccountId, InferenceSource), Response> {
     let caller = crate::account_api::caller(&state.auth, headers).await;
     let (id, account, seq) = caller.map_err(signed_out)?;
-    let (source, key) = (account.inference_source)
+    let (source, key, switched) = (account.inference_source)
         .applied(body, local_proxy::loopback_base)
         .map_err(|why| refuse(StatusCode::BAD_REQUEST, why))?;
     for (field, (door, model, effort)) in source.named_efforts(body).into_iter().flatten() {
@@ -262,6 +298,9 @@ async fn save(
         .decide(AccountCommand::SetInferenceSource { source, at_ms })
         .map_err(|why| refuse(StatusCode::UNPROCESSABLE_ENTITY, why.to_string()))?;
     let after = crate::account_api::persist(&state.auth, &id, account, seq, &events).await?;
+    if let Some(on) = switched {
+        switch_every(state, &id, on).await?;
+    }
     // DROPPED ONLY ONCE THE SETTING SAYS THERE IS NO KEY: a delete that fails leaves a row no turn
     // reads, where the other order could leave a setting naming a key that is gone.
     if let KeyChange::Clear = key
@@ -270,6 +309,22 @@ async fn save(
         tracing::warn!(%error, "a cleared proxy key could not be dropped");
     }
     Ok((id, after.inference_source))
+}
+
+/// `relayEnabled` on the account, as a client from before each computer had its own switch sends
+/// it: every one of the person's computers switched to it, each switched off told so and its
+/// stream closed, as one switched alone is (`PATCH /local-exec/daemon/{machine_id}`).
+async fn switch_every(state: &AgUiState, id: &AccountId, on: bool) -> Result<(), Response> {
+    let switched = state.auth.store.set_relays(id.as_str(), on).await;
+    let switched = switched.map_err(|error| {
+        tracing::error!(%error, "a relay switch was not saved");
+        let why = "your relay switch could not be saved; try again in a moment";
+        refuse(StatusCode::SERVICE_UNAVAILABLE, why)
+    })?;
+    for machine in switched.iter().filter(|_| !on) {
+        state.auth.relay.disable(id.as_str(), machine);
+    }
+    Ok(())
 }
 
 /// Seal the proxy's key before the setting says there is one. With no vault there is nowhere to

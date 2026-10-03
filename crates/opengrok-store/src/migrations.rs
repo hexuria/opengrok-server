@@ -1262,6 +1262,19 @@ create table if not exists timeline_view (
     at_ms        bigint  not null
 );
 create index if not exists timeline_view_coworker_idx on timeline_view (coworker_id, at_ms, id);
+
+-- Each computer's own relay switch, which the account's `relayEnabled` is read from: on for a
+-- machine enrolled before it. #332 kept one switch per account in its inference-source events,
+-- and an account whose last one says off has its machines switched off ONCE, so a relay its
+-- person turned off stays off; a second pass would turn off one they switched on since.
+alter table local_exec_daemon add column if not exists relay_enabled boolean not null default true;
+update local_exec_daemon d set relay_enabled = false
+ where not exists (select 1 from schema_migrations where name = 'the-relay-switch-is-each-computers')
+   and (select e.payload #>> '{source,relay_off}' from events e
+         where e.stream_id = 'account/' || d.account_id
+           and e.event_type = 'account-inference-source-set'
+         order by e.stream_seq desc limit 1) = 'true';
+insert into schema_migrations (name) values ('the-relay-switch-is-each-computers') on conflict do nothing;
 "#;
 
 /// Run on EVERY boot, after `SCHEMA`, whether or not the schema itself was replayed.

@@ -1028,6 +1028,10 @@ async fn a_bot_on_its_own_plan_is_skipped_while_the_relay_is_off_with_no_fallbac
     let uriah = h.person("Uriah").await;
     let ada = on_the_gateway(&h, &uriah, "Ada").await;
     let luna = on_its_plan(&h, &uriah, "Luna").await;
+    // A computer of Uriah's, which the switch turns off and on again with the rest.
+    let label = Some(json!({ "label": "Uriah's MacBook" }));
+    let (status, enrolled) = h.call(&uriah, "POST", "/local-exec/daemon", label).await;
+    assert_eq!(status, 200, "{enrolled}");
     relay_off(&h, &uriah, Value::Null).await;
     h.script(
         &ada,

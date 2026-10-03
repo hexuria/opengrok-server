@@ -206,6 +206,7 @@ async fn the_opening_says_where_the_turn_asks_in_the_same_write() {
             broker: std::sync::Arc::default(),
             account: "acct-1".to_string(),
             run_id: "r1".to_string(),
+            machines: vec!["mac-1".to_string()],
         })),
         ..proxy.clone()
     };

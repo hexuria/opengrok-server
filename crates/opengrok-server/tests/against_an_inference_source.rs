@@ -530,8 +530,8 @@ async fn a_person_is_on_the_gateway_until_they_choose_their_own_subscription() {
                "healthy": false, "hasApiKey": false,
                "relay": {"connected": false, "machineId": null, "machineLabel": null,
                          "localModel": null},
-               "newBotDefault": null, "relayEnabled": true, "planFallback": null}),
-        "the default, whole: never a 404 and never an empty body"
+               "newBotDefault": null, "relayEnabled": false, "planFallback": null}),
+        "the default, whole: never a 404 and never an empty body; no computer, no relay"
     );
 }
 
@@ -548,7 +548,7 @@ async fn a_person_saves_their_own_proxy_and_reads_it_back_healthy() {
                           "localModel": "gpt-5.5", "healthy": true, "hasApiKey": false,
                           "relay": {"connected": false, "machineId": null, "machineLabel": null,
                                     "localModel": null},
-                          "newBotDefault": null, "relayEnabled": true, "planFallback": null});
+                          "newBotDefault": null, "relayEnabled": false, "planFallback": null});
     assert_eq!(
         saved, expected,
         "the PUT answers as GET does, its trailing slash gone"

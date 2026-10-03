@@ -105,7 +105,7 @@ async fn daemon_enrolment_and_audit_round_trip() {
         .expect("enrol");
     assert_eq!(
         store.daemon_jti(&account, &machine).await.expect("jti"),
-        Some(("jti-1".to_string(), false))
+        Some(("jti-1".to_string(), false, true))
     );
     // Re-enrol rotates the jti and clears revocation.
     store
@@ -114,7 +114,7 @@ async fn daemon_enrolment_and_audit_round_trip() {
         .expect("re-enrol");
     assert_eq!(
         store.daemon_jti(&account, &machine).await.expect("jti"),
-        Some(("jti-2".to_string(), false))
+        Some(("jti-2".to_string(), false, true))
     );
     // Revoke → the row says revoked (the poll gate refuses it).
     store
@@ -123,7 +123,7 @@ async fn daemon_enrolment_and_audit_round_trip() {
         .expect("revoke");
     assert_eq!(
         store.daemon_jti(&account, &machine).await.expect("jti"),
-        Some(("jti-2".to_string(), true))
+        Some(("jti-2".to_string(), true, true))
     );
     assert_eq!(store.list_daemons(&account).await.expect("list").len(), 1);
 
@@ -145,6 +145,62 @@ async fn daemon_enrolment_and_audit_round_trip() {
     assert_eq!(log[0]["decision"], "allow");
     assert_eq!(log[0]["outcome"], "success");
     assert_eq!(log[0]["exitCode"], 0);
+}
+
+/// ONE RELAY SWITCH PER COMPUTER, on the account's own row: on when enrolled; another account's
+/// machine under the same id is untouched and unknown to it; a revoked one is left as it was;
+/// every one is switched at once, revoked or not; and one enrolled again keeps its switch.
+#[tokio::test]
+async fn a_computers_relay_switch_is_its_own_and_outlives_its_re_enrolment() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let suffix = uuid::Uuid::now_v7().simple().to_string();
+    let [ada, eve] = ["ada", "eve"].map(|who| format!("acct_{who}_{suffix}"));
+    for (account, machine) in [(&ada, "mac-a"), (&ada, "mac-b"), (&eve, "mac-a")] {
+        let enrolled = store.enrol_daemon(account, machine, "Mac", "jti-1", 1);
+        enrolled.await.expect("enrol");
+    }
+    let on = |account: &str, machine: &str| {
+        let (store, account, machine) = (store.clone(), account.to_string(), machine.to_string());
+        async move {
+            let row = store.daemon_jti(&account, &machine).await.expect("read");
+            row.expect("enrolled").2
+        }
+    };
+    let listed = store.list_daemons(&ada).await.expect("list");
+    assert!(listed.iter().all(|row| row.relay_enabled), "{listed:?}");
+
+    let row = store.set_relay(&ada, "mac-a", false).await.expect("switch");
+    let row = row.expect("Ada's");
+    assert_eq!(
+        (row.machine_id.as_str(), row.relay_enabled),
+        ("mac-a", false)
+    );
+    assert!(on(&eve, "mac-a").await, "Eve's own");
+    let unknown = store
+        .set_relay(&ada, "mac-nobody", false)
+        .await
+        .expect("switch");
+    assert_eq!(unknown, None);
+    let again = store.enrol_daemon(&ada, "mac-a", "Mac", "jti-2", 2);
+    again.await.expect("enrol again");
+    assert!(!on(&ada, "mac-a").await, "kept");
+
+    store.revoke_daemon(&ada, "mac-b").await.expect("revoke");
+    let revoked = store.set_relay(&ada, "mac-b", false).await.expect("switch");
+    let revoked = revoked.expect("Ada's");
+    assert_eq!(
+        (revoked.revoked, revoked.relay_enabled),
+        (true, true),
+        "as it was"
+    );
+    let mut every = store.set_relays(&ada, false).await.expect("every one");
+    every.sort();
+    assert_eq!(every, ["mac-a", "mac-b"]);
+    assert!(!on(&ada, "mac-a").await && !on(&ada, "mac-b").await);
+    assert!(on(&eve, "mac-a").await, "Eve's still");
+    store.set_relays(&ada, true).await.expect("every one");
+    assert!(on(&ada, "mac-a").await && on(&ada, "mac-b").await);
 }
 
 // -------------------------------------------------------------------------------------------------

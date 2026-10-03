@@ -507,6 +507,12 @@ async fn a_fallback_for_the_relay_is_refused_an_effort_its_gateway_model_does_no
     let h = harness(&database_url).await;
     let ada = h.person().await;
     h.on_the_proxy(&ada).await;
+    // The switch is read from the person's computers, off with none enrolled: one enrolled, on,
+    // is what shows the refused save switched nothing.
+    let enrol = Some(json!({ "label": "Ada's Mac" }));
+    let post = reqwest::Method::POST;
+    let (status, enrolled) = h.send(&ada, post, "/local-exec/daemon", enrol).await;
+    assert_eq!(status, 200, "{enrolled}");
     let fallback = |model: &str, effort: &str| {
         json!({ "kind": "local_proxy", "relayEnabled": false,
                 "planFallback": { "model": model, "effort": effort } })

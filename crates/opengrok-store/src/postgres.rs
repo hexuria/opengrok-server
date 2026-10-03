@@ -27,6 +27,17 @@ pub struct PgStore {
     pool: PgPool,
 }
 
+/// An enrolled machine (`local_exec_daemon`), as `GET /local-exec/daemon` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct Daemon {
+    pub machine_id: String,
+    pub label: String,
+    pub enrolled_at_ms: i64,
+    pub revoked: bool,
+    /// Its own relay switch, on until its person switches it off.
+    pub relay_enabled: bool,
+}
+
 /// One run as a routine's history lists it: the stored status word (`running`,
 /// `awaiting-approval`, `finished`, `failed`), when it began, when it last moved.
 #[derive(Debug, Clone)]
@@ -1953,16 +1964,9 @@ impl PgStore {
         account_id: &str,
         machine_id: &str,
     ) -> StoreResult<Option<String>> {
-        let row = sqlx::query(
-            "select mode from local_exec_policy where account_id = $1 and machine_id = $2",
-        )
-        .bind(account_id)
-        .bind(machine_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row
-            .map(|row| row.try_get::<String, _>("mode"))
-            .transpose()?)
+        let sql = "select mode from local_exec_policy where account_id = $1 and machine_id = $2";
+        let mode = sqlx::query_scalar(sql).bind(account_id).bind(machine_id);
+        Ok(mode.fetch_optional(&self.pool).await?)
     }
 
     pub async fn set_local_exec_mode(
@@ -1994,18 +1998,10 @@ impl PgStore {
         machine_id: &str,
         kind: &str,
     ) -> StoreResult<Vec<String>> {
-        let rows = sqlx::query(
-            "select pattern from local_exec_rule
-             where account_id = $1 and machine_id = $2 and kind = $3 order by added_at_ms",
-        )
-        .bind(account_id)
-        .bind(machine_id)
-        .bind(kind)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| Ok(row.try_get::<String, _>("pattern")?))
-            .collect()
+        let sql = "select pattern from local_exec_rule
+                   where account_id = $1 and machine_id = $2 and kind = $3 order by added_at_ms";
+        let rows = sqlx::query_scalar(sql).bind(account_id).bind(machine_id);
+        Ok(rows.bind(kind).fetch_all(&self.pool).await?)
     }
 
     pub async fn add_local_exec_rule(
@@ -2079,62 +2075,52 @@ impl PgStore {
         Ok(())
     }
 
-    /// The daemon's current token id and whether it is revoked, for verifying a presented token.
+    /// The daemon's token id, whether it is revoked and whether its relay is on, for its token.
     pub async fn daemon_jti(
         &self,
         account_id: &str,
         machine_id: &str,
-    ) -> StoreResult<Option<(String, bool)>> {
-        let row = sqlx::query(
-            "select jti, revoked from local_exec_daemon where account_id = $1 and machine_id = $2",
-        )
-        .bind(account_id)
-        .bind(machine_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(|row| {
-            Ok((
-                row.try_get::<String, _>("jti")?,
-                row.try_get::<bool, _>("revoked")?,
-            ))
-        })
-        .transpose()
+    ) -> StoreResult<Option<(String, bool, bool)>> {
+        let sql = "select jti, revoked, relay_enabled from local_exec_daemon
+                   where account_id = $1 and machine_id = $2";
+        let row = sqlx::query_as(sql).bind(account_id).bind(machine_id);
+        Ok(row.fetch_optional(&self.pool).await?)
     }
 
     pub async fn revoke_daemon(&self, account_id: &str, machine_id: &str) -> StoreResult<()> {
-        sqlx::query(
-            "update local_exec_daemon set revoked = true where account_id = $1 and machine_id = $2",
-        )
-        .bind(account_id)
-        .bind(machine_id)
-        .execute(&self.pool)
-        .await?;
+        let sql = "update local_exec_daemon set revoked = true
+                   where account_id = $1 and machine_id = $2";
+        let query = sqlx::query(sql).bind(account_id).bind(machine_id);
+        query.execute(&self.pool).await?;
         Ok(())
     }
 
-    /// The account's enrolled machines: (machine_id, label, enrolled_at_ms, revoked).
-    #[allow(clippy::type_complexity)]
-    pub async fn list_daemons(
-        &self,
-        account_id: &str,
-    ) -> StoreResult<Vec<(String, String, i64, bool)>> {
-        let rows = sqlx::query(
-            "select machine_id, label, enrolled_at_ms, revoked from local_exec_daemon
-             where account_id = $1 order by enrolled_at_ms desc",
-        )
-        .bind(account_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok((
-                    row.try_get::<String, _>("machine_id")?,
-                    row.try_get::<String, _>("label")?,
-                    row.try_get::<i64, _>("enrolled_at_ms")?,
-                    row.try_get::<bool, _>("revoked")?,
-                ))
-            })
-            .collect()
+    /// The account's enrolled machines, newest first.
+    pub async fn list_daemons(&self, account_id: &str) -> StoreResult<Vec<Daemon>> {
+        let sql = "select machine_id, label, enrolled_at_ms, revoked, relay_enabled
+                   from local_exec_daemon where account_id = $1 order by enrolled_at_ms desc";
+        let rows = sqlx::query_as(sql).bind(account_id);
+        Ok(rows.fetch_all(&self.pool).await?)
+    }
+
+    /// One of `owner`'s machines with its relay switched, as it then is; `None` for one `owner`
+    /// has not enrolled, which another account's is too. A revoked one is left as it was.
+    pub async fn set_relay(&self, owner: &str, id: &str, on: bool) -> StoreResult<Option<Daemon>> {
+        let sql = "update local_exec_daemon
+                   set relay_enabled = case when revoked then relay_enabled else $3 end
+                   where account_id = $1 and machine_id = $2
+                   returning machine_id, label, enrolled_at_ms, revoked, relay_enabled";
+        let row = sqlx::query_as(sql).bind(owner).bind(id).bind(on);
+        Ok(row.fetch_optional(&self.pool).await?)
+    }
+
+    /// Every one of the account's machines switched at once, revoked ones too, so one enrolled
+    /// again keeps the switch: the ids switched.
+    pub async fn set_relays(&self, account_id: &str, on: bool) -> StoreResult<Vec<String>> {
+        let sql = "update local_exec_daemon set relay_enabled = $2 where account_id = $1
+                   returning machine_id";
+        let rows = sqlx::query_scalar(sql).bind(account_id).bind(on);
+        Ok(rows.fetch_all(&self.pool).await?)
     }
 
     /// Write an audit row at enqueue time (before the command runs).
