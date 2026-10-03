@@ -5,7 +5,7 @@
 //! caller has not already committed to, and decide nothing about the run or the routine.
 
 use opengrok_core::id::{AccountId, ScheduleId};
-use opengrok_core::run::{RunEvent, RunView};
+use opengrok_core::run::{RunEvent, RunStatus, RunView};
 use opengrok_core::schedule::{Schedule, ScheduleEvent};
 use opengrok_wire::events::{Change, Note};
 use serde_json::Value;
@@ -35,7 +35,8 @@ const FIRED: &str = "select event_type, payload from events
 ///
 /// A batch of only `ToolStarted` and `Spent` is the log's own bookkeeping and writes nothing.
 /// Any other is a `thread.changed`, with `run.started` before it when the run began in this batch,
-/// and `run.finished` after it when it ended in this one. A run waiting on a card has not ended.
+/// `run.waiting` after it when the batch parked the run on a card, and `run.finished` after it
+/// when it ended in this one. A run waiting on a card has not ended.
 /// The `thread.changed` names the run when the run's own loop wrote the batch, and says `null`
 /// when a person's answer or stop, or the sweep, did.
 pub async fn run_appended(
@@ -108,6 +109,22 @@ pub async fn run_appended(
         coworker_id,
         run_id: caused_by,
     });
+    // A PARK IS TOLD ONCE, FROM WHAT THE BATCH LEAVES THE RUN AS: still waiting. A park that rode
+    // with an ending left nothing to answer, a frame appended to a run already waiting parked
+    // nothing, and a person's answer is no park. A round that stacks cards is one park, told with
+    // the reason of the call the run now waits on: the aggregate keeps one pending call, the last.
+    let parked = events.iter().rev().find_map(|event| match event {
+        RunEvent::Suspended { reason, .. } => Some(*reason),
+        _ => None,
+    });
+    if let Some(reason) = parked.filter(|_| view.status == RunStatus::AwaitingApproval) {
+        notes.push(Note::RunWaiting {
+            run_id,
+            thread_id,
+            coworker_id,
+            reason,
+        });
+    }
     if ended {
         let state = view.status.history_word();
         notes.push(Note::RunFinished {

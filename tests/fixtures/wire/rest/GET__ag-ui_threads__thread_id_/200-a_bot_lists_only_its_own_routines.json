@@ -78,7 +78,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "[{\"id\":\"sched_0199bb4e-0000-7000-8000-000000000005\",\"name\":\"Report\",\"bot\":\"Luna\",\"prompt\":\"post the standup\",\"active\":true,\"when\":[\"0 9 * * MON-FRI\"],\"tz\":\"UTC\",\"nextDueMs\":1791190800000,\"webhook\":false},{\"id\":\"sched_0199bb4e-0000-7000-8000-000000000006\",\"name\":\"Standup\",\"bot\":\"Luna\",\"prompt\":\"post the standup\",\"active\":true,\"when\":[\"0 9 * * MON-FRI\"],\"tz\":\"UTC\",\"nextDueMs\":1791190800000,\"webhook\":false}]",
             "timestamp": 100,
-            "durationMs": 67,
+            "durationMs": 9,
             "toolCallId": "call-routine"
           },
           {

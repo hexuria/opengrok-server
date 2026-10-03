@@ -1,0 +1,40 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-awaiting-approval",
+  "threadId": "thread-missed",
+  "runId": "0199bb4e-0000-7000-8000-000000000001",
+  "callId": "call-routine",
+  "tool": "request_user_form",
+  "arguments": {
+    "title": "Missed card 8a4d",
+    "instruction": "Missed card 8a4d, please",
+    "fields": [
+      {
+        "id": "email",
+        "label": "Missed card 8a4d email",
+        "type": "text",
+        "required": false,
+        "secret": false
+      }
+    ],
+    "collect": true
+  },
+  "reason": "user-form",
+  "why": "Waiting for you",
+  "entryId": "e_0199bb4e-0000-7000-8000-000000000002",
+  "formRequest": {
+    "title": "Missed card 8a4d",
+    "instruction": "Missed card 8a4d, please",
+    "fields": [
+      {
+        "id": "email",
+        "label": "Missed card 8a4d email",
+        "type": "text",
+        "required": false,
+        "secret": false
+      }
+    ],
+    "collect": true
+  }
+}

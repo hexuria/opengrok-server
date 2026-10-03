@@ -58,7 +58,7 @@ pinned by the `server_sha` in its `MANIFEST.json`, and parses every file.
   only noted: some tests read a routine while its run is still in flight, and whether a field
   is `null` or an object depends on timing.
 - `MANIFEST.json`'s `emits` is every AG-UI type, CUSTOM name, approval reason and form resolution
-  the server CAN send, and the five blocks of the account events stream (`events`, from
+  the server CAN send, and the six blocks of the account events stream (`events`, from
   `opengrok_wire::events::EVENTS`). It comes from `opengrok_wire::agui::SENT_TYPES` and
   `CUSTOM_NAMES` and from the enums, not from what the tests happened to reach.
   `the_wire_names_are_all_listed` scans the source and fails when a producer sends a name those

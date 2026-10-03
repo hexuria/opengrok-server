@@ -44,7 +44,9 @@ fn unique(prefix: &str) -> String {
 }
 
 /// A model that makes the one call its person's message asks for, then says the result back; any
-/// other message gets a plain answer, which is how a routine's run and a chat turn end.
+/// other message gets a plain answer, which is how a routine's run and a chat turn end. A message
+/// that names a `then` call gets it made after the first call's result, under an id of its own (a
+/// card is answered once per call id), which is how a run comes to park twice.
 #[derive(Default)]
 struct Caller {
     asked: Mutex<Vec<ModelRequest>>,
@@ -54,33 +56,33 @@ struct Caller {
 impl ModelDoor for Caller {
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
         self.asked.lock().unwrap().push(request.clone());
-        let last = request.messages.last();
-        let deltas = match last {
-            Some(message) if message.role == "tool" => {
+        let asked = request.messages.iter().rev().find(|m| m.role == "user");
+        let wanted: Value = asked
+            .and_then(|message| serde_json::from_str(&message.content).ok())
+            .unwrap_or_default();
+        let none = Value::Null;
+        let results = request.messages.iter().filter(|m| m.role == "tool").count();
+        let (call, id) = match results {
+            0 => (&wanted, "call-routine"),
+            1 => (&wanted["then"], "call-then"),
+            _ => (&none, ""),
+        };
+        let deltas = match (call["tool"].as_str(), request.messages.last()) {
+            (Some(name), _) => vec![
+                ModelDelta::ToolCallStart {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: id.to_string(),
+                    delta: call["arguments"].to_string(),
+                },
+                ModelDelta::ToolCallEnd { id: id.to_string() },
+            ],
+            (None, Some(message)) if message.role == "tool" => {
                 vec![ModelDelta::Text(format!("result: {}", message.content))]
             }
-            _ => {
-                let asked = request.messages.iter().rev().find(|m| m.role == "user");
-                let wanted: Value = asked
-                    .and_then(|message| serde_json::from_str(&message.content).ok())
-                    .unwrap_or_default();
-                match wanted["tool"].as_str() {
-                    Some(name) => vec![
-                        ModelDelta::ToolCallStart {
-                            id: "call-routine".to_string(),
-                            name: name.to_string(),
-                        },
-                        ModelDelta::ToolCallArgs {
-                            id: "call-routine".to_string(),
-                            delta: wanted["arguments"].to_string(),
-                        },
-                        ModelDelta::ToolCallEnd {
-                            id: "call-routine".to_string(),
-                        },
-                    ],
-                    None => vec![ModelDelta::Text("nothing to do".to_string())],
-                }
-            }
+            (None, _) => vec![ModelDelta::Text("nothing to do".to_string())],
         };
         Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
     }
@@ -285,6 +287,33 @@ impl Sse {
 
 fn finished(run: &str) -> impl Fn(&Block) -> bool + '_ {
     move |block| block.event == "run.finished" && block.data["runId"] == run
+}
+
+fn waiting(run: &str) -> impl Fn(&Block) -> bool + '_ {
+    move |block| block.event == "run.waiting" && block.data["runId"] == run
+}
+
+/// A form the Bot asks for in chat (nothing is typed into a page), in words that mark it.
+fn form(title: &str) -> Value {
+    let field = json!({ "id": "email", "label": format!("{title} email"), "type": "text" });
+    json!({ "collect": true, "title": title, "instruction": format!("{title}, please"),
+            "fields": [field] })
+}
+
+/// A `run.waiting` as the contract words it, down to the bytes, and none of the card's words
+/// (`card`: its title, its tool, its arguments, its call) anywhere in the block.
+fn assert_waiting(block: &Block, run: &str, thread: &str, bot: &str, reason: &str, card: &[&str]) {
+    let data = format!(
+        r#"{{"runId":"{run}","threadId":"{thread}","coworkerId":"{bot}","reason":"{reason}"}}"#
+    );
+    let bytes = format!("id: {}\nevent: run.waiting\ndata: {data}\n\n", block.id);
+    assert_eq!(block.text, bytes);
+    for word in card {
+        assert!(
+            !block.text.contains(word),
+            "{word:?} is on the wire: {block:?}"
+        );
+    }
 }
 
 impl Harness {
@@ -644,12 +673,14 @@ async fn a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_und
     let started = sse.must().await;
     assert_eq!(started.event, "run.started");
     assert_eq!(started.data["runId"], turn.as_str());
-    // Its rounds up to the card, and then quiet: the run is waiting and has not ended.
+    // Its rounds up to the card, the run saying it is waiting, and then quiet: it has not ended.
     let mut rounds = vec![sse.must().await];
     while let Some(more) = sse.block(700).await {
         rounds.push(more);
     }
-    for round in &rounds {
+    let waits = rounds.iter().filter(|round| round.event == "run.waiting");
+    assert_eq!(waits.count(), 1, "{:?}", words(&rounds));
+    for round in rounds.iter().filter(|round| round.event != "run.waiting") {
         assert_eq!(round.event, "thread.changed", "{round:?}");
         assert_eq!(round.data["runId"], turn.as_str(), "the run's own round");
     }
@@ -675,6 +706,11 @@ async fn a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_und
         settled.data,
         json!({ "threadId": started.data["threadId"], "coworkerId": luna, "runId": null }),
         "the person's answer names no run"
+    );
+    assert!(
+        told.iter().all(|block| block.event != "run.waiting"),
+        "the yes is no new wait: {:?}",
+        words(&told)
     );
     for block in told.iter().filter(|block| block.event == "thread.changed") {
         let run = &block.data["runId"];
@@ -856,6 +892,191 @@ async fn every_routine_write_is_told_whether_the_pane_or_a_bot_made_it() {
     assert_eq!(updated[0].data["routineId"], routine.as_str());
 }
 
+// ---- when a run is waiting on the person -----------------------------------------------------
+
+impl Harness {
+    /// The card `run` is waiting on, as the approvals queue lists it for `who`. Not asked while a
+    /// form is pending: a form's arguments are a shape the wire corpus does not hold for that
+    /// route, and a test of the events stream is not where it should come from.
+    async fn card(&self, who: &Person, run: &str) -> Value {
+        let (status, queue) = self
+            .send(who, reqwest::Method::GET, "/ag-ui/approvals", None)
+            .await;
+        assert_eq!(status, 200, "{queue}");
+        let cards = queue.as_array().unwrap();
+        let found = cards.iter().find(|card| card["runId"] == run);
+        found.expect("the run's card in the queue").clone()
+    }
+
+    /// `who` answers `call` of `run`, yes or no. The model door's calls are `call-routine`, and
+    /// after its first result `call-then`.
+    async fn answer(&self, who: &Person, run: &str, call: &str, approved: bool) {
+        let body = json!({ "call_id": call, "approved": approved });
+        let path = format!("/ag-ui/runs/{run}/answer");
+        let (status, answered) = self
+            .send(who, reqwest::Method::POST, &path, Some(body))
+            .await;
+        assert_eq!(status, 200, "{answered}");
+    }
+}
+
+/// A RUN THAT PARKS ON A CARD IS TOLD WAITING, ONCE, IN IDS AND THE CARD'S OWN WORD. A Bot's delete
+/// always asks, on the policy's card: after the round that raised it the stream says the run is
+/// waiting, the app's "needs you", with the word the approvals queue gives that same card and not
+/// a word of what the card says. The person's yes is no new wait: the run goes on to its end and
+/// nothing says it again.
+#[tokio::test]
+async fn a_run_that_parks_on_an_approval_card_is_told_waiting_once_and_going_on_is_not() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let ada = h.person("Ada", None).await;
+    let luna = h.hire(&ada, "Luna").await;
+    let id = h.routine(&ada, &luna, "Card words 4e1b").await;
+    let mut sse = h.listen(&ada, None).await;
+    assert_eq!(sse.must().await.event, "reset");
+
+    let call = json!({ "routine": id });
+    let (turn, called) = h.call(&ada, &luna, "delete_routine", call).await;
+    let thread = called["thread"].as_str().unwrap();
+    let told = sse.until(waiting(&turn)).await;
+    let (wait, before) = told.split_last().unwrap();
+    let raised = |block: &Block| block.event == "thread.changed" && block.data["runId"] == turn;
+    assert!(before.iter().any(raised), "after the round that raised it");
+    let card = h.card(&ada, &turn).await;
+    assert_eq!(card["reason"], "policy-approval");
+    let spoken = [
+        "Card words 4e1b",
+        "summarise the quarter",
+        "delete_routine",
+        "call-routine",
+    ];
+    for block in &told {
+        for word in spoken {
+            assert!(
+                !block.text.contains(word),
+                "{word:?} is on the wire: {block:?}"
+            );
+        }
+    }
+    assert_waiting(wait, &turn, thread, &luna, "policy-approval", &spoken);
+    sse.nothing_for(700).await;
+
+    h.answer(&ada, &turn, card["callId"].as_str().unwrap(), true)
+        .await;
+    let ended = sse.until(finished(&turn)).await;
+    let said = words(&ended);
+    assert!(
+        ended.iter().all(|block| block.event != "run.waiting"),
+        "{said:?}"
+    );
+}
+
+/// A RUN THAT PARKS ON A FORM IS TOLD WAITING, in the form's own word and none of its words: the
+/// title, the instruction and the fields are the card's, and the tool that raised it is not on the
+/// stream either. The person's dismissal ends the wait and nothing says it again.
+#[tokio::test]
+async fn a_run_that_parks_on_a_form_is_told_waiting_in_the_forms_word() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let ada = h.person("Ada", None).await;
+    let luna = h.hire(&ada, "Luna").await;
+    let mut sse = h.listen(&ada, None).await;
+    assert_eq!(sse.must().await.event, "reset");
+
+    let asked = form("Tax profile 6e2f");
+    let (turn, called) = h.call(&ada, &luna, "request_user_form", asked).await;
+    let thread = called["thread"].as_str().unwrap();
+    let told = sse.until(waiting(&turn)).await;
+    let spoken = [
+        "Tax profile 6e2f",
+        "please",
+        "email",
+        "request_user_form",
+        "call-routine",
+    ];
+    for block in &told {
+        for word in spoken {
+            assert!(
+                !block.text.contains(word),
+                "{word:?} is on the wire: {block:?}"
+            );
+        }
+    }
+    assert_waiting(
+        told.last().unwrap(),
+        &turn,
+        thread,
+        &luna,
+        "user-form",
+        &spoken,
+    );
+    sse.nothing_for(700).await;
+
+    h.answer(&ada, &turn, "call-routine", false).await;
+    let ended = sse.until(finished(&turn)).await;
+    let said = words(&ended);
+    assert!(
+        ended.iter().all(|block| block.event != "run.waiting"),
+        "{said:?}"
+    );
+}
+
+/// A RUN THAT PARKS TWICE IS TOLD WAITING TWICE, each time in the word of its own card, and the
+/// yes between them is not a third. The first card is a policy's (a Bot's `shell` needs a yes);
+/// once the yes lets the run go on, the second, on the same run, is a form.
+#[tokio::test]
+async fn a_run_that_parks_twice_is_told_waiting_twice() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let ada = h.person("Ada", None).await;
+    let luna = h.hire(&ada, "Luna").await;
+    let path = format!("/coworkers/{luna}/approvals");
+    let grant = Some(json!({ "tools": ["shell"] }));
+    let (status, set) = h.send(&ada, reqwest::Method::POST, &path, grant).await;
+    assert_eq!(status, 200, "{set}");
+    let mut sse = h.listen(&ada, None).await;
+    assert_eq!(sse.must().await.event, "reset");
+
+    let then = json!({ "tool": "request_user_form", "arguments": form("Second card 7c0a") });
+    let said = json!({ "tool": "shell", "arguments": { "command": "echo first-card-3d5e" },
+                       "then": then });
+    let thread = unique("thr");
+    let (turn, status) = h.turn(&ada, &luna, &thread, &said.to_string()).await;
+    assert_eq!(status, 200);
+
+    let first = sse.until(waiting(&turn)).await;
+    let spoken = ["echo first-card-3d5e", "Second card 7c0a", "shell"];
+    assert_waiting(
+        first.last().unwrap(),
+        &turn,
+        &thread,
+        &luna,
+        "policy-approval",
+        &spoken,
+    );
+    sse.nothing_for(700).await;
+
+    h.answer(&ada, &turn, "call-routine", true).await;
+    let second = sse.until(waiting(&turn)).await;
+    let (wait, between) = second.split_last().unwrap();
+    assert_waiting(wait, &turn, &thread, &luna, "user-form", &spoken);
+    assert!(between.iter().all(|block| block.event == "thread.changed"));
+    assert_eq!(
+        between[0].data["runId"],
+        Value::Null,
+        "the person's yes names no run"
+    );
+    sse.nothing_for(700).await;
+
+    h.answer(&ada, &turn, "call-then", false).await;
+    let ended = sse.until(finished(&turn)).await;
+    let said = words(&ended);
+    assert!(
+        ended.iter().all(|block| block.event != "run.waiting"),
+        "{said:?}"
+    );
+}
+
 // ---- whose it is ---------------------------------------------------------------------------
 
 /// NOTES FOLLOW THE OWNER OF THE THING. On a Bot shared with the org, the owner is told of their own
@@ -929,7 +1150,115 @@ async fn on_a_shared_bot_each_person_is_told_only_what_is_theirs() {
     }
 }
 
+/// A PARK IS TOLD TO THE PERSON WHOSE TURN IT IS. On a Bot shared with the org, an org-mate's turn
+/// that parks is the mate's to hear and not the owner's; the owner's, on the same thread id, is the
+/// owner's and not the mate's; somebody outside the org hears nothing at all. The thread id (the
+/// app names a Bot's chat after the Bot) says nothing of whose it is.
+#[tokio::test]
+async fn on_a_shared_bot_only_the_person_whose_turn_parked_is_told_it_is_waiting() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let org = unique("org");
+    let (ann, ben) = (
+        h.person("Ann", Some(&org)).await,
+        h.person("Ben", Some(&org)).await,
+    );
+    let cy = h.person("Cy", Some(&unique("elsewhere"))).await;
+    // The Bot's computer is the Bot's, not each person's, so the mate has one to raise a card on.
+    let sharing = h.store.set_sharing_mode("org", &org, "per-bot", 1).await;
+    sharing.expect("per-bot");
+    let ada = h.hire(&ann, "Ada").await;
+    let shared = Some(json!({ "visibility": "org" }));
+    let path = format!("/coworkers/{ada}");
+    let (status, _) = h.send(&ann, reqwest::Method::PATCH, &path, shared).await;
+    assert_eq!(status, 200);
+    let (mut for_ann, mut for_ben, mut for_cy) = (
+        h.listen(&ann, None).await,
+        h.listen(&ben, None).await,
+        h.listen(&cy, None).await,
+    );
+    for sse in [&mut for_ann, &mut for_ben, &mut for_cy] {
+        assert_eq!(sse.must().await.event, "reset");
+    }
+
+    let thread = format!("gateway-{ada}");
+    let asked = json!({ "tool": "request_user_form", "arguments": form("Shared card 2b9e") });
+    let spoken = ["Shared card 2b9e", "request_user_form"];
+
+    // The member's turn parks: the member is told, the owner and the stranger are not.
+    let (bens, status) = h.turn(&ben, &ada, &thread, &asked.to_string()).await;
+    assert_eq!(status, 200);
+    let told = for_ben.until(waiting(&bens)).await;
+    assert_waiting(
+        told.last().unwrap(),
+        &bens,
+        &thread,
+        &ada,
+        "user-form",
+        &spoken,
+    );
+    for sse in [&mut for_ann, &mut for_cy] {
+        sse.nothing_for(700).await;
+    }
+    h.answer(&ben, &bens, "call-routine", false).await;
+    for_ben.until(finished(&bens)).await;
+    for sse in [&mut for_ann, &mut for_cy] {
+        sse.nothing_for(700).await;
+    }
+
+    // The owner's, on the same thread id: the owner is told, and the member is not.
+    let (anns, status) = h.turn(&ann, &ada, &thread, &asked.to_string()).await;
+    assert_eq!(status, 200);
+    let told = for_ann.until(waiting(&anns)).await;
+    assert_waiting(
+        told.last().unwrap(),
+        &anns,
+        &thread,
+        &ada,
+        "user-form",
+        &spoken,
+    );
+    for sse in [&mut for_ben, &mut for_cy] {
+        sse.nothing_for(700).await;
+    }
+}
+
 // ---- coming back ---------------------------------------------------------------------------
+
+/// A WAIT THAT WAS MISSED IS REPLAYED as any other note is: a connection that came back after a Bot
+/// parked is told, from the id it last saw, in order and once, and is followed on from there.
+#[tokio::test]
+async fn a_connection_that_comes_back_is_replayed_the_wait_it_missed() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let ada = h.person("Ada", None).await;
+    let luna = h.hire(&ada, "Luna").await;
+    let mut sse = h.listen(&ada, None).await;
+    let last = sse.must().await;
+    assert_eq!(last.event, "reset");
+    drop(sse);
+
+    let asked = json!({ "tool": "request_user_form", "arguments": form("Missed card 8a4d") });
+    let (turn, status) = h
+        .turn(&ada, &luna, "thread-missed", &asked.to_string())
+        .await;
+    assert_eq!(status, 200);
+
+    let mut back = h.listen(&ada, Some(&last.id.to_string())).await;
+    let replayed = back.until(waiting(&turn)).await;
+    assert_eq!(replayed[0].event, "run.started");
+    let ids: Vec<i64> = replayed.iter().map(|block| block.id).collect();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    let spoken = ["Missed card 8a4d", "request_user_form"];
+    let wait = replayed.last().unwrap();
+    assert_waiting(wait, &turn, "thread-missed", &luna, "user-form", &spoken);
+    back.nothing_for(500).await;
+
+    // And followed on: the person's answer is heard live, with no second wait.
+    h.answer(&ada, &turn, "call-routine", false).await;
+    let ended = back.until(finished(&turn)).await;
+    assert!(ended.iter().all(|block| block.event != "run.waiting"));
+}
 
 /// A connection that went away is replayed what it missed, in order, from the id it last saw, and
 /// then followed; and an id that cannot be resumed from (not a number, from the future, or none)
