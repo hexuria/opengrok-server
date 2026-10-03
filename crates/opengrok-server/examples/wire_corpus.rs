@@ -12,7 +12,7 @@
 //! `emits`, `entries` and `unrecorded` (nativechat `src/opengrok/conformance.rs`). The Mac relay's
 //! stream frames are `relay/<type>/<slug>.json` (#292), new with it. So are the account events
 //! stream's blocks (#348): `events/<name>/<slug>.json`, each `{id, event, data}`, the whole block
-//! because its name is not in its data, one per shape of each of the five names, `reset` included.
+//! because its name is not in its data, one per shape of each of the six names, `reset` included.
 //!
 //! One file per distinct SHAPE (keys and value types), named after the lexicographically first
 //! test that produced it, so a re-recording names the same shape the same way. Ids and clocks
