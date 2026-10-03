@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/events",
+  "status": 503,
+  "body": {
+    "error": "attempted to acquire a connection on a closed pool"
+  }
+}
