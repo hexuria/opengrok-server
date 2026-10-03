@@ -191,7 +191,7 @@
         "type": "function",
         "function": {
           "name": "list_routines",
-          "description": "List your person's routines: each one's id, name, the Bot it wakes, its prompt, whether it is on, when it wakes (a 5-field cron), the time zone that is read in, and nextDueMs (epoch milliseconds). Webhook keys and addresses are never listed.",
+          "description": "List this Bot's routines: each one's id, name, the Bot it wakes, its prompt, whether it is on, when it wakes (a 5-field cron), the time zone that is read in, and nextDueMs (epoch milliseconds). Only this Bot's own are listed, never your person's other Bots': an empty list means this Bot has none, not that your person has none. Webhook keys and addresses are never listed.",
           "parameters": {
             "type": "object",
             "properties": {},
@@ -203,7 +203,7 @@
         "type": "function",
         "function": {
           "name": "create_routine",
-          "description": "Make a routine: one of your person's Bots is woken on a schedule and told its prompt, with nobody watching. `when` is REQUIRED and is never guessed: if the person has not said both the time and the days, call request_user_form first with a field for each, then make it with what they answer. A routine wakes at most once a minute.",
+          "description": "Make a routine: this Bot is woken on a schedule and told its prompt, with nobody watching. A routine is always this Bot's own; it cannot be made for another Bot. `when` is REQUIRED and is never guessed: if the person has not said both the time and the days, call request_user_form first with a field for each, then make it with what they answer. A routine wakes at most once a minute.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -222,10 +222,6 @@
               "tz": {
                 "type": "string",
                 "description": "The IANA time zone the cron is read in, like \"Asia/Manila\". Left out on a new one, your person's own zone."
-              },
-              "bot": {
-                "type": "string",
-                "description": "Which of your person's own Bots it wakes, by name or id. Left out on a new one, you."
               }
             },
             "required": [
@@ -239,7 +235,7 @@
         "type": "function",
         "function": {
           "name": "update_routine",
-          "description": "Change one of your person's routines, by its id from list_routines: only what you pass changes. `when` replaces its schedule; `active` false pauses it, true wakes it.",
+          "description": "Change one of this Bot's routines, by its id from list_routines: only what you pass changes. `when` replaces its schedule; `active` false pauses it, true wakes it.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -258,10 +254,6 @@
               "tz": {
                 "type": "string",
                 "description": "The IANA time zone the cron is read in, like \"Asia/Manila\". Left out on a new one, your person's own zone."
-              },
-              "bot": {
-                "type": "string",
-                "description": "Which of your person's own Bots it wakes, by name or id. Left out on a new one, you."
               },
               "routine": {
                 "type": "string",
@@ -282,7 +274,7 @@
         "type": "function",
         "function": {
           "name": "delete_routine",
-          "description": "Delete one of your person's routines for good, by its id from list_routines. It always asks the person first, naming the routine.",
+          "description": "Delete one of this Bot's routines for good, by its id from list_routines. It always asks the person first, naming the routine.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -301,7 +293,7 @@
         "type": "function",
         "function": {
           "name": "run_routine",
-          "description": "Run one of your person's routines now, as their Run now does, by its id or its name from list_routines: its own Bot is woken with its prompt, on its own thread, and you are told the run's id. A paused routine, or one whose plan cannot answer now, is refused in words.",
+          "description": "Run one of this Bot's routines now, as the person's Run now does, by its id or its name from list_routines: this Bot is woken with the routine's prompt, on the routine's own thread, and you are told the run's id. A paused routine, or one whose plan cannot answer now, is refused in words.",
           "parameters": {
             "type": "object",
             "properties": {

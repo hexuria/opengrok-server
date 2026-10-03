@@ -9,7 +9,7 @@
     "messages": [
       {
         "role": "system",
-        "content": "Your replies come from gpt-6-luna on the person's own plan.\n\nYou are Luna.\n\nNobody is talking with you: this turn is a routine you run on your own schedule for Test User, who hired you. It fired at 2026-10-03 07:21, Saturday UTC."
+        "content": "Your replies come from gpt-6-luna on the person's own plan.\n\nYou are Luna.\n\nNobody is talking with you: this turn is a routine you run on your own schedule for Test User, who hired you. It fired at 2026-10-03 12:07, Saturday UTC."
       },
       {
         "role": "user",
@@ -183,7 +183,7 @@
         "type": "function",
         "function": {
           "name": "list_routines",
-          "description": "List your person's routines: each one's id, name, the Bot it wakes, its prompt, whether it is on, when it wakes (a 5-field cron), the time zone that is read in, and nextDueMs (epoch milliseconds). Webhook keys and addresses are never listed.",
+          "description": "List this Bot's routines: each one's id, name, the Bot it wakes, its prompt, whether it is on, when it wakes (a 5-field cron), the time zone that is read in, and nextDueMs (epoch milliseconds). Only this Bot's own are listed, never your person's other Bots': an empty list means this Bot has none, not that your person has none. Webhook keys and addresses are never listed.",
           "parameters": {
             "type": "object",
             "properties": {},

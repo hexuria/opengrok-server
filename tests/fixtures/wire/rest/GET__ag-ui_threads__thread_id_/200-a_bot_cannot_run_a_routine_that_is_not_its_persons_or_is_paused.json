@@ -78,7 +78,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "refused: no routine sched_nobody is yours; call list_routines.",
             "timestamp": 100,
-            "durationMs": 31,
+            "durationMs": 20,
             "toolCallId": "call-routine"
           },
           {
@@ -120,8 +120,8 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  4617,
-                  4734
+                  4601,
+                  4718
                 ]
               },
               "model_ms": [

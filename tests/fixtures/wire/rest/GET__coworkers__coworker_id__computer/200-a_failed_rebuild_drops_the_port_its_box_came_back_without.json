@@ -8,10 +8,10 @@
     "vncUrl": "http://127.0.0.1:1447/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/computer/vnc/«redacted»/vnc.html?autoconnect=true&resize=scale&reconnect=true&password=«redacted»&path=coworkers/cw_0199bb4e-0000-7000-8000-000000000001/computer/vnc/«redacted»/websockify",
     "boxId": "bx_screen_0199bb4e000070008000000000000002",
     "update": {
-      "phase": "failed",
+      "phase": "pulling",
       "startedAtMs": 1790000000000,
-      "updatedAtMs": 1790000001000,
-      "error": "could not rebuild the computer: the box refused: 500 the copy failed"
+      "updatedAtMs": 1790000000000,
+      "error": null
     },
     "image": null,
     "isEgressTunnelAvailable": false,

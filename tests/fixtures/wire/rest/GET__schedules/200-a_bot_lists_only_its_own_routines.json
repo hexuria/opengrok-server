@@ -1,0 +1,81 @@
+{
+  "method": "GET",
+  "path": "/schedules",
+  "status": 200,
+  "body": [
+    {
+      "id": "sched_0199bb4e-0000-7000-8000-000000000001",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+      "name": "Say hello",
+      "cron": "0 0 9 * * MON-FRI",
+      "prompt": "post the standup",
+      "kind": "cron",
+      "active": false,
+      "nextDueMs": null,
+      "runLimits": {
+        "maxRounds": null,
+        "maxComputerRounds": null,
+        "maxWallMs": null
+      },
+      "lastRun": null,
+      "tz": "UTC"
+    },
+    {
+      "id": "sched_0199bb4e-0000-7000-8000-000000000003",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+      "name": "Say Hi",
+      "cron": null,
+      "prompt": "say hi",
+      "kind": "webhook",
+      "active": true,
+      "nextDueMs": null,
+      "runLimits": {
+        "maxRounds": null,
+        "maxComputerRounds": null,
+        "maxWallMs": null
+      },
+      "lastRun": null,
+      "tz": "UTC",
+      "webhook": {
+        "type": "webhook",
+        "url": "http://opengrok.lan:1447/hooks/hook_0199bb4e-0000-7000-8000-000000000004",
+        "key": "«redacted»",
+        "header": "Authorization: Bearer «redacted»"
+      }
+    },
+    {
+      "id": "sched_0199bb4e-0000-7000-8000-000000000005",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000006",
+      "name": "Report",
+      "cron": "0 0 9 * * MON-FRI",
+      "prompt": "post the standup",
+      "kind": "cron",
+      "active": true,
+      "nextDueMs": 1790000000000,
+      "runLimits": {
+        "maxRounds": null,
+        "maxComputerRounds": null,
+        "maxWallMs": null
+      },
+      "lastRun": null,
+      "tz": "UTC"
+    },
+    {
+      "id": "sched_0199bb4e-0000-7000-8000-000000000007",
+      "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000006",
+      "name": "Standup",
+      "cron": "0 0 9 * * MON-FRI",
+      "prompt": "post the standup",
+      "kind": "cron",
+      "active": true,
+      "nextDueMs": 1790000000000,
+      "runLimits": {
+        "maxRounds": null,
+        "maxComputerRounds": null,
+        "maxWallMs": null
+      },
+      "lastRun": null,
+      "tz": "UTC"
+    }
+  ]
+}
