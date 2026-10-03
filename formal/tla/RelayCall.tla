@@ -66,7 +66,9 @@ switches == <<on, stream, opening, closing, flips>>
 call == <<read, asked, door, ending, ask, answerer, takes, takenLate, posts, delivered, cancels>>
 vars == <<switches, call>>
 
-\* Every computer starts on, as one enrolled does and as every one enrolled before the switch read.
+\* Every computer starts on, as one enrolled does unless every other of its account is off, and as
+\* every one enrolled before the switch read. One enrolled off (`enrol_daemon`) is a `SwitchOff` and
+\* its `Close` before the turn, which RelayCall_switch reaches.
 Init == /\ on = [m \in Mine |-> TRUE] /\ stream = [m \in Mine |-> "none"]
         /\ opening = [m \in Mine |-> "idle"] /\ closing = [m \in Mine |-> FALSE] /\ flips = 0
         /\ read = {} /\ asked = "none" /\ door = "routing" /\ ending = "none" /\ ask = "none"

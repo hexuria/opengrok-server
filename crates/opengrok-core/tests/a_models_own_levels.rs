@@ -125,6 +125,66 @@ fn a_gateway_row_keeps_its_window_beside_its_levels() {
     assert!(models(&json!({ "data": "not a list" })).is_empty());
 }
 
+/// A LEVEL IS READ TRIMMED, on the picker and in the check a write is held to: NativeChat sends a
+/// level's `value` back as the effort, and `" high "` is no word a write takes, so the picker
+/// offered a stop no save could take and a write of `high` was refused as one it did not list.
+#[test]
+fn an_untrimmed_level_is_offered_and_taken_trimmed() {
+    let entries = json!([{ "value": " low", "label": "Low Effort" },
+                         { "value": "high ", "label": "High Effort", "default": true }]);
+    let listed = models(&json!({ "data": [{ "id": "m", "reasoning_efforts": entries }] }));
+    assert_eq!(listed[0].levels, levels(&["low", "high"], Some("high")));
+    assert_eq!(refusal("m", Effort::High, &listed), None);
+    assert_eq!(
+        refusal("m", Effort::Medium, &listed).as_deref(),
+        Some("m takes low or high, not \"medium\"")
+    );
+    let named = row(json!({ "id": "m", "reasoning_efforts": entries,
+                            "reasoning_effort": " low " }));
+    assert_eq!(named.own.as_deref(), Some("low"));
+}
+
+/// `minimal` IS THE GATEWAY'S WORD AND NO WRITE'S (`Effort::parse`), so it is no level: left off
+/// the picker and out of what a write is held to, and a model that lists nothing else has no
+/// levels, which refuses no word. `inherit` asks for the model's own level and is none; `none`
+/// is a coworker's word, and stays.
+#[test]
+fn minimal_and_every_word_no_write_takes_are_no_level() {
+    let entries = json!([{ "value": "minimal", "label": "Minimal" },
+                         { "value": "none", "label": "None Effort" },
+                         { "value": "inherit", "label": "Inherit" },
+                         { "value": "low", "label": "Low Effort" },
+                         { "value": "turbo", "label": "Turbo" }]);
+    let only = json!([{ "value": "minimal", "label": "Minimal" }]);
+    let body = json!({ "data": [{ "id": "m", "reasoning_efforts": entries },
+                                { "id": "only", "reasoning_efforts": only }] });
+    let listed = models(&body);
+    assert_eq!(listed[0].levels, levels(&["none", "low"], None));
+    assert_eq!(listed[1].levels, Levels::default(), "nothing left is null");
+    assert_eq!(
+        refusal("m", Effort::Medium, &listed).as_deref(),
+        Some("m takes none or low, not \"medium\"")
+    );
+    assert_eq!(refusal("only", Effort::Max, &listed), None);
+}
+
+/// A MODEL'S OWN LEVEL IS NULL WHEN NO WRITE TAKES IT, named or marked `default`: the slider
+/// starts on `ownEffort`, and there it would start on a stop no save takes.
+#[test]
+fn an_own_level_no_write_takes_is_null() {
+    let entries = json!([{ "value": "minimal", "label": "Minimal", "default": true },
+                         { "value": "low", "label": "Low Effort" }]);
+    let marked = models(&json!({ "data": [{ "id": "m", "reasoning_efforts": entries }] }));
+    assert_eq!(marked[0].levels, levels(&["low"], None));
+    let said = marked[0].on_the_plan(Via::Mac);
+    let low = json!([{ "value": "low", "label": "Low Effort" }]);
+    assert_eq!((&said["efforts"], &said["ownEffort"]), (&low, &Value::Null));
+    let named = row(json!({ "id": "m", "reasoning_effort": "minimal" }));
+    assert_eq!(named, Levels::default());
+    let inherit = row(json!({ "id": "m", "reasoning_effort": "inherit" }));
+    assert_eq!(inherit, Levels::default());
+}
+
 #[test]
 fn each_row_is_the_wire_agreed_with_nativechat() {
     let listed = models(&captured());

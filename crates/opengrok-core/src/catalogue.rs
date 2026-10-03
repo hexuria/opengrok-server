@@ -28,7 +28,7 @@ pub struct Model {
     pub levels: Levels,
 }
 
-/// The levels a row publishes, both `None` when it publishes none.
+/// The levels a row publishes that a write takes (`Levels::of`), both `None` with none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Levels {
     /// `reasoning_efforts` without `default`, in the row's order, which is low to high.
@@ -70,6 +70,11 @@ impl Levels {
     /// entry with no `value` is no level, and one with no `label` is shown as its value: NativeChat
     /// reads a list with either gap as no list at all (its `effort_levels_or_none`), which would
     /// take the slider from a model over one bad entry. Blank is no word.
+    ///
+    /// A LEVEL IS A WORD A WRITE TAKES, read trimmed (`is_level`): NativeChat sends a level's
+    /// `value` back as the effort, so the gateway's `minimal`, which `Effort::parse` refuses, or
+    /// `" high "`, would be a stop the slider offers and every save refuses. Such a word is left
+    /// out, an own level that is one is null, and what a write is held to (`refusal`) is the same.
     pub fn of(row: &Value) -> Self {
         if row.get("supports_reasoning_effort") == Some(&Value::Bool(false)) {
             return Self::default();
@@ -86,16 +91,23 @@ impl Levels {
         let marked = listed.iter().find(|(marked, _)| *marked);
         let named = word(row, "reasoning_effort");
         let own = named.or(marked.map(|(_, level)| level.value.as_str()));
-        let own = own.map(str::to_string);
-        let efforts: Vec<Level> = listed.into_iter().map(|(_, level)| level).collect();
+        let own = own.filter(|own| is_level(own)).map(str::to_string);
+        let listed = listed.into_iter().map(|(_, level)| level);
+        let efforts: Vec<Level> = listed.filter(|level| is_level(&level.value)).collect();
         let efforts = (!efforts.is_empty()).then_some(efforts);
         Self { efforts, own }
     }
 }
 
 fn word<'a>(object: &'a Value, key: &str) -> Option<&'a str> {
-    let word = object.get(key)?.as_str()?;
-    (!word.trim().is_empty()).then_some(word)
+    let word = object.get(key)?.as_str()?.trim();
+    (!word.is_empty()).then_some(word)
+}
+
+/// One of a coworker's words but `inherit`, which asks for the model's own level rather than
+/// naming one. `none` is a word a write takes, so a model that lists it may be switched off.
+fn is_level(word: &str) -> bool {
+    Effort::parse(word).is_some_and(|effort| effort != Effort::Inherit)
 }
 
 impl Model {

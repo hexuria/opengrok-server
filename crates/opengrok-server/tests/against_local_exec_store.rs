@@ -203,6 +203,48 @@ async fn a_computers_relay_switch_is_its_own_and_outlives_its_re_enrolment() {
     assert!(on(&ada, "mac-a").await && on(&ada, "mac-b").await);
 }
 
+/// RELAY OFF STICKS ON A NEW COMPUTER, the owner's call (review of #342): enrolled while every
+/// un-revoked computer of its account is off, a computer is enrolled off, or enrolling it would
+/// turn back on the relay its person turned off. With any one on it is on, and with none, an
+/// account's first or one whose computers are all revoked, as before. A revoked one is no
+/// computer either way, and one enrolled again keeps its own switch.
+#[tokio::test]
+async fn a_computer_enrolled_while_every_other_is_off_is_enrolled_off() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let suffix = uuid::Uuid::now_v7().simple().to_string();
+    let [ada, bob] = ["ada", "bob"].map(|who| format!("acct_{who}_{suffix}"));
+    let enrolled_on = |account: &str, machine: &str| {
+        let (store, account, machine) = (store.clone(), account.to_string(), machine.to_string());
+        async move {
+            let enrolled = store.enrol_daemon(&account, &machine, "Mac", "jti", 1);
+            enrolled.await.expect("enrol");
+            let row = store.daemon_jti(&account, &machine).await.expect("read");
+            row.expect("enrolled").2
+        }
+    };
+    assert!(enrolled_on(&ada, "mac-a").await, "no computer: on");
+    assert!(enrolled_on(&ada, "mac-b").await, "one on: on");
+    store.revoke_daemon(&ada, "mac-b").await.expect("revoke");
+    let off = store.set_relay(&ada, "mac-a", false).await.expect("switch");
+    assert!(off.is_some_and(|row| !row.relay_enabled));
+    assert!(
+        !enrolled_on(&ada, "mac-c").await,
+        "every one off: off, mac-b on but revoked"
+    );
+    let again = enrolled_on(&ada, "mac-b").await;
+    assert!(again, "enrolled again: its own, though every other is off");
+    assert!(enrolled_on(&ada, "mac-d").await, "one on again: on");
+
+    assert!(enrolled_on(&bob, "mac-a").await);
+    store.set_relay(&bob, "mac-a", false).await.expect("switch");
+    store.revoke_daemon(&bob, "mac-a").await.expect("revoke");
+    assert!(
+        enrolled_on(&bob, "mac-b").await,
+        "every one revoked: on, as the first"
+    );
+}
+
 // -------------------------------------------------------------------------------------------------
 // The enqueue path end to end (slices 4–5): the gate judges a command, an allowed one is dispatched
 // to a (fake) daemon over the broker, the result comes back, and every path writes the right audit
