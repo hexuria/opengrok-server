@@ -33,7 +33,8 @@ pub struct Model {
 pub struct Levels {
     /// `reasoning_efforts` without `default`, in the row's order, which is low to high.
     pub efforts: Option<Vec<Level>>,
-    /// The model's own level: `reasoning_effort`, else the entry marked `default: true`.
+    /// The model's own level: `reasoning_effort`, else the first entry marked `default: true`,
+    /// each only if a write takes it (`Levels::of`).
     pub own: Option<String>,
 }
 
@@ -74,7 +75,9 @@ impl Levels {
     /// A LEVEL IS A WORD A WRITE TAKES, read trimmed (`is_level`): NativeChat sends a level's
     /// `value` back as the effort, so the gateway's `minimal`, which `Effort::parse` refuses, or
     /// `" high "`, would be a stop the slider offers and every save refuses. Such a word is left
-    /// out, an own level that is one is null, and what a write is held to (`refusal`) is the same.
+    /// out, and what a write is held to (`refusal`) is the same. The own level is the named one if
+    /// it is a level, else the first marked `default` that is, else null: a named `minimal` hid a
+    /// marked `high` (review of #344), and the slider started nowhere though the row said where.
     pub fn of(row: &Value) -> Self {
         if row.get("supports_reasoning_effort") == Some(&Value::Bool(false)) {
             return Self::default();
@@ -88,10 +91,10 @@ impl Levels {
             Some((marked, Level { value, label }))
         };
         let listed: Vec<_> = entries.into_iter().flatten().filter_map(level).collect();
-        let marked = listed.iter().find(|(marked, _)| *marked);
-        let named = word(row, "reasoning_effort");
-        let own = named.or(marked.map(|(_, level)| level.value.as_str()));
-        let own = own.filter(|own| is_level(own)).map(str::to_string);
+        let marked = listed.iter().filter(|(marked, _)| *marked);
+        let marked = marked.map(|(_, level)| level.value.as_str());
+        let mut own = word(row, "reasoning_effort").into_iter().chain(marked);
+        let own = own.find(|own| is_level(own)).map(str::to_string);
         let listed = listed.into_iter().map(|(_, level)| level);
         let efforts: Vec<Level> = listed.filter(|level| is_level(&level.value)).collect();
         let efforts = (!efforts.is_empty()).then_some(efforts);
