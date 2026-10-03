@@ -15,7 +15,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use opengrok_core::coworker::Effort;
+use opengrok_core::coworker::{Coworker, Effort};
 use opengrok_core::id::{AccountId, RunId};
 use opengrok_core::inference::{
     InferenceSource, PlanFallback, SourceKind, TurnSource, Via, subscription_model,
@@ -236,6 +236,38 @@ impl Route {
             } => None,
             Self::LocalProxy { model, .. } => Some((model, SourceKind::LocalProxy)),
         }
+    }
+
+    /// A firing's way to its model (#316), a routine's or a Bot's message's: THE GATEWAY for a
+    /// coworker off its person's own plan, whatever its hirer chose for their own turns (#294). One
+    /// whose own `source` is `local_proxy` answers on that plan alone, so its firing goes there as
+    /// a live turn on it would, by the setting's way, and never to the gateway in its place.
+    pub async fn for_routine(
+        saved: &dyn Saved,
+        (account, run_id): (&AccountId, &RunId),
+        coworker: &Coworker,
+    ) -> Self {
+        let own = (coworker.source, Some(coworker.model.clone()));
+        match coworker.source == Some(SourceKind::LocalProxy) {
+            true => route(saved, Some(account), None, None, run_id.as_str(), own).await,
+            false => Self::Gateway,
+        }
+    }
+
+    /// Why this route would find nobody to answer a firing now, as its skip's code and sentence:
+    /// the person's Mac holds no relay stream, their proxy does not answer `/healthz`, or they
+    /// switched the relay off with no fallback. `None` on the gateway, their fallback included, and
+    /// for any other refusal in words, which a live turn on that setting gets too.
+    pub async fn unreachable(&self) -> Option<(&'static str, &'static str)> {
+        let Self::LocalProxy { endpoint, .. } = self else {
+            return None;
+        };
+        let (up, way) = match endpoint {
+            ModelEndpoint::Relay(to) => (to.broker.connected(&to.account).is_some(), 0),
+            ModelEndpoint::Proxy { base_url, .. } => (healthy(base_url).await, 1),
+            ModelEndpoint::Unavailable { why, .. } => (!why.starts_with(RELAY_OFF), 2),
+        };
+        (!up).then_some(opengrok_core::schedule::SKIPPED[way])
     }
 
     /// A monitor's: the gateway, or on its Bot's own plan refused in words before any model is

@@ -208,10 +208,10 @@ async fn inbound(
     // Counted only once the key is known good: how much work a routine has in flight is not
     // something an unauthenticated caller may learn by watching for a 429. A hook can be pressed
     // as fast as whoever holds the key likes — a SaaS app redelivering, a shell loop.
-    if let Some(refusal) =
+    if let Some((status, why)) =
         crate::autonomy::too_busy(&state.agui, &row.account_id, row.schedule_id.as_str()).await
     {
-        return refusal;
+        return json_error(status, &why);
     }
 
     let run_id = RunId::new();
@@ -237,7 +237,7 @@ async fn inbound(
         {
             return Err((StatusCode::UNAUTHORIZED, "bad token".to_string()));
         }
-        let firing = ScheduleCommand::firing(skip, FireCause::Webhook, &run_id, now_ms());
+        let firing = ScheduleCommand::firing(skip, (FireCause::Webhook, None), &run_id, now_ms());
         loaded.decide(firing).map_err(|reason| {
             let code = if reason == opengrok_core::schedule::ScheduleError::Paused {
                 StatusCode::CONFLICT

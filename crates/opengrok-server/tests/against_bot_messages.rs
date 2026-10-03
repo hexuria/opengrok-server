@@ -1620,3 +1620,27 @@ async fn a_crash_carry_on_asks_with_the_message_fenced_and_never_in_the_system_m
     assert_eq!(asked[0].system.as_deref(), Some(captured));
     assert_eq!(fenced_only(&asked[0], words), 1, "{:?}", asked[0].messages);
 }
+
+/// A BOT'S REPLY RUNS NO ROUTINE (#337's loop guard): a turn on another Bot's message is offered
+/// the routine listing alone, never `run_routine`, while the turn its person drove is offered all
+/// five.
+#[tokio::test]
+async fn a_bots_reply_is_offered_no_routine_to_run() {
+    let database_url = database_or_skip!();
+    let s = sent(&database_url, "please check the inbox").await;
+    let routines = |request: &ModelRequest| -> Vec<String> {
+        let names = request.tools.iter();
+        let names = names.filter_map(|tool| tool["function"]["name"].as_str());
+        let names = names.filter(|name| name.ends_with("_routine") || *name == "list_routines");
+        names.map(str::to_string).collect()
+    };
+    let driven = s.h.asked_for(&s.ada);
+    let driven = routines(driven.first().expect("Ada's turn"));
+    assert!(
+        driven.iter().any(|name| name == "run_routine"),
+        "{driven:?}"
+    );
+    let reply = s.h.asked_for(&s.bob);
+    let reply = routines(reply.first().expect("Bob's reply"));
+    assert_eq!(reply, ["list_routines"], "the listing alone");
+}

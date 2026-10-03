@@ -732,6 +732,41 @@ impl Run {
             .to_string()
     }
 
+    /// The text of the run's LAST assistant message. A routine that stopped on a card and carried on
+    /// said something before the card ("I need you to sign in") and its answer after it; the answer
+    /// is what the person needs, and a prompt the journal replays as a user message is never it.
+    pub fn last_answer(&self) -> String {
+        let field =
+            |frame: &Value, key: &str| frame.get(key).and_then(Value::as_str).map(str::to_string);
+        let mut from_the_person = std::collections::HashSet::new();
+        let mut current: Option<String> = None;
+        let mut text = String::new();
+        for frame in &self.emitted {
+            match field(frame, "type").as_deref() {
+                Some("TEXT_MESSAGE_START") if field(frame, "role").as_deref() == Some("user") => {
+                    if let Some(id) = field(frame, "messageId") {
+                        from_the_person.insert(id);
+                    }
+                }
+                Some("TEXT_MESSAGE_CONTENT") => {
+                    let id = field(frame, "messageId");
+                    if id.as_ref().is_some_and(|id| from_the_person.contains(id)) {
+                        continue;
+                    }
+                    if id.is_some() && id != current {
+                        text.clear();
+                        current = id;
+                    }
+                    if let Some(delta) = field(frame, "delta") {
+                        text.push_str(&delta);
+                    }
+                }
+                _ => {}
+            }
+        }
+        text
+    }
+
     /// Whether a routine started this run (opengrok-server `autonomy::fire`), or a Bot's message
     /// did (#314): its one question is journaled under the run's own id by `routine_prompt`, the
     /// only writer of that id. A client names its own messages, so a turn could carry it only on

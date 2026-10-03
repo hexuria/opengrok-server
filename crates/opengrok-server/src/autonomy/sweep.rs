@@ -78,7 +78,8 @@ pub async fn schedule_tick(
         // claim — skipped its slot. The Routines pane autosaves on blur, so that race is ordinary.
         let decided =
             super::desk::mutate_schedule(state, account, &schedule.id, now_ms(), |loaded| {
-                let firing = ScheduleCommand::firing(skip, FireCause::Clock, &run_id, now_ms());
+                let firing =
+                    ScheduleCommand::firing(skip, (FireCause::Clock, None), &run_id, now_ms());
                 let refused = |why: opengrok_core::schedule::ScheduleError| {
                     (axum::http::StatusCode::CONFLICT, why.to_string())
                 };
