@@ -1,0 +1,111 @@
+//! The account events stream (`GET /ag-ui/events`, #348): small notes that something the server did
+//! changed, so the app re-reads it. Each is one SSE block, `id: <n>`, `event: <name>`, `data: <one
+//! line of JSON>`. The id is the account's own and only goes up; the app sends the last it saw as
+//! `Last-Event-ID` and is replayed what came after.
+//!
+//! Provenance: the contract agreed with NativeChat on hexuria/nativechat#171 (3 Oct 2026), which
+//! names every note and field below. `cause` and `state` are not words of its own: they are the
+//! ones a routine's run history already says (`GET /schedules/{id}/runs`), so the app reads one
+//! vocabulary. The history's causes are `clock`, `manual`, `webhook` and `bot` for a routine,
+//! `event` and `manual` for a monitor, and a run nothing fired is `chat`; its end is `ok` or
+//! `error` (a stop is an `error`, as the history has it).
+//!
+//! IDS ONLY. No variant has anywhere to put a message, a title or a name: a note says WHAT changed
+//! and the app asks for it. That keeps nothing sensitive on a stream that stays open for hours, and
+//! a note dropped or doubled costs one extra read, never a lost message.
+
+use serde::Serialize;
+
+pub const THREAD_CHANGED: &str = "thread.changed";
+pub const RUN_STARTED: &str = "run.started";
+pub const RUN_FINISHED: &str = "run.finished";
+pub const ROUTINE_CHANGED: &str = "routine.changed";
+/// Not stored: the server's own answer to an id it cannot resume from, or to a stream that fell
+/// behind. The app forgets what it holds and reads it all again.
+pub const RESET: &str = "reset";
+
+/// Every name a block's `event:` can carry: what the wire corpus lists as sent.
+pub const EVENTS: [&str; 5] = [
+    THREAD_CHANGED,
+    RUN_STARTED,
+    RUN_FINISHED,
+    ROUTINE_CHANGED,
+    RESET,
+];
+
+/// An SSE comment, which a reader skips: it keeps a quiet stream from being taken for a dead one.
+pub const PING: &str = ": ping\n\n";
+
+/// What happened to a routine. A firing, a skipped firing and a rotated key are an `updated`: the
+/// row the app shows (`lastRun`, `nextDueMs`, the webhook's key) changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Change {
+    Created,
+    Updated,
+    Deleted,
+    Paused,
+    Resumed,
+}
+
+/// One note, as its `data:` line says it. Untagged: the name is the block's `event:`, and a name
+/// inside the object as well would be a second place for the two to disagree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum Note<'a> {
+    /// A message, a run's frames or a card settled: a journal round was appended.
+    ThreadChanged {
+        thread_id: &'a str,
+        coworker_id: &'a str,
+    },
+    /// A run began. `routine_id` is the routine that fired it, left out for any other run.
+    RunStarted {
+        run_id: &'a str,
+        thread_id: &'a str,
+        coworker_id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        routine_id: Option<&'a str>,
+        cause: &'a str,
+    },
+    /// A run ended for good. A run waiting on a card has not: that is a `ThreadChanged`.
+    RunFinished {
+        run_id: &'a str,
+        thread_id: &'a str,
+        coworker_id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        routine_id: Option<&'a str>,
+        state: &'a str,
+    },
+    RoutineChanged {
+        routine_id: &'a str,
+        coworker_id: &'a str,
+        change: Change,
+    },
+}
+
+impl Note<'_> {
+    /// The block's `event:`.
+    pub fn event(&self) -> &'static str {
+        match self {
+            Self::ThreadChanged { .. } => THREAD_CHANGED,
+            Self::RunStarted { .. } => RUN_STARTED,
+            Self::RunFinished { .. } => RUN_FINISHED,
+            Self::RoutineChanged { .. } => ROUTINE_CHANGED,
+        }
+    }
+
+    /// The block's `data:`, on one line, which an SSE field must be.
+    pub fn data(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+/// One SSE block. `data` must be a single line; JSON from `serde_json` always is.
+pub fn block(id: i64, event: &str, data: &str) -> String {
+    format!("id: {id}\nevent: {event}\ndata: {data}\n\n")
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[path = "../tests/unit/events.rs"]
+mod tests;
