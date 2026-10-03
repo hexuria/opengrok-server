@@ -2719,8 +2719,10 @@ async fn every_computer_off_is_the_fallback_and_one_asleep_is_relay_offline() {
 }
 
 /// THE ACCOUNT'S SWITCH IS ITS COMPUTERS': `relayEnabled` reads on while any un-revoked one is on,
-/// and off with none, none enrolled included; a PUT of it, as an app from before each computer had
-/// its own sends it, switches every one, and one switched off with its stream open is told so.
+/// and off with none, none enrolled included; a computer enrolled while it is off is enrolled off,
+/// so a new computer never turns it back on (review of #342); a PUT of it, as an app from before
+/// each computer had its own sends it, switches every one, and one switched off with its stream
+/// open is told so.
 #[tokio::test]
 async fn the_accounts_switch_reads_its_computers_and_a_put_switches_every_one() {
     let database_url = database_or_skip!();
@@ -2738,6 +2740,9 @@ async fn the_accounts_switch_reads_its_computers_and_a_put_switches_every_one() 
     );
     assert_eq!(relay(h.read(&ada).await), false, "its one computer off");
     let (old, _) = h.enrol(&ada, "Ada's old Mac").await;
+    assert_eq!(relay(h.read(&ada).await), false, "a new one enrolled off");
+    let switched = h.switch(&ada, &old, json!({ "relayEnabled": true }));
+    assert_eq!(switched.await.0, 200);
     assert_eq!(relay(h.read(&ada).await), true, "any one on");
     let revoke = format!("/local-exec/daemon/{old}");
     let delete = reqwest::Method::DELETE;

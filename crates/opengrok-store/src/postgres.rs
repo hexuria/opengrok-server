@@ -34,7 +34,7 @@ pub struct Daemon {
     pub label: String,
     pub enrolled_at_ms: i64,
     pub revoked: bool,
-    /// Its own relay switch, on until its person switches it off.
+    /// Its own relay switch: on until switched off, or off from enrolment as its others were.
     pub relay_enabled: bool,
 }
 
@@ -2050,6 +2050,9 @@ impl PgStore {
     // ---- Reverse-exec: enrolled machine daemons (token id only) and the audit log. ----
 
     /// Enrol (or re-enrol) a machine's daemon: store its token id, clear any prior revocation.
+    /// RELAY OFF STICKS (review of #342): a new machine is enrolled off while every un-revoked one
+    /// of its account is off, or enrolling it would turn back on the relay its person turned off;
+    /// on with any one on, or none. One enrolled again keeps its own switch, which no update sets.
     pub async fn enrol_daemon(
         &self,
         account_id: &str,
@@ -2058,20 +2061,15 @@ impl PgStore {
         jti: &str,
         at_ms: i64,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "insert into local_exec_daemon (account_id, machine_id, label, jti, enrolled_at_ms, revoked)
-             values ($1, $2, $3, $4, $5, false)
-             on conflict (account_id, machine_id) do update set
-               label = excluded.label, jti = excluded.jti,
-               enrolled_at_ms = excluded.enrolled_at_ms, revoked = false",
-        )
-        .bind(account_id)
-        .bind(machine_id)
-        .bind(label)
-        .bind(jti)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
+        let sql = "insert into local_exec_daemon
+               (account_id, machine_id, label, jti, enrolled_at_ms, revoked, relay_enabled)
+             values ($1, $2, $3, $4, $5, false, coalesce((select bool_or(relay_enabled)
+               from local_exec_daemon where account_id = $1 and not revoked), true))
+             on conflict (account_id, machine_id) do update set label = excluded.label,
+               jti = excluded.jti, enrolled_at_ms = excluded.enrolled_at_ms, revoked = false";
+        let query = sqlx::query(sql).bind(account_id).bind(machine_id);
+        let query = query.bind(label).bind(jti).bind(at_ms);
+        query.execute(&self.pool).await?;
         Ok(())
     }
 
