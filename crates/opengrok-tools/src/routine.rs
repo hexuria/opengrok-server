@@ -25,18 +25,21 @@ pub const LIST_ROUTINES: &str = "list_routines";
 pub const CREATE_ROUTINE: &str = "create_routine";
 pub const UPDATE_ROUTINE: &str = "update_routine";
 pub const DELETE_ROUTINE: &str = "delete_routine";
-/// The four, in the order they are offered.
-pub const TOOLS: [&str; 4] = [
+pub const RUN_ROUTINE: &str = "run_routine";
+/// The five, in the order they are offered: the listing first, the one a run a routine started,
+/// or a Bot's message, is offered (#337's loop guard).
+pub const TOOLS: [&str; 5] = [
     LIST_ROUTINES,
     CREATE_ROUTINE,
     UPDATE_ROUTINE,
     DELETE_ROUTINE,
+    RUN_ROUTINE,
 ];
 
-/// The ceiling row that switches all four (`GET`/`PUT /coworkers/{id}/ceiling`).
+/// The ceiling row that switches all five (`GET`/`PUT /coworkers/{id}/ceiling`).
 pub const ROW: &str = "routines";
 pub const ROW_LABEL: &str = "Routines";
-pub const ROW_DESCRIPTION: &str = "List, make, edit and delete your routines when you ask in \
+pub const ROW_DESCRIPTION: &str = "List, make, edit, delete and run your routines when you ask in \
      chat. Deleting one always asks you first.";
 
 /// A `when` that is missing: the time and days are the person's to say, never the model's to guess.
@@ -62,6 +65,12 @@ pub fn note(setting: &InferenceSource) -> &'static str {
         (Via::Mac, true, Some(_)) => "runs on your Server fallback model while Relay is off",
         (Via::Mac, true, None) => "is skipped while Relay is off for your plan",
     }
+}
+
+/// A name `run_routine` was given that more than one of the person's routines has (#337).
+pub fn ambiguous(name: &str, ids: &[String]) -> String {
+    let ids = ids.join(", ");
+    format!("more than one of your routines is called \"{name}\" ({ids}); run one by its id.")
 }
 
 /// A routine id the person does not own, answered as unknown whether or not it exists.
@@ -160,8 +169,17 @@ pub struct Fields {
 pub enum Ask {
     List,
     Create(Fields),
-    Update { routine: String, fields: Fields },
-    Delete { routine: String },
+    Update {
+        routine: String,
+        fields: Fields,
+    },
+    Delete {
+        routine: String,
+    },
+    /// By its id, or its name as `list_routines` gives it (#337).
+    Run {
+        routine: String,
+    },
 }
 
 /// The person's routines, as the server keeps them. Every call is answered as `context`'s
@@ -187,8 +205,8 @@ pub async fn admit(
     let ask = read(name, arguments)?;
     if listing && ask != Ask::List {
         return Err(
-            "a run a routine started may only list routines; making or changing one waits for \
-             the person"
+            "a run a routine started may only list routines; making, changing or running one \
+             waits for the person"
                 .to_string(),
         );
     }
@@ -280,6 +298,13 @@ fn read(name: &str, arguments: &Value) -> Result<Ask, String> {
         DELETE_ROUTINE => Ok(Ask::Delete {
             routine: routine()?,
         }),
+        RUN_ROUTINE => Ok(Ask::Run {
+            routine: text("routine")?.ok_or_else(|| {
+                format!(
+                    "bad arguments: name the routine by its id or its name from {LIST_ROUTINES}"
+                )
+            })?,
+        }),
         other => Err(format!("there is no routine tool called {other}")),
     }
 }
@@ -342,6 +367,12 @@ pub fn description(name: &str) -> Option<&'static str> {
             "Delete one of your person's routines for good, by its id from list_routines. It \
              always asks the person first, naming the routine."
         }
+        RUN_ROUTINE => {
+            "Run one of your person's routines now, as their Run now does, by its id or its name \
+             from list_routines: its own Bot is woken with its prompt, on its own thread, and \
+             you are told the run's id. A paused routine, or one whose plan cannot answer now, is \
+             refused in words."
+        }
         ROW => ROW_DESCRIPTION,
         _ => return None,
     })
@@ -374,6 +405,10 @@ pub fn schema(name: &str) -> Option<Value> {
             (properties, json!(["routine"]))
         }
         DELETE_ROUTINE => (json!({ "routine": routine }), json!(["routine"])),
+        RUN_ROUTINE => {
+            let routine = string("The routine's id, or its name as list_routines gives it.");
+            (json!({ "routine": routine }), json!(["routine"]))
+        }
         _ => return None,
     };
     let parameters = json!({ "type": "object", "properties": properties, "required": required });

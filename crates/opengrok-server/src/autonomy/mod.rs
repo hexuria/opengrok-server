@@ -33,13 +33,11 @@ pub mod sweep;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use opengrok_core::coworker::Coworker;
 use opengrok_core::id::{AccountId, CoworkerId, RunId};
-use opengrok_core::inference::SourceKind;
 use opengrok_core::limits::RunLimits;
 use opengrok_core::schedule::{SKIPPED, ScheduleView, Skip};
 use opengrok_harness::ModelEndpoint;
-use opengrok_harness::local_proxy::{self, Route, Saved};
+use opengrok_harness::local_proxy::{self, Route};
 use opengrok_harness::{ChatMessage, RunBudget, RunContext, run_conversation_within};
 
 use crate::agui::routes::{AgUiState, StoreJournal};
@@ -160,7 +158,8 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
             Some((line, said)) => {
                 // Its own rule (#314), unless the person switched the relay off: then its plan's
                 // fallback answers, or it is skipped as a routine's firing is (#332).
-                let route = match routine_route(&state, (&account_id, &run_id), &coworker).await {
+                let route = Route::for_routine(&state, (&account_id, &run_id), &coworker);
+                let route = match route.await {
                     route @ Route::Fallback(_) => route,
                     Route::LocalProxy {
                         endpoint: ModelEndpoint::Unavailable { why, .. },
@@ -186,7 +185,7 @@ pub(crate) async fn fire(host: HostState, firing: Firing) {
         None => (
             match thread_id.starts_with("mon_") {
                 true => Route::for_monitor(coworker.source, &coworker.model),
-                false => routine_route(&state, (&account_id, &run_id), &coworker).await,
+                false => Route::for_routine(&state, (&account_id, &run_id), &coworker).await,
             },
             crate::persona::routine_line(&hirer, chrono::Utc::now()),
             opengrok_core::run::routine_prompt(&run_id, &prompt),
@@ -272,7 +271,7 @@ pub(crate) async fn too_busy(
     state: &AgUiState,
     account_id: &AccountId,
     thread_id: &str,
-) -> Option<Response> {
+) -> Option<desk::Refusal> {
     // Unfinished runs are the newest, so a hundred rows reach every one that could matter.
     match state
         .auth
@@ -289,18 +288,16 @@ pub(crate) async fn too_busy(
                 .count();
             if i64::try_from(in_flight).unwrap_or(i64::MAX) >= MAX_RUNS_IN_FLIGHT {
                 tracing::warn!(routine = %thread_id, %in_flight, "refused a wake: too much already running");
-                return Some(json_reply(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "this routine already has three runs in flight; wait for one to end",
-                ));
+                let why = "this routine already has three runs in flight; wait for one to end";
+                return Some((StatusCode::TOO_MANY_REQUESTS, why.to_string()));
             }
             None
         }
         Err(error) => {
             tracing::error!(%error, routine = %thread_id, "could not count a routine's runs in flight");
-            Some(json_reply(
+            Some((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "storage failed",
+                "storage failed".to_string(),
             ))
         }
     }
@@ -348,39 +345,7 @@ fn json_reply(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
-/// A firing's way to its model (#316), a routine's or a monitor's: THE GATEWAY for a coworker
-/// off its person's own plan, whatever its hirer chose for their own turns (#294). One whose own
-/// `source` is `local_proxy` answers on that plan alone, so its firing goes there exactly as a
-/// live turn on it would, by the setting's way, and never to the gateway in its place.
-pub(crate) async fn routine_route(
-    saved: &dyn Saved,
-    (account, run_id): (&AccountId, &RunId),
-    coworker: &Coworker,
-) -> Route {
-    let own = (coworker.source, Some(coworker.model.clone()));
-    match coworker.source == Some(SourceKind::LocalProxy) {
-        true => local_proxy::route(saved, Some(account), None, None, run_id.as_str(), own).await,
-        false => Route::Gateway,
-    }
-}
-
-/// Why `route` would find nobody to answer a firing now, as its skip's code and sentence: the
-/// person's Mac holds no relay stream, their proxy does not answer `/healthz`, or they switched the
-/// relay off with no fallback. `None` on the gateway, their fallback included, and for any other
-/// refusal in words, which a live turn on that setting gets too.
-pub(crate) async fn unreachable_by(route: &Route) -> Option<(&'static str, &'static str)> {
-    let Route::LocalProxy { endpoint, .. } = route else {
-        return None;
-    };
-    let (up, way) = match endpoint {
-        ModelEndpoint::Relay(to) => (to.broker.connected(&to.account).is_some(), 0),
-        ModelEndpoint::Proxy { base_url, .. } => (local_proxy::healthy(base_url).await, 1),
-        ModelEndpoint::Unavailable { why, .. } => (!why.starts_with(local_proxy::RELAY_OFF), 2),
-    };
-    (!up).then_some(SKIPPED[way])
-}
-
-/// Why a routine's firing now would find nobody to answer it (`unreachable_by`), its coworker
+/// Why a routine's firing now would find nobody to answer it (`Route::unreachable`), its coworker
 /// read as it is now. `None` is a firing that runs. Asked before the `Fired` is written, by the
 /// clock, a hook and "run now" alike, so a skip starts nothing and asks no model at all.
 pub(crate) async fn unreachable(
@@ -390,7 +355,8 @@ pub(crate) async fn unreachable(
     run_id: &RunId,
 ) -> Option<(&'static str, &'static str)> {
     let (coworker, _) = state.auth.store.load_coworker(coworker_id).await.ok()?;
-    unreachable_by(&routine_route(state, (account_id, run_id), &coworker).await).await
+    let route = Route::for_routine(state, (account_id, run_id), &coworker).await;
+    route.unreachable().await
 }
 
 /// A routine's newest run, or its newest skipped firing when that came after it (#316), as its
@@ -418,18 +384,24 @@ pub(crate) async fn last_run(
         return Ok(Some(serde_json::json!({ "runId": null, "status": null,
             "startedAtMs": null, "finishedAtMs": null, "summary": why, "at": skip.at_ms,
             "cause": skip.cause.as_str(), "state": "skipped", "skipped": skip.code,
-            "reason": why })));
+            "reason": why, "by": skip.by })));
     }
     let Some(newest) = newest else {
         return Ok(None);
     };
     let (run, _) = state.auth.store.load_run(&newest.id).await?;
+    // What started it, by the routine's own `Fired`, and the Bot when one did (#337).
+    let routine = opengrok_core::id::ScheduleId::from_stored(view.id.clone());
+    let (loaded, _) = store.load_schedule(&routine).await?;
+    let (cause, by) = loaded.fired(newest.id.as_str()).unzip();
     Ok(Some(serde_json::json!({
         "runId": newest.id.as_str(),
         "status": run.status.as_str(),
         "startedAtMs": newest.started_at_ms,
         "finishedAtMs": run.status.is_terminal().then_some(newest.updated_at_ms),
         "summary": run_summary(&view.name, &run),
+        "cause": cause,
+        "by": by.flatten(),
     })))
 }
 
@@ -463,7 +435,7 @@ pub(crate) fn run_summary(name: &str, run: &opengrok_core::run::Run) -> String {
             }
         }
         RunStatus::Finished => {
-            let text = last_answer(&run.emitted);
+            let text = run.last_answer();
             let text = text.trim();
             let head: String = text.chars().take(200).collect();
             if head.is_empty() {
@@ -476,47 +448,3 @@ pub(crate) fn run_summary(name: &str, run: &opengrok_core::run::Run) -> String {
         }
     }
 }
-
-/// The text of the run's LAST assistant message. A routine that stopped on a card and carried on
-/// said something before the card ("I need you to sign in") and its answer after it; the answer
-/// is what the person needs, and a prompt the journal replays as a user message is never it.
-fn last_answer(emitted: &[serde_json::Value]) -> String {
-    let field = |frame: &serde_json::Value, key: &str| {
-        frame
-            .get(key)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-    };
-    let mut from_the_person = std::collections::HashSet::new();
-    let mut current: Option<String> = None;
-    let mut text = String::new();
-    for frame in emitted {
-        match field(frame, "type").as_deref() {
-            Some("TEXT_MESSAGE_START") if field(frame, "role").as_deref() == Some("user") => {
-                if let Some(id) = field(frame, "messageId") {
-                    from_the_person.insert(id);
-                }
-            }
-            Some("TEXT_MESSAGE_CONTENT") => {
-                let id = field(frame, "messageId");
-                if id.as_ref().is_some_and(|id| from_the_person.contains(id)) {
-                    continue;
-                }
-                if id.is_some() && id != current {
-                    text.clear();
-                    current = id;
-                }
-                if let Some(delta) = field(frame, "delta") {
-                    text.push_str(&delta);
-                }
-            }
-            _ => {}
-        }
-    }
-    text
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-#[path = "../../tests/unit/autonomy.rs"]
-mod tests;
