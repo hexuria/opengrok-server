@@ -429,8 +429,7 @@ async fn schedule_runs(
 /// where it has none, and its own `at`, `state: "skipped"`, `skipped` (the code), `reason` and `by`.
 ///
 /// The status words (`running`, `waiting`, `ok`, `error`) are the run history's own vocabulary as
-/// #82 and #235 write it, not `RunStatus::as_str`; an exhaustive match, so a new status does not
-/// compile until it is given a word.
+/// #82 and #235 write it (`RunStatus::history_word`), not `RunStatus::as_str`.
 pub(super) fn history(
     runs: &[opengrok_store::ThreadRun],
     limit: Option<i64>,
@@ -442,18 +441,13 @@ pub(super) fn history(
     let ran = runs.iter().filter_map(|run| {
         let key = run.id.as_str();
         let (cause, by) = cause_of(key)?;
-        let (status, ended) = match RunStatus::from_stored(&run.status) {
-            RunStatus::Running => ("running", false),
-            RunStatus::AwaitingApproval => ("waiting", false),
-            RunStatus::Finished => ("ok", true),
-            RunStatus::Failed | RunStatus::Stopped => ("error", true),
-        };
+        let status = RunStatus::from_stored(&run.status);
         let mut row = json!({
             "runId": key,
             "cause": cause,
-            "status": status,
+            "status": status.history_word(),
             "startedAtMs": run.started_at_ms,
-            "endedAtMs": ended.then_some(run.updated_at_ms),
+            "endedAtMs": status.is_terminal().then_some(run.updated_at_ms),
         });
         if let Some(by) = by {
             row["by"] = by;
