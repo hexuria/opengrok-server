@@ -167,6 +167,28 @@ and the events of that run itself (`run/{id}`) never wake it again; another moni
 event the run causes elsewhere (a computer assigned, say), can still match. Its history's `cause`
 is `event` (the log woke it) or `manual`.
 
+## Hearing what the server did on its own
+
+A routine's run, a Test run, a Bot's `run_routine` and a hook happen with no client streaming
+them, and a turn taken on one device is not on the person's others. `GET /ag-ui/events` is the one
+stream an app holds open to hear of them (#348). It carries small notes, ids only, and the app
+reads again what changed:
+
+```sh
+curl -sN "$OG/ag-ui/events" -H "authorization: Bearer $TOKEN" -H 'last-event-id: 41'
+# id: 42
+# event: run.started
+# data: {"runId":…,"threadId":…,"coworkerId":…,"routineId":…,"cause":"manual"}
+```
+
+`Last-Event-ID` resumes: every note after it is replayed in order and then followed. An id the
+server cannot resume from, or none, begins with `reset`, and the app reads everything again. Notes
+follow the owner of the thing, so on a Bot shared with the org each person hears of their own
+turns and routines and nothing of a teammate's. The notes, their fields and the rules are in
+[`../research/client-nativechat.md`](../research/client-nativechat.md), the `/ag-ui/events` row.
+It needs one connection to Postgres of its own per server process
+([`postgres.md`](postgres.md)).
+
 ## Attachments: what the server accepts and what the model sees
 
 The shape is the one NativeChat chose in hexuria/nativechat#90 (#229): upload the file to

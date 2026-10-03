@@ -469,6 +469,26 @@ async fn a_stream_is_for_a_signed_in_person_by_header_or_by_the_consoles_cookie(
     assert_eq!(res.headers()["cache-control"], "no-cache");
 }
 
+/// A STORE THAT CANNOT BE READ IS A 503 IN WORDS, not a stream that opens and never speaks: the
+/// app says the server is out of reach and tries again.
+#[tokio::test]
+async fn a_store_that_cannot_be_read_is_a_503_in_words() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let ada = h.person("Ada", None).await;
+    h.store.pool().close().await;
+
+    let events = format!("{}/ag-ui/events", h.base);
+    let res = h.client.get(events).bearer_auth(&ada.token).send().await;
+    let res = res.unwrap();
+    assert_eq!(res.status().as_u16(), 503);
+    let body: Value = res.json().await.unwrap();
+    assert!(
+        body["error"].as_str().is_some_and(|said| !said.is_empty()),
+        "{body}"
+    );
+}
+
 /// A fresh connection is told to read everything first: `reset`, with the head for its id.
 #[tokio::test]
 async fn a_new_connection_begins_with_a_reset() {
@@ -709,14 +729,15 @@ async fn a_hooks_run_is_told_webhook() {
 }
 
 /// A BOT'S `run_routine` IS A `bot`: the routine's run names the routine and the cause the history
-/// gives it, beside the Bot's own chat turn, which is a `chat`.
+/// gives it, beside the Bot's own chat turn, which is a `chat`. A Bot runs only the routines that
+/// wake it (#349), so both runs are Luna's.
 #[tokio::test]
 async fn a_bots_run_routine_is_told_bot() {
     let url = database_or_skip!();
     let h = harness(&url).await;
     let ada = h.person("Ada", None).await;
-    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
-    let id = h.routine(&ada, &sol, "Standup").await;
+    let luna = h.hire(&ada, "Luna").await;
+    let id = h.routine(&ada, &luna, "Standup").await;
     let mut sse = h.listen(&ada, None).await;
     assert_eq!(sse.must().await.event, "reset");
 
@@ -751,7 +772,7 @@ async fn a_bots_run_routine_is_told_bot() {
         .find(|block| block.event == "run.started" && block.data["runId"] == routine_run.as_str());
     assert_eq!(
         started.unwrap().data,
-        json!({ "runId": routine_run, "threadId": id, "coworkerId": sol, "routineId": id,
+        json!({ "runId": routine_run, "threadId": id, "coworkerId": luna, "routineId": id,
                 "cause": "bot" })
     );
     let ended = told.iter().find(|block| finished(&routine_run)(block));
