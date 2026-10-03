@@ -315,6 +315,27 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_resumed_routine_never_fires_at_once_and_records_nothing_it_missed",
         "/schedules",
     ),
+    // Each computer's own relay switch (the per-computer contract, 3 Oct 2026): a computer's row
+    // with its switch and whether it relays, the PATCH that switches it off and the 409 its stream
+    // is refused with while it is off, and the PATCH's 404, 409 and 400, each shaped like a row or
+    // a refusal already kept and asked for by name. Each test makes its first call of each status
+    // the one it is kept for.
+    (
+        "a_computers_row_says_its_switch_and_whether_it_relays_now",
+        "/local-exec/daemon",
+    ),
+    (
+        "a_computer_switched_off_is_told_disabled_and_refused_until_it_is_on_again",
+        "/local-exec/daemon/{machine_id}",
+    ),
+    (
+        "a_computer_switched_off_is_told_disabled_and_refused_until_it_is_on_again",
+        "/inference-relay/requests",
+    ),
+    (
+        "a_switch_names_only_the_callers_own_computer_and_is_refused_in_words",
+        "/local-exec/daemon/{machine_id}",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

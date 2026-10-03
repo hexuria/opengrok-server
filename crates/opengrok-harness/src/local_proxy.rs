@@ -155,7 +155,8 @@ pub(crate) fn allowed_ids(body: &serde_json::Value) -> Vec<String> {
 /// it, and the server reads.
 #[async_trait::async_trait]
 pub trait Saved: Send + Sync {
-    /// The account's setting; `None` when it cannot be read.
+    /// The account's setting with its `relays` as the store holds them now, never kept between
+    /// reads; `None` when either cannot be read, which is never a relay read as off.
     async fn setting(&self, account: &AccountId) -> Option<InferenceSource>;
     /// The proxy's key when `saved` says there is one, or why it cannot be opened.
     async fn key(&self, account: &AccountId, saved: bool) -> Result<Option<String>, String>;
@@ -319,9 +320,10 @@ pub async fn route(
     let base = match setting.resolve(chosen) {
         (SourceKind::Gateway, _) => return Route::Gateway,
         (SourceKind::LocalProxy, Via::Loopback) => setting.base_url.as_deref(),
-        // RELAY OFF (#332): a fresh turn asks the person's fallback; a carry-on never changes door
-        // mid-run, and with no fallback the turn is refused in words.
-        (SourceKind::LocalProxy, Via::Mac) if setting.relay_off => {
+        // RELAY OFF (#332), no computer's on: a fresh turn asks the person's fallback; a carry-on
+        // never changes door mid-run, and with no fallback the turn is refused in words. Asked on
+        // the Mac's way alone: the loopback above has no computer to switch.
+        (SourceKind::LocalProxy, Via::Mac) if setting.relays.is_empty() => {
             let model = captured.or(setting.relay_model).unwrap_or_default();
             let (endpoint, fallback) = (refused(RELAY_OFF, Via::Mac), setting.plan_fallback);
             let fallback = fallback.filter(|_| fresh);
@@ -340,6 +342,7 @@ pub async fn route(
                     broker: saved.relay(),
                     account: account.as_str().to_string(),
                     run_id: run_id.to_string(),
+                    machines: setting.relays,
                 })
             };
             return Route::LocalProxy { model, endpoint };
@@ -394,7 +397,7 @@ pub async fn listed(
 ) -> Option<(serde_json::Value, Vec<serde_json::Value>)> {
     let setting = saved.setting(account).await?;
     let relay = saved.relay();
-    let mac = relay.connected(account.as_str());
+    let mac = relay.connected(account.as_str(), &setting.relays);
     let by_mac = setting.via == Some(Via::Mac);
     if setting.base_url.is_none() && mac.is_none() && !by_mac {
         return None;
@@ -413,7 +416,7 @@ pub async fn listed(
         _ => Vec::new(),
     };
     let from_mac = match (listing, &mac) {
-        (true, Some(_)) => relay.models(account.as_str()).await,
+        (true, Some(_)) => relay.models(account.as_str(), &setting.relays).await,
         _ => Vec::new(),
     };
     let entry = |via: Via| {
@@ -432,8 +435,9 @@ pub async fn listed(
 /// `apply`. Never the key, only whether there is one; `healthy` is a live `/healthz` on every read,
 /// whatever the kind, and false with no address. `mac` is the account's connected Mac and its
 /// enrolled label, for `relay`: an account with none reads `connected: false` and nulls, whole.
-/// `newBotDefault` and `planFallback` are always there, null until set, and `relayEnabled` too: a
-/// missing key reads as a server from before.
+/// `newBotDefault` and `planFallback` are always there, null until set, and `relayEnabled` too,
+/// whether any of the person's computers has its relay on (false with none enrolled): a missing
+/// key reads as a server from before.
 pub async fn described(
     source: &InferenceSource,
     mac: Option<(String, Option<String>)>,
@@ -457,7 +461,7 @@ pub async fn described(
             "localModel": source.relay_model,
         },
         "newBotDefault": source.new_bot_default,
-        "relayEnabled": !source.relay_off,
+        "relayEnabled": !source.relays.is_empty(),
         "planFallback": source.plan_fallback,
     })
 }

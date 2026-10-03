@@ -262,10 +262,10 @@ async fn a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_or_is_refused() 
         local_model: Some("gpt-5.5".to_string()),
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
-        relay_off: true,
         plan_fallback: Some(fallback.clone()),
         ..Default::default()
     };
+    assert!(off.relays.is_empty(), "none of the person's computers on");
     let luna = (Some(SourceKind::LocalProxy), Some("gpt-6-luna".to_string()));
     for (bot, pin) in [(NO_BOT, "oag/cheap"), (luna, "gpt-6-luna")] {
         let routed = route(
@@ -327,19 +327,25 @@ async fn a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_or_is_refused() 
         )
     );
 
+    // A PLAN ON THIS SERVER'S OWN MACHINE HAS NO COMPUTER TO SWITCH: with none enrolled, and a
+    // fallback set, its turns, its own plan's Bots' included, go to its proxy.
     let loopback = stored(Some(InferenceSource {
         via: Some(Via::Loopback),
         ..off.clone()
     }));
-    let routed = route(&loopback, Some(&ada), None, None, "r4", NO_BOT).await;
-    let (model, endpoint) = routed.asked(String::new());
-    assert_eq!(model, "gpt-5.5", "the loopback ignores the switch");
-    assert!(
-        matches!(endpoint, Some(ModelEndpoint::Proxy { .. })),
-        "{endpoint:?}"
-    );
+    let luna = (Some(SourceKind::LocalProxy), Some("gpt-6-luna".to_string()));
+    for (bot, asks) in [(NO_BOT, "gpt-5.5"), (luna, "gpt-6-luna")] {
+        let routed = route(&loopback, Some(&ada), None, None, "r4", bot).await;
+        assert_eq!(routed.fallback(Effort::High), (Effort::High, None));
+        let (model, endpoint) = routed.asked(String::new());
+        assert_eq!(model, asks, "the loopback ignores the switch");
+        assert!(
+            matches!(endpoint, Some(ModelEndpoint::Proxy { .. })),
+            "never the fallback nor a refusal: {endpoint:?}"
+        );
+    }
     let on = stored(Some(InferenceSource {
-        relay_off: false,
+        relays: vec!["mac-1".to_string()],
         ..off.clone()
     }));
     let routed = route(&on, Some(&ada), None, None, "r5", NO_BOT).await;
@@ -361,27 +367,28 @@ async fn a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_or_is_refused() 
     );
 }
 
-/// GET SAYS THE SWITCH AND THE FALLBACK ALWAYS (#332): on and null until a person sets them.
+/// GET SAYS THE SWITCH AND THE FALLBACK ALWAYS (#332): the switch is whether any of the person's
+/// computers has its relay on, so off with none enrolled; the fallback null until set.
 #[tokio::test]
 async fn the_setting_reads_back_the_relay_switch_and_the_fallback() {
     let unset = described(&InferenceSource::default(), None).await;
     assert_eq!(
         (&unset["relayEnabled"], &unset["planFallback"]),
-        (&serde_json::json!(true), &serde_json::Value::Null)
+        (&serde_json::json!(false), &serde_json::Value::Null)
     );
-    let off = InferenceSource {
-        relay_off: true,
+    let on = InferenceSource {
+        relays: vec!["mac-1".to_string()],
         plan_fallback: Some(PlanFallback {
             model: "xai/grok-4.6".to_string(),
             effort: Effort::High,
         }),
         ..Default::default()
     };
-    let said = described(&off, None).await;
+    let said = described(&on, None).await;
     let fallback = serde_json::json!({ "model": "xai/grok-4.6", "effort": "high" });
     assert_eq!(
         (&said["relayEnabled"], &said["planFallback"]),
-        (&serde_json::json!(false), &fallback)
+        (&serde_json::json!(true), &fallback)
     );
 }
 
@@ -399,6 +406,7 @@ async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
         has_key: true,
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
+        relays: vec!["mac-1".to_string()],
         ..Default::default()
     };
     let saved = stored(Some(by_mac.clone()));
@@ -407,6 +415,7 @@ async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
             broker: saved.1.clone(),
             account: ada.as_str().to_string(),
             run_id: run.to_string(),
+            machines: vec!["mac-1".to_string()],
         }))
     };
     let routed = route(&saved, Some(&ada), None, None, "r1", NO_BOT).await;
@@ -665,6 +674,7 @@ async fn a_coworkers_pin_goes_to_the_mac_only_on_its_own_plan() {
         kind: SourceKind::LocalProxy,
         via: Some(Via::Mac),
         relay_model: Some("gpt-6-sol".to_string()),
+        relays: vec!["mac-1".to_string()],
         ..Default::default()
     }));
     let own = (Some(SourceKind::LocalProxy), Some("gpt-6-luna".to_string()));

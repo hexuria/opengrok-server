@@ -434,7 +434,11 @@ impl Harness {
 
     /// Enrol a Mac and hold its stream open, past its `ready`.
     async fn mac(&self, who: &Person, label: &str) -> Mac {
-        let (machine, token) = self.enrol(who, label).await;
+        self.hold(self.enrol(who, label).await).await
+    }
+
+    /// Hold an enrolled machine's stream open, past its `ready`: a Mac that was asleep wakes.
+    async fn hold(&self, (machine, token): (String, String)) -> Mac {
         let (status, frames) = self.open(&token).await;
         assert_eq!(status, 200);
         let mut mac = Mac {
@@ -659,8 +663,9 @@ async fn a_turn_by_the_mac_is_answered_by_the_mac_with_the_loopbacks_own_body() 
     );
 }
 
-/// NO MAC, NO FALL BACK: a turn by the Mac with none connected ends `relay_offline`, in words,
-/// and nothing is asked anywhere, not the gateway and not the loopback.
+/// NO MAC, NO FALL BACK: a turn by the Mac with none connected, its computer's relay on but the
+/// computer asleep, ends `relay_offline`, in words, and nothing is asked anywhere, not the gateway
+/// and not the loopback.
 #[tokio::test]
 async fn with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_nothing() {
     let database_url = database_or_skip!();
@@ -668,6 +673,7 @@ async fn with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_not
     let ada = h.person().await;
     let coworker = h.hire(&ada, "Ada").await;
     h.by_the_mac(&ada).await;
+    let _asleep = h.enrol(&ada, "Ada's MacBook").await;
     let props = json!({ "coworkerId": coworker });
     let (thread, run) = (unique("thr"), run_id());
     let turn = h.turn(&ada, &thread, &run, json!([user("m1", "hi")]), props);
@@ -1001,6 +1007,7 @@ async fn a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects() {
     let ada = h.person().await;
     let coworker = h.hire(&ada, "Ada").await;
     h.by_the_mac(&ada).await;
+    let asleep = h.enrol(&ada, "Ada's MacBook").await;
     let thread = unique("thr");
     let first = json!([user("m1", "first")]);
     let props = json!({ "coworkerId": coworker, "inferenceSource": "gateway" });
@@ -1068,7 +1075,7 @@ async fn a_queued_send_held_for_an_absent_mac_drains_when_the_mac_reconnects() {
         "still queued"
     );
 
-    let mut mac = h.mac(&ada, "Ada's MacBook").await;
+    let mut mac = h.hold(asleep).await;
     let infer = mac.next().await;
     assert_eq!(
         infer["type"], "infer",
@@ -1644,6 +1651,7 @@ async fn a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac() {
     let body = json!({ "kind": "gateway", "via": "mac", "relay": { "localModel": "gpt-5.5" } });
     let (status, saved) = h.set(&ada, body).await;
     assert_eq!(status, 200, "{saved}");
+    let asleep = h.enrol(&ada, "Ada's MacBook").await;
     let coworker = h.hire(&ada, "Luna").await;
     let own = Some(json!({ "source": "local_proxy", "model": "gpt-6-luna" }));
     let path = format!("/coworkers/{coworker}");
@@ -1705,7 +1713,7 @@ async fn a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac() {
         "still queued: {listed}"
     );
 
-    let mut mac = h.mac(&ada, "Ada's MacBook").await;
+    let mut mac = h.hold(asleep).await;
     let infer = mac.next().await;
     assert_eq!(
         infer["type"], "infer",
@@ -1911,9 +1919,9 @@ async fn a_due_routine_on_a_plan_bot_runs_through_the_mac() {
     assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
 }
 
-/// WITH NO MAC THE FIRING IS SKIPPED (#316): no run starts and nothing is asked anywhere; the
-/// routine's history and its row say so in the owner's words, with the code; and its clock moves
-/// to its next slot, with nothing caught up after.
+/// WITH NO MAC THE FIRING IS SKIPPED (#316), its computer's relay on but the computer asleep: no
+/// run starts and nothing is asked anywhere; the routine's history and its row say so in the
+/// owner's words, with the code; and its clock moves to its next slot, with nothing caught up after.
 #[tokio::test]
 async fn a_due_routine_with_no_mac_is_skipped_and_its_clock_moves_on() {
     let database_url = database_or_skip!();
@@ -1921,6 +1929,7 @@ async fn a_due_routine_with_no_mac_is_skipped_and_its_clock_moves_on() {
     let h = harness(&database_url).await;
     let ada = h.person().await;
     h.by_the_mac(&ada).await;
+    let _asleep = h.enrol(&ada, "Ada's MacBook").await;
     let routine = h.plan_routine(&ada, "cron").await;
     let before = now_ms();
 
@@ -1964,6 +1973,7 @@ async fn run_now_with_no_mac_answers_409_and_records_the_skip() {
     let h = harness(&database_url).await;
     let ada = h.person().await;
     h.by_the_mac(&ada).await;
+    let _asleep = h.enrol(&ada, "Ada's MacBook").await;
     let routine = h.plan_routine(&ada, "cron").await;
     let path = format!("/schedules/{routine}/run");
     let post = reqwest::Method::POST;
@@ -1988,6 +1998,7 @@ async fn a_webhook_for_a_plan_bot_with_no_mac_is_skipped() {
     let h = harness(&database_url).await;
     let ada = h.person().await;
     h.by_the_mac(&ada).await;
+    let _asleep = h.enrol(&ada, "Ada's MacBook").await;
     let routine = h.plan_routine(&ada, "webhook").await;
     let row = h.routine_row(&ada, &routine).await;
     let url = row["webhook"]["url"].as_str().unwrap();
@@ -2044,16 +2055,32 @@ impl Harness {
         let next = tokio::time::timeout(Duration::from_millis(600), mac.next());
         next.await.is_err()
     }
+
+    /// What `mac`'s stream said, pings aside, until it ended: within 20 s.
+    async fn said_until_closed(mac: &mut Mac) -> Vec<Value> {
+        let draining = async {
+            let mut said = Vec::new();
+            while let Some(frame) = mac.frames.recv().await {
+                if frame["type"] != "ping" {
+                    said.push(frame);
+                }
+            }
+            said
+        };
+        let said = tokio::time::timeout(Duration::from_secs(20), draining).await;
+        said.expect("the stream ends within 20 s")
+    }
 }
 
 /// THE SWITCH AND ITS FALLBACK, SAVED IN ONE BODY (#332) beside the way the app means, and read
-/// back as saved: the relay off, the Mac still the way, the fallback's model and effort. One save
-/// and one read, which the corpus keeps.
+/// back as saved: the relay off, its computer's with it, the Mac still the way, the fallback's
+/// model and effort. One save and one read, which the corpus keeps.
 #[tokio::test]
 async fn a_person_switches_the_relay_off_and_names_a_fallback_in_one_save() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let ada = h.person().await;
+    let _asleep = h.enrol(&ada, "Ada's MacBook").await;
     let fallback = json!({ "model": "xai/grok-4.6", "effort": "low" });
     let body = json!({ "kind": "local_proxy", "via": "mac", "relay": { "localModel": "gpt-5.5" },
                        "relayEnabled": false, "planFallback": fallback });
@@ -2070,8 +2097,9 @@ async fn a_person_switches_the_relay_off_and_names_a_fallback_in_one_save() {
 }
 
 /// THE SWITCH MOVES NO WAY (#332): off and on again, the Mac stays the way, which only a `via`
-/// changes; an account that never touched either reads the relay on and no fallback. A fallback
-/// left out is kept, null clears it, and a body refused in any part saves none of itself.
+/// changes; an account with no computer reads the relay off, and one enrolled reads it on, with
+/// no fallback. A fallback left out is kept, null clears it, and a body refused in any part saves
+/// none of itself.
 #[tokio::test]
 async fn the_relay_switch_moves_no_way_and_a_fallback_is_kept_until_cleared() {
     let database_url = database_or_skip!();
@@ -2079,7 +2107,10 @@ async fn the_relay_switch_moves_no_way_and_a_fallback_is_kept_until_cleared() {
     let ada = h.person().await;
     let fresh = h.read(&ada).await;
     let unset = (&fresh["relayEnabled"], &fresh["planFallback"]);
-    assert_eq!(unset, (&json!(true), &Value::Null), "{fresh}");
+    assert_eq!(unset, (&json!(false), &Value::Null), "{fresh}");
+    let _asleep = h.enrol(&ada, "Ada's MacBook").await;
+    let enrolled = h.read(&ada).await;
+    assert_eq!(enrolled["relayEnabled"], true, "{enrolled}");
     h.by_the_mac(&ada).await;
     h.relay_off(&ada, Value::Null).await;
     let fallback = json!({ "model": "oag/cheap", "effort": "high" });
@@ -2170,7 +2201,9 @@ async fn a_turn_by_the_mac_with_the_relay_off_asks_the_fallback_and_says_so() {
     );
     assert_eq!(asked, (1, &json!("oag/cheap"), &json!("low")));
     assert!(h.proxy.asked().is_empty(), "never the loopback");
-    assert!(Harness::quiet(&mut mac).await, "never the Mac");
+    let told = Harness::said_until_closed(&mut mac).await;
+    let off = [json!({"type": "disabled"})];
+    assert_eq!(told, off, "switched off with the rest, and never asked");
 
     let started = h.run(&run).await;
     let kept = (
@@ -2226,7 +2259,9 @@ async fn a_turn_by_the_mac_with_the_relay_off_and_no_fallback_is_refused_in_word
     let way = json!({ "kind": "local_proxy", "via": "mac", "model": "gpt-5.5" });
     assert_eq!(sources(&frames), vec![way]);
     assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
-    assert!(Harness::quiet(&mut mac).await, "never the Mac");
+    let told = Harness::said_until_closed(&mut mac).await;
+    let off = [json!({"type": "disabled"})];
+    assert_eq!(told, off, "switched off with the rest, and never asked");
 }
 
 /// RELAY OFF, A FALLBACK SET: A PLAN BOT'S ROUTINE RUNS ON IT (#332), on the gateway at the
@@ -2313,12 +2348,14 @@ async fn a_plan_bots_routine_is_skipped_while_the_relay_is_off_with_no_fallback(
     }
     assert_eq!(h.runs_of(&ada, &routine).await, 0, "no run");
     assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
-    assert!(Harness::quiet(&mut mac).await, "never the Mac");
+    let told = Harness::said_until_closed(&mut mac).await;
+    let off = [json!({"type": "disabled"})];
+    assert_eq!(told, off, "switched off with the rest, and never asked");
 }
 
 /// RELAY ON, THE COMPUTER AWAY: NOTHING CHANGES (#332). A fallback named for when the relay is off
-/// is never asked while it is on: the routine's firing is skipped `relay_offline`, and a turn ends
-/// `relay_offline`, as before.
+/// is never asked while a computer's relay is on and it is asleep: the routine's firing is skipped
+/// `relay_offline`, and a turn ends `relay_offline`, as before.
 #[tokio::test]
 async fn with_the_relay_on_and_the_computer_away_the_fallback_is_never_asked() {
     let database_url = database_or_skip!();
@@ -2327,6 +2364,7 @@ async fn with_the_relay_on_and_the_computer_away_the_fallback_is_never_asked() {
     let ada = h.person().await;
     let coworker = h.hire(&ada, "Ada").await;
     h.by_the_mac(&ada).await;
+    let _asleep = h.enrol(&ada, "Ada's MacBook").await;
     let fallback = json!({ "kind": "local_proxy", "planFallback": { "model": "oag/cheap" } });
     let (status, saved) = h.set(&ada, fallback).await;
     assert_eq!(
@@ -2423,6 +2461,7 @@ async fn after_relay_offline_skips_the_next_due_is_the_normal_next_tick() {
     let h = harness(&database_url).await;
     let ada = h.person().await;
     h.by_the_mac(&ada).await;
+    let asleep = h.enrol(&ada, "Ada's MacBook").await;
     let routine = h.plan_routine(&ada, "cron").await;
     for skips in 1..=2 {
         let before = now_ms();
@@ -2434,10 +2473,348 @@ async fn after_relay_offline_skips_the_next_due_is_the_normal_next_tick() {
         let history = h.history(&ada, &routine).await;
         assert_eq!(history.as_array().unwrap().len(), skips, "{history}");
     }
-    let _mac = h.mac(&ada, "Ada's MacBook").await;
+    let _mac = h.hold(asleep).await;
     let tick = opengrok_server::autonomy::sweep::schedule_tick(&h.host).await;
     assert_eq!(tick.expect("a tick"), 0, "nothing missed is caught up");
     assert_eq!(h.runs_of(&ada, &routine).await, 0);
     let history = h.history(&ada, &routine).await;
     assert_eq!(history.as_array().unwrap().len(), 2, "{history}");
+}
+
+/// What a computer's relay stream is refused with while its relay is off: the contract's words.
+const RELAY_IS_OFF: &str = "Relay is off for this computer. Turn it on in Settings → Computer.";
+
+impl Harness {
+    /// `who`'s enrolled computers, as `GET /local-exec/daemon` lists them.
+    async fn computers(&self, who: &Person) -> Vec<Value> {
+        let get = reqwest::Method::GET;
+        let (status, listed) = self
+            .send(Some(&who.token), get, "/local-exec/daemon", None)
+            .await;
+        assert_eq!(status, 200, "{listed}");
+        listed["machines"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// `PATCH /local-exec/daemon/{machine}` with `body`, as `who`.
+    async fn switch(&self, who: &Person, machine: &str, body: Value) -> (u16, Value) {
+        let path = format!("/local-exec/daemon/{machine}");
+        let patch = reqwest::Method::PATCH;
+        self.send(Some(&who.token), patch, &path, Some(body)).await
+    }
+
+    /// A computer's switch as another replica's PATCH leaves it here: its row written, and the
+    /// stream this replica holds for it still open.
+    async fn switched_elsewhere(&self, who: &Person, machine: &str, on: bool) {
+        let sql = "update local_exec_daemon set relay_enabled = $3
+                   where account_id = $1 and machine_id = $2";
+        let query = sqlx::query(sql)
+            .bind(who.id.as_str())
+            .bind(machine)
+            .bind(on);
+        query
+            .execute(self.store.pool())
+            .await
+            .expect("switched elsewhere");
+    }
+
+    /// The answer a machine's relay stream is opened with when it is refused, within 10 s: a
+    /// stream wrongly opened never ends, and would hang the test instead of failing it.
+    async fn refused_a_stream(&self, token: &str) -> (u16, Value) {
+        let get = reqwest::Method::GET;
+        let opening = self.send(Some(token), get, "/inference-relay/requests", None);
+        let opening = tokio::time::timeout(Duration::from_secs(10), opening).await;
+        opening.expect("refused, not opened")
+    }
+
+    /// One turn of `coworker`'s by its person's Mac, answered by `mac` with `said`: its words.
+    async fn carried(&self, who: &Person, coworker: &str, mac: &mut Mac, said: &str) -> String {
+        let props = json!({ "coworkerId": coworker });
+        let turn = self.turn(
+            who,
+            &unique("thr"),
+            &run_id(),
+            json!([user("m1", "hi")]),
+            props,
+        );
+        let infer = mac.next().await;
+        assert_eq!(infer["type"], "infer", "{infer}");
+        let id = infer["requestId"].as_str().unwrap();
+        let answered = self.answer(&mac.token, id, "text/event-stream", sse(&words(said)));
+        assert_eq!(answered.await.0, 204);
+        text_of(&turn.await.unwrap().1)
+    }
+}
+
+/// A COMPUTER'S ROW SAYS ITS OWN SWITCH AND WHETHER IT RELAYS NOW: every field the contract names,
+/// `relayEnabled` on for a computer just enrolled, and `relaying` true while its relay stream is
+/// open here and false for one asleep; `connected` is its command stream's, as before. One read,
+/// which the corpus keeps.
+#[tokio::test]
+async fn a_computers_row_says_its_switch_and_whether_it_relays_now() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let mac = h.mac(&ada, "Ada's MacBook").await;
+    let (asleep, _) = h.enrol(&ada, "Ada's iMac").await;
+    let rows = h.computers(&ada).await;
+    let row = |id: &str| rows.iter().find(|row| row["machineId"] == id).cloned();
+    let awake = row(&mac.machine).expect("listed");
+    let at = awake["enrolledAtMs"].as_i64().expect("enrolledAtMs");
+    let expected = json!({ "machineId": mac.machine, "label": "Ada's MacBook", "enrolledAtMs": at,
+        "revoked": false, "connected": false, "relayEnabled": true, "relaying": true });
+    assert_eq!(awake, expected);
+    let other = row(&asleep).expect("listed");
+    let said = (&other["relayEnabled"], &other["relaying"]);
+    assert_eq!(said, (&json!(true), &json!(false)), "{other}");
+}
+
+/// SWITCHED OFF, A COMPUTER IS TOLD SO AND ITS STREAM CLOSED: the PATCH answers its row, off and no
+/// longer relaying; its stream is sent `disabled` and ends; and while it is off a stream it opens
+/// is refused, 409 `relay_disabled`, before any frame. Switched on again, it opens as before. One
+/// switch off, one refusal, which the corpus keeps.
+#[tokio::test]
+async fn a_computer_switched_off_is_told_disabled_and_refused_until_it_is_on_again() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let mut mac = h.mac(&ada, "Ada's MacBook").await;
+    let (status, row) = h
+        .switch(&ada, &mac.machine, json!({ "relayEnabled": false }))
+        .await;
+    assert_eq!(status, 200, "{row}");
+    let at = row["enrolledAtMs"].as_i64().expect("enrolledAtMs");
+    let expected = json!({ "machineId": mac.machine, "label": "Ada's MacBook", "enrolledAtMs": at,
+        "revoked": false, "connected": false, "relayEnabled": false, "relaying": false });
+    assert_eq!(row, expected);
+    let told = Harness::said_until_closed(&mut mac).await;
+    assert_eq!(told, [json!({"type": "disabled"})], "told, then closed");
+
+    let refused = h.refused_a_stream(&mac.token).await;
+    let off = json!({ "error": RELAY_IS_OFF, "code": "relay_disabled" });
+    assert_eq!(refused, (409, off));
+    assert_eq!(h.computers(&ada).await[0]["relayEnabled"], false);
+
+    let (status, row) = h
+        .switch(&ada, &mac.machine, json!({ "relayEnabled": true }))
+        .await;
+    assert_eq!((status, &row["relayEnabled"]), (200, &json!(true)), "{row}");
+    let _again = h.hold((mac.machine.clone(), mac.token.clone())).await;
+    assert_eq!(h.computers(&ada).await[0]["relaying"], true);
+}
+
+/// A SWITCH NAMES ONLY THE CALLER'S OWN COMPUTER, AND IS REFUSED IN WORDS: another account's
+/// machine is unknown, the same 404 as an id nobody enrolled, and stays on; a revoked one is a 409;
+/// a body without a true or false `relayEnabled` is a 400. Nothing refused is switched. One call
+/// for each refusal, which the corpus keeps.
+#[tokio::test]
+async fn a_switch_names_only_the_callers_own_computer_and_is_refused_in_words() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (ada, eve) = (h.person().await, h.person().await);
+    let (theirs, _) = h.enrol(&eve, "Eve's MacBook").await;
+    let off = || json!({ "relayEnabled": false });
+    let unknown = json!({ "error": "no computer of yours has that id", "code": "not_found" });
+    assert_eq!(h.switch(&ada, &theirs, off()).await, (404, unknown.clone()));
+    assert_eq!(h.switch(&ada, "mac_nobody", off()).await, (404, unknown));
+    assert_eq!(
+        h.computers(&eve).await[0]["relayEnabled"],
+        true,
+        "Eve's own"
+    );
+
+    let (mine, _) = h.enrol(&ada, "Ada's MacBook").await;
+    let (old, _) = h.enrol(&ada, "Ada's old Mac").await;
+    let delete = reqwest::Method::DELETE;
+    let revoke = format!("/local-exec/daemon/{old}");
+    assert_eq!(h.send(Some(&ada.token), delete, &revoke, None).await.0, 204);
+    let why = "this computer was revoked; enrol it again to use it";
+    let revoked = json!({ "error": why, "code": "revoked" });
+    assert_eq!(h.switch(&ada, &old, off()).await, (409, revoked));
+
+    let why = "relayEnabled must be true or false";
+    let not_a_switch = json!({ "error": why, "code": "bad_request" });
+    let bodies = [
+        json!({ "relayEnabled": "off" }),
+        json!({}),
+        json!({ "relayEnabled": null }),
+    ];
+    for body in bodies.into_iter().chain([json!([false])]) {
+        let refused = h.switch(&ada, &mine, body.clone()).await;
+        assert_eq!(refused, (400, not_a_switch.clone()), "{body}");
+    }
+    let path = format!("{}/local-exec/daemon/{mine}", h.base);
+    let words = h.client.patch(path).bearer_auth(&ada.token).body("off");
+    let res = words.send().await.expect("a body that is not JSON");
+    assert_eq!(res.status().as_u16(), 400);
+    assert_eq!(res.json::<Value>().await.expect("json"), not_a_switch);
+    let rows = h.computers(&ada).await;
+    let on = rows.iter().all(|row| row["relayEnabled"] == true);
+    assert!(on, "nothing refused was switched: {rows:?}");
+}
+
+/// A COMPUTER SWITCHED OFF IS NEVER ASKED, though its stream is the newest and still open here, as
+/// it is while another replica's switch closes nothing on this one: the next turn reads the
+/// switches anew and goes to the one still on. Switched on again it is the newest, and the turn
+/// after goes there. Nothing waits for a restart.
+#[tokio::test]
+async fn a_turn_skips_a_computer_switched_off_while_another_serves() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada, "Ada").await;
+    h.by_the_mac(&ada).await;
+    let mut older = h.mac(&ada, "Ada's iMac").await;
+    let mut newer = h.mac(&ada, "Ada's MacBook").await;
+    h.switched_elsewhere(&ada, &newer.machine, false).await;
+    let said = h
+        .carried(&ada, &coworker, &mut older, "from the iMac")
+        .await;
+    assert_eq!(said, "from the iMac");
+    assert!(Harness::quiet(&mut newer).await, "never asked");
+    let read = h.read(&ada).await;
+    assert_eq!(read["relay"]["machineId"], older.machine.as_str(), "{read}");
+
+    h.switched_elsewhere(&ada, &newer.machine, true).await;
+    let said = h
+        .carried(&ada, &coworker, &mut newer, "from the MacBook")
+        .await;
+    assert_eq!(said, "from the MacBook");
+    assert!(Harness::quiet(&mut older).await);
+    assert_eq!((h.gateway.asked().len(), h.proxy.asked().len()), (0, 0));
+}
+
+/// RELAY OFF IS EVERY COMPUTER OFF, AND ONE ASLEEP IS STILL ON: with the person's one computer on
+/// but asleep, a turn by the Mac ends `relay_offline` and the fallback is never asked; switched
+/// off, the next turn asks the fallback, its frame saying `fallbackFor: "relay_disabled"`.
+#[tokio::test]
+async fn every_computer_off_is_the_fallback_and_one_asleep_is_relay_offline() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada, "Ada").await;
+    h.by_the_mac(&ada).await;
+    let fallback = json!({ "kind": "local_proxy", "planFallback": { "model": "oag/cheap" } });
+    assert_eq!(h.set(&ada, fallback).await.0, 200);
+    let (asleep, _) = h.enrol(&ada, "Ada's MacBook").await;
+    let props = json!({ "coworkerId": coworker });
+    let hello = || json!([user("m1", "hello")]);
+    let turn = h.turn(&ada, &unique("thr"), &run_id(), hello(), props.clone());
+    let (_, frames) = turn.await.unwrap();
+    assert_eq!(ending(&frames)["code"], "relay_offline", "{frames:?}");
+    let waits = "the fallback waits while a computer is on";
+    assert!(h.gateway.asked().is_empty(), "{waits}");
+
+    let (status, _) = h
+        .switch(&ada, &asleep, json!({ "relayEnabled": false }))
+        .await;
+    assert_eq!(status, 200);
+    let turn = h.turn(&ada, &unique("thr"), &run_id(), hello(), props);
+    let (_, frames) = turn.await.unwrap();
+    assert_eq!(text_of(&frames), "from the gateway", "{frames:?}");
+    let said = json!({ "kind": "gateway", "model": "oag/cheap", "fallbackFor": "relay_disabled" });
+    assert_eq!(sources(&frames), [said]);
+}
+
+/// THE ACCOUNT'S SWITCH IS ITS COMPUTERS': `relayEnabled` reads on while any un-revoked one is on,
+/// and off with none, none enrolled included; a PUT of it, as an app from before each computer had
+/// its own sends it, switches every one, and one switched off with its stream open is told so.
+#[tokio::test]
+async fn the_accounts_switch_reads_its_computers_and_a_put_switches_every_one() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let relay = |read: Value| read["relayEnabled"].clone();
+    assert_eq!(relay(h.read(&ada).await), false, "no computer, no relay");
+    let (imac, imac_token) = h.enrol(&ada, "Ada's iMac").await;
+    assert_eq!(relay(h.read(&ada).await), true);
+    assert_eq!(
+        h.switch(&ada, &imac, json!({ "relayEnabled": false }))
+            .await
+            .0,
+        200
+    );
+    assert_eq!(relay(h.read(&ada).await), false, "its one computer off");
+    let (old, _) = h.enrol(&ada, "Ada's old Mac").await;
+    assert_eq!(relay(h.read(&ada).await), true, "any one on");
+    let revoke = format!("/local-exec/daemon/{old}");
+    let delete = reqwest::Method::DELETE;
+    assert_eq!(h.send(Some(&ada.token), delete, &revoke, None).await.0, 204);
+    assert_eq!(
+        relay(h.read(&ada).await),
+        false,
+        "a revoked one is no computer"
+    );
+
+    let on = json!({ "kind": "local_proxy", "relayEnabled": true });
+    let (status, saved) = h.set(&ada, on).await;
+    assert_eq!((status, relay(saved)), (200, json!(true)));
+    let rows = h.computers(&ada).await;
+    assert!(
+        rows.iter().all(|row| row["relayEnabled"] == true),
+        "{rows:?}"
+    );
+    let mut imac = h.hold((imac, imac_token)).await;
+    let off = json!({ "kind": "local_proxy", "relayEnabled": false });
+    let (status, saved) = h.set(&ada, off).await;
+    assert_eq!((status, relay(saved)), (200, json!(false)));
+    let rows = h.computers(&ada).await;
+    assert!(
+        rows.iter().all(|row| row["relayEnabled"] == false),
+        "{rows:?}"
+    );
+    let told = Harness::said_until_closed(&mut imac).await;
+    assert_eq!(told, [json!({"type": "disabled"})]);
+}
+
+/// A PLAN ON THIS SERVER'S OWN MACHINE IS NEVER "RELAY OFF": with no computer enrolled the account
+/// reads its relay off, yet its turns go to its proxy by the loopback though a fallback is set, and
+/// so does its plan Bot's routine. The switch is the Mac's way's alone.
+#[tokio::test]
+async fn a_plan_on_this_servers_own_machine_is_never_relay_off() {
+    let database_url = database_or_skip!();
+    let _sweep = one_sweeper(&database_url).await;
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let coworker = h.hire(&ada, "Ada").await;
+    let body = json!({ "kind": "local_proxy", "via": "loopback", "baseUrl": h.proxy_url,
+                       "localModel": "gpt-5.5", "planFallback": { "model": "oag/cheap" } });
+    let (status, saved) = h.set(&ada, body).await;
+    assert_eq!(
+        (status, &saved["relayEnabled"]),
+        (200, &json!(false)),
+        "{saved}"
+    );
+    let props = json!({ "coworkerId": coworker });
+    let turn = h.turn(
+        &ada,
+        &unique("thr"),
+        &run_id(),
+        json!([user("m1", "hi")]),
+        props,
+    );
+    let (_, frames) = turn.await.unwrap();
+    assert_eq!(text_of(&frames), "from the loopback", "{frames:?}");
+    let way = json!({ "kind": "local_proxy", "via": "loopback", "model": "gpt-5.5" });
+    assert_eq!(sources(&frames), [way]);
+
+    let routine = h.plan_routine(&ada, "cron").await;
+    assert_eq!(h.tick_when_due(&routine).await, 1, "it fired");
+    let mut last = Value::Null;
+    for _ in 0..100 {
+        last = h.routine_row(&ada, &routine).await["lastRun"].clone();
+        if last["status"] == "finished" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let ran = "Routine Weekly ran: from the loopback";
+    assert_eq!(last["summary"], ran, "{last}");
+    let asked = h.proxy.asked();
+    let models: Vec<&Value> = asked.iter().map(|asked| &asked["model"]).collect();
+    assert_eq!(
+        models,
+        [&json!("gpt-5.5"), &json!("gpt-6-luna")],
+        "the loopback both times"
+    );
+    assert!(h.gateway.asked().is_empty(), "never the fallback");
 }

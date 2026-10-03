@@ -95,12 +95,19 @@ async fn a_firing_on_the_plan_is_unreachable_while_its_mac_or_proxy_is_away() {
     let by_mac = stored(InferenceSource {
         kind: SourceKind::LocalProxy,
         via: Some(Via::Mac),
+        relays: vec!["mac-1".to_string()],
         ..Default::default()
     });
     let routed = routine_route(&by_mac, (&ada, &run), &luna).await;
     let offline = "Skipped: your computer was off, so your plan couldn't answer";
     let skipped = unreachable_by(&routed).await;
     assert_eq!(skipped, Some(("relay_offline", offline)));
+    // One switched off, though connected, is no Mac to the firing: it is never asked.
+    let _off = by_mac.1.connect(ada.as_str(), "mac-off");
+    assert_eq!(
+        unreachable_by(&routed).await,
+        Some(("relay_offline", offline))
+    );
     let _stream = by_mac.1.connect(ada.as_str(), "mac-1");
     assert_eq!(
         unreachable_by(&routed).await,
@@ -129,8 +136,9 @@ async fn a_firing_on_the_plan_is_unreachable_while_its_mac_or_proxy_is_away() {
     assert_eq!(unsaid, None, "refused in words instead");
 }
 
-/// RELAY OFF (#332): a firing by the Mac with no fallback is skipped `relay_disabled`, though its
-/// Mac is connected; with a fallback it asks the gateway, which nothing skips.
+/// RELAY OFF (#332), none of the person's computers on: a firing by the Mac with no fallback is
+/// skipped `relay_disabled`, though its Mac is connected; with a fallback it asks the gateway,
+/// which nothing skips.
 #[tokio::test]
 async fn a_firing_by_the_mac_with_the_relay_off_is_skipped_unless_a_fallback_answers() {
     let (ada, run) = (AccountId::new(), RunId::new());
@@ -139,7 +147,7 @@ async fn a_firing_by_the_mac_with_the_relay_off_is_skipped_unless_a_fallback_ans
         kind: SourceKind::LocalProxy,
         via: Some(Via::Mac),
         relay_model: Some("gpt-5.5".to_string()),
-        relay_off: true,
+        relays: Vec::new(),
         ..Default::default()
     };
     let saved = stored(off.clone());

@@ -11,9 +11,13 @@
 //! body piped into the run as it arrives rather than one result, and a replaced stream is told so
 //! (`replaced`) and closed, where local-exec's is dropped.
 //!
-//! WHICH MAC: the account's machine that most recently opened its stream and still holds it.
-//! Opening it IS the machine saying it can carry calls. A call is only ever sent under the
-//! account whose turn it is, so only the account's own machines serve, and only its own turns.
+//! WHICH MAC: the account's machine that most recently opened its stream and still holds it,
+//! SKIPPING ONE WHOSE RELAY IS SWITCHED OFF. Opening it IS the machine saying it can carry calls,
+//! and its person's switch says whether it may: a stream is refused while it is off and closed
+//! when it goes off, but one may still be open meanwhile (here between the switch's write and its
+//! close, or on another replica), so the pick is held to the switches as the turn read them
+//! (`RelayTo::machines`, `formal/tla/RelayCall.tla`). A call is only ever sent under the account
+//! whose turn it is, so only the account's own machines serve, and only its own turns.
 //!
 //! THE DOOR KEEPS ITS OWN CLOCKS: a Mac that does not start answering within `FIRST_BYTE`, or goes
 //! quiet for `IDLE`, ends the call with `relay_timeout` and is told to cancel; a Stop ends it
@@ -143,12 +147,16 @@ pub struct RelayTo {
     pub broker: Arc<RelayBroker>,
     pub account: String,
     pub run_id: String,
+    /// The account's machines whose relay was on as the turn read them (`InferenceSource::relays`):
+    /// the only ones it asks.
+    pub machines: Vec<String>,
 }
 
 impl PartialEq for RelayTo {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.broker, &other.broker)
-            && (&self.account, &self.run_id) == (&other.account, &other.run_id)
+            && (&self.account, &self.run_id, &self.machines)
+                == (&other.account, &other.run_id, &other.machines)
     }
 }
 
@@ -216,10 +224,21 @@ impl RelayBroker {
         })
     }
 
-    /// The account's Mac: its machine that most recently opened its stream and still holds it.
-    pub fn connected(&self, account: &str) -> Option<String> {
+    /// The account's Mac: of its machines `on` (whose relay is), the one that most recently opened
+    /// its stream and still holds it.
+    pub fn connected(&self, account: &str, on: &[String]) -> Option<String> {
         let state = self.lock();
-        latest(&state, account).map(|((_, machine), _)| machine.clone())
+        latest(&state, account, on).map(|((_, machine), _)| machine.clone())
+    }
+
+    /// Whether this machine's relay stream is open here now, whatever its switch says.
+    pub fn relaying(&self, account: &str, machine: &str) -> bool {
+        let key = (account.to_string(), machine.to_string());
+        let state = self.lock();
+        state
+            .macs
+            .get(&key)
+            .is_some_and(|mac| !mac.frames.is_closed())
     }
 
     /// A machine's daemon token was revoked, or rotated by a re-enrolment: its stream ends now,
@@ -228,6 +247,16 @@ impl RelayBroker {
     pub fn disconnect(&self, account: &str, machine: &str) {
         let key = (account.to_string(), machine.to_string());
         self.lock().macs.remove(&key);
+    }
+
+    /// A machine's relay was switched off, its row written first: its stream is told so
+    /// (`disabled`) and ends, so it is sent no more turns. A call in flight on it ends as one on a
+    /// dropped stream does: its answer is the machine's, by its token, or its clock runs out.
+    pub fn disable(&self, account: &str, machine: &str) {
+        let key = (account.to_string(), machine.to_string());
+        if let Some(mac) = self.lock().macs.remove(&key) {
+            let _ = mac.frames.send(RelayFrame::Disabled);
+        }
     }
 
     /// Claim the sending of `account`'s held sends on `thread` (`opengrok-server`'s
@@ -256,11 +285,11 @@ impl RelayBroker {
         again
     }
 
-    /// Send `frame` to the account's Mac under a fresh, unguessable id, and register where its
-    /// answer goes.
+    /// Send `frame` to the account's Mac, of its machines `on`, under a fresh, unguessable id, and
+    /// register where its answer goes.
     fn ask(
         self: &Arc<Self>,
-        account: &str,
+        (account, on): (&str, &[String]),
         run_id: Option<&str>,
         frame: impl FnOnce(String) -> RelayFrame,
     ) -> Result<Call, ModelError> {
@@ -275,7 +304,7 @@ impl RelayBroker {
         let stop = Arc::new(Notify::new());
         let mut state = self.lock();
         let (machine, sent) = {
-            let (machine, mac) = latest(&state, account).ok_or_else(offline)?;
+            let (machine, mac) = latest(&state, account, on).ok_or_else(offline)?;
             let busy = state.asks.values().filter(|ask| ask.machine == *machine);
             if busy.count() >= MAX_IN_FLIGHT {
                 return Err(ModelError::Proxy(format!(
@@ -376,13 +405,12 @@ impl RelayBroker {
         // about where it goes. The Mac's opencodex is at an address and a key entered on the Mac.
         let body = crate::gateway::chat_body(request);
         let (run_id, model) = (to.run_id.clone(), request.model.clone());
-        let mut call = self.ask(&to.account, Some(&to.run_id), |request_id| {
-            RelayFrame::Infer {
-                request_id,
-                run_id,
-                model,
-                request: body,
-            }
+        let mac = (to.account.as_str(), to.machines.as_slice());
+        let mut call = self.ask(mac, Some(&to.run_id), |request_id| RelayFrame::Infer {
+            request_id,
+            run_id,
+            model,
+            request: body,
         })?;
         let clocks = self.clocks;
         let first = call.bytes(clocks.first_byte, false).await?;
@@ -399,11 +427,11 @@ impl RelayBroker {
         ))
     }
 
-    /// The ids the account's Mac says its opencodex serves that a subscription may use
-    /// (`local_proxy::allowed_ids`). None when no Mac is connected, or it does not answer within
-    /// `Clocks::listing`: a list is never an error, and never waits long.
-    pub async fn models(self: &Arc<Self>, account: &str) -> Vec<String> {
-        let asked = self.ask(account, None, |request_id| RelayFrame::Models {
+    /// The ids the account's Mac, of its machines `on`, says its opencodex serves that a
+    /// subscription may use (`local_proxy::allowed_ids`). None when no Mac is connected, or it
+    /// does not answer within `Clocks::listing`: a list is never an error, and never waits long.
+    pub async fn models(self: &Arc<Self>, account: &str, on: &[String]) -> Vec<String> {
+        let asked = self.ask((account, on), None, |request_id| RelayFrame::Models {
             request_id,
         });
         let Ok(mut call) = asked else {
@@ -419,10 +447,12 @@ impl RelayBroker {
     }
 }
 
-/// The account's machine whose stream opened last and is still held.
-fn latest<'a>(state: &'a State, account: &str) -> Option<(&'a Machine, &'a Mac)> {
+/// The account's machine whose stream opened last and is still held, of those `on`: a machine
+/// whose relay is off is skipped though its stream is open, and never asked (`NeverAskedDisabled`).
+fn latest<'a>(state: &'a State, account: &str, on: &[String]) -> Option<(&'a Machine, &'a Mac)> {
     let theirs = state.macs.iter().filter(|((owner, _), _)| owner == account);
-    let live = theirs.filter(|(_, mac)| !mac.frames.is_closed());
+    let switched_on = theirs.filter(|((_, machine), _)| on.contains(machine));
+    let live = switched_on.filter(|(_, mac)| !mac.frames.is_closed());
     live.max_by_key(|(_, mac)| mac.opened)
 }
 

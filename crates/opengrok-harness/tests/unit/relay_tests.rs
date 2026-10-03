@@ -36,11 +36,19 @@ fn turn(model: &str) -> ModelRequest {
     }
 }
 
+/// The machines every test's account has switched on, whatever it connects.
+fn on() -> Vec<String> {
+    ["mac-1", "mac-old", "mac-new", "mac-b"]
+        .map(str::to_string)
+        .to_vec()
+}
+
 fn to(broker: &Arc<RelayBroker>, account: &str) -> RelayTo {
     RelayTo {
         broker: broker.clone(),
         account: account.to_string(),
         run_id: "run-1".to_string(),
+        machines: on(),
     }
 }
 
@@ -75,8 +83,84 @@ async fn a_stream_opens_with_ready_pings_and_is_replaced_by_the_next_from_its_ma
         Some("replaced"),
         "{rest:?}"
     );
-    assert_eq!(broker.connected("acct-a").as_deref(), Some("mac-1"));
-    assert_eq!(broker.connected("acct-b"), None);
+    assert_eq!(broker.connected("acct-a", &on()).as_deref(), Some("mac-1"));
+    assert_eq!(broker.connected("acct-b", &on()), None);
+}
+
+/// A MACHINE SWITCHED OFF IS NEVER ASKED, though it holds the newest stream: a turn's call, and a
+/// model list, go to the newest stream of the machines the turn read on; with none of those
+/// connected the call is `relay_offline`, and the switched-off one is still never asked.
+#[tokio::test]
+async fn a_call_skips_a_newer_stream_whose_machine_is_switched_off() {
+    let broker = quick();
+    let mut older = Box::pin(broker.connect("acct-a", "mac-old"));
+    let mut off = Box::pin(broker.connect("acct-a", "mac-off"));
+    for stream in [&mut older, &mut off] {
+        frame(stream).await;
+    }
+    assert_eq!(
+        broker.connected("acct-a", &on()).as_deref(),
+        Some("mac-old")
+    );
+    let asked = tokio::spawn({
+        let broker = broker.clone();
+        async move {
+            words(
+                broker
+                    .stream(&to(&broker, "acct-a"), &turn("gpt-5.5"))
+                    .await?,
+            )
+            .await
+        }
+    });
+    let infer = frame(&mut older).await.unwrap();
+    assert_eq!(infer["type"], "infer", "{infer}");
+    let id = infer["requestId"].as_str().unwrap();
+    let answering = broker.answer("acct-a", "mac-old", id).unwrap();
+    let sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"from the older\"}}]}\n\ndata: [DONE]\n\n";
+    let done = futures::stream::iter([Ok::<_, std::io::Error>(sse.as_bytes())]);
+    answering.pipe(true, done).await;
+    assert_eq!(asked.await.unwrap().unwrap(), "from the older");
+    let listing = tokio::spawn({
+        let broker = broker.clone();
+        async move { broker.models("acct-a", &on()).await }
+    });
+    assert_eq!(frame(&mut older).await.unwrap()["type"], "models");
+    listing.abort();
+
+    drop(older);
+    let offline = broker
+        .stream(&to(&broker, "acct-a"), &turn("gpt-5.5"))
+        .await;
+    assert_eq!(offline.err().and_then(|e| e.code()), Some("relay_offline"));
+    let asked_off = tokio::time::timeout(Duration::from_millis(350), frame(&mut off)).await;
+    assert!(asked_off.is_err(), "never asked: {asked_off:?}");
+    assert!(
+        broker.relaying("acct-a", "mac-off"),
+        "its stream is open all the same"
+    );
+}
+
+/// SWITCHED OFF, A STREAM IS TOLD SO AND ENDS: the machine is no longer relaying, and a turn that
+/// read it on before finds no stream to ask, `relay_offline`.
+#[tokio::test]
+async fn a_machine_switched_off_is_told_disabled_and_its_stream_ends() {
+    let broker = quick();
+    let mut mac = Box::pin(broker.connect("acct-a", "mac-1"));
+    frame(&mut mac).await;
+    assert!(broker.relaying("acct-a", "mac-1"));
+    broker.disable("acct-a", "mac-1");
+    let mut rest = Vec::new();
+    while let Some(said) = frame(&mut mac).await {
+        rest.push(said);
+    }
+    assert_eq!(rest, [serde_json::json!({"type": "disabled"})]);
+    assert!(!broker.relaying("acct-a", "mac-1"));
+    let offline = broker
+        .stream(&to(&broker, "acct-a"), &turn("gpt-5.5"))
+        .await;
+    assert_eq!(offline.err().and_then(|e| e.code()), Some("relay_offline"));
 }
 
 /// A call goes to the account's newest stream, as the body the loopback door would POST, and no
@@ -259,12 +343,12 @@ async fn a_stop_cancels_the_call_at_the_mac_once() {
 #[tokio::test]
 async fn a_macs_model_list_is_kept_to_the_allowlist() {
     let broker = quick();
-    assert!(broker.models("acct-a").await.is_empty());
+    assert!(broker.models("acct-a", &on()).await.is_empty());
     let mut mac = Box::pin(broker.connect("acct-a", "mac-1"));
     frame(&mut mac).await;
     let listing = tokio::spawn({
         let broker = broker.clone();
-        async move { broker.models("acct-a").await }
+        async move { broker.models("acct-a", &on()).await }
     });
     let asked = frame(&mut mac).await.unwrap();
     assert_eq!(asked["type"], "models");

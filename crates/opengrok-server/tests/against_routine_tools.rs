@@ -792,6 +792,11 @@ async fn a_routine_for_a_bot_on_its_persons_plan_says_when_it_runs() {
         )
         .await;
     assert_eq!(status, 200, "{row}");
+    // A computer of Ada's, asleep, which `relayEnabled` switches on and off with the rest.
+    let label = Some(json!({ "label": "Ada's MacBook" }));
+    let post = reqwest::Method::POST;
+    let (status, enrolled) = h.send(&ada, post, "/local-exec/daemon", label).await;
+    assert_eq!(status, 200, "{enrolled}");
     let fallback = json!({ "model": "xai/grok-4.6" });
     for (via, (on, fallback), note) in [
         (

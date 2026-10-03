@@ -373,7 +373,7 @@ pub(crate) async fn unreachable_by(route: &Route) -> Option<(&'static str, &'sta
         return None;
     };
     let (up, way) = match endpoint {
-        ModelEndpoint::Relay(to) => (to.broker.connected(&to.account).is_some(), 0),
+        ModelEndpoint::Relay(to) => (to.broker.connected(&to.account, &to.machines).is_some(), 0),
         ModelEndpoint::Proxy { base_url, .. } => (local_proxy::healthy(base_url).await, 1),
         ModelEndpoint::Unavailable { why, .. } => (!why.starts_with(local_proxy::RELAY_OFF), 2),
     };

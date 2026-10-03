@@ -14,7 +14,7 @@ must touch the models, and what to do with a counterexample: [`POLICY.md`](POLIC
 | `tla/RunLifecycle.tla` | One run across processes: the aggregate (`opengrok-core/src/run.rs`), the turn and its continuations, answers racing each other, Stop, the recovery sweep, crashes, lapsed leases, and a client retrying its POST with the same run id. |
 | `tla/JournalAppend.tla` | One journal write racing a Stop, as the store sees it: read the run, append at the next seq, lose the race with a `Conflict`. Which errors a write may retry. |
 | `tla/RecipeLease.tla` | Starting a recipe run on one bot (`start_recipe_run`, `opengrok-store/src/postgres.rs`): starters that each lock, take the insert's snapshot, insert where no live lease is visible, and commit; a landed run clears its lease. |
-| `tla/RelayCall.tla` | One model call a person's Mac carries (#292, `opengrok-harness/src/relay.rs`): the door sends `infer` down the asked machine's stream and waits; any daemon-token holder may POST answers to the call's id, as often as it likes; the door gives up at its clock or on a Stop and tells the Mac to cancel. |
+| `tla/RelayCall.tla` | One model call a person's Mac carries (#292, `opengrok-harness/src/relay.rs`): the turn reads its person's computers' relay switches, the door picks a stream of one read on and sends `infer` down it, and waits; meanwhile a computer is switched off (its row, then its stream told `disabled` and closed) or on, and opens its stream (the switch read, the stream registered, the switch read again) or drops it; any daemon-token holder may POST answers to the call's id, as often as it likes; the door gives up at its clock or on a Stop and tells the Mac to cancel. |
 | `tla/HeldSend.tla` | A queued send the person's Mac would carry (#292, `agui/pending.rs`): the app fires it while a Mac connects and leaves; the fire's check and the row's locked drain are two steps; a Mac that opens its stream makes the server fire it too (`drain_held`), once the person's other turns on the thread have ended, one sending per thread; the drained turn's call then finds a Mac or not. |
 | `tla/PairDelivery.tla` | A message one Bot sends another (#314, `opengrok-server/src/pairs.rs`): the sender's call writes the outbox row, unique on (sender run, call, receiver), and asks the pair to drain; a drain takes the pair's lock, looks for a run of the pair in flight and claims the oldest queued message; the claimed message's run, whose id the row named, starts once; a pair's run ending drains it again, and so does every sweep, which also starts a claimed message whose drain died. The process crashes and restarts. |
 | `lean/Harness.lean` | The facts that must hold for every constant, not just the ones TLC can enumerate: the loop's four, and a chain of Bot messages' bound (#314). Lean 4 core only. |
@@ -37,9 +37,12 @@ it ends instead.
 
 **Relay** (`RelayCall`, `HeldSend`). The Mac relay is a door, not a loop: the loop awaits a
 stream as it does for the gateway, and the door's clocks, its cancel and a Stop reaching it
-(through the broker, from the stop route) are inside it. `RelayCall` is one call: `waiting →
-streaming → done`, answered, failed, timed out or stopped, with answers from the asked machine,
-the same person's other machine and another account's machine under the same id. `HeldSend` is
+(through the broker, from the stop route) are inside it. `RelayCall` is one call: `routing →
+picking → waiting → streaming → done`, relay off (no computer read on), offline (none of those
+holding a stream), answered, failed, timed out or stopped, with answers from the asked machine,
+the same person's other machine and another account's machine under the same id. Before the pick,
+each computer's switch flips and its stream opens and drops around the turn's read; after it, no
+step of the call reads either, which is what "a call in flight ends as on a dropped stream" means. `HeldSend` is
 the pending delivery the relay adds: a fire's check and the row's drain as two steps, the Mac
 coming and going around them, the reconnect drain racing the app and waiting out the person's
 other turns on the thread, one sending per thread that a new trigger sends round again.
@@ -90,6 +93,8 @@ is the loop a retried POST with the same run id starts, at any point in the run'
 | Every tool that started is on record until its result is (#91) | safety | `ToolStartIsOnRecord` |
 | Every recipe start answers, won or refused | liveness | `RecipeLease` `EveryStartAnswers` |
 | A round that said nothing after a Stop ends as the Stop, never "no text" (#292) | safety | `SilenceAfterStopIsTheStop` |
+| A computer switched off before its turn read the switches is never asked, its stream open or not | safety | `RelayCall` `NeverAskedDisabled` |
+| A computer whose relay is off keeps no stream, once its switch-off and its opens have settled | safety | `RelayCall` `NoStreamWhileOff` |
 | A relayed answer reaches only the call that asked, from the machine it asked | safety | `RelayCall` `OnlyTheAsked` |
 | A relayed call takes one answer, and none after the door gave up | safety | `RelayCall` `AnsweredOnce`, `NothingTakenAfterGivingUp` |
 | A call given up on (clock or Stop) is cancelled at the Mac, exactly once; one the Mac finished is not | safety | `RelayCall` `CancelledOnceIfGivenUp` |
@@ -313,6 +318,30 @@ Each trace is TLC's shortest.
     - **Holds as built**: a claimed message whose drain died in a crash holds its pair until the
       sweep starts it (`pairs_to_sweep`, after `LEASE_MS`); the run's id makes a slow drain and the
       sweep start it once.
+
+18. **Each computer's own relay switch** (the per-computer contract, 3 Oct 2026, after #332). Two
+    counterexamples, each a design choice made before the code and kept (`RelayCall_switch`, 24,100
+    states for two computers, three flips and an answer each; `RelayCall`, 5,148, the call's own
+    claims with the pick in front of them):
+    - **Without the skip** (`RelayCall_noskip`, `NeverAskedDisabled`, six states): a computer's
+      stream opening reads its switch on, its person switches it off, the turn reads the switches
+      (the other computer alone is on), the stream is registered, and the pick takes the newest
+      stream held: a disabled computer is asked. A switch-off closes the stream it finds, yet one is
+      held meanwhile, between an open's two reads, between a switch's row and its close, and on
+      another replica, whose close never reaches this one; so `latest` is held to the switches the
+      turn read (`RelayTo::machines`), read with the setting on every turn and never kept. Tests:
+      `a_call_skips_a_newer_stream_whose_machine_is_switched_off` (the broker) and
+      `a_turn_skips_a_computer_switched_off_while_another_serves` (a switch written as another
+      replica writes it), each seen failing with the skip taken out.
+    - **Without the second read** (`RelayCall_norecheck`, `NoStreamWhileOff`, five states): an open
+      reads the switch on, the switch-off writes its row and finds no stream to close, and the open
+      registers its stream: a computer whose relay is off holds a stream that no close is coming
+      for, told nothing. `relay_requests` reads the switch again once the stream is registered, as
+      it reads the token (#298), and drops the stream before a frame, 409 `relay_disabled`.
+    - **Stated limit**: no test stops a request between those two reads, as none does for the
+      token's, so the second is the model's to hold. And a switch turned off and on again before
+      the first close runs has that close end the stream opened in between, a `disabled` frame to a
+      computer that is on, which reconnects; the model allows it, as no invariant forbids it.
 
 ## Lean findings
 

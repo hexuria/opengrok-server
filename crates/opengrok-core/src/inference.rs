@@ -186,11 +186,15 @@ pub struct InferenceSource {
     /// the log until set, so every event from before it reads as none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_bot_default: Option<NewBotDefault>,
-    /// The person switched the relay off (#332): a turn that would go by their Mac goes to the
-    /// gateway on `plan_fallback`, or is refused; the loopback never reads it. Kept as the switch's
-    /// off side, so every event from before it reads as on.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub relay_off: bool,
+    /// The person's computers whose relay is on: each un-revoked enrolled machine whose own switch
+    /// (`local_exec_daemon.relay_enabled`) is on, filled on every read of the setting
+    /// (`local_proxy::Saved::setting`) and never logged, so a switch counts from the next turn.
+    /// NONE IS "RELAY OFF", FOR THE MAC'S WAY ALONE: a turn that would go by the Mac goes to the
+    /// gateway on `plan_fallback`, or is refused. The loopback never reads it, so a plan on this
+    /// server's own machine, with no Mac enrolled, is never off. #332 kept an account-wide switch
+    /// here as `relay_off`; an event that carries it replays with it unread.
+    #[serde(skip)]
+    pub relays: Vec<String>,
     /// What answers in the Mac's place while the relay is off (#332). Absent until set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_fallback: Option<PlanFallback>,
@@ -299,26 +303,28 @@ impl InferenceSource {
     /// Whether a turn that named `chosen`, with a coworker whose own source is `coworker`, goes
     /// by the person's Mac over this setting: the question a queued send asks to know whether it
     /// waits for one (opengrok-server `pending::Held`), resolved as the turn itself is. Never
-    /// while the relay is off (#332): such a turn goes to the fallback or is refused, at once.
+    /// while the relay is off (#332), no computer's on: such a turn goes to the fallback or is
+    /// refused, at once.
     pub fn by_mac(&self, chosen: Option<TurnSource>, coworker: Option<SourceKind>) -> bool {
         let way = self.resolve(TurnSource::picked(chosen, coworker));
-        !self.relay_off && way == (SourceKind::LocalProxy, Via::Mac)
+        !self.relays.is_empty() && way == (SourceKind::LocalProxy, Via::Mac)
     }
 
-    /// The setting a `PUT /account/inference-source` body asks for over this one, and what it does
-    /// to the key, or the sentence it is refused with; `base` judges an address
-    /// (`opengrok_harness::local_proxy::loopback_base`). A field absent keeps what is saved; `null`
-    /// or blank clears it, and so for `via`, `relay.localModel`, `newBotDefault` and
-    /// `planFallback` (null only); `relayEnabled` is true or false, and SWITCHES NO WAY: the app
-    /// sends `via` beside it when it means one (#332). EVERY RULE IS ASKED HERE, BEFORE ANYTHING IS
-    /// WRITTEN: an address that is not this machine, or a model the terms forbid, beside a fresh
-    /// key saves neither. The key goes out in a header, so it is printable and bounded or refused
-    /// now, not at a turn.
+    /// The setting a `PUT /account/inference-source` body asks for over this one, what it does to
+    /// the key, and the relay switch it names, or the sentence it is refused with; `base` judges
+    /// an address (`opengrok_harness::local_proxy::loopback_base`). A field absent keeps what is
+    /// saved; `null` or blank clears it, and so for `via`, `relay.localModel`, `newBotDefault` and
+    /// `planFallback` (null only); `relayEnabled` is true or false, is not part of the setting
+    /// (the caller switches every one of the person's computers to it), and SWITCHES NO WAY: the
+    /// app sends `via` beside it when it means one (#332). EVERY RULE IS ASKED HERE, BEFORE
+    /// ANYTHING IS WRITTEN: an address that is not this machine, or a model the terms forbid,
+    /// beside a fresh key saves neither. The key goes out in a header, so it is printable and
+    /// bounded or refused now, not at a turn.
     pub fn applied(
         &self,
         body: &Value,
         base: impl Fn(&str) -> Result<String, String>,
-    ) -> Result<(Self, KeyChange), String> {
+    ) -> Result<(Self, KeyChange, Option<bool>), String> {
         let text = |object: &Value, field: &str| -> Result<Option<Option<String>>, String> {
             match object.get(field) {
                 None => Ok(None),
@@ -368,9 +374,10 @@ impl InferenceSource {
         if let Some(chosen) = body.get("newBotDefault") {
             source.new_bot_default = NewBotDefault::named(chosen)?;
         }
-        if let Some(on) = body.get("relayEnabled") {
-            source.relay_off = !on.as_bool().ok_or("relayEnabled must be true or false")?;
-        }
+        let switched = body.get("relayEnabled").map(Value::as_bool);
+        let switched = switched
+            .map(|on| on.ok_or("relayEnabled must be true or false"))
+            .transpose()?;
         if let Some(chosen) = body.get("planFallback") {
             source.plan_fallback = PlanFallback::named(chosen)?;
         }
@@ -387,7 +394,7 @@ impl InferenceSource {
             KeyChange::Set(_) => true,
             KeyChange::Clear => false,
         };
-        Ok((source, key))
+        Ok((source, key, switched))
     }
 }
 
