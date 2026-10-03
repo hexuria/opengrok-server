@@ -22,6 +22,7 @@ async fn changed(pool: &PgPool, account: &str, thread: &str) {
     let note = Note::ThreadChanged {
         thread_id: thread,
         coworker_id: "cw_1",
+        run_id: None,
     };
     let mut tx = pool.begin().await.unwrap();
     emit(&mut tx, account, &[note]).await.unwrap();

@@ -20,6 +20,15 @@ fn changed(thread: &str) -> Note<'_> {
     Note::ThreadChanged {
         thread_id: thread,
         coworker_id: "cw_1",
+        run_id: None,
+    }
+}
+
+fn by_run<'a>(thread: &'a str, run: &'a str) -> Note<'a> {
+    Note::ThreadChanged {
+        thread_id: thread,
+        coworker_id: "cw_1",
+        run_id: Some(run),
     }
 }
 
@@ -57,7 +66,7 @@ async fn a_new_connection_is_told_to_reset_and_then_hears_what_follows() {
     assert_eq!((heard.id, heard.event.as_str()), (1, "thread.changed"));
     assert_eq!(
         heard.data,
-        json!({ "threadId": "t1", "coworkerId": "cw_1" })
+        json!({ "threadId": "t1", "coworkerId": "cw_1", "runId": null })
     );
     assert_eq!(block(&mut frames, 300).await, None, "and nothing more");
 }
@@ -321,6 +330,55 @@ async fn a_burst_for_one_thread_is_told_once_and_ends_on_the_last() {
     assert!(
         told_at.elapsed() >= Duration::from_millis(400),
         "the burst waited out the window"
+    );
+}
+
+/// WHAT A BURST SAYS ABOUT WHOSE COMMIT IT WAS is on the wire as the merge decided: one run's
+/// rounds name that run, and rounds of two runs, or of a run and a person, name none. The app that
+/// streams a run skips the read for its own, and must not skip one it was not the cause of.
+#[tokio::test]
+async fn a_burst_names_its_run_only_when_every_note_in_it_does() {
+    let Some(pool) = pool().await else { return };
+    let (hub, ada) = (hub(&pool), account());
+    hub.tune(Tuning {
+        ping: Duration::from_secs(60),
+        poll: Duration::from_secs(60),
+        window: Duration::from_millis(600),
+        room: 64,
+    });
+    let mut frames = hub.follow(&ada, None).await.unwrap();
+    must(&mut frames).await;
+    note(&pool, &ada, changed("lead")).await;
+    must(&mut frames).await;
+
+    // Within the window, in one commit: "mine" is one run's alone, "split" is two runs', and
+    // "settled" is a run's and then a person's.
+    let notes = [
+        by_run("mine", "run_a"),
+        by_run("split", "run_a"),
+        by_run("settled", "run_a"),
+        by_run("mine", "run_a"),
+        by_run("split", "run_b"),
+        changed("settled"),
+    ];
+    let mut tx = pool.begin().await.unwrap();
+    emit(&mut tx, &ada, &notes).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let mut told = Vec::new();
+    while let Some(next) = block(&mut frames, 1_500).await {
+        told.push((
+            next.data["threadId"].as_str().unwrap().to_string(),
+            next.data["runId"].clone(),
+        ));
+    }
+    assert_eq!(
+        told,
+        [
+            ("mine".to_string(), json!("run_a")),
+            ("split".to_string(), json!(null)),
+            ("settled".to_string(), json!(null)),
+        ]
     );
 }
 

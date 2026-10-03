@@ -1,10 +1,12 @@
 //! One stream: a resume or a `reset`, then the outbox followed.
 
 use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
 use std::time::Duration;
 
 use futures::stream::{self, BoxStream, StreamExt};
 use opengrok_wire::events::{PING, RESET, THREAD_CHANGED, block};
+use serde_json::Value;
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at, sleep_until};
 
@@ -31,12 +33,12 @@ impl Hub {
     ///
     /// The stream ends only if the process does; a client that goes away drops it, and with it the
     /// seat in the account's room. An outbox that cannot be read now is read again soon, and does
-    /// not end the stream.
+    /// not end the stream. Its items cannot fail (`Infallible`): a response body asks for a result.
     pub async fn follow(
         &self,
         account: &str,
         last_event_id: Option<&str>,
-    ) -> Result<BoxStream<'static, String>, sqlx::Error> {
+    ) -> Result<BoxStream<'static, Result<String, Infallible>>, sqlx::Error> {
         let wakes = self.room(account);
         self.listen();
         let (head, floor) = outbox::bounds(self.pool(), account).await?;
@@ -61,7 +63,7 @@ impl Hub {
         }
         let frames = stream::unfold(follow, |mut follow| async move {
             let frame = follow.next().await?;
-            Some((frame, follow))
+            Some((Ok(frame), follow))
         });
         Ok(frames.boxed())
     }
@@ -156,21 +158,40 @@ impl Follow {
     }
 }
 
-/// Of the `thread.changed` notes one live read found for a thread, only the last. The app reads
-/// the thread again either way, and the last says where it must have got to. Nothing else is
-/// merged, and a replay is not: it is every note, in order.
-fn coalesced(notes: Vec<Stored>) -> Vec<Stored> {
+/// Of the `thread.changed` notes one live read found for a thread, only the last: the app reads
+/// the thread again either way, and the last says where it must have got to. It names a run only
+/// if every note it stands for did. The app skips reading a thread for the run it is streaming, so
+/// notes of two runs, or of a run and a person, merge into one that names nobody: `null`, never
+/// the run the app happens to be streaming. Nothing else is merged, and a replay is not: it is
+/// every note, in order.
+pub(crate) fn coalesced(notes: Vec<Stored>) -> Vec<Stored> {
     let key = |note: &Stored| {
         let word = |name: &str| note.payload[name].as_str().unwrap_or_default().to_string();
         (word("threadId"), word("coworkerId"))
     };
-    let thread_changed = |note: &&Stored| note.kind == THREAD_CHANGED;
-    let last: HashMap<_, _> = notes
-        .iter()
-        .filter(thread_changed)
-        .map(|n| (key(n), n.id))
-        .collect();
-    let keep =
-        |note: &Stored| note.kind != THREAD_CHANGED || last.get(&key(note)) == Some(&note.id);
-    notes.into_iter().filter(keep).collect()
+    // Each thread's last note, and the run its notes agree on.
+    let mut last: HashMap<(String, String), (i64, Value)> = HashMap::new();
+    for note in notes.iter().filter(|note| note.kind == THREAD_CHANGED) {
+        let run = note.payload["runId"].clone();
+        let seen = last.entry(key(note)).or_insert((note.id, run.clone()));
+        *seen = (note.id, if seen.1 == run { run } else { Value::Null });
+    }
+    let merged = |mut note: Stored| {
+        if note.kind == THREAD_CHANGED {
+            let (id, run) = last.get(&key(&note))?;
+            if *id != note.id {
+                return None;
+            }
+            if let Some(object) = note.payload.as_object_mut() {
+                object.insert("runId".to_string(), run.clone());
+            }
+        }
+        Some(note)
+    };
+    notes.into_iter().filter_map(merged).collect()
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[path = "../tests/unit/follow.rs"]
+mod tests;

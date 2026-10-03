@@ -19,6 +19,7 @@ fn changed<'a>(thread: &'a str) -> Note<'a> {
     Note::ThreadChanged {
         thread_id: thread,
         coworker_id: "cw_1",
+        run_id: None,
     }
 }
 

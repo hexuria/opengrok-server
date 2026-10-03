@@ -4,7 +4,8 @@
 //! `Last-Event-ID` and is replayed what came after.
 //!
 //! Provenance: the contract agreed with NativeChat on hexuria/nativechat#171 (3 Oct 2026), which
-//! names every note and field below. `cause` and `state` are not words of its own: they are the
+//! names every note and field below; `thread.changed`'s `runId` is its client build's addition the
+//! same day. `cause` and `state` are not words of its own: they are the
 //! ones a routine's run history already says (`GET /schedules/{id}/runs`), so the app reads one
 //! vocabulary. The history's causes are `clock`, `manual`, `webhook` and `bot` for a routine,
 //! `event` and `manual` for a monitor, and a run nothing fired is `chat`; its end is `ok` or
@@ -53,10 +54,14 @@ pub enum Change {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged, rename_all_fields = "camelCase")]
 pub enum Note<'a> {
-    /// A message, a run's frames or a card settled: a journal round was appended.
+    /// A message, a run's frames or a card settled: a journal round was appended. `run_id` is the
+    /// run whose own commit it was, so the app can skip reading what it is already streaming; it
+    /// is `null`, and present, for a change no run's commit caused: a person settling a card or
+    /// stopping a run, the sweep.
     ThreadChanged {
         thread_id: &'a str,
         coworker_id: &'a str,
+        run_id: Option<&'a str>,
     },
     /// A run began. `routine_id` is the routine that fired it, left out for any other run.
     RunStarted {

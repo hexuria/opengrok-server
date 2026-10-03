@@ -2,6 +2,7 @@
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::convert::Infallible;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -89,13 +90,13 @@ pub fn parse(text: &str) -> Block {
     }
 }
 
-pub type Frames = BoxStream<'static, String>;
+pub type Frames = BoxStream<'static, Result<String, Infallible>>;
 
 /// The next block within `ms`, or `None` if nothing came: a comment (a ping) is a panic here.
 pub async fn block(frames: &mut Frames, ms: u64) -> Option<Block> {
     let next = tokio::time::timeout(Duration::from_millis(ms), frames.next()).await;
     next.ok()
-        .map(|text| parse(&text.expect("the stream ended")))
+        .map(|text| parse(&text.expect("the stream ended").unwrap()))
 }
 
 /// The next block, which must come.
@@ -106,5 +107,6 @@ pub async fn must(frames: &mut Frames) -> Block {
 /// The next frame of any kind within `ms`: a block, or a comment.
 pub async fn frame(frames: &mut Frames, ms: u64) -> Option<String> {
     let next = tokio::time::timeout(Duration::from_millis(ms), frames.next()).await;
-    next.ok().map(|text| text.expect("the stream ended"))
+    next.ok()
+        .map(|text| text.expect("the stream ended").unwrap())
 }

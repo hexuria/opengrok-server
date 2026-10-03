@@ -23,7 +23,7 @@ const TAKE: &str = "insert into account_event_head (account_id, head)
     returning head";
 
 const WRITE: &str = "insert into account_event (account_id, id, kind, payload)
-    select $1, $2 + t.n, t.kind, t.payload::jsonb
+    select $1, $2 + t.n, t.kind, t.payload::json
       from unnest($3::text[], $4::text[]) with ordinality as t(kind, payload, n)";
 
 /// Delete what is past retention, and lift `floor` to the highest id gone so a resume below it is
@@ -44,7 +44,8 @@ const BOUNDS: &str = "select
         coalesce((select max(id) from account_event
                    where account_id = $1 and created_at < now() - make_interval(hours => $2)), 0))";
 
-const PAGE: &str = "select id, kind, payload from account_event where account_id = $1 and id > $2 order by id limit $3";
+const PAGE: &str = "select id, kind, payload from account_event
+    where account_id = $1 and id > $2 order by id limit $3";
 
 /// Write `notes` for `account` on the caller's connection, then wake whoever follows the account.
 ///

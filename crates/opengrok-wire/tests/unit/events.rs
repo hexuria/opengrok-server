@@ -14,11 +14,12 @@ fn every_note_says_what_changed_in_ids_and_the_contracts_names() {
     let thread = Note::ThreadChanged {
         thread_id: "sched_1",
         coworker_id: "cw_1",
+        run_id: Some("run_1"),
     };
     assert_eq!(thread.event(), "thread.changed");
     assert_eq!(
         data(&thread),
-        json!({ "threadId": "sched_1", "coworkerId": "cw_1" })
+        json!({ "threadId": "sched_1", "coworkerId": "cw_1", "runId": "run_1" })
     );
 
     let started = Note::RunStarted {
@@ -83,6 +84,22 @@ fn a_run_no_routine_fired_has_no_routine_id_at_all() {
     assert!(data(&finished).get("routineId").is_none());
 }
 
+/// A change no run's commit caused still says so: `runId` is there, and `null`, where a missing
+/// key would leave an app to guess whether the server knew.
+#[test]
+fn a_change_no_run_caused_has_a_null_run_id_and_not_a_missing_one() {
+    let settled = Note::ThreadChanged {
+        thread_id: "t",
+        coworker_id: "cw_1",
+        run_id: None,
+    };
+    assert_eq!(data(&settled).get("runId"), Some(&Value::Null));
+    assert_eq!(
+        settled.data(),
+        r#"{"threadId":"t","coworkerId":"cw_1","runId":null}"#
+    );
+}
+
 /// Five changes, in the contract's words.
 #[test]
 fn a_routine_changes_in_five_words() {
@@ -111,6 +128,7 @@ fn a_block_is_id_event_and_one_line_of_data() {
     let hostile = Note::ThreadChanged {
         thread_id: "a\nb\r\nid: 99",
         coworker_id: "cw_1",
+        run_id: None,
     };
     let sent = block(8, hostile.event(), &hostile.data());
     assert_eq!(sent.matches('\n').count(), 4, "{sent:?}");

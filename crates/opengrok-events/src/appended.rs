@@ -4,6 +4,7 @@
 //! These READ THE LOG AS THE STORE DOES and write nothing but notes: they name no state the
 //! caller has not already committed to, and decide nothing about the run or the routine.
 
+use opengrok_core::id::{AccountId, ScheduleId};
 use opengrok_core::run::{RunEvent, RunView};
 use opengrok_core::schedule::{Schedule, ScheduleEvent};
 use opengrok_wire::events::{Change, Note};
@@ -35,6 +36,8 @@ const FIRED: &str = "select event_type, payload from events
 /// A batch of only `ToolStarted` and `Spent` is the log's own bookkeeping and writes nothing.
 /// Any other is a `thread.changed`, with `run.started` before it when the run began in this batch,
 /// and `run.finished` after it when it ended in this one. A run waiting on a card has not ended.
+/// The `thread.changed` names the run when the run's own loop wrote the batch, and says `null`
+/// when a person's answer or stop, or the sweep, did.
 pub async fn run_appended(
     conn: &mut PgConnection,
     events: &[RunEvent],
@@ -77,6 +80,19 @@ pub async fn run_appended(
     };
     let (run_id, thread_id) = (view.id.as_str(), view.thread_id.as_str());
     let (coworker_id, routine_id) = (coworker.as_str(), routine.as_deref());
+    // WHOSE COMMIT IT IS. The run's own loop writes its start, its frames and its card; a person's
+    // answer or stop, and the sweep's resume, are not the run's, and a frame that rides with one
+    // (a parked run interrupted) is not either. The app skips reading a thread for the run it is
+    // streaming, so a change it must read says `null` and never the run it happens to be streaming.
+    let others = |event: &RunEvent| {
+        let by_others = matches!(event, RunEvent::Answered { .. } | RunEvent::Stopped { .. });
+        by_others || matches!(event, RunEvent::Resumed { .. })
+    };
+    let own = |event: &RunEvent| {
+        let begun = matches!(event, RunEvent::Started { .. } | RunEvent::Emitted { .. });
+        begun || matches!(event, RunEvent::Suspended { .. })
+    };
+    let caused_by = (events.iter().any(own) && !events.iter().any(others)).then_some(run_id);
     let mut notes = Vec::with_capacity(3);
     if started.is_some() {
         notes.push(Note::RunStarted {
@@ -90,6 +106,7 @@ pub async fn run_appended(
     notes.push(Note::ThreadChanged {
         thread_id,
         coworker_id,
+        run_id: caused_by,
     });
     if ended {
         let state = view.status.history_word();
@@ -137,8 +154,8 @@ async fn fired(
 /// routine is on after the append.
 pub async fn routine_appended(
     conn: &mut PgConnection,
-    owner: &str,
-    routine: &str,
+    owner: &AccountId,
+    routine: &ScheduleId,
     coworker: &str,
     events: &[ScheduleEvent],
 ) -> Result<(), sqlx::Error> {
@@ -155,11 +172,11 @@ pub async fn routine_appended(
     let mut notes: Vec<Note> = events
         .iter()
         .map(|event| Note::RoutineChanged {
-            routine_id: routine,
+            routine_id: routine.as_str(),
             coworker_id: coworker,
             change: change(event),
         })
         .collect();
     notes.dedup();
-    emit(conn, owner, &notes).await
+    emit(conn, owner.as_str(), &notes).await
 }

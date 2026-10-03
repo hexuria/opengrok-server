@@ -27,8 +27,13 @@ pub use appended::{routine_appended, run_appended};
 pub use hub::{CHANNEL, Hub, Tuning};
 pub use outbox::{RETAIN_HOURS, RETAIN_MAX, emit};
 
-/// The outbox's tables, applied with the store's schema (`opengrok_store::migrations`), so one
-/// digest covers both and an unchanged schema is not replayed on every boot.
+/// Create the outbox's tables. The store's migration calls this beside its own schema, under its
+/// advisory lock, and keys both by one digest, so an unchanged schema is not replayed every boot.
+pub async fn apply(conn: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(SCHEMA).execute(conn).await.map(|_| ())
+}
+
+/// The outbox's tables.
 pub const SCHEMA: &str = r#"
 -- The account events stream's notes (opengrok-events): ids only, never text. `id` is the account's
 -- own, handed out under its head row's lock so that ids are in commit order. `head` never goes down
@@ -39,11 +44,13 @@ create table if not exists account_event_head (
     floor      bigint not null default 0
 );
 
+-- `payload` is the frame's `data:` line as written, so it is `json` and not `jsonb`: jsonb sorts a
+-- note's keys, and the order the contract lists them in is the order NativeChat's fixtures show.
 create table if not exists account_event (
     account_id text        not null,
     id         bigint      not null,
     kind       text        not null,
-    payload    jsonb       not null,
+    payload    json        not null,
     created_at timestamptz not null default now(),
     primary key (account_id, id)
 );
