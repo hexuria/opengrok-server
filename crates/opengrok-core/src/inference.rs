@@ -389,7 +389,25 @@ impl InferenceSource {
         };
         Ok((source, key))
     }
+
+    /// The efforts a `PUT` body names, by field, each with the door and model it is held to
+    /// (opengrok-server `inference::effort_refused`): the default's on its own source, and the
+    /// fallback's on the gateway, which answers it. One the body leaves out stands as saved.
+    pub fn named_efforts(&self, body: &Value) -> [Option<(&'static str, Named<'_>)>; 2] {
+        let default = self.new_bot_default.as_ref();
+        let default = default.map(|d| (Some(d.source), d.model.as_str(), d.effort));
+        let fallback = self.plan_fallback.as_ref();
+        let fallback = fallback.map(|f| (Some(SourceKind::Gateway), f.model.as_str(), f.effort));
+        let named = |field, chosen| Some((field, body.get(field).and(chosen)?));
+        [
+            named("newBotDefault", default),
+            named("planFallback", fallback),
+        ]
+    }
 }
+
+/// An effort a save names, with the door and the model it is held to.
+pub type Named<'a> = (Option<SourceKind>, &'a str, Effort);
 
 /// Providers whose terms forbid routing a consumer subscription through a third-party app, so a
 /// refusal can say why rather than call the model unrecognised.

@@ -53,14 +53,21 @@ fn setting_the_effort_changes_how_hard_it_thinks_and_nothing_else() {
     );
 }
 
-/// The words are the gateway's `reasoning_effort` plus inherit, spelled the same by `as_str`,
-/// `parse` and the log; anything else is refused rather than stored as a guess.
+/// The words are the gateway's `reasoning_effort` plus inherit and opencodex's ultra, spelled the
+/// same by `as_str`, `parse` and the log; anything else is refused rather than stored as a guess.
 #[test]
-fn the_effort_words_are_the_gateways_plus_inherit() {
+fn the_effort_words_are_the_gateways_plus_inherit_and_ultra() {
     let words: Vec<&str> = Effort::ALL.iter().map(|effort| effort.as_str()).collect();
     assert_eq!(
         words,
-        ["inherit", "none", "low", "medium", "high", "xhigh", "max"]
+        [
+            "inherit", "none", "low", "medium", "high", "xhigh", "max", "ultra"
+        ]
+    );
+    assert_eq!(
+        Effort::Ultra.reasoning_effort(),
+        Some("ultra"),
+        "sent as any word is"
     );
     for effort in Effort::ALL {
         assert_eq!(Effort::parse(effort.as_str()), Some(effort));

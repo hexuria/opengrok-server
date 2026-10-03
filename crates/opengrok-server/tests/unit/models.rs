@@ -1,4 +1,6 @@
 use super::*;
+// What `list_within` makes of a body it was answered with.
+use opengrok_core::catalogue::models_in as parse_models;
 
 #[test]
 fn ids_are_read_from_an_openai_shaped_listing() {
@@ -101,6 +103,7 @@ fn a_pin_finds_its_window_through_aliases_and_channels() {
         id: id.to_string(),
         context_window: window,
         alias_of: alias.map(str::to_string),
+        levels: Default::default(),
     };
     let models = vec![
         model("oag/auto", None, None),

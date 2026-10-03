@@ -1382,8 +1382,10 @@ async fn the_model_list_carries_the_macs_models_and_says_it_is_connected() {
     assert_eq!(
         mac_entries,
         [
-            json!({"id": "gpt-6-sol", "points": null, "source": "local_proxy", "via": "mac"}),
-            json!({"id": "xai/grok-4.7", "points": null, "source": "local_proxy", "via": "mac"}),
+            json!({"id": "gpt-6-sol", "points": null, "source": "local_proxy", "via": "mac",
+                   "efforts": null, "ownEffort": null}),
+            json!({"id": "xai/grok-4.7", "points": null, "source": "local_proxy", "via": "mac",
+                   "efforts": null, "ownEffort": null}),
         ]
     );
     assert_eq!(
@@ -2101,7 +2103,8 @@ async fn the_relay_switch_moves_no_way_and_a_fallback_is_kept_until_cleared() {
     let on = (&on["relayEnabled"], &on["via"], &on["planFallback"]);
     assert_eq!(on, (&json!(true), &json!("mac"), &fallback), "no way moved");
 
-    let effort = "planFallback.effort must be one of inherit, none, low, medium, high, xhigh, max";
+    let effort =
+        "planFallback.effort must be one of inherit, none, low, medium, high, xhigh, max, ultra";
     for (body, why) in [
         (
             json!({ "kind": "local_proxy", "relayEnabled": "off" }),
