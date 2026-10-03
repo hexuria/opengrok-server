@@ -9,8 +9,9 @@
 //! THE TICKET IS IN THE PATH. A webview loading `vncUrl` sends no Authorization header, and noVNC
 //! fetches its own scripts by relative path and its websocket by the `path` it is given: a token
 //! in the query would be gone by the first asset. The ticket names one account, one coworker and
-//! one box, and expires; the account's right to the coworker and the box's place as its computer
-//! are checked again on every request, so a revoked share stops the next asset and reconnect.
+//! one box, and expires; the account's right to the coworker is checked again on every request,
+//! and the box's place as its computer every `PLACE_FOR` (`UPSTREAMS`), so a retired coworker
+//! stops the next asset and reconnect, and a computer that moved stops within seconds.
 //!
 //! THE TICKET IS STABLE WITHIN A WINDOW. The pane polls the status, and a `vncUrl` that changed on
 //! every poll would reload the desktop each time; the same claims sign to the same token, so the
@@ -22,8 +23,9 @@
 //! `/console` and honours its `og_access` cookie. See `confined` for what keeps the one from
 //! acting as the other, and `DIAL` for why a redirect is never followed.
 
-use std::sync::LazyLock;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
@@ -42,6 +44,40 @@ const PURPOSE: &str = "screen";
 const WINDOW_SECONDS: i64 = 6 * 60 * 60;
 /// The most of the box's handshake reply that is read before giving up on it.
 const HEAD_LIMIT: usize = 16 * 1024;
+
+/// Each ticket's box, its noVNC port and when its place was last checked, until the ticket
+/// expires: asking for these on each of a page's ~80 files and its websocket was 160 `docker`
+/// processes and 500 queries at once, 3.7 s a file and 5 s to paint (3 Oct 2026). Re-learned by
+/// each status that hands the ticket out; dropped when a dial to it fails (the box came back on
+/// another port) and when the box is stopped here (`forget_box`), so a freed port is not dialled.
+type Upstream = (String, u16, i64, Instant);
+static UPSTREAMS: LazyLock<Mutex<HashMap<String, Upstream>>> = LazyLock::new(Mutex::default);
+
+/// How long a ticket's box is taken to still be its coworker's computer (`scoped_box_row_for`,
+/// five queries) between checks; the ticket and the account's right are checked every request.
+const PLACE_FOR: Duration = Duration::from_secs(5);
+
+fn remember(ticket: &str, box_id: &str, port: u16, until: i64) {
+    let now = chrono::Utc::now().timestamp();
+    if let Ok(mut known) = UPSTREAMS.lock() {
+        known.retain(|_, upstream| upstream.2 > now);
+        known.insert(ticket.into(), (box_id.into(), port, until, Instant::now()));
+    }
+}
+
+fn forget(ticket: &str) {
+    if let Ok(mut known) = UPSTREAMS.lock() {
+        known.remove(ticket);
+    }
+}
+
+/// Forget the port of every ticket for a box just stopped here: it gets new ports when it starts
+/// again, and the old ones may by then be another box's.
+pub fn forget_box(box_id: &str) {
+    if let Ok(mut known) = UPSTREAMS.lock() {
+        known.retain(|_, (bx, ..)| bx != box_id);
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Ticket {
@@ -84,15 +120,19 @@ pub fn proxied_page(
     now_seconds: i64,
 ) -> Option<String> {
     let (_, settings) = local_page.split_once('?')?;
+    let exp = (now_seconds.div_euclid(WINDOW_SECONDS) + 2) * WINDOW_SECONDS;
     let ticket = minter
         .mint_claims(&Ticket {
             sub: account.as_str().to_string(),
             cw: coworker.as_str().to_string(),
             bx: box_id.to_string(),
-            exp: (now_seconds.div_euclid(WINDOW_SECONDS) + 2) * WINDOW_SECONDS,
+            exp,
             purpose: PURPOSE.to_string(),
         })
         .ok()?;
+    if let Some(port) = loopback_port(local_page) {
+        remember(&ticket, box_id, port, exp);
+    }
     let base = format!("coworkers/{}/computer/vnc/{ticket}", coworker.as_str());
     Some(format!(
         "{origin}/{base}/vnc.html?{settings}&path={base}/websockify"
@@ -106,10 +146,12 @@ fn loopback_port(page: &str) -> Option<u16> {
     rest.split(['/', '?']).next()?.parse().ok()
 }
 
-/// The box behind a ticket, as its noVNC port — re-authorised now, not at mint time.
-async fn upstream_for(state: &AgUiState, coworker_id: &str, ticket: &str) -> Option<u16> {
+/// The box behind a ticket, as its noVNC port — re-authorised now, not at mint time. The port is
+/// the remembered one; when the box's place is due a check, the first request past `PLACE_FOR`
+/// moves the stamp, so a page's burst of files sends one check, not eighty.
+async fn upstream_for(state: &AgUiState, cw: &str, ticket: &str) -> Option<u16> {
     let claims: Ticket = state.auth.minter.verify_claims(ticket).ok()?;
-    if claims.purpose != PURPOSE || claims.cw != coworker_id {
+    if claims.purpose != PURPOSE || claims.cw != cw {
         return None;
     }
     let account = AccountId::from_stored(claims.sub);
@@ -120,33 +162,64 @@ async fn upstream_for(state: &AgUiState, coworker_id: &str, ticket: &str) -> Opt
     ) {
         return None;
     }
-    let scoped = crate::agui::provision::scoped_box_for(state, &account, &coworker).await?;
-    if scoped.box_id != claims.bx || scoped.kind != "local-docker" {
-        return None;
+    let known = UPSTREAMS.lock().ok().and_then(|mut known| {
+        let (_, port, _, checked) = known.get_mut(ticket)?;
+        let due = checked.elapsed() >= PLACE_FOR;
+        *checked = if due { Instant::now() } else { *checked };
+        Some((*port, due))
+    });
+    if let Some((port, false)) = known {
+        return Some(port);
     }
-    let page = scoped.computer.screen_url(&scoped.box_id).await.ok()??;
-    loopback_port(&page)
+    let row = crate::agui::provision::scoped_box_row_for(state, &account, &coworker).await;
+    let Some(row) = row.filter(|row| row.box_id == claims.bx && row.kind == "local-docker") else {
+        forget(ticket);
+        return None;
+    };
+    if let Some((port, _)) = known {
+        return Some(port);
+    }
+    let lookup = crate::agui::provision::lookup_provider(state, row.org_id.as_deref(), &row.kind);
+    let computer = lookup.await.computer?;
+    let page = computer.screen_url(&row.box_id).await.ok()??;
+    let port = loopback_port(&page)?;
+    remember(ticket, &row.box_id, port, claims.exp);
+    Some(port)
 }
 
 /// `GET /coworkers/{id}/computer/vnc/{ticket}/{*rest}` — noVNC's files, and its websocket.
 /// Every refusal is the same 404: a guessed ticket learns nothing about which part was wrong.
+/// A remembered port nothing answers on is asked for once more, fresh, before giving up.
 pub async fn serve(
     State(state): State<AgUiState>,
     Path((coworker_id, ticket, rest)): Path<(String, String, String)>,
-    request: Request,
+    mut request: Request,
 ) -> Response {
-    let Some(port) = upstream_for(&state, &coworker_id, &ticket).await else {
-        return confined((StatusCode::NOT_FOUND, "no such screen").into_response());
-    };
     let upgrade = request
         .headers()
         .get(header::UPGRADE)
         .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"));
-    if upgrade {
-        return tunnel(port, request).await;
+    for _ in 0..2 {
+        let Some(port) = upstream_for(&state, &coworker_id, &ticket).await else {
+            return confined((StatusCode::NOT_FOUND, "no such screen").into_response());
+        };
+        if upgrade {
+            match tunnel(port, request).await {
+                Ok(response) => return response,
+                Err(unsent) => request = *unsent,
+            }
+        } else if let Some(fetched) = fetch(port, &rest).await {
+            return confined(fetched);
+        }
+        forget(&ticket);
     }
-    confined(fetch(port, &rest).await)
+    let silent = (StatusCode::BAD_GATEWAY, SILENT).into_response();
+    if upgrade { silent } else { confined(silent) }
 }
+
+const SILENT: &str = "the computer's screen did not answer";
+const REDIRECTED: &str =
+    "the computer's screen answered with a redirect, which this server does not follow";
 
 /// The one client the proxy dials a box with. NO REDIRECTS: `loopback_port` pins only the first
 /// hop, and reqwest follows ten by default — a box answering `302 Location:
@@ -164,36 +237,29 @@ static DIAL: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
 });
 
 /// One of noVNC's files from the box on `port`, with only its status, body and `Content-Type`.
-async fn fetch(port: u16, rest: &str) -> Response {
-    let silent = || {
-        (
-            StatusCode::BAD_GATEWAY,
-            "the computer's screen did not answer",
-        )
-            .into_response()
-    };
+/// `None` when nothing on `port` took the request.
+async fn fetch(port: u16, rest: &str) -> Option<Response> {
+    let silent = || Some((StatusCode::BAD_GATEWAY, SILENT).into_response());
     if rest
         .split('/')
         .any(|segment| segment == ".." || segment.is_empty())
     {
-        return (StatusCode::NOT_FOUND, "no such file").into_response();
+        return Some((StatusCode::NOT_FOUND, "no such file").into_response());
     }
     let Some(client) = DIAL.as_ref() else {
         return silent();
     };
-    let Ok(fetched) = client
+    let fetched = match client
         .get(format!("http://127.0.0.1:{port}/{rest}"))
         .send()
         .await
-    else {
-        return silent();
+    {
+        Ok(fetched) => fetched,
+        Err(error) if error.is_connect() => return None,
+        Err(_) => return silent(),
     };
     if fetched.status().is_redirection() {
-        return (
-            StatusCode::BAD_GATEWAY,
-            "the computer's screen answered with a redirect, which this server does not follow",
-        )
-            .into_response();
+        return Some((StatusCode::BAD_GATEWAY, REDIRECTED).into_response());
     }
     let status = StatusCode::from_u16(fetched.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let kind = fetched.headers().get(header::CONTENT_TYPE).cloned();
@@ -212,7 +278,7 @@ async fn fetch(port: u16, rest: &str) -> Response {
     if let Some(kind) = kind {
         response.headers_mut().insert(header::CONTENT_TYPE, kind);
     }
-    response
+    Some(response)
 }
 
 /// Put first in every page the box serves, because `confined` takes its storage away. noVNC
@@ -285,18 +351,19 @@ fn confined(mut response: Response) -> Response {
 
 /// Replay the browser's websocket handshake to the box and splice the two sockets. REPLAYED, NOT
 /// REMADE: the box answers the key the browser sent, so its `Sec-WebSocket-Accept` is the one the
-/// browser checks, and the frames pass through untouched in both directions.
-async fn tunnel(port: u16, mut request: Request) -> Response {
-    let refused = |why: &'static str| (StatusCode::BAD_GATEWAY, why).into_response();
+/// browser checks, and the frames pass through untouched in both directions. `Err` hands the
+/// request back when nothing on `port` took the connection.
+async fn tunnel(port: u16, mut request: Request) -> Result<Response, Box<Request>> {
+    let refused = |why: &'static str| Ok((StatusCode::BAD_GATEWAY, why).into_response());
     let [key, protocol] = ["sec-websocket-key", "sec-websocket-protocol"].map(|name| {
         let value = request.headers().get(name)?.to_str().ok()?;
         Some(value.to_string())
     });
     let Some(key) = key else {
-        return (StatusCode::BAD_REQUEST, "not a websocket handshake").into_response();
+        return Ok((StatusCode::BAD_REQUEST, "not a websocket handshake").into_response());
     };
     let Ok(mut upstream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
-        return refused("the computer's screen did not answer");
+        return Err(Box::new(request));
     };
     let mut hello = format!(
         "GET /websockify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n\
@@ -307,7 +374,7 @@ async fn tunnel(port: u16, mut request: Request) -> Response {
     }
     hello.push_str("\r\n");
     if upstream.write_all(hello.as_bytes()).await.is_err() {
-        return refused("the computer's screen did not answer");
+        return refused(SILENT);
     }
     let Some((head, early)) = read_head(&mut upstream).await else {
         return refused("the computer's screen did not answer the handshake");
@@ -347,9 +414,10 @@ async fn tunnel(port: u16, mut request: Request) -> Response {
     if let Some(chosen) = chosen {
         response = response.header("sec-websocket-protocol", chosen);
     }
-    response
-        .body(Body::empty())
-        .unwrap_or_else(|_| refused("the computer's screen refused the handshake"))
+    response.body(Body::empty()).map_or_else(
+        |_| refused("the computer's screen refused the handshake"),
+        Ok,
+    )
 }
 
 /// The box's reply head, and whatever arrived after it in the same reads.

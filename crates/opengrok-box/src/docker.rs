@@ -35,6 +35,17 @@
 //!
 //! A container started without 8790 must be recreated. The image must ship `box-egress-tunnel`
 //! (`grok-box:local` rebuild). Never publish 8791/8792 — those stay guest-internal.
+//!
+//! ONE `docker inspect` PER BOX PER SECOND, NOT ONE PROCESS PER QUESTION. A Computer status asked
+//! eight `docker` processes in a row (state, two for the screen, two for the image, three for
+//! the guest) and the screen proxy two per noVNC file; each costs 50 ms on an idle Mac and up to
+//! a second on a loaded one, and the pane's polls piled up: 11 s a status, 5 s before the window
+//! painted (3 Oct 2026). Every per-box fact is in one inspect, kept `INSPECT_FRESH_FOR` and shared
+//! by callers that ask at once. A stop, start, rebuild or removal made here forgets it at once.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::process::Command;
@@ -80,6 +91,84 @@ const WORKSPACE_DIR: &str = "/workspace";
 
 /// The user the desktop image runs as; copied data has to end up owned by it.
 const BOX_USER: &str = "box";
+
+/// How long one `docker inspect` answers for a box. Short, because a box stopped or removed by
+/// hand must read as such within a poll, and `wake` polls every 1.5 s for a box coming up.
+const INSPECT_FRESH_FOR: Duration = Duration::from_secs(1);
+
+/// How long the image a new box would get is taken as known. It changes only when somebody
+/// builds or pulls it; an update and a pull made here forget it.
+const LATEST_FRESH_FOR: Duration = Duration::from_secs(30);
+
+/// What one `docker inspect` says about a box: everything a status, a screen and the guest
+/// agents need. No `Debug`: the environment holds the box's token and passwords.
+struct Inspected {
+    /// Docker's own word: running, exited, created, paused, restarting, removing, dead.
+    status: String,
+    /// Each published container port and the loopback port it is on. Empty while the box is
+    /// not running: Docker gives a box new host ports every time it starts.
+    published: Vec<(u16, u16)>,
+    /// Whether noVNC was published when the box was made — awake or not.
+    made_with_screen: bool,
+    /// `Config.Env`, one `KEY=value` per line — where every per-box secret lives.
+    env: String,
+    /// The image id the box runs.
+    image: String,
+    volumes: Option<BoxVolumes>,
+}
+
+impl Inspected {
+    /// One container out of `docker inspect --type container`'s JSON array.
+    fn parse(json: &str) -> Option<Self> {
+        use serde_json::Value;
+        let all: Value = serde_json::from_str(json).ok()?;
+        let one = all.get(0)?;
+        let text = |pointer: &str| one.pointer(pointer).and_then(Value::as_str);
+        let ports = one
+            .pointer("/NetworkSettings/Ports")
+            .and_then(Value::as_object);
+        let published = ports.into_iter().flatten().filter_map(|(key, bindings)| {
+            let inside = key.strip_suffix("/tcp")?.parse().ok()?;
+            let host = bindings.as_array()?.first()?.get("HostPort")?.as_str()?;
+            Some((inside, host.parse().ok()?))
+        });
+        let env = one.pointer("/Config/Env").and_then(Value::as_array);
+        let env = env.into_iter().flatten().filter_map(Value::as_str);
+        Some(Self {
+            status: text("/State/Status")?.to_string(),
+            published: published.collect(),
+            made_with_screen: one.pointer("/HostConfig/PortBindings/6080~1tcp").is_some(),
+            env: env.collect::<Vec<_>>().join("\n"),
+            image: text("/Image").unwrap_or_default().to_string(),
+            volumes: text(&format!("/Config/Labels/{VOLUMES_LABEL}")).and_then(BoxVolumes::parse),
+        })
+    }
+
+    /// The loopback port `port` is published on, while the box runs.
+    fn port(&self, port: u16) -> Option<u16> {
+        let found = self.published.iter().find(|(inside, _)| *inside == port);
+        found.map(|(_, host)| *host)
+    }
+}
+
+/// The last inspect of one box, when and what it said; `None` is "no such box". Behind its own
+/// lock, so callers that ask at once wait for one `docker` process instead of each starting one.
+type Slot = Arc<tokio::sync::Mutex<Option<(Instant, Option<Arc<Inspected>>)>>>;
+
+/// What Docker said lately, shared by clones so a box stopped through one is forgotten by all.
+#[derive(Default)]
+struct Seen {
+    boxes: Mutex<HashMap<String, Slot>>,
+    /// Image name → when it was resolved, and its id.
+    latest: tokio::sync::Mutex<HashMap<String, (Instant, String)>>,
+}
+
+/// Opaque, so a `DockerComputer` printed with `{:?}` never carries a box's secrets into a log.
+impl std::fmt::Debug for Seen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Seen")
+    }
+}
 
 /// A box's two named volumes. Chosen at create, written to the container's labels, read back for
 /// `recreate` and `destroy_with_data`.
@@ -133,6 +222,7 @@ pub struct DockerComputer {
     /// create time. The in-app `egressTunnelEnabled` toggle is host intent for the *verb*;
     /// it cannot publish a port on an already-created container.
     egress_tunnel: Option<bool>,
+    seen: Arc<Seen>,
 }
 
 impl Default for DockerComputer {
@@ -150,6 +240,7 @@ impl DockerComputer {
                 .ok()
                 .filter(|tag| !tag.is_empty()),
             egress_tunnel: None,
+            seen: Arc::default(),
         }
     }
 
@@ -196,6 +287,43 @@ impl DockerComputer {
             status: output.status.code().unwrap_or(-1).unsigned_abs() as u16,
             body: stderr.chars().take(500).collect(),
         })
+    }
+
+    /// What Docker says about a box, at most `INSPECT_FRESH_FOR` old. `NoSuchBox` for a box that
+    /// is gone; a Docker that could not answer is not remembered.
+    async fn inspect(&self, box_id: &str) -> BoxResult<Arc<Inspected>> {
+        let slot = match self.seen.boxes.lock() {
+            Ok(mut boxes) => boxes.entry(box_id.to_string()).or_default().clone(),
+            Err(_) => Slot::default(),
+        };
+        let mut last = slot.lock().await;
+        if let Some((at, seen)) = last.as_ref()
+            && at.elapsed() < INSPECT_FRESH_FOR
+        {
+            return seen.clone().ok_or(BoxError::NoSuchBox);
+        }
+        let seen = match self
+            .docker(&["inspect", "--type", "container", box_id])
+            .await
+        {
+            Ok(json) => Some(Arc::new(Inspected::parse(&json).ok_or_else(|| {
+                BoxError::Refused {
+                    status: 500,
+                    body: "docker inspect answered something unreadable".to_string(),
+                }
+            })?)),
+            Err(BoxError::NoSuchBox) => None,
+            Err(error) => return Err(error),
+        };
+        *last = Some((Instant::now(), seen.clone()));
+        seen.ok_or(BoxError::NoSuchBox)
+    }
+
+    /// Drop what was seen of a box this provider just started, stopped, rebuilt or removed.
+    fn forget(&self, box_id: &str) {
+        if let Ok(mut boxes) = self.seen.boxes.lock() {
+            boxes.remove(box_id);
+        }
     }
 
     /// Whether this host's Docker has `self.image` (`docker image inspect`), never pulling it.
@@ -337,16 +465,8 @@ impl Computer for DockerComputer {
     /// so the container's own port bindings say whether it has a screen — awake or not, and
     /// whatever the image env says today. A box Docker cannot describe falls back to that env.
     async fn offers_a_screen(&self, box_id: &str) -> bool {
-        match self
-            .docker(&[
-                "inspect",
-                "--format",
-                "{{json .HostConfig.PortBindings}}",
-                box_id,
-            ])
-            .await
-        {
-            Ok(bindings) => bindings.contains("\"6080/tcp\""),
+        match self.inspect(box_id).await {
+            Ok(seen) => seen.made_with_screen,
             Err(BoxError::NoSuchBox) => false,
             Err(_) => self.wants_desktop(),
         }
@@ -576,11 +696,15 @@ impl Computer for DockerComputer {
     }
 
     async fn stop(&self, box_id: &str) -> BoxResult<()> {
-        self.docker(&["stop", box_id]).await.map(|_| ())
+        let stopped = self.docker(&["stop", box_id]).await.map(|_| ());
+        self.forget(box_id);
+        stopped
     }
 
     async fn resume(&self, box_id: &str) -> BoxResult<()> {
-        self.docker(&["start", box_id]).await.map(|_| ())
+        let started = self.docker(&["start", box_id]).await.map(|_| ());
+        self.forget(box_id);
+        started
     }
 
     /// The container and its data volumes: "the disk goes with it" is the trait's promise, and
@@ -588,7 +712,9 @@ impl Computer for DockerComputer {
     /// it removes only the container, so the volumes carry over.
     async fn destroy(&self, box_id: &str) -> BoxResult<()> {
         let volumes = self.volumes_of(box_id).await.ok().flatten();
-        self.docker(&["rm", "-f", box_id]).await?;
+        let removed = self.docker(&["rm", "-f", box_id]).await;
+        self.forget(box_id);
+        removed?;
         if let Some(volumes) = volumes {
             let _ = self
                 .docker(&["volume", "rm", "-f", &volumes.home, &volumes.workspace])
@@ -600,7 +726,9 @@ impl Computer for DockerComputer {
     /// The container only, as `recreate` removes the box it replaces: a box rebuilt on another's
     /// volumes holds a person's files there, and may share them with the box that kept the scope.
     async fn discard(&self, box_id: &str) -> BoxResult<()> {
-        self.docker(&["rm", "-f", box_id]).await.map(|_| ())
+        let removed = self.docker(&["rm", "-f", box_id]).await.map(|_| ());
+        self.forget(box_id);
+        removed
     }
 
     fn image(&self) -> String {
@@ -608,9 +736,10 @@ impl Computer for DockerComputer {
     }
 
     async fn image_status(&self, box_id: &str) -> BoxResult<ImageStatus> {
+        let (running, latest) = tokio::join!(self.inspect(box_id), self.latest_image());
         Ok(ImageStatus {
-            running: self.running_image(box_id).await?,
-            latest: self.latest_image().await?,
+            running: running?.image.clone(),
+            latest: latest?,
         })
     }
 
@@ -618,7 +747,9 @@ impl Computer for DockerComputer {
         if image_is_local(&self.image) {
             return Ok(false);
         }
-        self.docker(&["pull", &self.image]).await.map(|_| true)
+        let pulled = self.docker(&["pull", &self.image]).await.map(|_| true);
+        self.seen.latest.lock().await.remove(&self.image);
+        pulled
     }
 
     /// Stop the old box, make sure its data is in volumes (copying it there once if it predates
@@ -629,7 +760,9 @@ impl Computer for DockerComputer {
             Some(volumes) => (volumes, false),
             None => (BoxVolumes::fresh(), true),
         };
-        self.docker(&["stop", old_box_id]).await?;
+        // The new box runs whatever the image is now, and the old one stops here.
+        self.seen.latest.lock().await.remove(&self.image);
+        self.stop(old_box_id).await?;
         if needs_copy {
             for volume in [&volumes.home, &volumes.workspace] {
                 self.docker(&["volume", "create", volume]).await?;
@@ -650,21 +783,17 @@ impl Computer for DockerComputer {
         let id = self.docker(&borrowed).await?;
         // Only once the new box exists: a failed create above leaves the old one stopped but
         // intact, which `resume` brings back.
-        let _ = self.docker(&["rm", "-f", old_box_id]).await;
+        let _ = self.discard(old_box_id).await;
         Ok(id.chars().take(12).collect())
     }
 
     async fn state(&self, box_id: &str) -> BoxResult<String> {
-        // `docker inspect` prints the container's own status word: running, exited, created, paused,
-        // restarting, removing, dead. A container that is gone is `NoSuchBox` here, which is `absent`
-        // to the caller — a missing box is a fact, not a failure.
-        match self
-            .docker(&["inspect", "-f", "{{.State.Status}}", box_id])
-            .await
-        {
-            Ok(status) if !status.is_empty() => Ok(status),
-            Ok(_) => Ok("absent".to_string()),
-            Err(BoxError::NoSuchBox) => Ok("absent".to_string()),
+        // `docker inspect`'s own status word: running, exited, created, paused, restarting,
+        // removing, dead. A container that is gone is `NoSuchBox` here, which is `absent` to the
+        // caller — a missing box is a fact, not a failure.
+        match self.inspect(box_id).await {
+            Ok(seen) if !seen.status.is_empty() => Ok(seen.status.clone()),
+            Ok(_) | Err(BoxError::NoSuchBox) => Ok("absent".to_string()),
             Err(other) => Err(other),
         }
     }
@@ -673,16 +802,15 @@ impl Computer for DockerComputer {
     /// restart keeps it. A box without one has no screen here rather than a guessed password;
     /// boxes created before per-box passwords still carry theirs, and keep working.
     async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
-        let port = match self.docker(&["port", box_id, "6080"]).await {
-            Ok(mapping) => host_port(&mapping),
+        let seen = match self.inspect(box_id).await {
+            Ok(seen) => seen,
             Err(BoxError::NoSuchBox) | Err(BoxError::Refused { .. }) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let Some(port) = port else {
+        let Some(port) = seen.port(6080) else {
             return Ok(None);
         };
-        let env = self.env_of(box_id).await?;
-        Ok(env_from_inspect(&env, "BOX_VNC_PASSWORD")
+        Ok(env_from_inspect(&seen.env, "BOX_VNC_PASSWORD")
             .map(|password| vnc_page_url(&format!("http://127.0.0.1:{port}"), &password)))
     }
 
@@ -739,8 +867,7 @@ impl Computer for DockerComputer {
                 return None;
             }
         };
-        let info = match tokio::time::timeout(std::time::Duration::from_secs(1), guest.info()).await
-        {
+        let info = match tokio::time::timeout(crate::GUEST_INFO_PATIENCE, guest.info()).await {
             Ok(Ok(info)) => info,
             Ok(Err(error)) => {
                 tracing::debug!(
@@ -770,37 +897,18 @@ impl Computer for DockerComputer {
 /// WS, so ops recover it with `docker inspect` for the laptop client.
 impl DockerComputer {
     async fn guest(&self, box_id: &str) -> BoxResult<grok_box::GrokBox> {
-        let exec_url = self.published_url(box_id, 1337).await?;
-        let host_url = self.published_url(box_id, 1340).await?;
-        let token = self.box_token(box_id).await?;
-        grok_box::GrokBox::connect(exec_url, host_url, token).map_err(guest_error)
-    }
-
-    async fn box_token(&self, box_id: &str) -> BoxResult<String> {
-        let env = self.env_of(box_id).await?;
-        env_from_inspect(&env, "BOX_TOKEN").ok_or_else(no_screen)
-    }
-
-    /// The container's `Config.Env`, one `KEY=value` per line — where every per-box secret lives.
-    async fn env_of(&self, box_id: &str) -> BoxResult<String> {
-        self.docker(&[
-            "inspect",
-            box_id,
-            "--format",
-            "{{range .Config.Env}}{{println .}}{{end}}",
-        ])
-        .await
-    }
-
-    async fn published_url(&self, box_id: &str, port: u16) -> BoxResult<String> {
-        let mapping = match self.docker(&["port", box_id, &port.to_string()]).await {
-            Ok(mapping) => mapping,
+        let seen = match self.inspect(box_id).await {
+            Ok(seen) => seen,
             Err(BoxError::Refused { .. }) => return Err(no_screen()),
             Err(error) => return Err(error),
         };
-        host_port(&mapping)
-            .map(|host| format!("http://127.0.0.1:{host}"))
-            .ok_or_else(no_screen)
+        let published_url = |port| {
+            let host = seen.port(port).ok_or_else(no_screen)?;
+            Ok::<_, BoxError>(format!("http://127.0.0.1:{host}"))
+        };
+        let (exec_url, host_url) = (published_url(1337)?, published_url(1340)?);
+        let token = env_from_inspect(&seen.env, "BOX_TOKEN").ok_or_else(no_screen)?;
+        grok_box::GrokBox::connect(exec_url, host_url, token).map_err(guest_error)
     }
 }
 
@@ -809,27 +917,21 @@ impl DockerComputer {
     /// The volumes a box was created on, from its labels; `None` for a box made before data
     /// lived in volumes (its data is in the container layer and needs the one-time copy).
     async fn volumes_of(&self, box_id: &str) -> BoxResult<Option<BoxVolumes>> {
-        let label = self
-            .docker(&[
-                "inspect",
-                box_id,
-                "--format",
-                &format!("{{{{index .Config.Labels \"{VOLUMES_LABEL}\"}}}}"),
-            ])
-            .await?;
-        Ok(BoxVolumes::parse(&label))
-    }
-
-    /// The image id a box runs.
-    async fn running_image(&self, box_id: &str) -> BoxResult<String> {
-        self.docker(&["inspect", "--format", "{{.Image}}", box_id])
-            .await
+        Ok(self.inspect(box_id).await?.volumes.clone())
     }
 
     /// The id of the image a new box would get — what `docker run <image>` resolves to now.
     async fn latest_image(&self) -> BoxResult<String> {
-        self.docker(&["image", "inspect", "--format", "{{.Id}}", &self.image])
-            .await
+        let mut latest = self.seen.latest.lock().await;
+        if let Some((at, id)) = latest.get(&self.image)
+            && at.elapsed() < LATEST_FRESH_FOR
+        {
+            return Ok(id.clone());
+        }
+        let inspect = ["image", "inspect", "--format", "{{.Id}}", &self.image];
+        let id = self.docker(&inspect).await?;
+        latest.insert(self.image.clone(), (Instant::now(), id.clone()));
+        Ok(id)
     }
 
     /// The shell pipeline that copies one directory out of a (stopped) container into a volume,
@@ -946,12 +1048,6 @@ fn recipe_error(error: grok_box::Error) -> BoxError {
         }
         other => guest_error(other),
     }
-}
-
-fn host_port(mapping: &str) -> Option<u16> {
-    let line = mapping.lines().next()?.trim();
-    let host = line.rsplit_once(':')?.1;
-    host.parse().ok()
 }
 
 /// Gateway helper's env words, kept here because `opengrok-box` must not depend on the server.
@@ -1335,11 +1431,43 @@ mod tests {
         assert!(command.contains(r#"-name "Singleton*""#), "{command}");
     }
 
+    /// One inspect answers what `docker port` and four templated inspects did: the loopback
+    /// port of each published one while the box runs, none once it stops (Docker gives it new
+    /// ones at the next start), and the secrets, image and volumes either way.
     #[test]
-    fn docker_port_mapping_yields_the_host_port() {
-        assert_eq!(host_port("127.0.0.1:58041"), Some(58041));
-        assert_eq!(host_port("0.0.0.0:6080\n"), Some(6080));
-        assert_eq!(host_port(""), None);
+    fn one_inspect_yields_the_ports_the_secrets_the_image_and_the_volumes() {
+        let running = r#"[{"State":{"Status":"running"},"Image":"sha256:abc",
+            "Config":{"Env":["PATH=/usr/bin","BOX_TOKEN=og-t","BOX_VNC_PASSWORD=pw4boxA1"],
+                      "Labels":{"dev.opengrok.volumes":"ogbox-x-home,ogbox-x-ws"}},
+            "HostConfig":{"PortBindings":{"6080/tcp":[{"HostIp":"127.0.0.1","HostPort":""}]}},
+            "NetworkSettings":{"Ports":{"6080/tcp":[{"HostIp":"127.0.0.1","HostPort":"52885"}],
+                                        "8790/tcp":null}}}]"#;
+        let seen = Inspected::parse(running).expect("parsed");
+        assert_eq!(seen.status, "running");
+        assert_eq!(seen.port(6080), Some(52885));
+        assert_eq!(seen.port(8790), None, "exposed but not published");
+        assert!(seen.made_with_screen);
+        assert_eq!(
+            env_from_inspect(&seen.env, "BOX_TOKEN").as_deref(),
+            Some("og-t")
+        );
+        assert_eq!(seen.image, "sha256:abc");
+        assert_eq!(
+            seen.volumes.map(|volumes| volumes.workspace).as_deref(),
+            Some("ogbox-x-ws")
+        );
+
+        let stopped = running.replace("\"running\"", "\"exited\"").replace(
+            r#""6080/tcp":[{"HostIp":"127.0.0.1","HostPort":"52885"}],"#,
+            "",
+        );
+        let seen = Inspected::parse(&stopped).expect("parsed");
+        assert_eq!((seen.status.as_str(), seen.port(6080)), ("exited", None));
+        assert!(
+            seen.made_with_screen,
+            "a stopped desktop still has a screen"
+        );
+        assert!(Inspected::parse("[]").is_none());
     }
 
     /// A port that was not published cannot be exposed later, and saying so beats handing back a
