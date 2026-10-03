@@ -1,0 +1,83 @@
+{
+  "method": "GET",
+  "path": "/recipes/rcp_0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "recipe": {
+      "id": "rcp_0199bb4e-0000-7000-8000-000000000001",
+      "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
+      "orgId": "org_two_hands_0199bb4e000070008000000000000003",
+      "name": "Export the ledger",
+      "description": "",
+      "screen": {
+        "width": 1280,
+        "height": 800
+      },
+      "createdAtMs": 1790000000000,
+      "updatedAtMs": 1790000001000,
+      "deletedAtMs": null,
+      "latestVersion": 1,
+      "relation": "mine",
+      "shareState": null,
+      "kind": "recipe",
+      "parameters": []
+    },
+    "versions": [
+      {
+        "version": 1,
+        "kind": "filtered",
+        "note": "filtered",
+        "createdBy": "acct_0199bb4e-0000-7000-8000-000000000002",
+        "createdAtMs": 1790000001000,
+        "body": {
+          "steps": [
+            {
+              "x": 10,
+              "y": 10,
+              "op": "click",
+              "button": 1
+            }
+          ],
+          "screenshot": "end",
+          "stop_on_error": true
+        }
+      }
+    ],
+    "shares": [],
+    "grants": [],
+    "runs": [
+      {
+        "id": "rrun_0199bb4e-0000-7000-8000-000000000004",
+        "recipeId": "rcp_0199bb4e-0000-7000-8000-000000000001",
+        "version": 1,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000005",
+        "runId": "rrun_0199bb4e-0000-7000-8000-000000000004",
+        "ok": false,
+        "stoppedAt": null,
+        "receipt": {
+          "ok": false,
+          "running": true
+        },
+        "atMs": 1790000002000,
+        "leaseUntilMs": 1790000003000,
+        "state": "running",
+        "artifacts": [
+          {
+            "id": "art_0199bb4e-0000-7000-8000-000000000006",
+            "kind": "screenshot",
+            "mime": "image/png",
+            "stepIndex": 0,
+            "sizeBytes": 8,
+            "meta": {}
+          }
+        ]
+      }
+    ],
+    "myBots": [
+      {
+        "id": "cw_0199bb4e-0000-7000-8000-000000000005",
+        "name": "Ada"
+      }
+    ]
+  }
+}

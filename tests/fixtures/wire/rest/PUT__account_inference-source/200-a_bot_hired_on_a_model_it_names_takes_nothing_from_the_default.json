@@ -19,6 +19,8 @@
       "source": "local_proxy",
       "model": "gpt-6-sol--fast",
       "effort": "high"
-    }
+    },
+    "relayEnabled": true,
+    "planFallback": null
   }
 }

@@ -4,10 +4,10 @@
   "status": 200,
   "body": {
     "id": "cw_0199bb4e-0000-7000-8000-000000000001",
-    "name": "Luna",
-    "model": "gpt-6-luna",
+    "name": "Ada",
+    "model": "oag/cheap",
     "effort": "inherit",
-    "source": "local_proxy",
+    "source": "gateway",
     "role": null,
     "title": null,
     "avatarShape": null,

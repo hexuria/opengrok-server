@@ -3,7 +3,7 @@
   "path": "/schedules/sched_0199bb4e-0000-7000-8000-000000000001/run",
   "status": 409,
   "body": {
-    "error": "Skipped: your plan's proxy didn't answer",
-    "code": "proxy_down"
+    "error": "Skipped: Relay is off for your plan",
+    "code": "relay_disabled"
   }
 }

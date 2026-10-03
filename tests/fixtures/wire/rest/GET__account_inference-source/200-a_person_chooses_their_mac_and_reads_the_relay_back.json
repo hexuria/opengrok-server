@@ -15,6 +15,8 @@
       "machineLabel": "Ada's MacBook",
       "localModel": "gpt-6-sol"
     },
-    "newBotDefault": null
+    "newBotDefault": null,
+    "relayEnabled": true,
+    "planFallback": null
   }
 }
