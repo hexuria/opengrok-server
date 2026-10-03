@@ -69,13 +69,16 @@ pub enum Wake {
 }
 
 /// Who asked this firing to exist. A `Fired` event still stores two bools (`manual`, `webhook`)
-/// so rows written before webhooks deserialize; a `Skipped` one stores this, by its wire word.
+/// so rows written before webhooks deserialize, and a Bot's press its `by` (#337); a `Skipped` one
+/// stores this, by its wire word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FireCause {
     Clock,
     Manual,
     Webhook,
+    /// A Bot's `run_routine` for its person (#337): their "run now", except that a pause holds.
+    Bot,
 }
 
 impl FireCause {
@@ -84,8 +87,18 @@ impl FireCause {
             Self::Clock => "clock",
             Self::Manual => "manual",
             Self::Webhook => "webhook",
+            Self::Bot => "bot",
         }
     }
+}
+
+/// The Bot that ran a routine for its person (#337), as it was called then. Its history row and
+/// `lastRun` carry it as `by`, in the log's words, camelCase in both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FiringBot {
+    pub coworker_id: CoworkerId,
+    pub name: String,
 }
 
 /// A firing that did not run because the person's own plan could not answer it (#316): when, who
@@ -95,6 +108,9 @@ pub struct Skip {
     pub cause: FireCause,
     pub code: String,
     pub at_ms: i64,
+    /// The Bot that asked, when one did (#337).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<FiringBot>,
 }
 
 /// A skip's code, and the sentence its row says it in: by the way the plan goes, or for the relay
@@ -340,6 +356,10 @@ pub enum ScheduleEvent {
         /// those replay as a clock firing unless `manual` is set.
         #[serde(default)]
         webhook: bool,
+        /// The Bot whose `run_routine` started it (#337); absent on every other firing, and so on
+        /// every row from before, which replay as they did.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<FiringBot>,
         at_ms: i64,
     },
     /// A firing that started no run: its coworker answers on the person's own plan, and the
@@ -383,6 +403,8 @@ pub struct Schedule {
     /// Runs the clock started, by id. Kept rather than inferred as "neither of the above": the
     /// routine's thread takes a person's replies too, and those are no firing at all.
     pub clock_runs: std::collections::BTreeSet<String>,
+    /// Runs a Bot started for its person (#337), by id, with which Bot.
+    pub bot_runs: std::collections::BTreeMap<String, FiringBot>,
     /// What every run this routine starts may spend, at most. Its org's ceiling still binds at
     /// run time, so a ceiling lowered after these were saved narrows them.
     pub run_limits: RunLimits,
@@ -460,6 +482,8 @@ pub enum ScheduleCommand {
     Fire {
         run_id: RunId,
         cause: FireCause,
+        /// The Bot, when `cause` is one's (#337).
+        by: Option<FiringBot>,
         at_ms: i64,
     },
     /// Record a firing that will start no run, under the same rules a firing is held to.
@@ -474,7 +498,7 @@ impl ScheduleCommand {
     /// code and the words for (opengrok-server `autonomy::unreachable`).
     pub fn firing(
         skip: Option<(&str, &str)>,
-        cause: FireCause,
+        (cause, by): (FireCause, Option<FiringBot>),
         run_id: &RunId,
         at_ms: i64,
     ) -> Self {
@@ -483,10 +507,12 @@ impl ScheduleCommand {
                 cause,
                 code: code.to_string(),
                 at_ms,
+                by,
             }),
             None => Self::Fire {
                 run_id: run_id.clone(),
                 cause,
+                by,
                 at_ms,
             },
         }
@@ -494,6 +520,21 @@ impl ScheduleCommand {
 }
 
 impl Schedule {
+    /// What started run `run`: its cause's word and, when a Bot pressed it, which (#337). `None`
+    /// for a run this routine never fired: a person replying in its thread is no firing.
+    pub fn fired(&self, run: &str) -> Option<(&'static str, Option<&FiringBot>)> {
+        if let Some(by) = self.bot_runs.get(run) {
+            return Some((FireCause::Bot.as_str(), Some(by)));
+        }
+        let causes = [
+            (&self.manual_runs, FireCause::Manual),
+            (&self.webhook_runs, FireCause::Webhook),
+            (&self.clock_runs, FireCause::Clock),
+        ];
+        let cause = causes.into_iter().find(|(runs, _)| runs.contains(run));
+        cause.map(|(_, cause)| (cause.as_str(), None))
+    }
+
     pub fn replay<'a>(events: impl IntoIterator<Item = &'a ScheduleEvent>) -> Self {
         let mut state = Self::default();
         for event in events {
@@ -582,9 +623,13 @@ impl Schedule {
                 run_id,
                 manual,
                 webhook,
+                by,
                 ..
             } => {
-                if *webhook {
+                if let Some(by) = by {
+                    self.bot_runs
+                        .insert(run_id.as_str().to_string(), by.clone());
+                } else if *webhook {
                     self.webhook_runs.insert(run_id.as_str().to_string());
                 } else if *manual {
                     self.manual_runs.insert(run_id.as_str().to_string());
@@ -757,6 +802,7 @@ impl Schedule {
             ScheduleCommand::Fire {
                 run_id,
                 cause,
+                by,
                 at_ms,
             } => {
                 self.may_fire(cause)?;
@@ -764,6 +810,7 @@ impl Schedule {
                     run_id,
                     manual: cause == FireCause::Manual,
                     webhook: cause == FireCause::Webhook,
+                    by,
                     at_ms,
                 }])
             }

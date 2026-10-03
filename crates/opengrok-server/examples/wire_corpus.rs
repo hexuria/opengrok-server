@@ -315,6 +315,25 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_resumed_routine_never_fires_at_once_and_records_nothing_it_missed",
         "/schedules",
     ),
+    // A Bot runs its person's routine (#337): the history and the list with its run, `cause:
+    // "bot"` and `by`; the replay of the turn whose `run_routine` answered `{runId, threadId}`; and
+    // of one refused. Each test makes one call of each kind on the route it is kept for.
+    (
+        "a_bot_runs_a_routine_by_its_id_and_its_history_names_the_bot",
+        "/schedules/{id}/runs",
+    ),
+    (
+        "a_bot_runs_a_routine_by_its_id_and_its_history_names_the_bot",
+        "/schedules",
+    ),
+    (
+        "a_bot_runs_a_routine_by_its_id_and_its_history_names_the_bot",
+        "/ag-ui/threads/{thread_id}",
+    ),
+    (
+        "a_bot_cannot_run_a_routine_that_is_not_its_persons_or_is_paused",
+        "/ag-ui/threads/{thread_id}",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";

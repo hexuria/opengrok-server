@@ -205,6 +205,7 @@ fn a_paused_schedule_cannot_fire() {
         .decide(ScheduleCommand::Fire {
             run_id: RunId::from_stored("run_1"),
             cause: FireCause::Clock,
+            by: None,
             at_ms: 3_000,
         })
         .expect_err("paused must not fire");
@@ -213,6 +214,7 @@ fn a_paused_schedule_cannot_fire() {
         .decide(ScheduleCommand::Fire {
             run_id: RunId::from_stored("run_manual"),
             cause: FireCause::Manual,
+            by: None,
             at_ms: 3_000,
         })
         .expect("a manual fire on a paused schedule");
@@ -237,6 +239,7 @@ fn pause_resume_fire_round_trip() {
         .decide(ScheduleCommand::Fire {
             run_id: RunId::from_stored("run_1"),
             cause: FireCause::Clock,
+            by: None,
             at_ms: 4,
         })
         .expect("a resumed schedule fires");
@@ -250,6 +253,7 @@ fn a_deleted_schedule_refuses_everything() {
         schedule.decide(ScheduleCommand::Fire {
             run_id: RunId::from_stored("run_1"),
             cause: FireCause::Clock,
+            by: None,
             at_ms: 3,
         }),
         Err(ScheduleError::Deleted)
@@ -313,6 +317,7 @@ fn a_paused_webhook_refuses_an_inbound_fire_but_not_run_now() {
         schedule.decide(ScheduleCommand::Fire {
             run_id: RunId::from_stored("run_hook"),
             cause: FireCause::Webhook,
+            by: None,
             at_ms: 3,
         }),
         Err(ScheduleError::Paused)
@@ -321,6 +326,7 @@ fn a_paused_webhook_refuses_an_inbound_fire_but_not_run_now() {
         .decide(ScheduleCommand::Fire {
             run_id: RunId::from_stored("run_manual"),
             cause: FireCause::Manual,
+            by: None,
             at_ms: 3,
         })
         .expect("run now on a paused webhook");
@@ -364,6 +370,7 @@ fn a_webhook_fire_is_labelled_webhook_not_manual() {
         .decide(ScheduleCommand::Fire {
             run_id: RunId::from_stored("run_hook"),
             cause: FireCause::Webhook,
+            by: None,
             at_ms: 2,
         })
         .expect("webhook fire");
@@ -387,6 +394,7 @@ fn every_firing_is_remembered_by_what_caused_it() {
             .decide(ScheduleCommand::Fire {
                 run_id: RunId::from_stored(run),
                 cause,
+                by: None,
                 at_ms: 2,
             })
             .expect("fire");
@@ -628,6 +636,7 @@ fn a_skip_is_recorded_under_the_rules_a_firing_is() {
             cause,
             code: "relay_offline".to_string(),
             at_ms: 3,
+            by: None,
         })
     };
     let mut schedule = created();
@@ -651,4 +660,71 @@ fn a_skip_is_recorded_under_the_rules_a_firing_is() {
     let expected = serde_json::json!({"type": "skipped", "cause": "manual",
         "code": "relay_offline", "at_ms": 3});
     assert_eq!(written, expected);
+}
+
+/// A BOT'S PRESS IS ITS OWN CAUSE (#337): its `Fired` names the Bot, as it was called then, its
+/// run is labelled `bot` with that `by`, and its skip says so too; every other firing has no `by`,
+/// and a `Fired` from before replays as it always did. A pause holds a Bot's press, where it does
+/// not hold the person's own.
+#[test]
+fn a_bots_press_is_its_own_cause_and_names_the_bot() {
+    let luna = FiringBot {
+        coworker_id: CoworkerId::from_stored("cw_luna"),
+        name: "Luna".to_string(),
+    };
+    let fire = |run: &str, cause, by: Option<FiringBot>| ScheduleCommand::Fire {
+        run_id: RunId::from_stored(run),
+        cause,
+        by,
+        at_ms: 2,
+    };
+    let mut schedule = created();
+    let pressed = fire("run_bot", FireCause::Bot, Some(luna.clone()));
+    let events = schedule.decide(pressed).expect("a Bot's press fires");
+    let stored = serde_json::to_value(&events[0]).expect("json");
+    assert_eq!(
+        stored["by"],
+        serde_json::json!({ "coworkerId": "cw_luna", "name": "Luna" })
+    );
+    let manual = fire("run_person", FireCause::Manual, None);
+    let events = [events, schedule.decide(manual).expect("fires")].concat();
+    let none = serde_json::to_value(&events[1]).expect("json");
+    assert!(none.get("by").is_none(), "no `by` but a Bot's: {none}");
+    for event in &events {
+        schedule.apply(event);
+    }
+    assert_eq!(schedule.fired("run_bot"), Some(("bot", Some(&luna))));
+    assert_eq!(schedule.fired("run_person"), Some(("manual", None)));
+    assert_eq!(schedule.fired("run_a_reply"), None, "no firing of its own");
+
+    let old: ScheduleEvent = serde_json::from_value(serde_json::json!({
+        "type": "fired", "run_id": "run_old", "manual": true, "at_ms": 1 }))
+    .expect("a Fired from before");
+    schedule.apply(&old);
+    assert_eq!(
+        schedule.fired("run_old"),
+        Some(("manual", None)),
+        "as it always did"
+    );
+
+    schedule.apply(&ScheduleEvent::Paused { at_ms: 3 });
+    let held = schedule.decide(fire("run_held", FireCause::Bot, Some(luna.clone())));
+    let held = held.expect_err("a pause holds a Bot's press");
+    assert_eq!(held, ScheduleError::Paused);
+    let skip = ScheduleCommand::firing(
+        Some(("relay_offline", "")),
+        (FireCause::Bot, Some(luna.clone())),
+        &RunId::from_stored("run_skipped"),
+        4,
+    );
+    let mut alive = created();
+    let skipped = alive
+        .decide(skip)
+        .expect("a Bot's press is skipped like the person's");
+    alive.apply(&skipped[0]);
+    let last = alive.skipped.last().expect("the skip");
+    assert_eq!(
+        (last.cause.as_str(), last.by.as_ref()),
+        ("bot", Some(&luna))
+    );
 }

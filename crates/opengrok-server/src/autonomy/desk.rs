@@ -11,16 +11,18 @@
 //! otherwise): a billed model woken every second is a bill, not a test.
 
 use axum::http::StatusCode;
-use opengrok_core::id::{AccountId, CoworkerId, ScheduleId};
+use opengrok_core::id::{AccountId, CoworkerId, RunId, ScheduleId};
 use opengrok_core::limits::RunLimits;
 use opengrok_core::schedule::{
-    Schedule, ScheduleCommand, ScheduleError, ScheduleEvent, ScheduleView, UTC, Wake, WakeKind,
+    FireCause, FiringBot, Schedule, ScheduleCommand, ScheduleError, ScheduleEvent, ScheduleView,
+    UTC, Wake, WakeKind,
 };
 use opengrok_tools::ToolContext;
 use opengrok_tools::routine::{self, Ask, Bot, Fields, RoutineDesk};
 use serde_json::{Value, json};
 
 use crate::agui::routes::AgUiState;
+use crate::host_state::HostState;
 use crate::now_ms;
 
 /// A status and the sentence that goes with it.
@@ -340,6 +342,60 @@ pub(crate) async fn change(
     .await
 }
 
+/// A routine's "Run now", as its person presses it (`POST /schedules/{id}/run`) or a Bot runs it
+/// for them (`run_routine`, #337, `by` it): ONE FUNCTION, so the two refuse and skip alike. POLICY
+/// IS ASKED FIRST, like create: `fire` refuses a revoked grant silently, and a run id that never
+/// appears is a lie nobody can see. Three runs in flight refuse it, and a routine on its person's
+/// own plan with nobody to answer is SKIPPED (#316, #332): recorded as this press, no run, and
+/// refused with the skip's code. A PERSON'S PRESS RUNS A PAUSED ROUTINE AND LEAVES IT PAUSED; a
+/// Bot's is refused by the pause (`Schedule::decide`). The run, on the routine's thread.
+pub(crate) async fn run_now(
+    host: &HostState,
+    (account, id): (&AccountId, &ScheduleId),
+    loaded: &Schedule,
+    by: Option<FiringBot>,
+) -> Result<RunId, (Refusal, Option<&'static str>)> {
+    let (state, plain) = (&host.agui, |refusal| (refusal, None));
+    // A 409, not may_use's 404: on the route a 404 reads as "the routine is gone", and the
+    // routine is right there; it is the coworker behind it that cannot work.
+    let gone = "this routine's coworker is no longer hired; hand it to another coworker";
+    let coworker_id = match loaded.coworker_id.as_ref() {
+        Some(coworker_id) if takes_work(state, coworker_id).await => coworker_id.clone(),
+        _ => return Err(plain(refused(StatusCode::CONFLICT, gone))),
+    };
+    may_use(state, account, &coworker_id).await.map_err(plain)?;
+    if let Some(busy) = crate::autonomy::too_busy(state, account, id.as_str()).await {
+        return Err(plain(busy));
+    }
+    let run_id = RunId::new();
+    let skip = crate::autonomy::unreachable(state, account, &coworker_id, &run_id).await;
+    let cause = (
+        by.as_ref().map_or(FireCause::Manual, |_| FireCause::Bot),
+        by,
+    );
+    let fired = mutate_schedule(state, account, id, now_ms(), |loaded| {
+        let firing = ScheduleCommand::firing(skip, cause.clone(), &run_id, now_ms());
+        let conflict = |why: ScheduleError| refused(StatusCode::CONFLICT, why.to_string());
+        loaded.decide(firing).map_err(conflict)
+    });
+    let after = fired.await.map_err(plain)?;
+    if let Some((code, why)) = skip {
+        return Err((refused(StatusCode::CONFLICT, why), Some(code)));
+    }
+    let firing = crate::autonomy::Firing {
+        origin: format!("schedule {id} (run now, {})", cause.0.as_str()),
+        account_id: account.clone(),
+        coworker_id: after.coworker_id.clone().unwrap_or(coworker_id),
+        prompt: after.prompt.clone(),
+        thread_id: id.as_str().to_string(),
+        run_id: run_id.clone(),
+        run_limits: after.run_limits,
+        message: None,
+    };
+    tokio::spawn(crate::autonomy::fire(host.clone(), firing));
+    Ok(run_id)
+}
+
 /// Load the schedule, decide with `decide`, append at the loaded seq — and if another writer got
 /// there first, re-read and try ONCE more before answering 409. Why: the desktop's Routines pane
 /// autosaves an edit on blur at the same instant a person clicks "Test run", so two mutations on
@@ -446,6 +502,32 @@ impl Tools {
         }
     }
 
+    /// A routine of the person's by its id, or by its name as `list_routines` gives it (#337):
+    /// a name two of theirs share is refused, naming both.
+    async fn runnable(
+        &self,
+        context: &ToolContext,
+        asked: &str,
+    ) -> Result<(ScheduleId, Schedule), String> {
+        let by_id = self.routine(context, asked).await;
+        if by_id.is_ok() {
+            return by_id;
+        }
+        let views = self
+            .state
+            .auth
+            .store
+            .schedules_for(&context.account_id)
+            .await;
+        let views = views.map_err(|error| said(storage(error)))?.into_iter();
+        let named: Vec<String> = views.filter(|v| v.name == asked).map(|v| v.id).collect();
+        match named.as_slice() {
+            [one] => self.routine(context, one).await,
+            [] => by_id,
+            _ => Err(routine::ambiguous(asked, &named)),
+        }
+    }
+
     /// The routine as the tools carry it, read back from its projection after a write.
     async fn reply(&self, account: &AccountId, id: &ScheduleId) -> Result<Value, String> {
         let view = view_of(&self.state, account, id).await.map_err(said)?;
@@ -521,6 +603,20 @@ impl RoutineDesk for Tools {
                 let delete = |at_ms| ScheduleCommand::Delete { at_ms };
                 change(state, (account, &id), delete).await.map_err(said)?;
                 Ok(json!({ "deleted": id.as_str(), "name": loaded.name }))
+            }
+            // The person's "Run now", as the Bot whose turn it is, called what it is called now.
+            Ask::Run { routine: asked } => {
+                let (id, loaded) = self.runnable(context, &asked).await?;
+                let bot = state.auth.store.load_coworker(&context.coworker_id).await;
+                let name = bot.map_err(|error| said(storage(error)))?.0.name;
+                let by = FiringBot {
+                    coworker_id: context.coworker_id.clone(),
+                    name,
+                };
+                let host = HostState::new(state.clone(), None);
+                let ran = run_now(&host, (account, &id), &loaded, Some(by)).await;
+                let run_id = ran.map_err(|(refusal, _)| said(refusal))?;
+                Ok(json!({ "runId": run_id.as_str(), "threadId": id.as_str() }))
             }
         }
     }

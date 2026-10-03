@@ -3,7 +3,9 @@
 //! intersects with it. After that pass a ceiling without them is one its owner switched off, and
 //! no later boot may switch it back on. A ceiling that admits nothing is not handed them. A Bot
 //! from before #314 too gains `message_bot` and the routines on the same boot, each pass under
-//! its own marker, so neither pass's record stands in for the other's.
+//! its own marker, so neither pass's record stands in for the other's. `run_routine` (#337) is the
+//! row's fifth tool: a Bot whose row is on gains it ONCE, on its own pass, and one whose row its
+//! owner switched off does not.
 //!
 //! Its own test binary, so its own database: it forgets the pass and boots again, which touches
 //! every ceiling in the database, and nothing else may be running beside it.
@@ -36,9 +38,10 @@ const ROUTINES: [&str; 4] = [
     "update_routine",
 ];
 
-/// The two one-time passes this file boots through: #314's, then #316's.
+/// The one-time passes this file boots through: #314's, #316's, then #337's.
 const BOTS: &str = "the-bots-join-the-ceiling";
 const PASS: &str = "the-routines-join-the-ceiling";
+const RUN: &str = "the-routine-runs-join-the-ceiling";
 
 /// Boot again, these passes forgotten first.
 async fn boot(store: &PgStore, forget: &[&str]) {
@@ -77,8 +80,9 @@ async fn profile(store: &PgStore, account: &AccountId, coworker: &CoworkerId) ->
     policy.grant.expect("a grant").profile
 }
 
+/// A list with the Routines row on, as the passes leave it: the four, and `run_routine` (#337).
 fn with_routines(names: &[&str]) -> ToolSet {
-    ToolSet::only(names.iter().copied().chain(ROUTINES))
+    ToolSet::only(names.iter().copied().chain(ROUTINES).chain(["run_routine"]))
 }
 
 /// A ceiling from before both passes, after them: #314's row and #316's.
@@ -126,15 +130,17 @@ async fn every_bot_from_before_gains_the_routines_once_and_one_switched_off_stay
     }
     let (_, version) = stored(&store, &hired).await;
 
-    boot(&store, &[BOTS, PASS]).await;
-    assert!(recorded(&store, BOTS).await && recorded(&store, PASS).await);
+    boot(&store, &[BOTS, PASS, RUN]).await;
+    for pass in [BOTS, PASS, RUN] {
+        assert!(recorded(&store, pass).await, "{pass}");
+    }
 
     // Every list gains them, chosen or not, ceiling and profile alike, sorted as the store writes
     // a set; the ceiling's version moves once for each pass, so a screen that read it before is
     // refused. The Bots' row is the ceiling's alone, as #314 wrote it: it needed no profile.
     let (tools, moved) = stored(&store, &hired).await;
     assert_eq!(tools, json(&with_both(&BEFORE)));
-    assert_eq!(moved, version + 2);
+    assert_eq!(moved, version + 3);
     assert_eq!(
         profile(&store, &account, &hired).await,
         with_routines(&BEFORE)
@@ -156,14 +162,29 @@ async fn every_bot_from_before_gains_the_routines_once_and_one_switched_off_stay
     boot(&store, &[]).await;
     let both = (json(&with_both(&BEFORE)), moved);
     assert_eq!(stored(&store, &hired).await, both);
-    boot(&store, &[PASS]).await;
-    assert_eq!(stored(&store, &hired).await, both);
+    for pass in [PASS, RUN] {
+        boot(&store, &[pass]).await;
+        assert_eq!(stored(&store, &hired).await, both, "{pass}");
+    }
+
+    // A Bot from #316's time, its row on with the four, gains `run_routine` on #337's pass alone,
+    // in its ceiling and its owner's profile.
+    let sixteen = coworker("sixteen");
+    let four = ToolSet::only(BEFORE.into_iter().chain(ROUTINES));
+    let granted = store.grant_access(&account, &sixteen, &four, &four, &ToolSet::None, 3);
+    granted.await.expect("grant");
+    let (_, before_run) = stored(&store, &sixteen).await;
+    boot(&store, &[RUN]).await;
+    let ran = (json(&with_routines(&BEFORE)), before_run + 1);
+    assert_eq!(stored(&store, &sixteen).await, ran);
+    let profiled = profile(&store, &account, &sixteen).await;
+    assert_eq!(profiled, with_routines(&BEFORE));
 
     // The owner switches them off, as the ceiling route does, and every later boot leaves it.
     let off = ToolSet::only(BEFORE.into_iter().chain(["message_bot"]));
     let written = store.set_ceiling(&account, &hired, &off, None, 2).await;
     assert!(written.expect("switch them off").is_some());
-    boot(&store, &[]).await;
+    boot(&store, &[RUN]).await;
     assert_eq!(stored(&store, &hired).await.0, json(&off));
     assert_eq!(profile(&store, &account, &hired).await, off);
 }

@@ -1355,17 +1355,30 @@ update ceiling_view
        tools = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
          from (select distinct jsonb_array_elements_text((tools->'only') || '["create_routine",
            "delete_routine", "list_routines", "update_routine"]'::jsonb) tool) known))
- where tools ? 'only'
-   and not (tools->'only' ?& '{create_routine,delete_routine,list_routines,update_routine}')
+ where not (tools->'only' ?& '{create_routine,delete_routine,list_routines,update_routine}')
    and not exists (select 1 from schema_migrations where name = 'the-routines-join-the-ceiling');
 update grant_view
    set profile = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
          from (select distinct jsonb_array_elements_text((profile->'only') || '["create_routine",
            "delete_routine", "list_routines", "update_routine"]'::jsonb) tool) known))
- where profile ? 'only'
-   and not (profile->'only' ?& '{create_routine,delete_routine,list_routines,update_routine}')
+ where not (profile->'only' ?& '{create_routine,delete_routine,list_routines,update_routine}')
    and not exists (select 1 from schema_migrations where name = 'the-routines-join-the-ceiling');
 insert into schema_migrations (name) values ('the-routines-join-the-ceiling') on conflict do nothing;
+-- #337: `run_routine` is the Routines row's fifth tool, so a list ceiling, and its owner's profile,
+-- that has the row's four gains it ONCE, after them; one without them had the row switched off.
+update ceiling_view
+   set version = version + 1, tools = jsonb_build_object('only', (select jsonb_agg(tool order by
+     tool collate "C") from jsonb_array_elements_text((tools->'only') || '["run_routine"]') tool))
+ where tools->'only' ?& '{create_routine,delete_routine,list_routines,update_routine}'
+   and not (tools->'only' ? 'run_routine')
+   and not exists (select 1 from schema_migrations where name = 'the-routine-runs-join-the-ceiling');
+update grant_view
+   set profile = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
+     from jsonb_array_elements_text((profile->'only') || '["run_routine"]') tool))
+ where profile->'only' ?& '{create_routine,delete_routine,list_routines,update_routine}'
+   and not (profile->'only' ? 'run_routine')
+   and not exists (select 1 from schema_migrations where name = 'the-routine-runs-join-the-ceiling');
+insert into schema_migrations (name) values ('the-routine-runs-join-the-ceiling') on conflict do nothing;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

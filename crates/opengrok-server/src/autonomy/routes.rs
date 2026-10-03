@@ -25,8 +25,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use opengrok_core::id::{AccountId, CoworkerId, RunId, ScheduleId};
-use opengrok_core::schedule::{FireCause, Schedule, ScheduleCommand, ScheduleView, Skip, WakeKind};
+use opengrok_core::id::{AccountId, CoworkerId, ScheduleId};
+use opengrok_core::schedule::{Schedule, ScheduleCommand, ScheduleView, Skip, WakeKind};
 
 use super::desk::{self, Draft, Refusal};
 use crate::agui::routes::{AgUiState, account_from_bearer};
@@ -343,14 +343,8 @@ pub(super) fn json_refusal((code, body): (u16, Value)) -> Response {
         .into_response()
 }
 
-/// `POST /schedules/{id}/run` — the person's "Run now".
-///
-/// A PAUSED ROUTINE RUNS, AND STAYS PAUSED. That is the core's rule (`Schedule::decide`, `Fire`):
-/// a person asking is the one wake a pause does not refuse, and pressing it is not a resume — the
-/// clock and the hook stay off. POLICY IS ASKED FIRST, like create: `fire` refuses a revoked
-/// grant silently, and a 202 with a run id that never appears is a lie the person cannot see.
-/// A ROUTINE ON THE PERSON'S PLAN WITH NOBODY TO ANSWER IS SKIPPED (#316): recorded as their
-/// press, no run starts, and the 409 says why in the row's words, with the skip's code.
+/// `POST /schedules/{id}/run` — the person's "Run now", the desk's (`desk::run_now`): 202 with the
+/// run's id, a skip's 409 with its code, any other refusal `{error}`.
 async fn run_schedule_now(
     State(state): State<HostState>,
     headers: HeaderMap,
@@ -361,51 +355,16 @@ async fn run_schedule_now(
         Ok(loaded) => loaded,
         Err(refusal) => return refusal,
     };
-    // A 409, not may_use's 404: on this route a 404 reads as "the routine is gone", and the
-    // routine is right there — it is the coworker behind it that cannot work.
-    let coworker_id = match loaded.coworker_id.as_ref() {
-        Some(coworker_id) if takes_work(&state.agui, coworker_id).await => coworker_id.clone(),
-        _ => {
-            let why = "this routine's coworker is no longer hired; hand it to another coworker";
-            return refused((StatusCode::CONFLICT, why.to_string()));
+    match desk::run_now(&state, (&account_id, &id), &loaded, None).await {
+        Ok(run_id) => {
+            let accepted = json!({ "accepted": true, "runId": run_id.as_str() });
+            (StatusCode::ACCEPTED, Json(accepted)).into_response()
         }
-    };
-    if let Err(refusal) = desk::may_use(&state.agui, &account_id, &coworker_id).await {
-        return refused(refusal);
+        Err(((status, why), Some(code))) => {
+            (status, Json(json!({ "error": why, "code": code }))).into_response()
+        }
+        Err((refusal, None)) => refused(refusal),
     }
-    if let Some(refusal) = crate::autonomy::too_busy(&state.agui, &account_id, id.as_str()).await {
-        return refusal;
-    }
-    let run_id = RunId::new();
-    let skip = crate::autonomy::unreachable(&state.agui, &account_id, &coworker_id, &run_id).await;
-    let fired = desk::mutate_schedule(&state.agui, &account_id, &id, now_ms(), |loaded| {
-        let firing = ScheduleCommand::firing(skip, FireCause::Manual, &run_id, now_ms());
-        let refused =
-            |why: opengrok_core::schedule::ScheduleError| (StatusCode::CONFLICT, why.to_string());
-        loaded.decide(firing).map_err(refused)
-    });
-    let after = match fired.await {
-        Ok(after) => after,
-        Err(refusal) => return refused(refusal),
-    };
-    if let Some((code, why)) = skip {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": why, "code": code })),
-        )
-            .into_response();
-    }
-    let prompt = after.prompt.clone();
-    crate::autonomy::start_fired(
-        &state,
-        after.coworker_id.clone(),
-        account_id,
-        id.as_str(),
-        run_id,
-        prompt,
-        format!("schedule {id} (run now)"),
-        after.run_limits,
-    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -452,17 +411,11 @@ async fn schedule_runs(
             return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
         }
     };
+    // `by` on every row of a routine's (#337), null but for a Bot's.
     let cause = |run: &str| {
-        let ran = |runs: &std::collections::BTreeSet<String>| runs.contains(run);
-        let causes = [
-            (&loaded.manual_runs, "manual"),
-            (&loaded.webhook_runs, "webhook"),
-            (&loaded.clock_runs, "clock"),
-        ];
-        causes
-            .into_iter()
-            .find(|(runs, _)| ran(runs))
-            .map(|(_, cause)| cause)
+        loaded
+            .fired(run)
+            .map(|(cause, by)| (cause, Some(json!(by))))
     };
     let rows = history(&runs, query.limit, cause, &loaded.skipped);
     ([NO_STORE], Json(rows)).into_response()
@@ -470,10 +423,10 @@ async fn schedule_runs(
 
 /// One page of a routine's or a monitor's history, newest first, shared so the two cannot drift:
 /// `{runId, cause, status, startedAtMs, endedAtMs}`, `limit` clamped to 1..=`RUNS_MAX` (default
-/// 20). `cause_of` names what started a run, or `None` for one the owner never fired — a person
-/// replying in its thread is no firing, and is left out. A skipped firing (#316) is a row too:
-/// every field a run's has, null where it has none, and its own `at`, `state: "skipped"`,
-/// `skipped` (the code) and `reason`.
+/// 20). `cause_of` names what started a run, and the `by` its row carries when it has one (a
+/// routine's, #337), or `None` for one the owner never fired: a person replying in its thread is
+/// no firing, and is left out. A skipped firing (#316) is a row too: every field a run's has, null
+/// where it has none, and its own `at`, `state: "skipped"`, `skipped` (the code), `reason` and `by`.
 ///
 /// The status words (`running`, `waiting`, `ok`, `error`) are the run history's own vocabulary as
 /// #82 and #235 write it, not `RunStatus::as_str`; an exhaustive match, so a new status does not
@@ -481,33 +434,36 @@ async fn schedule_runs(
 pub(super) fn history(
     runs: &[opengrok_store::ThreadRun],
     limit: Option<i64>,
-    cause_of: impl Fn(&str) -> Option<&'static str>,
+    cause_of: impl Fn(&str) -> Option<(&'static str, Option<Value>)>,
     skipped: &[Skip],
 ) -> Vec<Value> {
     use opengrok_core::run::RunStatus;
     let limit = usize::try_from(limit.unwrap_or(20).clamp(1, RUNS_MAX)).unwrap_or(20);
     let ran = runs.iter().filter_map(|run| {
         let key = run.id.as_str();
-        let cause = cause_of(key)?;
+        let (cause, by) = cause_of(key)?;
         let (status, ended) = match RunStatus::from_stored(&run.status) {
             RunStatus::Running => ("running", false),
             RunStatus::AwaitingApproval => ("waiting", false),
             RunStatus::Finished => ("ok", true),
             RunStatus::Failed | RunStatus::Stopped => ("error", true),
         };
-        let row = json!({
+        let mut row = json!({
             "runId": key,
             "cause": cause,
             "status": status,
             "startedAtMs": run.started_at_ms,
             "endedAtMs": ended.then_some(run.updated_at_ms),
         });
+        if let Some(by) = by {
+            row["by"] = by;
+        }
         Some((run.started_at_ms, row))
     });
     let skips = skipped.iter().map(|skip| {
         let row = json!({ "runId": null, "cause": skip.cause.as_str(), "status": null,
             "startedAtMs": null, "endedAtMs": null, "at": skip.at_ms, "state": "skipped",
-            "skipped": skip.code, "reason": Skip::reason(&skip.code) });
+            "skipped": skip.code, "reason": Skip::reason(&skip.code), "by": skip.by });
         (skip.at_ms, row)
     });
     let mut rows: Vec<(i64, Value)> = ran.chain(skips).collect();

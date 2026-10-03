@@ -416,6 +416,7 @@ async fn seed_clock_run(h: &Harness, routine: &str) -> RunId {
         .decide(ScheduleCommand::Fire {
             run_id: run_id.clone(),
             cause: FireCause::Clock,
+            by: None,
             at_ms: now_ms(),
         })
         .expect("fire");

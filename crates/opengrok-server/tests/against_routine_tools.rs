@@ -44,11 +44,12 @@ const ONE_SCHEDULE: &str =
 const NO_WEBHOOK: &str = "a Bot can't make a webhook trigger: its key must not pass through \
                           chat. Ask the person to add one in Routines.";
 const FLOOR: &str = "a routine can wake at most once a minute: use 5 fields, like */5 * * * *.";
-const ROUTINE_TOOLS: [&str; 4] = [
+const ROUTINE_TOOLS: [&str; 5] = [
     "list_routines",
     "create_routine",
     "update_routine",
     "delete_routine",
+    "run_routine",
 ];
 
 fn unique(prefix: &str) -> String {
@@ -164,6 +165,8 @@ struct Harness {
 
 /// What one tool call came to, as the turn's frames say it.
 struct Called {
+    /// The thread the turn was taken on, for its replay.
+    thread: String,
     /// `TOOL_CALL_RESULT`'s `ok` and `content`, when the call ran or was refused.
     result: Option<(bool, String)>,
     /// The `run-awaiting-approval` frame, when the call parked on a card.
@@ -311,12 +314,13 @@ impl Harness {
     /// One turn in which `bot` makes the one call `tool(arguments)`.
     async fn call(&self, who: &Person, bot: &str, tool: &str, arguments: Value) -> Called {
         let said = json!({ "tool": tool, "arguments": arguments }).to_string();
+        let thread = unique("thr");
         let res = self
             .client
             .post(format!("{}/ag-ui", self.base))
             .bearer_auth(&who.token)
             .json(&json!({
-                "threadId": unique("thr"),
+                "threadId": thread,
                 "runId": uuid::Uuid::now_v7().to_string(),
                 "messages": [{ "id": unique("m"), "role": "user", "content": said }],
                 "forwardedProps": { "coworkerId": bot },
@@ -342,7 +346,11 @@ impl Harness {
             .iter()
             .find(|frame| frame["name"] == "run-awaiting-approval")
             .cloned();
-        Called { result, parked }
+        Called {
+            thread,
+            result,
+            parked,
+        }
     }
 
     /// The call's result, which must be one the model can read.
@@ -927,8 +935,8 @@ async fn a_bots_ceiling_lists_its_routines_as_one_row() {
         .find(|row| row["name"] == "routines")
         .cloned();
     let expected = json!({ "name": "routines", "kind": "builtin", "label": "Routines",
-        "enabled": true, "description": "List, make, edit and delete your routines when you ask \
-        in chat. Deleting one always asks you first." });
+        "enabled": true, "description": "List, make, edit, delete and run your routines when you \
+        ask in chat. Deleting one always asks you first." });
     assert_eq!(routines, Some(expected));
 }
 
@@ -953,4 +961,317 @@ async fn the_route_and_the_tool_make_the_same_routine() {
         row.as_object_mut().unwrap().remove("id");
     }
     assert_eq!(rows[0], rows[1]);
+}
+
+impl Harness {
+    /// A routine of `who`'s for `bot`, made the way the Routines pane makes one: its id.
+    async fn made(&self, who: &Person, bot: &str, name: &str) -> String {
+        let body = json!({ "coworkerId": bot, "name": name, "prompt": "post the standup",
+            "cron": "0 9 * * MON-FRI" });
+        let made = self.rest_routine(who, body).await;
+        made["id"].as_str().unwrap().to_string()
+    }
+
+    /// `who`'s inference source saved as `body`, which must be taken.
+    async fn source(&self, who: &Person, body: Value) {
+        let path = "/account/inference-source";
+        let (status, saved) = self.send(who, reqwest::Method::PUT, path, Some(body)).await;
+        assert_eq!(status, 200, "{saved}");
+    }
+
+    /// `bot`'s own door, set by its owner.
+    async fn door(&self, who: &Person, bot: &str, body: Value) {
+        let path = format!("/coworkers/{bot}");
+        let (status, row) = self
+            .send(who, reqwest::Method::PATCH, &path, Some(body))
+            .await;
+        assert_eq!(status, 200, "{row}");
+    }
+
+    /// The routine's runs, read from the store, so a wait records no reply.
+    async fn runs_of(&self, routine: &str) -> usize {
+        let runs =
+            sqlx::query_scalar::<_, i64>("select count(*) from run_view where thread_id = $1");
+        let runs = runs
+            .bind(routine)
+            .fetch_one(self.store.pool())
+            .await
+            .expect("runs");
+        usize::try_from(runs).unwrap_or_default()
+    }
+}
+
+/// A BOT RUNS ITS PERSON'S ROUTINE BY ITS ID, AS THEIR RUN NOW DOES (#337): its own Bot is woken
+/// with its prompt on its thread, the call is told `{runId, threadId}`, and the history and the
+/// row's `lastRun` say a Bot pressed it, which, as it was called. The person's own press says
+/// `manual`, `by` null. One read of the history, the list and the call's thread each, which the
+/// corpus keeps.
+#[tokio::test]
+async fn a_bot_runs_a_routine_by_its_id_and_its_history_names_the_bot() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
+    let id = h.made(&ada, &sol, "Standup").await;
+    let path = format!("/schedules/{id}/run");
+    let (status, pressed) = h
+        .send(&ada, reqwest::Method::POST, &path, Some(json!({})))
+        .await;
+    assert_eq!(status, 202, "{pressed}");
+    h.wait_for_ending(&RunId::from_stored(pressed["runId"].as_str().unwrap()))
+        .await;
+
+    let called = h
+        .call(&ada, &luna, "run_routine", json!({ "routine": id }))
+        .await;
+    assert!(called.parked.is_none(), "no card");
+    let (ok, said) = called.result.expect("a result");
+    assert!(ok, "{said}");
+    let ran: Value = serde_json::from_str(&said).expect("JSON");
+    let run_id = ran["runId"].as_str().expect("runId").to_string();
+    assert_eq!(ran, json!({ "runId": run_id, "threadId": id }));
+    h.wait_for_ending(&RunId::from_stored(run_id.clone())).await;
+    let (run, _) = h
+        .store
+        .load_run(&RunId::from_stored(run_id.clone()))
+        .await
+        .unwrap();
+    let woke = run.coworker_id.as_ref().map(|bot| bot.as_str());
+    assert_eq!(
+        (woke, run.thread_id.as_str()),
+        (Some(sol.as_str()), id.as_str())
+    );
+
+    let by = json!({ "coworkerId": luna, "name": "Luna" });
+    let (status, history) = h
+        .send(&ada, reqwest::Method::GET, &format!("{path}s"), None)
+        .await;
+    assert_eq!(status, 200, "{history}");
+    let causes: Vec<(&Value, &Value, &Value)> = history
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| (&row["runId"], &row["cause"], &row["by"]))
+        .collect();
+    let (bot, manual) = (json!("bot"), json!("manual"));
+    let expected = vec![
+        (&ran["runId"], &bot, &by),
+        (&pressed["runId"], &manual, &Value::Null),
+    ];
+    assert_eq!(causes, expected, "{history}");
+    let row = h.routines(&ada).await.pop().expect("the routine");
+    let last = &row["lastRun"];
+    let said = (&last["runId"], &last["cause"], &last["by"]);
+    assert_eq!(said, (&ran["runId"], &bot, &by), "{last}");
+    let replay = format!("/ag-ui/threads/{}", called.thread);
+    let (status, thread) = h.send(&ada, reqwest::Method::GET, &replay, None).await;
+    assert_eq!(status, 200, "{thread}");
+    assert!(
+        thread.to_string().contains(&run_id),
+        "the call's result is replayed"
+    );
+}
+
+/// BY ITS NAME TOO, as `list_routines` gives it (#337); a name two of the person's routines share
+/// is refused naming both, and runs neither.
+#[tokio::test]
+async fn a_bot_runs_a_routine_by_its_name_and_a_shared_name_is_refused_naming_both() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let luna = h.hire(&ada, "Luna").await;
+    let standup = h.made(&ada, &luna, "Standup").await;
+    let (one, two) = (
+        h.made(&ada, &luna, "Report").await,
+        h.made(&ada, &luna, "Report").await,
+    );
+    let (ok, said) = h
+        .answer(&ada, &luna, "run_routine", json!({ "routine": "Standup" }))
+        .await;
+    assert!(ok, "{said}");
+    let ran: Value = serde_json::from_str(&said).expect("JSON");
+    assert_eq!(ran["threadId"], standup.as_str(), "{ran}");
+    h.wait_for_ending(&RunId::from_stored(ran["runId"].as_str().unwrap()))
+        .await;
+
+    let (ok, said) = h
+        .answer(&ada, &luna, "run_routine", json!({ "routine": "Report" }))
+        .await;
+    assert!(!ok, "{said}");
+    let start = "refused: more than one of your routines is called \"Report\" (";
+    assert!(said.starts_with(start), "{said}");
+    assert!(said.contains(&one) && said.contains(&two), "{said}");
+    assert!(said.ends_with("); run one by its id."), "{said}");
+    assert_eq!((h.runs_of(&one).await, h.runs_of(&two).await), (0, 0));
+}
+
+/// A ROUTINE THAT IS NOT THE PERSON'S IS UNKNOWN to `run_routine` too, by id or by name, whoever's
+/// it is (#337), and nothing runs; a paused one of theirs is refused in the pause's words, which
+/// the person's own press is not. One read of a refused call's thread, which the corpus keeps.
+#[tokio::test]
+async fn a_bot_cannot_run_a_routine_that_is_not_its_persons_or_is_paused() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (ada, bea) = (h.person().await, h.person().await);
+    let luna = h.hire(&ada, "Luna").await;
+    let orion = h.hire(&bea, "Orion").await;
+    let theirs = h.made(&bea, &orion, "Bea's").await;
+    let mut refusal_thread = String::new();
+    for asked in [theirs.as_str(), "Bea's", "sched_nobody"] {
+        let called = h
+            .call(&ada, &luna, "run_routine", json!({ "routine": asked }))
+            .await;
+        let unknown = format!("refused: no routine {asked} is yours; call list_routines.");
+        assert_eq!(called.result, Some((false, unknown)), "{asked}");
+        refusal_thread = called.thread;
+    }
+    assert_eq!(h.runs_of(&theirs).await, 0, "nothing ran");
+    let replay = format!("/ag-ui/threads/{refusal_thread}");
+    let (status, thread) = h.send(&ada, reqwest::Method::GET, &replay, None).await;
+    assert_eq!(status, 200, "{thread}");
+
+    let mine = h.made(&ada, &luna, "Standup").await;
+    let pause = format!("/schedules/{mine}/pause");
+    let (status, _) = h
+        .send(&ada, reqwest::Method::POST, &pause, Some(json!({})))
+        .await;
+    assert_eq!(status, 204);
+    let (ok, said) = h
+        .answer(&ada, &luna, "run_routine", json!({ "routine": mine }))
+        .await;
+    assert_eq!(
+        (ok, said.as_str()),
+        (false, "refused: that schedule is paused")
+    );
+    assert_eq!(h.runs_of(&mine).await, 0, "a pause holds a Bot's press");
+}
+
+/// ITS PLAN'S RULES HOLD (#316, #332, #337): a routine of a Bot on its person's own plan is
+/// skipped in the run now's words while the person's computer is off, or their proxy does not
+/// answer, and its history says a Bot asked; with Relay off it runs on the fallback, or with none
+/// is skipped as Relay off. The calling Bot is on the server, so its own turn is answered.
+#[tokio::test]
+async fn a_plan_bots_routine_run_by_a_bot_keeps_its_plans_rules() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let (luna, sol) = (h.hire(&ada, "Luna").await, h.hire(&ada, "Sol").await);
+    h.door(&ada, &luna, json!({ "source": "gateway" })).await;
+    h.door(
+        &ada,
+        &sol,
+        json!({ "source": "local_proxy", "model": "gpt-6-luna" }),
+    )
+    .await;
+    let id = h.made(&ada, &sol, "Standup").await;
+    let mac = json!({ "kind": "local_proxy", "via": "mac", "relay": { "localModel": "gpt-5.5" } });
+    let down = json!({ "kind": "local_proxy", "via": "loopback", "baseUrl": "http://127.0.0.1:1",
+        "localModel": "gpt-5.5" });
+    for (setting, words) in [
+        (
+            mac.clone(),
+            "Skipped: your computer was off, so your plan couldn't answer",
+        ),
+        (down, "Skipped: your plan's proxy didn't answer"),
+    ] {
+        h.source(&ada, setting).await;
+        let (ok, said) = h
+            .answer(&ada, &luna, "run_routine", json!({ "routine": id }))
+            .await;
+        assert_eq!((ok, said), (false, format!("refused: {words}")));
+    }
+    assert_eq!(h.runs_of(&id).await, 0, "skipped, never run");
+    let (status, history) = h
+        .send(
+            &ada,
+            reqwest::Method::GET,
+            &format!("/schedules/{id}/runs"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{history}");
+    let by = json!({ "coworkerId": luna, "name": "Luna" });
+    for (row, code) in history
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(["proxy_down", "relay_offline"])
+    {
+        let said = (&row["cause"], &row["skipped"], &row["by"]);
+        assert_eq!(said, (&json!("bot"), &json!(code), &by), "{row}");
+    }
+
+    let mut off = mac;
+    off["relayEnabled"] = json!(false);
+    off["planFallback"] = json!(null);
+    h.source(&ada, off.clone()).await;
+    let (ok, said) = h
+        .answer(&ada, &luna, "run_routine", json!({ "routine": id }))
+        .await;
+    let words = "refused: Skipped: Relay is off for your plan";
+    assert_eq!((ok, said.as_str()), (false, words));
+    off["planFallback"] = json!({ "model": "oag/fallback", "effort": "low" });
+    h.source(&ada, off).await;
+    let (ok, said) = h
+        .answer(&ada, &luna, "run_routine", json!({ "routine": id }))
+        .await;
+    assert!(ok, "{said}");
+    let ran: Value = serde_json::from_str(&said).expect("JSON");
+    let run_id = RunId::from_stored(ran["runId"].as_str().unwrap());
+    h.wait_for_ending(&run_id).await;
+    let (run, _) = h.store.load_run(&run_id).await.unwrap();
+    let asked = (run.model.as_deref(), run.inference_source);
+    use opengrok_core::inference::SourceKind;
+    assert_eq!(
+        asked,
+        (Some("oag/fallback"), SourceKind::Gateway),
+        "on the fallback"
+    );
+}
+
+/// A ROUTINE'S OWN RUN CANNOT RUN A ROUTINE (#337's loop guard): `run_routine` is not offered to it,
+/// and a call it makes anyway is refused, so no chain of runs can form.
+#[tokio::test]
+async fn a_routines_own_run_cannot_run_a_routine() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let luna = h.hire(&ada, "Luna").await;
+    let id = h.made(&ada, &luna, "Loop").await;
+    let again = json!({ "tool": "run_routine", "arguments": { "routine": id } });
+    let path = format!("/schedules/{id}");
+    let edit = Some(json!({ "prompt": again.to_string() }));
+    let (status, row) = h.send(&ada, reqwest::Method::PATCH, &path, edit).await;
+    assert_eq!(status, 200, "{row}");
+    let (status, accepted) = h
+        .send(
+            &ada,
+            reqwest::Method::POST,
+            &format!("{path}/run"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, 202, "{accepted}");
+    h.wait_for_ending(&RunId::from_stored(accepted["runId"].as_str().unwrap()))
+        .await;
+    let asked = h.door.asked.lock().unwrap().clone();
+    let first = asked.first().expect("the routine's run asked the model");
+    let offered = first
+        .tools
+        .iter()
+        .filter_map(|tool| tool["function"]["name"].as_str());
+    assert!(
+        !offered.collect::<Vec<_>>().contains(&"run_routine"),
+        "not offered"
+    );
+    let said = asked
+        .last()
+        .unwrap()
+        .messages
+        .last()
+        .unwrap()
+        .content
+        .clone();
+    assert!(said.contains("may only list routines"), "{said}");
+    assert_eq!(h.runs_of(&id).await, 1, "no chain");
 }

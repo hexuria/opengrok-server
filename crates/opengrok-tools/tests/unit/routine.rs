@@ -109,7 +109,7 @@ fn an_edit_and_a_delete_name_their_routine() {
 
 /// Every tool has its schema and words; the row's words are the group's, and nothing else is one.
 #[test]
-fn each_tool_is_described_and_the_row_switches_all_four() {
+fn each_tool_is_described_and_the_row_switches_all_five() {
     for name in TOOLS {
         let schema = schema(name).unwrap();
         assert_eq!(schema["function"]["name"], name);
@@ -124,4 +124,34 @@ fn each_tool_is_described_and_the_row_switches_all_four() {
             .unwrap()
             .contains("never listed")
     );
+}
+
+/// `run_routine` NAMES ITS ROUTINE by id or by name (#337), and asks no card; a run a routine
+/// started, or a Bot's message, is offered the listing alone, which comes first. A name two
+/// routines share is refused naming both.
+#[test]
+fn run_routine_takes_an_id_or_a_name_and_is_listed_last() {
+    for named in ["sched_1", "Standup"] {
+        let ask = read_ok(RUN_ROUTINE, json!({ "routine": named }));
+        assert_eq!(
+            ask,
+            Ask::Run {
+                routine: named.to_string()
+            }
+        );
+    }
+    let missing = refused(RUN_ROUTINE, json!({}));
+    assert!(missing.contains("by its id or its name"), "{missing}");
+    assert_eq!(
+        TOOLS[0], LIST_ROUTINES,
+        "the one a routine's run is offered"
+    );
+    assert_eq!(TOOLS.last(), Some(&RUN_ROUTINE));
+    let schema = schema(RUN_ROUTINE).unwrap();
+    let required = &schema["function"]["parameters"]["required"];
+    assert_eq!(required, &json!(["routine"]));
+    let said = ambiguous("Standup", &["sched_1".to_string(), "sched_2".to_string()]);
+    let words = "more than one of your routines is called \"Standup\" (sched_1, sched_2); run \
+                 one by its id.";
+    assert_eq!(said, words);
 }

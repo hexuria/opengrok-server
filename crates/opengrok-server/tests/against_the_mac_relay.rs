@@ -1932,7 +1932,7 @@ async fn a_due_routine_with_no_mac_is_skipped_and_its_clock_moves_on() {
     assert!(at >= before, "{history}");
     let expected = json!({ "runId": null, "cause": "clock", "status": null, "startedAtMs": null,
         "endedAtMs": null, "at": at, "state": "skipped", "skipped": "relay_offline",
-        "reason": SKIPPED });
+        "reason": SKIPPED, "by": null });
     assert_eq!(skipped[0], expected);
     let row = h.routine_row(&ada, &routine).await;
     let last = &row["lastRun"];
@@ -2308,7 +2308,7 @@ async fn a_plan_bots_routine_is_skipped_while_the_relay_is_off_with_no_fallback(
         let at = row["at"].as_i64().expect("at");
         let expected = json!({ "runId": null, "cause": cause, "status": null,
             "startedAtMs": null, "endedAtMs": null, "at": at, "state": "skipped",
-            "skipped": "relay_disabled", "reason": skipped });
+            "skipped": "relay_disabled", "reason": skipped, "by": null });
         assert_eq!(row, &expected);
     }
     assert_eq!(h.runs_of(&ada, &routine).await, 0, "no run");

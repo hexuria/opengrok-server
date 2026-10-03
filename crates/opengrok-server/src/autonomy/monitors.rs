@@ -488,11 +488,12 @@ async fn monitor_runs(
             return (StatusCode::INTERNAL_SERVER_ERROR, "storage failed").into_response();
         }
     };
+    // No `by`: a monitor's rows are as they were (#337 is a routine's).
     let cause = |run: &str| {
         if loaded.manual_runs.contains(run) {
-            Some("manual")
+            Some(("manual", None))
         } else if loaded.event_runs.contains(run) {
-            Some("event")
+            Some(("event", None))
         } else {
             None
         }

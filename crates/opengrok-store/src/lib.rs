@@ -90,34 +90,21 @@ impl From<sqlx::Error> for StoreError {
 // re-exported here because every integration test already reaches for them through the store.
 pub use opengrok_testdb::{gate_database_or_panic, is_test_database_url};
 
-/// One stream per coworker.
-pub fn coworker_stream(id: &opengrok_core::id::CoworkerId) -> String {
-    format!("coworker/{id}")
+/// One stream per aggregate, `<kind>/<id>`: a coworker, a run, an org, a schedule, a monitor and
+/// an account each have their own. They share the `events` table and never a stream.
+macro_rules! streams {
+    ($($name:ident($id:ty) = $kind:literal;)*) => {$(
+        #[doc = concat!("The stream of one ", $kind, ".")]
+        pub fn $name(id: &$id) -> String { format!(concat!($kind, "/{}"), id) }
+    )*};
 }
-
-/// One stream per run. Runs and accounts share the `events` table and never the same stream.
-pub fn run_stream(id: &opengrok_core::id::RunId) -> String {
-    format!("run/{id}")
-}
-
-/// One stream per org.
-pub fn org_stream(id: &opengrok_core::id::OrgId) -> String {
-    format!("org/{id}")
-}
-
-/// One stream per schedule.
-pub fn schedule_stream(id: &opengrok_core::id::ScheduleId) -> String {
-    format!("schedule/{id}")
-}
-
-/// The stream a monitor's events live on.
-pub fn monitor_stream(id: &opengrok_core::id::MonitorId) -> String {
-    format!("monitor/{id}")
-}
-
-/// The account stream's id. One stream per account, keyed by the account id.
-pub fn account_stream(id: &AccountId) -> String {
-    format!("account/{id}")
+streams! {
+    coworker_stream(opengrok_core::id::CoworkerId) = "coworker";
+    run_stream(opengrok_core::id::RunId) = "run";
+    org_stream(opengrok_core::id::OrgId) = "org";
+    schedule_stream(opengrok_core::id::ScheduleId) = "schedule";
+    monitor_stream(opengrok_core::id::MonitorId) = "monitor";
+    account_stream(AccountId) = "account";
 }
 
 #[cfg(test)]
