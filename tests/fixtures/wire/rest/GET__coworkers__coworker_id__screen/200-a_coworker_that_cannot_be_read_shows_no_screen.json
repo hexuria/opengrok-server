@@ -1,0 +1,12 @@
+{
+  "method": "GET",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/screen",
+  "status": 200,
+  "body": {
+    "mime": "image/png",
+    "base64": "AAAA",
+    "width": 1,
+    "height": 1,
+    "visibility": "transcript"
+  }
+}

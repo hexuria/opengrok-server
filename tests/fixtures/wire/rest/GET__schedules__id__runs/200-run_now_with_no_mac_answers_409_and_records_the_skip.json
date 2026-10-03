@@ -12,7 +12,8 @@
       "at": 1790000000000,
       "state": "skipped",
       "skipped": "relay_offline",
-      "reason": "Skipped: your computer was off, so your plan couldn't answer"
+      "reason": "Skipped: your computer was off, so your plan couldn't answer",
+      "by": null
     }
   ]
 }

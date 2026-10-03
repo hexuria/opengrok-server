@@ -300,6 +300,25 @@
       {
         "type": "function",
         "function": {
+          "name": "run_routine",
+          "description": "Run one of your person's routines now, as their Run now does, by its id or its name from list_routines: its own Bot is woken with its prompt, on its own thread, and you are told the run's id. A paused routine, or one whose plan cannot answer now, is refused in words.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "routine": {
+                "type": "string",
+                "description": "The routine's id, or its name as list_routines gives it."
+              }
+            },
+            "required": [
+              "routine"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
           "name": "bar_chart",
           "description": "Render an interactive bar chart in the user's chat. When the user asks for a chart, graph, bar chart, or numeric comparison, you MUST call this tool. Invent reasonable sample bars if they did not provide numbers. Do not search the computer, do not write files, and do not print the bars as markdown or ASCII.",
           "parameters": {

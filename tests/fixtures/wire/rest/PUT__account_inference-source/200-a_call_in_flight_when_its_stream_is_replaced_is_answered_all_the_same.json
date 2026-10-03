@@ -16,7 +16,7 @@
       "localModel": "gpt-5.5"
     },
     "newBotDefault": null,
-    "relayEnabled": true,
+    "relayEnabled": false,
     "planFallback": null
   }
 }

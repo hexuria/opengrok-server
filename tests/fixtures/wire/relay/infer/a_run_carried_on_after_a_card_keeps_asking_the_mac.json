@@ -307,6 +307,25 @@
             ]
           }
         }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "run_routine",
+          "description": "Run one of your person's routines now, as their Run now does, by its id or its name from list_routines: its own Bot is woken with its prompt, on its own thread, and you are told the run's id. A paused routine, or one whose plan cannot answer now, is refused in words.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "routine": {
+                "type": "string",
+                "description": "The routine's id, or its name as list_routines gives it."
+              }
+            },
+            "required": [
+              "routine"
+            ]
+          }
+        }
       }
     ],
     "tool_choice": "auto"

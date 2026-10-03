@@ -7,12 +7,16 @@
       {
         "id": "xai/grok-4.6",
         "points": null,
-        "source": "gateway"
+        "source": "gateway",
+        "efforts": null,
+        "ownEffort": null
       },
       {
         "id": "openai/gpt-5.5",
         "points": null,
-        "source": "gateway"
+        "source": "gateway",
+        "efforts": null,
+        "ownEffort": null
       }
     ],
     "note": null,

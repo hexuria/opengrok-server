@@ -1,0 +1,9 @@
+{
+  "method": "GET",
+  "path": "/inference-relay/requests",
+  "status": 409,
+  "body": {
+    "error": "Relay is off for this computer. Turn it on in Settings → Computer.",
+    "code": "relay_disabled"
+  }
+}

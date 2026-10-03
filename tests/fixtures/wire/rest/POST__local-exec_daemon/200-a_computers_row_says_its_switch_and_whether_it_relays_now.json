@@ -1,0 +1,9 @@
+{
+  "method": "POST",
+  "path": "/local-exec/daemon",
+  "status": 200,
+  "body": {
+    "machineId": "mac_0199bb4e000070008000000000000001",
+    "token": "«redacted»"
+  }
+}

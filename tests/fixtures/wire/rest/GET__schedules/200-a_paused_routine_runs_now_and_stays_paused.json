@@ -22,7 +22,9 @@
         "status": "running",
         "startedAtMs": 1790000000000,
         "finishedAtMs": null,
-        "summary": "Routine Weekly is running."
+        "summary": "Routine Weekly is running.",
+        "cause": "manual",
+        "by": null
       },
       "tz": "UTC"
     }
