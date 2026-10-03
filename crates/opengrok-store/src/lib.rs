@@ -43,9 +43,9 @@ pub use pending::{
 };
 pub use points::{PointsLimit, PointsLimitRow, PointsScope};
 pub use postgres::{
-    ArtifactRow, CredentialUpdate, PasskeyMeta, PasskeyWrite, PgStore, RecipeGrantRow, RecipeRow,
-    RecipeRunRow, RecipeShareRow, RecipeVersionRow, RosterOwner, SiteLoginRow, SiteLoginSecrets,
-    SiteLoginWrite, ThreadListing, ThreadRun,
+    ArtifactRow, CredentialUpdate, Daemon, PasskeyMeta, PasskeyWrite, PgStore, RecipeGrantRow,
+    RecipeRow, RecipeRunRow, RecipeShareRow, RecipeVersionRow, RosterOwner, SiteLoginRow,
+    SiteLoginSecrets, SiteLoginWrite, ThreadListing, ThreadRun,
 };
 pub use replica::{AllowOnce, OAuthCodeRow};
 pub use skills::{NewSkill, NewSkillVersion, SkillFileRow, SkillRow, SkillVersionRow};

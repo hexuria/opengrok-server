@@ -20,6 +20,7 @@
 //! difference between "no" and "we do not know" must never be a way in — which is the same rule as
 //! CLAUDE.md #8's "a typo may only ever narrow access", seen from the lookup side.
 
+pub mod local_exec;
 pub mod shell;
 
 use std::collections::BTreeSet;

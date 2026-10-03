@@ -800,6 +800,11 @@ async fn a_routine_for_a_bot_on_its_persons_plan_says_when_it_runs() {
         )
         .await;
     assert_eq!(status, 200, "{row}");
+    // A computer of Ada's, asleep, which `relayEnabled` switches on and off with the rest.
+    let label = Some(json!({ "label": "Ada's MacBook" }));
+    let post = reqwest::Method::POST;
+    let (status, enrolled) = h.send(&ada, post, "/local-exec/daemon", label).await;
+    assert_eq!(status, 200, "{enrolled}");
     let fallback = json!({ "model": "xai/grok-4.6" });
     for (via, (on, fallback), note) in [
         (
@@ -1164,6 +1169,12 @@ async fn a_plan_bots_routine_run_by_a_bot_keeps_its_plans_rules() {
     )
     .await;
     let id = h.made(&ada, &sol, "Standup").await;
+    // A computer of Ada's, asleep: on, so the Mac's way is relay_offline and not Relay off, until
+    // `relayEnabled` switches it off with the rest.
+    let label = Some(json!({ "label": "Ada's MacBook" }));
+    let post = reqwest::Method::POST;
+    let (status, enrolled) = h.send(&ada, post, "/local-exec/daemon", label).await;
+    assert_eq!(status, 200, "{enrolled}");
     let mac = json!({ "kind": "local_proxy", "via": "mac", "relay": { "localModel": "gpt-5.5" } });
     let down = json!({ "kind": "local_proxy", "via": "loopback", "baseUrl": "http://127.0.0.1:1",
         "localModel": "gpt-5.5" });

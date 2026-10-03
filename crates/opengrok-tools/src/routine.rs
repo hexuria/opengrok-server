@@ -51,13 +51,13 @@ pub const ONE_SCHEDULE: &str =
 pub const NO_WEBHOOK: &str = "a Bot can't make a webhook trigger: its key must not pass through \
      chat. Ask the person to add one in Routines.";
 /// What a routine made for a Bot on the person's own plan says (#316): it runs only while the
-/// plan can answer, by the way the plan goes, and is skipped otherwise; while the person switched
-/// the relay off, it runs on their fallback or is skipped every time (#332).
+/// plan can answer, by the way the plan goes, and is skipped otherwise; while the relay is off,
+/// none of the person's computers on, it runs on their fallback or is skipped every time (#332).
 pub fn note(setting: &InferenceSource) -> &'static str {
     let plan = TurnSource::picked(None, Some(SourceKind::LocalProxy));
     match (
         setting.resolve(plan).1,
-        setting.relay_off,
+        setting.relays.is_empty(),
         &setting.plan_fallback,
     ) {
         (Via::Loopback, ..) => "runs only while your plan's proxy answers",

@@ -4,7 +4,9 @@
 //!
 //! Provenance: the contract agreed with NativeChat on opengrok-server#292 (FINAL there), which
 //! names every frame and field below. `ready` comes first on every connect; a second stream from
-//! the same machine replaces the first, which is sent `replaced` and closed.
+//! the same machine replaces the first, which is sent `replaced` and closed. `disabled` and the
+//! 409 a switched-off machine's stream is refused with are the per-computer relay contract
+//! NativeChat confirmed on 3 Oct 2026, after #332.
 //!
 //! NO URL AND NO KEY EVER GO DOWN THIS STREAM, and no variant has anywhere to put one. The Mac
 //! calls its own opencodex at an address and with a key entered ON THE MAC. The account's stored
@@ -39,7 +41,15 @@ pub enum RelayFrame {
     Ping,
     /// Another stream from this machine took over; this one ends now.
     Replaced,
+    /// This machine's relay was switched off (`PATCH /local-exec/daemon/{machineId}`, or the
+    /// account's `relayEnabled: false`, which switches every machine): this stream ends now, and
+    /// the next is refused with `RELAY_IS_OFF` until the switch is on again.
+    Disabled,
 }
+
+/// What `GET /inference-relay/requests` answers a machine whose relay is switched off, 409 with
+/// `code: "relay_disabled"`, before any frame, in the contract's words.
+pub const RELAY_IS_OFF: &str = "Relay is off for this computer. Turn it on in Settings → Computer.";
 
 impl RelayFrame {
     /// The JSON one SSE `data:` line carries: on one line, which an SSE field must be.

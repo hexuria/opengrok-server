@@ -224,12 +224,22 @@ fn an_account_keeps_the_setting_it_was_given_and_starts_on_the_gateway() {
             model: "gpt-6-sol--fast".to_string(),
             effort: Effort::High,
         }),
-        relay_off: true,
+        relays: Vec::new(),
         plan_fallback: Some(PlanFallback {
             model: "xai/grok-4.6".to_string(),
             effort: Effort::Low,
         }),
     };
+    let read = InferenceSource {
+        relays: vec!["mac-1".to_string()],
+        ..setting.clone()
+    };
+    let logged = |source: &InferenceSource| serde_json::to_value(source).unwrap();
+    assert_eq!(
+        logged(&read),
+        logged(&setting),
+        "its computers are never logged"
+    );
     let events = account
         .decide(AccountCommand::SetInferenceSource {
             source: setting.clone(),
@@ -492,18 +502,34 @@ fn a_default_for_new_bots_is_named_whole_or_refused_in_its_parts_words() {
     assert_eq!(stored, wire, "the log and the wire spell it alike");
 }
 
-/// A SETTING FROM BEFORE THE SWITCH HAS THE RELAY ON (#332), with no fallback, and one that never
-/// touched either logs neither, so an old log and an older replica read as they did.
+/// AN EVENT FROM BEFORE EACH COMPUTER HAD ITS SWITCH STILL REPLAYS, #332's account-wide one in it
+/// unread, with no fallback: whether a turn goes by the Mac is the person's computers' now
+/// (`relays`, read beside the setting and never logged), so the same setting goes by the Mac with
+/// one of them on and not with none, whatever was logged; one that never set either logs neither.
 #[test]
-fn a_setting_from_before_the_relay_switch_has_the_relay_on_and_no_fallback() {
-    let logged = json!({ "type": "inference-source-set", "at_ms": 2,
-                         "source": { "kind": "local_proxy", "via": "mac", "has_key": false } });
-    let account = Account::replay(&[serde_json::from_value(logged).expect("an event from before")]);
-    let setting = &account.inference_source;
-    assert_eq!((setting.relay_off, &setting.plan_fallback), (false, &None));
-    assert!(setting.by_mac(None, None), "on, it goes by the Mac");
+fn a_setting_logged_with_the_account_wide_switch_replays_with_it_unread() {
+    for off in [None, Some(true), Some(false)] {
+        let mut source = json!({ "kind": "local_proxy", "via": "mac", "has_key": false });
+        if let Some(off) = off {
+            source["relay_off"] = json!(off);
+        }
+        let logged = json!({ "type": "inference-source-set", "at_ms": 2, "source": source });
+        let event = serde_json::from_value(logged).expect("an event from before");
+        let mut setting = Account::replay(&[event]).inference_source;
+        assert_eq!((setting.relays.len(), &setting.plan_fallback), (0, &None));
+        assert!(
+            !setting.by_mac(None, None),
+            "{off:?}: none on, not by the Mac"
+        );
+        setting.relays = vec!["mac-1".to_string()];
+        assert!(setting.by_mac(None, None), "{off:?}: one on, by the Mac");
+    }
     let unset = serde_json::to_value(InferenceSource::default()).unwrap();
-    assert!(unset.get("relay_off").is_none() && unset.get("plan_fallback").is_none());
+    let logs = |key: &str| unset.get(key).is_some();
+    assert!(
+        !logs("relay_off") && !logs("relays") && !logs("plan_fallback"),
+        "{unset}"
+    );
 }
 
 /// A FALLBACK IS NAMED WHOLE OR REFUSED in its parts' words: its model as a hire's pin is on the
@@ -542,9 +568,9 @@ fn a_plan_fallback_is_named_whole_or_refused_in_its_parts_words() {
     );
 }
 
-/// THE SWITCH MOVES NO WAY (#332): `relayEnabled` turns the relay off and on and leaves `via` as
-/// it was, which only a `via` in the body changes; a fallback absent is kept and null clears it.
-/// Off, a turn no longer goes by the Mac, so a queued send does not wait for one. A body refused
+/// THE SWITCH MOVES NO WAY (#332): `relayEnabled` is read out of the body for the person's
+/// computers, and leaves `via` as it was, which only a `via` in the body changes, and the setting's
+/// own computers as they were read; a fallback absent is kept and null clears it. A body refused
 /// in any part saves none of itself.
 #[test]
 fn switching_the_relay_moves_no_way_and_a_fallback_is_kept_until_cleared() {
@@ -552,37 +578,38 @@ fn switching_the_relay_moves_no_way_and_a_fallback_is_kept_until_cleared() {
     let by_mac = InferenceSource {
         kind: SourceKind::LocalProxy,
         via: Some(Via::Mac),
+        relays: vec!["mac-1".to_string()],
         ..Default::default()
     };
     let apply = |current: &InferenceSource, body| {
-        let (setting, key) = current.applied(&body, loopback).expect("applied");
+        let (setting, key, switched) = current.applied(&body, loopback).expect("applied");
         assert!(matches!(key, KeyChange::Keep));
-        setting
+        (setting, switched)
     };
     let fallback = json!({ "model": "xai/grok-4.6", "effort": "low" });
     let body = json!({ "kind": "local_proxy", "relayEnabled": false, "planFallback": fallback });
-    let off = apply(&by_mac, body);
+    let (off, switched) = apply(&by_mac, body);
     assert_eq!(
-        (off.relay_off, off.via),
-        (true, Some(Via::Mac)),
+        (switched, off.via),
+        (Some(false), Some(Via::Mac)),
         "no way moved"
     );
     let kept = PlanFallback::named(&fallback).unwrap();
-    assert_eq!(off.plan_fallback, kept);
-    assert!(!off.by_mac(None, None), "off, nothing waits for the Mac");
+    assert_eq!((&off.plan_fallback, &off.relays), (&kept, &by_mac.relays));
 
-    let on = apply(&off, json!({ "kind": "local_proxy", "relayEnabled": true }));
+    let (on, switched) = apply(&off, json!({ "kind": "local_proxy", "relayEnabled": true }));
     assert_eq!(
-        (on.relay_off, on.via, &on.plan_fallback),
-        (false, Some(Via::Mac), &kept)
+        (switched, on.via, &on.plan_fallback),
+        (Some(true), Some(Via::Mac), &kept)
     );
-    let loopback_way = apply(&on, json!({ "kind": "local_proxy", "via": "loopback" }));
+    let (loopback_way, switched) = apply(&on, json!({ "kind": "local_proxy", "via": "loopback" }));
     assert_eq!(
-        (loopback_way.relay_off, loopback_way.via),
-        (false, Some(Via::Loopback))
+        (switched, loopback_way.via),
+        (None, Some(Via::Loopback)),
+        "left out, nothing is switched"
     );
-    let cleared = apply(&off, json!({ "kind": "local_proxy", "planFallback": null }));
-    assert_eq!((cleared.relay_off, cleared.plan_fallback), (true, None));
+    let (cleared, _) = apply(&off, json!({ "kind": "local_proxy", "planFallback": null }));
+    assert_eq!(cleared.plan_fallback, None);
 
     for (body, why) in [
         (

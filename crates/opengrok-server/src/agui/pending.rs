@@ -96,15 +96,16 @@ fn named(row: &PendingUserMessageRow) -> Option<TurnSource> {
 
 /// Whether queued sends wait for the person's Mac (`heldFor`): one still queued goes by their Mac
 /// as `route` resolves it (`InferenceSource::by_mac`: its own source, else the turn's, over the
-/// coworker's own, `.1`, over the setting) and none is connected. Read per reply, never stored.
+/// coworker's own, `.1`, over the setting) and none whose relay is on is connected. Read per
+/// reply, never stored.
 pub(crate) struct Held(Option<InferenceSource>, Option<SourceKind>);
 
 impl Held {
     pub(crate) async fn now(state: &AgUiState, who: &AccountId, own: Option<SourceKind>) -> Self {
-        match state.auth.relay.connected(who.as_str()) {
-            Some(_) => Self(None, own),
-            None => Self(state.setting(who).await, own),
-        }
+        let (setting, relay) = (state.setting(who).await, &state.auth.relay);
+        let on = setting.as_ref().map(|setting| &setting.relays[..]);
+        let connected = relay.connected(who.as_str(), on.unwrap_or_default());
+        Self(setting.filter(|_| connected.is_none()), own)
     }
 
     fn of(&self, row: &PendingUserMessageRow, chosen: Option<TurnSource>) -> Option<&'static str> {
@@ -607,10 +608,13 @@ pub(crate) async fn drain_held(host: HostState, account: AccountId) {
 
 /// A thread's held sends, oldest first, each once nothing runs on the thread. A RUN IN FLIGHT IS
 /// WAITED OUT, NOT GIVEN UP ON (review of #298): with the app closed, nothing else sends a held
-/// send when that run ends. The wait ends with the Mac, whose next connect is the next trigger.
+/// send when that run ends. The wait ends with the Mac, one whose relay is on as each round reads
+/// the switches, whose next connect is the next trigger.
 async fn send_held(host: &HostState, account: &AccountId, thread: &str) {
-    let (store, mut wait) = (&host.agui.auth.store, WAIT_FIRST);
-    while host.agui.auth.relay.connected(account.as_str()).is_some() {
+    let (store, relay, mut wait) = (&host.agui.auth.store, &host.agui.auth.relay, WAIT_FIRST);
+    while let Some(setting) = host.agui.setting(account).await
+        && relay.connected(account.as_str(), &setting.relays).is_some()
+    {
         let Some((idle, coworker)) = thread_now(store, account, thread).await else {
             return;
         };
@@ -622,7 +626,7 @@ async fn send_held(host: &HostState, account: &AccountId, thread: &str) {
         let rows = store.pending_user_messages(thread, account).await;
         let rows = rows.unwrap_or_default();
         let own = thread_own(store, account, &rows).await;
-        let held = Held(host.agui.setting(account).await, own);
+        let held = Held(Some(setting), own);
         let first = rows.into_iter().next();
         let first = first.filter(|row| held.of(row, None).is_some());
         let Some(input) = first.and_then(|row| queued_turn(&row, coworker)) else {
