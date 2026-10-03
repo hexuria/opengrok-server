@@ -289,6 +289,140 @@ async fn a_revoked_computer_enrolled_again_is_switched_as_a_new_one() {
     assert_eq!(own, [false, true], "{said}");
 }
 
+/// An open transaction on a connection of its own, standing for a write in flight, and the pid of
+/// its session.
+async fn in_flight(url: &str) -> (sqlx::Transaction<'static, sqlx::Postgres>, i32) {
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1);
+    let pool = pool.connect(url).await.expect("connect");
+    let mut tx = pool.begin().await.expect("begin");
+    let pid = sqlx::query_scalar("select pg_backend_pid()");
+    let pid = pid.fetch_one(&mut *tx).await.expect("pid");
+    (tx, pid)
+}
+
+/// The account's relay lock as the store takes it (`relay_lock`): its class, "RLAY", then the
+/// account id's hash. Held, it stands for an enrolment or a switch of every computer in flight.
+async fn relay_lock(on: &mut sqlx::PgConnection, account: &str) {
+    let lock = sqlx::query("select pg_advisory_xact_lock($1, hashtext($2))");
+    let lock = lock.bind(0x524C_4159_i32).bind(account);
+    lock.execute(on).await.expect("the relay lock");
+}
+
+/// Until `task` is done, or a session waits on `pid` for a lock it holds or is ahead in line for:
+/// that session's pid. NO SLEEP: a store that takes no lock is seen done and one that waits is
+/// seen waiting, so the race is run the same way every time. `pg_locks` is read anew each time,
+/// where `pg_stat_activity` would be read once for the whole of the open transaction.
+async fn done_or_waiting<T>(
+    on: &mut sqlx::PgConnection,
+    pid: i32,
+    task: &tokio::task::JoinHandle<T>,
+) -> Option<i32> {
+    let sql = "select pid from pg_locks where not granted and $1 = any(pg_blocking_pids(pid))";
+    let seen = async {
+        while !task.is_finished() {
+            let waiter = sqlx::query_scalar(sql).bind(pid).fetch_optional(&mut *on);
+            if let Some(waiter) = waiter.await.expect("pg_locks") {
+                return Some(waiter);
+            }
+        }
+        None
+    };
+    let deadline = std::time::Duration::from_secs(30);
+    let seen = tokio::time::timeout(deadline, seen).await;
+    seen.expect("the store neither finished nor waited")
+}
+
+/// AN ENROLMENT WAITS FOR A SWITCH-OFF IN FLIGHT (Cursor's review of #344). Under READ COMMITTED
+/// an enrolment read the others' switches as its insert began, so a PUT of `relayEnabled: false`
+/// committing meanwhile switched off every row but the new one, which it could not see yet, and
+/// the new computer stayed on beside every other off. Both take the account's relay lock now: the
+/// switch-off holds it here, its rows written and not committed, as the enrolment starts.
+#[tokio::test]
+async fn an_enrolment_waits_for_a_switch_off_in_flight() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let ada = format!("acct_ada_{}", uuid::Uuid::now_v7().simple());
+    assert!(enrolled_on(&store, &ada, "mac-a").await);
+    let (mut switching, pid) = in_flight(&database_url).await;
+    relay_lock(&mut switching, &ada).await;
+    let off = "update local_exec_daemon set relay_enabled = false where account_id = $1";
+    let off = sqlx::query(off).bind(&ada).execute(&mut *switching).await;
+    assert_eq!(off.expect("switch off").rows_affected(), 1);
+    let enrol = tokio::spawn({
+        let (store, ada) = (store.clone(), ada.clone());
+        async move { enrolled_on(&store, &ada, "mac-b").await }
+    });
+    done_or_waiting(&mut switching, pid, &enrol).await;
+    switching.commit().await.expect("commit");
+    let on = enrol.await.expect("enrol");
+    assert!(!on, "enrolled after the switch-off it waited for: off");
+}
+
+/// A SWITCH-OFF WAITS FOR AN ENROLMENT IN FLIGHT, the other half: the PUT's update read the rows
+/// as it began, so it missed a computer whose enrolment had read another one on and not yet
+/// committed, and left it on beside every other off. The enrolment holds the lock here, its row
+/// written on, as the switch-off starts.
+#[tokio::test]
+async fn a_switch_off_waits_for_an_enrolment_in_flight() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let ada = format!("acct_ada_{}", uuid::Uuid::now_v7().simple());
+    assert!(enrolled_on(&store, &ada, "mac-a").await);
+    let (mut enrolling, pid) = in_flight(&database_url).await;
+    relay_lock(&mut enrolling, &ada).await;
+    let row = "insert into local_exec_daemon
+                 (account_id, machine_id, label, jti, enrolled_at_ms, revoked, relay_enabled)
+               values ($1, 'mac-b', 'Mac', 'jti', 1, false, true)";
+    let row = sqlx::query(row).bind(&ada).execute(&mut *enrolling).await;
+    row.expect("enrolled on, mac-a being on");
+    let off = tokio::spawn({
+        let (store, ada) = (store.clone(), ada.clone());
+        async move { store.set_relays(&ada, false).await }
+    });
+    done_or_waiting(&mut enrolling, pid, &off).await;
+    enrolling.commit().await.expect("commit");
+    let mut switched = off.await.expect("switch").expect("switch");
+    switched.sort();
+    assert_eq!(switched, ["mac-a", "mac-b"], "the enrolment it waited for");
+    let row = store.daemon_jti(&ada, "mac-b").await.expect("read");
+    assert!(!row.expect("enrolled").2, "off");
+}
+
+/// A COMPUTER REVOKED AS IT IS ENROLLED AGAIN counts for none of its account's others. The
+/// enrolment read it as one of them, un-revoked and on, then found it revoked as it wrote, and
+/// enrolled it as a new one on the strength of its own switch: on beside every other off. A
+/// revoke takes the account's relay lock too. Here the computer's row is held, so the revoke
+/// waits on it, and the enrolment starts behind the revoke.
+#[tokio::test]
+async fn a_computer_revoked_as_it_is_enrolled_again_counts_for_none() {
+    let database_url = database_or_skip!();
+    let store = store(&database_url).await;
+    let ada = format!("acct_ada_{}", uuid::Uuid::now_v7().simple());
+    assert!(enrolled_on(&store, &ada, "mac-a").await);
+    assert!(enrolled_on(&store, &ada, "mac-b").await);
+    store.set_relay(&ada, "mac-a", false).await.expect("switch");
+    let (mut held, pid) = in_flight(&database_url).await;
+    let row = "select 1 from local_exec_daemon
+               where account_id = $1 and machine_id = 'mac-b' for update";
+    let row = sqlx::query(row).bind(&ada);
+    row.execute(&mut *held).await.expect("held");
+    let revoke = tokio::spawn({
+        let (store, ada) = (store.clone(), ada.clone());
+        async move { store.revoke_daemon(&ada, "mac-b").await }
+    });
+    let revoking = done_or_waiting(&mut held, pid, &revoke).await;
+    let revoking = revoking.expect("the revoke waits on the row");
+    let enrol = tokio::spawn({
+        let (store, ada) = (store.clone(), ada.clone());
+        async move { enrolled_on(&store, &ada, "mac-b").await }
+    });
+    done_or_waiting(&mut held, revoking, &enrol).await;
+    held.commit().await.expect("commit");
+    revoke.await.expect("revoke").expect("revoke");
+    let on = enrol.await.expect("enrol");
+    assert!(!on, "enrolled again once revoked: a new one, off");
+}
+
 // -------------------------------------------------------------------------------------------------
 // The enqueue path end to end (slices 4–5): the gate judges a command, an allowed one is dispatched
 // to a (fake) daemon over the broker, the result comes back, and every path writes the right audit

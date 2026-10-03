@@ -18,7 +18,7 @@ use opengrok_core::coworker::{Coworker, CoworkerEvent, CoworkerView};
 use opengrok_core::id::{AccountId, BoxId, CoworkerId, RunId};
 use opengrok_core::inference::SourceKind;
 use opengrok_core::run::{Run, RunEvent, RunStatus, RunView};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::{StoreError, StoreResult, account_stream};
 
@@ -37,6 +37,9 @@ pub struct Daemon {
     /// Its own relay switch: on until switched off, or off from enrolment as its others were.
     pub relay_enabled: bool,
 }
+
+/// The first key of an account's relay lock ("RLAY", `relay_lock`); the second, its id's hash.
+const RELAY_LOCK_CLASS: i32 = 0x524C_4159;
 
 /// One run as a routine's history lists it: the stored status word (`running`,
 /// `awaiting-approval`, `finished`, `failed`), when it began, when it last moved.
@@ -1976,18 +1979,12 @@ impl PgStore {
         mode: &str,
         at_ms: i64,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "insert into local_exec_policy (account_id, machine_id, mode, updated_at_ms)
-             values ($1, $2, $3, $4)
-             on conflict (account_id, machine_id) do update set
-               mode = excluded.mode, updated_at_ms = excluded.updated_at_ms",
-        )
-        .bind(account_id)
-        .bind(machine_id)
-        .bind(mode)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
+        let sql = "insert into local_exec_policy (account_id, machine_id, mode, updated_at_ms)
+                   values ($1, $2, $3, $4)
+                   on conflict (account_id, machine_id) do update set
+                     mode = excluded.mode, updated_at_ms = excluded.updated_at_ms";
+        let query = sqlx::query(sql).bind(account_id).bind(machine_id);
+        query.bind(mode).bind(at_ms).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -2012,18 +2009,12 @@ impl PgStore {
         pattern: &str,
         at_ms: i64,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "insert into local_exec_rule (account_id, machine_id, kind, pattern, added_at_ms)
-             values ($1, $2, $3, $4, $5)
-             on conflict (account_id, machine_id, kind, pattern) do nothing",
-        )
-        .bind(account_id)
-        .bind(machine_id)
-        .bind(kind)
-        .bind(pattern)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
+        let sql = "insert into local_exec_rule (account_id, machine_id, kind, pattern, added_at_ms)
+                   values ($1, $2, $3, $4, $5)
+                   on conflict (account_id, machine_id, kind, pattern) do nothing";
+        let query = sqlx::query(sql).bind(account_id).bind(machine_id);
+        let query = query.bind(kind).bind(pattern).bind(at_ms);
+        query.execute(&self.pool).await?;
         Ok(())
     }
 
@@ -2064,10 +2055,11 @@ impl PgStore {
                jti = excluded.jti, enrolled_at_ms = excluded.enrolled_at_ms, revoked = false,
                relay_enabled = case when d.revoked then excluded.relay_enabled
                  else d.relay_enabled end";
+        let mut tx = self.relay_lock(account_id).await?;
         let query = sqlx::query(sql).bind(account_id).bind(machine_id);
         let query = query.bind(label).bind(jti).bind(at_ms);
-        query.execute(&self.pool).await?;
-        Ok(())
+        query.execute(&mut *tx).await?;
+        Ok(tx.commit().await?)
     }
 
     /// The daemon's token id, whether it is revoked and whether its relay is on, for its token.
@@ -2085,9 +2077,10 @@ impl PgStore {
     pub async fn revoke_daemon(&self, account_id: &str, machine_id: &str) -> StoreResult<()> {
         let sql = "update local_exec_daemon set revoked = true
                    where account_id = $1 and machine_id = $2";
+        let mut tx = self.relay_lock(account_id).await?;
         let query = sqlx::query(sql).bind(account_id).bind(machine_id);
-        query.execute(&self.pool).await?;
-        Ok(())
+        query.execute(&mut *tx).await?;
+        Ok(tx.commit().await?)
     }
 
     /// The account's enrolled machines, newest first.
@@ -2114,8 +2107,26 @@ impl PgStore {
     pub async fn set_relays(&self, account_id: &str, on: bool) -> StoreResult<Vec<String>> {
         let sql = "update local_exec_daemon set relay_enabled = $2 where account_id = $1
                    returning machine_id";
+        let mut tx = self.relay_lock(account_id).await?;
         let rows = sqlx::query_scalar(sql).bind(account_id).bind(on);
-        Ok(rows.fetch_all(&self.pool).await?)
+        let switched = rows.fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(switched)
+    }
+
+    /// A transaction holding the account's relay lock (review of #344). Under READ COMMITTED an
+    /// enrolment read the others' switches in a snapshot taken as its insert began, so a switch of
+    /// every computer committing meanwhile missed the new row, and a revoke of the computer being
+    /// enrolled again let it count its own switch: either left it on beside every other off. The
+    /// lock is its own statement, before the read, or the snapshot would predate it. One
+    /// computer's switch (`set_relay`) takes none: it reads and writes its own row only, so any
+    /// order it lands in beside an enrolment is one they could have run in turn.
+    async fn relay_lock(&self, account_id: &str) -> StoreResult<Transaction<'static, Postgres>> {
+        let mut tx = self.pool.begin().await?;
+        let lock = sqlx::query("select pg_advisory_xact_lock($1, hashtext($2))");
+        let lock = lock.bind(RELAY_LOCK_CLASS).bind(account_id);
+        lock.execute(&mut *tx).await?;
+        Ok(tx)
     }
 
     /// Write an audit row at enqueue time (before the command runs).
@@ -2131,21 +2142,12 @@ impl PgStore {
         rule: Option<&str>,
         at_ms: i64,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "insert into local_exec_audit
+        let sql = "insert into local_exec_audit
                (id, account_id, machine_id, origin, command, decision, rule, requested_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7, $8)",
-        )
-        .bind(id)
-        .bind(account_id)
-        .bind(machine_id)
-        .bind(origin)
-        .bind(command)
-        .bind(decision)
-        .bind(rule)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
+             values ($1, $2, $3, $4, $5, $6, $7, $8)";
+        let query = sqlx::query(sql).bind(id).bind(account_id).bind(machine_id);
+        let query = query.bind(origin).bind(command).bind(decision);
+        query.bind(rule).bind(at_ms).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -2159,17 +2161,10 @@ impl PgStore {
         exit_code: Option<i32>,
         at_ms: i64,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "update local_exec_audit
-                set outcome = $2, exit_code = $3, finished_at_ms = $4
-              where id = $1",
-        )
-        .bind(id)
-        .bind(outcome)
-        .bind(exit_code)
-        .bind(at_ms)
-        .execute(&self.pool)
-        .await?;
+        let sql = "update local_exec_audit
+                   set outcome = $2, exit_code = $3, finished_at_ms = $4 where id = $1";
+        let query = sqlx::query(sql).bind(id).bind(outcome).bind(exit_code);
+        query.bind(at_ms).execute(&self.pool).await?;
         Ok(())
     }
 
