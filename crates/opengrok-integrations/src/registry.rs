@@ -46,6 +46,8 @@ pub enum Error {
     #[error("{0}")]
     Refused(String),
 }
+/// A 404: an answer about the commit, which `on_branch` reads as "not on the branch".
+const NOT_FOUND: &str = "registry file not found at that commit";
 fn upstream(why: &str) -> Error {
     Error::Upstream(why.into())
 }
@@ -172,6 +174,9 @@ impl Registry {
         self.cache.lock().ok().map(|mut cache| read(&mut cache))
     }
     async fn bytes(&self, url: String) -> Result<Vec<u8>, Error> {
+        self.bytes_within(url, 2 * 1024 * 1024).await
+    }
+    async fn bytes_within(&self, url: String, cap: usize) -> Result<Vec<u8>, Error> {
         let mut request = self.client.get(&url);
         if let Some(token) = self.token.as_ref().filter(|_| url.starts_with(&self.api)) {
             request = request.bearer_auth(token);
@@ -182,7 +187,7 @@ impl Registry {
             .map_err(|_| upstream("registry could not be reached"))?;
         // Not there is an answer about the commit; anything else is the registry not answering.
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(refused("registry file not found at that commit"));
+            return Err(refused(NOT_FOUND));
         }
         if !response.status().is_success() {
             return Err(upstream("registry file unavailable"));
@@ -193,8 +198,8 @@ impl Registry {
             .await
             .map_err(|_| upstream("registry read failed"))?
         {
-            if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
-                return Err(refused("registry file exceeds 2 MiB"));
+            if bytes.len() + chunk.len() > cap {
+                return Err(refused(&format!("registry file exceeds {} MiB", cap >> 20)));
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -213,6 +218,9 @@ impl Registry {
         if let Some((_, sha)) = fresh.filter(|(at, _)| at.elapsed() < self.head_ttl) {
             return Ok(sha);
         }
+        self.head_now().await
+    }
+    async fn head_now(&self) -> Result<String, Error> {
         let sha: String = self
             .json(format!("{}/repos/{}/commits/HEAD", self.api, self.repo))
             .await?["sha"]
@@ -226,22 +234,48 @@ impl Registry {
     /// A pinned registry commit must be one the registry's own default branch reached. Any 40 hex
     /// characters would otherwise do, including a commit from a fork, which GitHub serves under
     /// the parent's path, carrying a marketplace nobody here curated.
-    async fn reachable(&self, sha: &str, head: &str) -> Result<(), Error> {
-        if sha == head || self.cached(|c| c.reachable.contains_key(sha)) == Some(true) {
+    ///
+    /// A NEWER PIN THAN THE CACHED HEAD IS ASKED ABOUT AGAIN. Against a stale HEAD it compares as
+    /// `behind`, and with two replicas the one that served the catalog had already moved on: a
+    /// valid install was refused for up to the cache's five minutes. Only the fresh answer refuses.
+    async fn reachable(&self, sha: &str) -> Result<(), Error> {
+        if self.cached(|c| c.reachable.contains_key(sha)) == Some(true) {
             return Ok(());
         }
-        let url = format!("{}/repos/{}/compare/{sha}...{head}", self.api, self.repo);
-        let not_ours = || refused("that revision is not on the registry's default branch");
-        // GitHub answers 404 for a commit it cannot place against HEAD; an outage stays one.
-        let compared = self.json(url).await.map_err(|error| match error {
-            Error::Refused(_) => not_ours(),
-            other => other,
-        })?;
-        if !["ahead", "identical"].contains(&compared["status"].as_str().unwrap_or_default()) {
-            return Err(not_ours());
+        let cached = self.head().await?;
+        if sha == cached || self.on_branch(sha, &cached).await? {
+            return self.remember_reachable(sha);
         }
+        let head = self.head_now().await?;
+        if head != cached && (sha == head || self.on_branch(sha, &head).await?) {
+            return self.remember_reachable(sha);
+        }
+        Err(refused(
+            "that revision is not on the registry's default branch",
+        ))
+    }
+    fn remember_reachable(&self, sha: &str) -> Result<(), Error> {
         self.cached(|c| keep(&mut c.reachable, sha.to_string(), ()));
         Ok(())
+    }
+    /// GitHub's compare, asked for one commit: the answer also lists changed files, so a pin far
+    /// behind HEAD can still be large, and is read up to 16 MiB rather than the 2 MiB a bundle file
+    /// gets. Only a 404, a commit GitHub cannot place, means "not ours"; a reply too large to read
+    /// or a registry that did not answer says so instead of calling the pin a fork's.
+    async fn on_branch(&self, sha: &str, head: &str) -> Result<bool, Error> {
+        let url = format!(
+            "{}/repos/{}/compare/{sha}...{head}?per_page=1",
+            self.api, self.repo
+        );
+        let bytes = match self.bytes_within(url, 16 * 1024 * 1024).await {
+            Ok(bytes) => bytes,
+            Err(Error::Refused(why)) if why == NOT_FOUND => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let compared: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| upstream("invalid registry JSON"))?;
+        let status = compared["status"].as_str().unwrap_or_default();
+        Ok(["ahead", "identical"].contains(&status))
     }
     pub async fn catalog(&self, revision: Option<&str>) -> Result<Catalog, Error> {
         let sha = match revision {
@@ -257,8 +291,7 @@ impl Registry {
         if let Some(catalog) = self.cached(|c| c.catalogs.get(&sha).cloned()).flatten() {
             return Ok(catalog);
         }
-        let head = self.head().await?;
-        self.reachable(&sha, &head).await?;
+        self.reachable(&sha).await?;
         let bytes = self
             .file(&self.repo, &sha, ".grok-plugin/marketplace.json")
             .await?;
@@ -274,10 +307,9 @@ impl Registry {
         // ONE BAD ROW IS ONE UNAVAILABLE ENTRY, never a catalog that fails for every person. A
         // row without a name at all cannot be shown, so only it is left out.
         for row in plugins {
-            let Some(name) = row["name"]
-                .as_str()
-                .map(|n| n.chars().take(64).collect::<String>())
-            else {
+            // The whole name is judged: cut first, a 70-character name read as a valid 64, and two
+            // names sharing their first 64 characters collided into one.
+            let Some(name) = row["name"].as_str().map(str::to_string) else {
                 continue;
             };
             let source = &row["source"];
@@ -348,6 +380,11 @@ impl Registry {
         Ok(Some((pinned, entry)))
     }
     pub async fn bundle(&self, entry: &Entry) -> Result<Bundle, Error> {
+        // BEFORE THE CACHE. The same source can be fine at one registry commit and unavailable at
+        // another (a duplicate name, a pulled entry); a cached bundle must not answer for it.
+        if let Some(why) = &entry.unavailable_reason {
+            return Err(Error::Refused(why.clone()));
+        }
         let key = (
             entry.repository.clone(),
             entry.revision.clone(),
@@ -364,9 +401,6 @@ impl Registry {
         Ok(bundle)
     }
     async fn fetch_bundle(&self, entry: &Entry) -> Result<Bundle, Error> {
-        if let Some(why) = &entry.unavailable_reason {
-            return Err(Error::Refused(why.clone()));
-        }
         if !repo_ok(&entry.repository)
             || !revision_ok(&entry.revision)
             || (!entry.path.is_empty() && !path_ok(&entry.path))

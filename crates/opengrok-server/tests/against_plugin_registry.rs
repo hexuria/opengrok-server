@@ -485,6 +485,35 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
     assert_eq!(status, 201, "{text}");
     let bot = hired["id"].as_str().unwrap();
     let bot_id = opengrok_core::id::CoworkerId::from_stored(bot);
+    // "ALL TOOLS" NEVER SWITCHES AN INSTALL ON: it admits every plugin without naming one, and an
+    // account's install is on only where it is named. Its row says off, and no skill is offered.
+    use opengrok_policy::ToolSet;
+    let at = chrono::Utc::now().timestamp_millis();
+    h.store
+        .grant_access(
+            &aid,
+            &bot_id,
+            &ToolSet::All,
+            &ToolSet::All,
+            &ToolSet::None,
+            at,
+        )
+        .await
+        .unwrap();
+    let (_, everything, _) = h
+        .call(&a, "GET", &format!("/coworkers/{bot}/ceiling"), None)
+        .await;
+    let demo = everything["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "demo");
+    assert_eq!(demo.unwrap()["enabled"], false, "{everything}");
+    assert!(
+        opengrok_integrations::turn::skill_offers(&h.store, &aid, &bot_id)
+            .await
+            .is_empty()
+    );
     assert_eq!(
         opengrok_integrations::installed::for_turn(&h.store, &aid, &bot_id)
             .await
@@ -753,6 +782,12 @@ async fn registry_resolves_local_and_external_commits_without_a_database() {
         registry.catalog(Some(FORK)).await,
         Err(opengrok_integrations::registry::Error::Refused(_))
     ));
+    // A replica whose HEAD is cached for five minutes still takes a pin newer than it.
+    let (cached, moved) = registry_fixture().await;
+    let cached = cached.with_head_ttl(std::time::Duration::from_secs(300));
+    assert_eq!(cached.catalog(None).await.unwrap().revision, OLD);
+    moved.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(cached.catalog(Some(NEW)).await.unwrap().revision, NEW);
     let mut unsafe_entry = external.clone();
     unsafe_entry.path = "../escape".into();
     assert!(registry.bundle(&unsafe_entry).await.is_err());
@@ -1039,6 +1074,10 @@ async fn hostile_registry() -> opengrok_integrations::registry::Registry {
         let blob = |path: &str| json!({"path": path, "type": "blob", "mode": "100644"});
         match path.as_str() {
             "repos/fixture/hostile/commits/HEAD" => return json(json!({"sha": OLD})),
+            // GitHub failing is an outage, never a verdict that the pin is a fork's.
+            "repos/fixture/hostile/compare/dddddddddddddddddddddddddddddddddddddddd...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => {
+                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
             "repos/fixture/hostile/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => {
                 let mut tree = vec![
                     blob("plugins/good/plugin.json"),
@@ -1075,6 +1114,7 @@ async fn hostile_registry() -> opengrok_integrations::registry::Registry {
                 {"name": "liar", "source": "./plugins/liar"},
                 {"name": "huge", "source": "./plugins/huge"},
                 {"name": "many", "source": "./plugins/many"},
+                {"name": "a-name-that-is-entirely-valid-in-its-characters-but-runs-past-sixty-four", "source": "./plugins/good"},
                 {"description": "a row with no name is left out"}
             ]}));
         }
@@ -1121,11 +1161,14 @@ async fn one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds()
     };
     assert_eq!(
         catalog.plugins.len(),
-        9,
+        10,
         "the nameless row is left out, the rest kept"
     );
+    // Judged whole, not cut to 64 first and then read as valid.
+    let long = "a-name-that-is-entirely-valid-in-its-characters-but-runs-past-sixty-four";
     for (name, why) in [
         ("Bad.Name", "plugin name is not a valid tool prefix"),
+        (long, "plugin name is not a valid tool prefix"),
         ("dup", "two registry entries share this name"),
         ("escape", "registry bundle path is unsafe"),
     ] {
@@ -1147,6 +1190,13 @@ async fn one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds()
     );
 
     let good = registry.bundle(&entry("good")).await.unwrap();
+    // The same source, unavailable at another registry commit: the cached bundle does not answer.
+    let mut pulled = entry("good");
+    pulled.unavailable_reason = Some("two registry entries share this name".into());
+    assert!(matches!(
+        registry.bundle(&pulled).await,
+        Err(Error::Refused(_))
+    ));
     let reason = |kind: &str, name: &str| {
         let part = good.parts.iter().find(|p| p.kind == kind && p.name == name);
         part.and_then(|p| p.reason.clone()).unwrap_or_default()
@@ -1201,5 +1251,10 @@ async fn one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds()
     assert!(matches!(
         registry.catalog(Some(FORK)).await,
         Err(Error::Refused(_))
+    ));
+    let outage = "dddddddddddddddddddddddddddddddddddddddd";
+    assert!(matches!(
+        registry.catalog(Some(outage)).await,
+        Err(Error::Upstream(_))
     ));
 }

@@ -75,6 +75,34 @@ pub async fn for_turn(
     .await?;
     Ok(readable(rows))
 }
+/// `for_turn`, reading only each plugin's skills: `(name, revision, skills)`.
+pub async fn skills_for_turn(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+) -> StoreResult<Vec<(String, String, std::collections::BTreeMap<String, String>)>> {
+    let rows = sqlx::query(
+        "select p.name, p.revision, p.bundle->'skills' as skills from plugin_installation p
+        join coworker_view c on c.account_id = p.account_id
+        where p.account_id = $1 and c.id = $2 and c.retired = false order by p.name",
+    )
+    .bind(account.as_str())
+    .bind(bot.as_str())
+    .fetch_all(store.pool())
+    .await?;
+    let mut out = Vec::new();
+    for row in rows {
+        let name: String = row.try_get("name")?;
+        let skills = serde_json::from_value(row.try_get("skills")?);
+        match skills {
+            Ok(skills) => out.push((name, row.try_get("revision")?, skills)),
+            Err(error) => {
+                tracing::warn!(name, %error, "an installed plugin's skills are unreadable")
+            }
+        }
+    }
+    Ok(out)
+}
 pub async fn install(
     store: &PgStore,
     account: &AccountId,
@@ -164,7 +192,8 @@ async fn switch_off(
 ) -> StoreResult<()> {
     let grants = sqlx::query(
         "select g.principal_id, g.coworker_id, g.profile from grant_view g
-         join coworker_view c on c.id = g.coworker_id where c.account_id = $1 for update of g",
+         join coworker_view c on c.id = g.coworker_id where c.account_id = $1
+         order by g.coworker_id, g.principal_id for update of g",
     )
     .bind(account.as_str())
     .fetch_all(&mut *tx)
@@ -185,7 +214,8 @@ async fn switch_off(
     }
     let ceilings = sqlx::query(
         "select t.coworker_id, t.tools from ceiling_view t
-         join coworker_view c on c.id = t.coworker_id where c.account_id = $1 for update of t",
+         join coworker_view c on c.id = t.coworker_id where c.account_id = $1
+         order by t.coworker_id for update of t",
     )
     .bind(account.as_str())
     .fetch_all(&mut *tx)

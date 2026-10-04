@@ -84,8 +84,12 @@ async fn rows(
     for plugin in plugins.values().filter(|p| free(&p.manifest.name)) {
         let name = &plugin.manifest.name;
         // Agent Plugins 1.0.0 has no label; `name` is its human-readable name.
-        let mut row = json!({ "name": name, "kind": "plugin", "label": name,
-            "enabled": ceiling.allows_all_of(name) });
+        // An account's install is on only where it is named (`opengrok_policy::names_plugin`).
+        let on = match state.plugins.contains_key(name) {
+            true => ceiling.allows_all_of(name),
+            false => ceiling.whole_plugins().any(|named| named == name),
+        };
+        let mut row = json!({ "name": name, "kind": "plugin", "label": name, "enabled": on });
         if let Some(description) = &plugin.manifest.description {
             row["description"] = json!(description);
         }

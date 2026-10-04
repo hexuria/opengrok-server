@@ -45,6 +45,9 @@ A pinned `revision` must be reachable from the registry's default branch (GitHub
 commit from a fork, which GitHub serves under the parent's path, are refused. An install also
 requires the plugin to be listed, and installable, at the registry's current HEAD: a plugin the
 maintainers pulled cannot be installed again at an older pin. Existing installs are untouched.
+Only GitHub's 404 means "not on the branch"; a compare that fails otherwise is an upstream error
+(502), and a pin newer than this replica's cached HEAD is asked about again against a fresh one
+before it is refused.
 Commits never change, so what was read at one is cached in the process; only "which commit is
 HEAD" expires, after five minutes.
 
@@ -70,9 +73,12 @@ A member's turn on an org-shared Bot gets neither the owner's installations nor 
 installations for their own Bots. Existing Bot-scoped connection lending is unchanged.
 The existing ceiling/profile gates still decide which installed MCP tools can run; the owner
 can switch installed plugin names through the existing Bot ceiling routes. **The same switch
-decides its skills**: they are offered only while the ceiling and the grant both admit the plugin
-whole (`opengrok_integrations::turn::switched_on`), and checked again when `use_skill` reads one,
-since a resumed run re-offers what its start captured. Install and uninstall each take the
+decides its skills and its servers**: both are on only while the ceiling and the grant both NAME
+the plugin whole (`"<plugin>.*"`, `opengrok_policy::names_plugin`), and a skill is checked again
+when `use_skill` reads one, since a resumed run re-offers what its start captured. A Bot whose
+tools are "all" admits every plugin without naming one, so an account's install is off there, and
+its ceiling row says so, until its owner switches it on by name; a deployment plugin keeps
+following "all" as before. Install and uninstall each take the
 plugin's entries out of the ceiling and grants of every Bot the account owns, in the same
 transaction, bumping the ceiling's `version`: a new install, including the uninstall-then-install
 update, starts switched off and waits for its owner to switch it on again. Built-in and
@@ -83,9 +89,10 @@ in loopback, private, link-local, CGNAT, documentation and other special-purpose
 refused at install and again at dial, and so is `localhost`. A name is resolved at every dial by a
 resolver that keeps public addresses only, and the session follows no redirects: a `307` to an
 internal address would otherwise carry the POST and its credential headers with it. An operator's
-own plugins (`OG_PLUGINS_DIR`) are configuration and keep the system resolver. A deployment that
-reaches the internet through an HTTP proxy resolves names at the proxy, where this check cannot
-see them.
+own plugins (`OG_PLUGINS_DIR`) are configuration and keep the system resolver. An installed
+plugin's session also ignores `HTTPS_PROXY`/`HTTP_PROXY`: through a proxy the resolver is asked
+for the proxy's address while the proxy resolves the bundle's host, so the check never ran. A
+deployment whose only way out is a proxy therefore cannot reach installed plugins' servers.
 
 Each installed plugin resolves only its own token namespace. Header placeholders follow the
 existing `${CONNECTOR_TOKEN}` convention. A streamable-HTTP server declaring no auth headers or token placeholders may

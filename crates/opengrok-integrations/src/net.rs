@@ -10,8 +10,14 @@ use opengrok_plugins::bundle::{is_public_ip, public_https};
 use std::net::SocketAddr;
 
 /// For `opengrok_tools::mcp::Endpoint::harden`.
+///
+/// NO PROXY, EITHER. reqwest reads `HTTPS_PROXY`/`HTTP_PROXY` by itself, and through a proxy the
+/// resolver below is asked for the PROXY's address while the proxy resolves the bundle's host: a
+/// name pointing at 169.254.169.254 was then fetched from inside the network, and a proxy on a
+/// private address made every installed plugin unreachable instead.
 pub fn harden(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     builder
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .dns_resolver(PublicOnly)
 }

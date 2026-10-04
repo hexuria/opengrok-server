@@ -110,3 +110,22 @@ Not changed: the `opengrok-integrations`/`opengrok-plugin-api` split itself and 
 `schema.sql` extraction stand; the follow-up states what the line count measures rather than
 undoing the structure. `MANIFEST.json`'s `server_sha` is rewritten by `scripts/record-wire.sh`
 on the next recording after merge.
+
+### Second review — 4 October 2026
+
+A second, independent review of PR #367 found two of the fixes above incomplete and several
+smaller problems. Each fix below has a regression test, and the three marked † were run against
+the previous source and failed there.
+
+| Finding | Fixed in | Asserted by |
+| --- | --- | --- |
+| `harden` left reqwest's environment proxy on: through `HTTPS_PROXY` the resolver judged the proxy's address and the proxy resolved the bundle's host | `net::harden` adds `.no_proxy()` | `a_hardened_client_goes_direct_and_does_not_follow_redirects`: a builder arriving with a proxy set; observed failing with `.no_proxy()` removed |
+| The bundle cache answered before `unavailable_reason`, so an entry unavailable at one registry commit was served from another's cache | the reason is checked before the cache | hostile-registry test, `pulled` entry |
+| A pin newer than a replica's cached HEAD compared as `behind` and was refused | `reachable` re-reads HEAD before refusing | † `registry_resolves_local_and_external_commits_without_a_database` (five-minute TTL) |
+| Every refusal from the compare call, including a reply over 2 MiB, read as "a fork's commit" | only a 404 means "not ours"; compare asks `per_page=1` and reads up to 16 MiB | hostile-registry test: a 500 from compare is `Upstream` |
+| A Bot whose tools were "all" had a reinstalled plugin live at once | `opengrok_policy::names_plugin`: an install is on only where it is named; its servers and ceiling row follow it | † main integration test, `ToolSet::All` grant; `an_installed_plugin_is_on_only_where_both_layers_name_it` |
+| Names were cut to 64 characters before they were judged | the whole name is judged | † hostile-registry test, a 72-character name |
+| `switch_off` locked rows in no fixed order | `order by` on both queries | — (a deadlock between two installs is not reproduced here) |
+| A server dropped as non-public at dial was not logged | `warn` naming the server | — |
+| Skills read each bundle whole, and judged the plugin by `policy_for` while the turn ran under `policy_to_use` | `installed::skills_for_turn` reads only skills; both skill paths use `policy_to_use` | main integration test |
+| The plugin switch copied the start of `may_run_any_under` | moved into `opengrok-policy` | `an_installed_plugin_is_on_only_where_both_layers_name_it` |

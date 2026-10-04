@@ -14,22 +14,8 @@ use opengrok_tools::mcp::Endpoint;
 use opengrok_tools::skill::SkillOffer;
 use std::collections::BTreeMap;
 
-/// Whether `plugin` is switched on for this turn: the ceiling and the grant both admit it whole,
-/// which is what its row on the ceiling screen shows as on. Every missing piece answers no.
-pub fn switched_on(account: &AccountId, bot: &CoworkerId, plugin: &str, policy: &Context) -> bool {
-    let action = opengrok_policy::Action::UseCoworker;
-    if !opengrok_policy::decide(account, bot, action, policy).is_allowed() {
-        return false;
-    }
-    let (Some(grant), Some(ceiling)) = (&policy.grant, &policy.ceiling) else {
-        return false;
-    };
-    &ceiling.coworker == bot
-        && ceiling
-            .tools
-            .intersect(&grant.profile)
-            .allows_all_of(plugin)
-}
+/// Whether `plugin` is switched on for this turn (`opengrok_policy::names_plugin`).
+pub use opengrok_policy::names_plugin as switched_on;
 
 /// Fail closed and say why: a turn whose plugins could not be read goes on without them, and the
 /// log says so, rather than an `if let Ok` dropping them without a word.
@@ -56,7 +42,8 @@ pub async fn endpoints(
     // Account bundles never inherit deployment-wide or bot-lent tokens. Each plugin's own
     // credential namespace is resolved only after the driving account owns this bot.
     for installation in installed(store, account, bot).await {
-        if operator(&installation.name) {
+        // Switched on by name, like its skills: `All` does not dial a bundle nobody chose.
+        if operator(&installation.name) || !switched_on(account, bot, &installation.name, policy) {
             continue;
         }
         let values = match vault {
@@ -82,7 +69,17 @@ pub async fn endpoints(
             reachable
                 .into_iter()
                 .filter(|endpoint| {
-                    crate::net::public_url(&endpoint.url)
+                    let public = crate::net::public_url(&endpoint.url);
+                    if !public {
+                        // Fail closed and say why: install refuses these, so one here is a row
+                        // stored before that check, and silence would read as "no tools".
+                        let server = endpoint.key();
+                        tracing::warn!(
+                            server,
+                            "an installed plugin server is not on a public host; not dialled"
+                        );
+                    }
+                    public
                         && opengrok_policy::may_run_any_under(
                             account,
                             bot,
@@ -99,30 +96,43 @@ pub async fn endpoints(
     endpoints
 }
 
-/// The skills of every installed plugin switched on for this Bot, named `<plugin>.<skill>`.
+/// The policy a turn of `bot` runs under, as the turn reads it (`policy_to_use`), so a skill is
+/// never judged by a different answer than the tools beside it.
+async fn turn_policy(store: &PgStore, account: &AccountId, bot: &CoworkerId) -> Option<Context> {
+    store
+        .policy_to_use(account, bot)
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(%error, %bot, "a Bot's policy could not be read; no plugin skills");
+        })
+        .ok()
+}
+
+/// The skills of every installed plugin switched on for this Bot, named `<plugin>.<skill>`. Only
+/// the skills are read: a bundle's files can be megabytes, and every turn asks this.
 pub async fn skill_offers(
     store: &PgStore,
     account: &AccountId,
     bot: &CoworkerId,
 ) -> Vec<SkillOffer> {
-    let installs = installed(store, account, bot).await;
+    let installs = installed::skills_for_turn(store, account, bot)
+        .await
+        .inspect_err(|error| {
+            tracing::warn!(%error, %bot, "installed plugin skills could not be read; none offered");
+        })
+        .unwrap_or_default();
     if installs.is_empty() {
         return Vec::new();
     }
-    let policy = match store.policy_for(account, bot).await {
-        Ok(policy) => policy,
-        Err(error) => {
-            tracing::warn!(%error, %bot, "a Bot's policy could not be read; no plugin skills offered");
-            return Vec::new();
-        }
+    let Some(policy) = turn_policy(store, account, bot).await else {
+        return Vec::new();
     };
     let mut offers = Vec::new();
-    for installation in installs
-        .iter()
-        .filter(|i| switched_on(account, bot, &i.name, &policy))
-    {
-        for (skill, text) in &installation.bundle.skills {
-            let (plugin, revision) = (&installation.name, &installation.revision);
+    for (plugin, revision, skills) in &installs {
+        if !switched_on(account, bot, plugin, &policy) {
+            continue;
+        }
+        for (skill, text) in skills {
             let name = format!("{plugin}.{skill}");
             if opengrok_plugins::is_valid_name(&name) {
                 let description = opengrok_plugins::split_frontmatter(text).description;
@@ -160,7 +170,7 @@ pub async fn skill(store: &PgStore, account: &AccountId, id: &str) -> Option<Plu
         return None;
     };
     let bot = CoworkerId::from_stored(*bot);
-    let policy = store.policy_for(account, &bot).await.ok()?;
+    let policy = turn_policy(store, account, &bot).await?;
     if !switched_on(account, &bot, name, &policy) {
         tracing::warn!(
             skill = id,
