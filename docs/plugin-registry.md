@@ -131,6 +131,10 @@ and 256 catalog entries. Public GitHub API rate limits can cause a read refusal;
 is inferred from user credentials, only `OG_PLUGIN_REGISTRY_TOKEN` is used. Each refusal here is
 asserted by `one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds`.
 
+An install saved before the MCP field rules above was never judged by them, and its stored servers
+have already lost the fields they read. The boot that brings the rules clears such installs once,
+with their credentials and sealed secrets; only the unmerged #366 branch wrote any. Reinstall them.
+
 Each installation carries a random `incarnation`, and a turn reads credentials for the incarnation
 it loaded: an uninstall and reinstall between a turn's read and its credential read gives that
 turn none. It replaced comparing the stored bundle JSON, which re-sent the bundle every turn and

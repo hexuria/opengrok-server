@@ -1258,3 +1258,84 @@ async fn one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds()
         Err(Error::Upstream(_))
     ));
 }
+
+/// Installs and uninstalls by one account at once never deadlock. Each takes the plugin out of the
+/// ceiling and grants of EVERY Bot the account owns, locking all of those rows; taken in whatever
+/// order a scan met them, two such transactions could each hold a row the other waited on, and
+/// Postgres killed one, which the person saw as a 503. Every Bot is switched back on between
+/// rounds, so each pass really rewrites rows and moves them in the heap, as real traffic does.
+///
+/// A RACE, SO IT CATCHES THE BUG OFTEN, NOT ALWAYS: with the `order by` taken out of
+/// `installed::switch_off` it hit "deadlock detected" in about half its runs here, and with it in
+/// place it never did. A green run alone does not prove the order; a red one always means a cycle.
+#[tokio::test]
+async fn installs_by_one_account_at_once_never_deadlock() {
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness(&url, registry).await;
+    let owner = h.person(None).await;
+    let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let mut bots = Vec::new();
+    for i in 0..8 {
+        let hire = json!({"name": format!("Busy bot {i}")});
+        let (status, hired, text) = h.call(&owner, "POST", "/coworkers", Some(hire)).await;
+        assert_eq!(status, 201, "{text}");
+        bots.push(opengrok_core::id::CoworkerId::from_stored(
+            hired["id"].as_str().unwrap(),
+        ));
+    }
+    let plugins = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+    ];
+    let rounds = 12;
+    let work = plugins.map(|plugin| {
+        let (store, account, bots) = (h.store.clone(), account.clone(), bots.clone());
+        tokio::spawn(async move {
+            let files: BTreeMap<String, String> = [(
+                "plugin.json".to_string(),
+                json!({ "name": plugin }).to_string(),
+            )]
+            .into();
+            let bundle = opengrok_plugins::bundle::Bundle::from_files(&files).unwrap();
+            let catalog = opengrok_integrations::registry::Catalog {
+                registry: "fixture/marketplace".into(),
+                revision: OLD.into(),
+                plugins: Vec::new(),
+            };
+            let entry = opengrok_integrations::registry::Entry {
+                name: plugin.into(),
+                description: String::new(),
+                repository: "fixture/marketplace".into(),
+                revision: OLD.into(),
+                path: String::new(),
+                unavailable_reason: None,
+            };
+            let on = opengrok_policy::ToolSet::only([format!("{plugin}.*"), "shell".into()]);
+            for round in 0..rounds {
+                let at = round + 1;
+                // Switched on everywhere, one Bot at a time, as a ceiling screen saves it.
+                for bot in &bots {
+                    store
+                        .set_ceiling(&account, bot, &on, None, at)
+                        .await
+                        .unwrap();
+                }
+                let installed = opengrok_integrations::installed::install(
+                    &store, &account, &catalog, &entry, &bundle, at,
+                )
+                .await;
+                assert!(installed.is_ok(), "{plugin} round {round}: {installed:?}");
+                let removed =
+                    opengrok_integrations::installed::uninstall(&store, &account, plugin, at).await;
+                assert!(
+                    matches!(removed, Ok(true)),
+                    "{plugin} round {round}: {removed:?}"
+                );
+            }
+        })
+    });
+    for task in work {
+        task.await
+            .expect("no task panicked: no install or uninstall was killed as a deadlock");
+    }
+}

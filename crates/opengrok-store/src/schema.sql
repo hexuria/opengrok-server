@@ -1296,3 +1296,17 @@ create table if not exists plugin_credential (
     primary key (account_id, plugin_name, connector),
     foreign key (account_id, plugin_name) references plugin_installation(account_id, name) on delete cascade
 );
+-- An install saved before the MCP field rules (#367) was never judged by them: its stored
+-- servers already lost the raw `disabled`, `oauth` and unknown fields those rules read, so a dial
+-- cannot judge it either. AFTER BOTH PLUGIN TABLES: a fresh database runs this too, and placed
+-- above `plugin_credential` it failed every first boot. Such installs were made only from the unmerged #366 branch, so they are
+-- cleared ONCE, credentials and their sealed secrets with them, and reinstalled under the rules.
+-- Run once, not by predicate: nothing in a row says which rules it was judged by, and a second
+-- pass would delete every install made since. A Bot ceiling still naming a cleared plugin shows
+-- it as no longer loaded, and a reinstall starts switched off (`installed::install`).
+delete from secret_store
+ where id in (select secret_id from plugin_credential)
+   and not exists (select 1 from schema_migrations where name = 'installs-before-the-mcp-field-rules');
+delete from plugin_installation
+ where not exists (select 1 from schema_migrations where name = 'installs-before-the-mcp-field-rules');
+insert into schema_migrations (name) values ('installs-before-the-mcp-field-rules') on conflict do nothing;

@@ -125,7 +125,14 @@ the previous source and failed there.
 | Every refusal from the compare call, including a reply over 2 MiB, read as "a fork's commit" | only a 404 means "not ours"; compare asks `per_page=1` and reads up to 16 MiB | hostile-registry test: a 500 from compare is `Upstream` |
 | A Bot whose tools were "all" had a reinstalled plugin live at once | `opengrok_policy::names_plugin`: an install is on only where it is named; its servers and ceiling row follow it | † main integration test, `ToolSet::All` grant; `an_installed_plugin_is_on_only_where_both_layers_name_it` |
 | Names were cut to 64 characters before they were judged | the whole name is judged | † hostile-registry test, a 72-character name |
-| `switch_off` locked rows in no fixed order | `order by` on both queries | — (a deadlock between two installs is not reproduced here) |
+| `switch_off` locked rows in no fixed order | `order by` on both queries | `installs_by_one_account_at_once_never_deadlock`: eight installs/uninstalls of one account at once. Without the `order by` it hit "deadlock detected" in 3 of 6 runs; with it, in none of 8 (nor of 16 more at smaller sizes). A race: it catches the bug often, not always |
 | A server dropped as non-public at dial was not logged | `warn` naming the server | — |
 | Skills read each bundle whole, and judged the plugin by `policy_for` while the turn ran under `policy_to_use` | `installed::skills_for_turn` reads only skills; both skill paths use `policy_to_use` | main integration test |
 | The plugin switch copied the start of `may_run_any_under` | moved into `opengrok-policy` | `an_installed_plugin_is_on_only_where_both_layers_name_it` |
+
+Installs saved before these rules were never judged by them, and their stored servers no longer
+carry the raw fields the rules read. The schema clears them once
+(`installs-before-the-mcp-field-rules` in `schema.sql`), credentials and sealed secrets with them;
+only the unmerged #366 branch could have written any. `installs_from_before_the_rules_go_once_and_installs_since_stay`
+asserts it, from a freshly created database: a first version of the pass sat above
+`plugin_credential` and failed every first boot, which that test caught.
