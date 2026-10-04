@@ -23,6 +23,7 @@
 //! and will grow; a loader that dropped what it did not recognise would quietly discard the half
 //! of a plugin meant for somebody else.
 
+pub mod bundle;
 pub mod catalogue;
 pub mod message;
 pub mod skill;

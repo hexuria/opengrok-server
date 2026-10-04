@@ -86,6 +86,8 @@ crates/
   opengrok-recipes  a taught tape into the box's recipe steps; the lint that keeps them runnable
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
+  opengrok-integrations  the plugin registry adapter, account installs and their per-turn use; OAuth provider rules
+  opengrok-plugin-api    the /plugins HTTP routes over opengrok-integrations, with an injected identity check
   opengrok-events   the account events stream's outbox: change notes (ids only) written in the transaction of the change, replayed by id, woken by LISTEN/NOTIFY
   opengrok-store    Postgres: append-only event store + projections (CQRS reads), runs, scheduler rows
   opengrok-testdb   test support: the `_gate` database guard, and each test binary's own database

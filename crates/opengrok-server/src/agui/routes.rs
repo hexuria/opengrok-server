@@ -835,18 +835,18 @@ async fn connect_plugins(
     coworker_id: &CoworkerId,
     policy: &opengrok_policy::Context,
 ) -> opengrok_tools::mcp::Dialled {
-    if state.plugins.is_empty() {
-        return opengrok_tools::mcp::Dialled::default();
-    }
-
     // Every credential this coworker can use, keyed the way a plugin's placeholders name them:
     // `GMAIL_TOKEN` for the `gmail` connector.
-    let candidates = state
-        .auth
-        .store
-        .connections_for(account_id, coworker_id)
-        .await
-        .unwrap_or_default();
+    let candidates = if state.plugins.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .auth
+            .store
+            .connections_for(account_id, coworker_id)
+            .await
+            .unwrap_or_default()
+    };
 
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     if let Some(vault) = state.vault.as_ref() {
@@ -887,6 +887,11 @@ async fn connect_plugins(
             opengrok_policy::may_run_any_under(account_id, coworker_id, &prefix, policy)
         }));
     }
+
+    let (store, vault) = (&state.auth.store, state.vault.as_deref());
+    let operator = |name: &str| state.plugins.contains_key(name);
+    let turn = opengrok_integrations::turn::endpoints;
+    endpoints.extend(turn(store, vault, account_id, coworker_id, policy, operator).await);
 
     // The ceiling gate, per tool and on every turn, whether the listing is fresh or pooled. A tool
     // the coworker may not run is not offered at all — being told about a tool that always

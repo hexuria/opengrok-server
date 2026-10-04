@@ -2307,6 +2307,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengrok-integrations"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "futures",
+ "opengrok-core",
+ "opengrok-plugins",
+ "opengrok-policy",
+ "opengrok-store",
+ "opengrok-tools",
+ "proptest",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "opengrok-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "opengrok-core",
+ "opengrok-integrations",
+ "opengrok-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "opengrok-plugins"
 version = "0.1.0"
 dependencies = [
@@ -2357,6 +2392,8 @@ dependencies = [
  "opengrok-core",
  "opengrok-events",
  "opengrok-harness",
+ "opengrok-integrations",
+ "opengrok-plugin-api",
  "opengrok-plugins",
  "opengrok-policy",
  "opengrok-recipes",

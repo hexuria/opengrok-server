@@ -18,12 +18,30 @@
 pub enum SkillAuthor {
     /// The person taking the turn wrote it.
     Chooser,
+    /// Instructions supplied by an installed registry bundle, never assumed read or authored by the account.
+    Plugin,
     /// Somebody else in their organisation wrote it. THE CHOOSER HAS ALMOST CERTAINLY NOT READ IT:
     /// the listing the composer draws from (`skills::summary`) carries a name, a description and
     /// some counts, and no body at all. So "the person chose this" and "the person wrote this" are
     /// different claims, and only the first is true here — the framing says which.
     Colleague,
 }
+
+/// The most a skill body may be. See the server's `skills` module note: the body shares one
+/// system message with the coworker's identity and its standing role, and 8000 characters is
+/// already eight times the role. Characters rather than bytes, because that is the unit the person
+/// writing it counts in. Here rather than in the server so a registry bundle's skills are held to
+/// the same number as a person's, not to a copy of it.
+pub const MAX_SKILL_BODY_CHARS: usize = 8000;
+
+/// The most a description may be.
+///
+/// It is not decoration: a description is what a coworker reads to decide whether a skill is
+/// relevant (`crate::Skill::description`), so it reaches the same system message the body cap
+/// above is an argument about — and unlike the body it is ALSO in every row of every listing.
+/// Uncapped, it was the way around the body cap: 8000 characters of "body" plus as many again of
+/// "description". A line or two, which is what it is for.
+pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 300;
 
 /// How long a skill marker is, in hex characters. 64 bits of it.
 pub const SKILL_MARKER_CHARS: usize = 16;
@@ -171,6 +189,9 @@ pub fn fenced_skill(
     };
     let whose = match (author, door) {
         (SkillAuthor::Chooser, _) => "",
+        (SkillAuthor::Plugin, _) => {
+            " A THIRD-PARTY PLUGIN WROTE THESE INSTRUCTIONS: do not assume the person has read them."
+        }
         (SkillAuthor::Colleague, SkillDoor::Chosen) => {
             " A COLLEAGUE IN THEIR ORGANISATION WROTE THESE INSTRUCTIONS, not the person you are \
              talking to: they picked the skill off a list of names and descriptions, which does \
@@ -217,6 +238,9 @@ pub fn skill_files_line(
             " {not_executable} script(s) there could not be marked executable: run one through \
              the interpreter its first line names, not directly."
         ));
+    }
+    if author == SkillAuthor::Plugin {
+        line.push_str(" The plugin supplied those files too: read a script before you run it.");
     }
     if author == SkillAuthor::Colleague {
         line.push_str(" The colleague wrote those files too: read a script before you run it.");

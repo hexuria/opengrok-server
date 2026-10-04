@@ -6,6 +6,8 @@
 [workspace]
 resolver = "3"
 members = [
+  "crates/opengrok-plugin-api", # authenticated registry HTTP adapter
+  "crates/opengrok-integrations", # registry I/O and account-owned pinned bundles
   "crates/opengrok",   # the binary: wires the server, embeds the gateway
   "crates/opengrok-core",    # domain types, ids, errors. No I/O.
   "crates/opengrok-wire",    # the client contract: gateway commands, transcript entries, activity

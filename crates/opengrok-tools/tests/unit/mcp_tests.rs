@@ -62,6 +62,7 @@ fn an_endpoint_does_not_print_its_token() {
         server: "api".to_string(),
         url: "https://mcp.example/".to_string(),
         headers: declared(&[("authorization", "Bearer gho_verysecret")]),
+        harden: None,
     };
     let printed = format!("{endpoint:?}");
     assert!(!printed.contains("gho_verysecret"), "{printed}");
@@ -75,6 +76,7 @@ fn tools_are_namespaced_by_plugin_and_server() {
         server: "api".to_string(),
         url: "https://x/".to_string(),
         headers: BTreeMap::new(),
+        harden: None,
     };
     assert_eq!(endpoint.qualify("search"), "github.api.search");
 }
@@ -87,12 +89,14 @@ fn two_plugins_with_the_same_tool_do_not_collide() {
         server: "api".to_string(),
         url: "https://x/".to_string(),
         headers: BTreeMap::new(),
+        harden: None,
     };
     let second = Endpoint {
         plugin: "gdrive".to_string(),
         server: "api".to_string(),
         url: "https://y/".to_string(),
         headers: BTreeMap::new(),
+        harden: None,
     };
     assert_ne!(first.qualify("search"), second.qualify("search"));
 }

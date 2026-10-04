@@ -269,6 +269,26 @@ async fn seed(store: &PgStore, email: &str) -> Seeded {
         .await
         .expect("pending user message");
 
+    // An installed plugin and its credential row: neither keys to `account_view`.
+    sqlx::query(
+        "insert into plugin_installation (account_id, name, registry, registry_revision,
+           repository, revision, bundle, installed_at_ms)
+         values ($1, 'demo', 'o/r', repeat('a', 40), 'o/r', repeat('a', 40), '{}'::jsonb, $2)",
+    )
+    .bind(account.as_str())
+    .bind(at_ms)
+    .execute(store.pool())
+    .await
+    .expect("plugin installation");
+    sqlx::query(
+        "insert into plugin_credential (account_id, plugin_name, connector, secret_id)
+         values ($1, 'demo', 'demo', 'plugin/' || $1 || '/demo/demo')",
+    )
+    .bind(account.as_str())
+    .execute(store.pool())
+    .await
+    .expect("plugin credential");
+
     Seeded {
         account,
         org,
@@ -344,6 +364,16 @@ async fn footprint(store: &PgStore, seeded: &Seeded) -> Vec<(&'static str, i64)>
             &account,
         ),
         ("skill", "select count(*) from skill where id = $1", &skill),
+        (
+            "plugin_installation",
+            "select count(*) from plugin_installation where account_id = $1",
+            &account,
+        ),
+        (
+            "plugin_credential",
+            "select count(*) from plugin_credential where account_id = $1",
+            &account,
+        ),
         (
             "skill_version",
             "select count(*) from skill_version where skill_id = $1",

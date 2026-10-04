@@ -47,10 +47,8 @@ use crate::health::refusal;
 use crate::now_ms;
 use crate::recipes::{MAX_TAPE_UPLOAD_BYTES, org_of, tape_into_steps};
 
-/// The most a skill body may be. See the module note: the body shares one system message with the
-/// coworker's identity and its standing role, and 8000 characters is already eight times the role.
-/// Characters rather than bytes, because that is the unit the person writing it counts in.
-pub const MAX_SKILL_BODY_CHARS: usize = 8000;
+/// Both caps live beside the parser, so a registry bundle's skills meet the same numbers.
+pub use opengrok_plugins::skill::{MAX_SKILL_BODY_CHARS, MAX_SKILL_DESCRIPTION_CHARS};
 
 /// The most every supporting file in one bundle may weigh, decoded.
 ///
@@ -65,15 +63,6 @@ pub const MAX_BUNDLE_BYTES: usize = 256 * 1024;
 /// And a file count, because a byte cap alone lets ten thousand empty files through, and each one
 /// is a row, a path to validate and a file to write onto a box.
 pub const MAX_BUNDLE_FILES: usize = 32;
-
-/// The most a description may be.
-///
-/// It is not decoration: a description is what a coworker reads to decide whether a skill is
-/// relevant (`opengrok_plugins::Skill::description`), so it reaches the same system message the
-/// body cap above is an argument about — and unlike the body it is ALSO in every row of every
-/// listing. Uncapped, it was the way around the body cap: 8000 characters of "body" plus as many
-/// again of "description". A line or two, which is what it is for.
-pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 300;
 
 /// The most skills one coworker may have attached (#270). Each is a line of every one of its
 /// turns' system message, and twenty of them, at up to 300 characters of description apiece, is
@@ -405,15 +394,36 @@ pub(crate) async fn files_line_for_turn(
     skill: &SkillForTurn,
     target: Option<(Arc<dyn opengrok_box::Computer>, String)>,
 ) -> Option<String> {
-    let unavailable = crate::persona::skill_files_unavailable_line;
     let files = match state.auth.store.skill_files(&skill.id, skill.version).await {
-        Ok(files) if files.is_empty() => return None,
-        Ok(files) => files,
+        Ok(files) => files.into_iter().map(|f| (f.path, f.bytes)).collect(),
         Err(error) => {
             tracing::warn!(skill = %skill.id, %error, "a chosen skill's files could not be read");
-            return Some(unavailable("they could not be read"));
+            return Some(crate::persona::skill_files_unavailable_line(
+                "they could not be read",
+            ));
         }
     };
+    // THE SKILL ID IS IN THE PATH. By name alone, two skills called the same (a person's own and
+    // a colleague's, on a per-org box) shared one directory, and two turns using them at once
+    // raced on its `rm -rf` and each other's writes.
+    let under = format!(".skills/{}/{}/v{}", skill.name, skill.id, skill.version);
+    files_line(files, &under, skill.author, &skill.id, target).await
+}
+
+/// Copy `files` under `under` and say where; shared by a person's skills and a plugin's, so a
+/// plugin skill's files are held to the same rules: never a reason to wake the box, and checked
+/// against the path allow-list here rather than trusted from wherever they were stored.
+async fn files_line(
+    files: Vec<(String, Vec<u8>)>,
+    under: &str,
+    author: crate::persona::SkillAuthor,
+    id: &str,
+    target: Option<(Arc<dyn opengrok_box::Computer>, String)>,
+) -> Option<String> {
+    let unavailable = crate::persona::skill_files_unavailable_line;
+    if files.is_empty() {
+        return None;
+    }
     let Some((computer, box_id)) = target else {
         return Some(unavailable("this coworker has no computer"));
     };
@@ -424,13 +434,8 @@ pub(crate) async fn files_line_for_turn(
     // pass it now, and it is refused rather than written.
     let (plain, refused): (Vec<_>, Vec<_>) = files
         .into_iter()
-        .partition(|file| check_path(&file.path).is_ok());
-    let plain: Vec<(String, Vec<u8>)> = plain.into_iter().map(|f| (f.path, f.bytes)).collect();
-    // THE SKILL ID IS IN THE PATH. By name alone, two skills called the same (a person's own and
-    // a colleague's, on a per-org box) shared one directory, and two turns using them at once
-    // raced on its `rm -rf` and each other's writes.
-    let under = format!(".skills/{}/{}/v{}", skill.name, skill.id, skill.version);
-    match opengrok_box::bundle::place(computer.as_ref(), &box_id, &under, &plain).await {
+        .partition(|(path, _)| check_path(path).is_ok());
+    match opengrok_box::bundle::place(computer.as_ref(), &box_id, under, &plain).await {
         Ok(placed) if placed.written.is_empty() => Some(unavailable(
             "none of them is a plain text file with a plain name",
         )),
@@ -439,10 +444,10 @@ pub(crate) async fn files_line_for_turn(
             placed.written.len(),
             placed.skipped.len() + refused.len(),
             placed.not_executable.len(),
-            skill.author,
+            author,
         )),
         Err(error) => {
-            tracing::warn!(skill = %skill.id, %error, "a chosen skill's files could not be copied");
+            tracing::warn!(skill = %id, %error, "a chosen skill's files could not be copied");
             Some(unavailable("they could not be copied onto it"))
         }
     }
@@ -501,7 +506,14 @@ pub(crate) async fn onto(
         name: skill.name,
         description: skill.description,
     });
-    with_offers(state, account, runner, offers.collect())
+    let mut offers: Vec<SkillOffer> = offers.collect();
+    let store = &state.auth.store;
+    for offer in opengrok_integrations::turn::skill_offers(store, account, coworker).await {
+        if !offers.iter().any(|o| o.name == offer.name) {
+            offers.push(offer);
+        }
+    }
+    with_offers(state, account, runner, offers)
 }
 
 /// `onto` for a resume: exactly the skills its run captured (`RunEvent::Started::offered_skills`),
@@ -551,6 +563,18 @@ struct Reader {
 #[async_trait::async_trait]
 impl SkillSource for Reader {
     async fn read(&self, offer: &SkillOffer) -> Option<SkillRead> {
+        if opengrok_integrations::turn::is_plugin_skill(&offer.id) {
+            let store = &self.state.auth.store;
+            let skill = opengrok_integrations::turn::skill(store, &self.who, &offer.id).await?;
+            let (author, target) = (crate::persona::SkillAuthor::Plugin, self.target.clone());
+            let files = files_line(skill.files, &skill.dir, author, &offer.id, target).await;
+            let instructions = skill.body;
+            return Some(SkillRead {
+                instructions,
+                author,
+                files,
+            });
+        }
         let skill = match for_turn(&self.state, &self.who, &offer.id).await {
             Ok(skill) => skill,
             Err(why) => {

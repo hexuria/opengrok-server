@@ -1,5 +1,5 @@
 {
-  "server_sha": "96b19dc908196591fe8820b5e8d11ee53072bdb3",
+  "server_sha": "08480598f1925526993b9473e13646a134e11f16",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -1058,6 +1058,10 @@
     {
       "file": "rest/GET__connectors/401-a_signed_out_caller_is_refused_the_connectors_and_a_sign_in_in_json.json",
       "source": "GET /connectors, recorded from the test a_signed_out_caller_is_refused_the_connectors_and_a_sign_in_in_json (crates/opengrok-server/tests/against_connections.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__connectors/200-pinned_installations_and_credentials_belong_only_to_the_driving_account.json",
+      "source": "GET /connectors, recorded from the test pinned_installations_and_credentials_belong_only_to_the_driving_account (crates/opengrok-server/tests/against_plugin_registry.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__coworkers/200-an_owner_puts_a_coworker_on_its_own_plan_and_the_roster_says_so.json",

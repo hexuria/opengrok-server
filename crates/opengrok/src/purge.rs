@@ -284,6 +284,18 @@ pub async fn purge_accounts_except(
         &skills
     );
     delete!("skill", "delete from skill where id = any($1)", &skills);
+    // Installed plugins have no key to `account_view`, so nothing cascades to them; their sealed
+    // tokens go with `secret_store` below, whose ids carry the account.
+    delete!(
+        "plugin_credential",
+        "delete from plugin_credential where account_id = any($1)",
+        &accounts
+    );
+    delete!(
+        "plugin_installation",
+        "delete from plugin_installation where account_id = any($1)",
+        &accounts
+    );
     delete!(
         "pending_user_message",
         "delete from pending_user_message where account_id = any($1) or thread_id = any($2) \

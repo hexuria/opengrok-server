@@ -34,7 +34,24 @@ fn builtin_rows() -> impl Iterator<Item = &'static str> {
 
 /// The rows as `ceiling` sets them, plus one per plugin it still switches on that this server no
 /// longer loads: kept, so it can be seen and switched off.
-async fn rows(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet) -> Vec<Value> {
+async fn rows(
+    state: &AgUiState,
+    owner: &AccountId,
+    ceiling: &ToolSet,
+) -> Result<Vec<Value>, opengrok_store::StoreError> {
+    // By reference: the deployment's plugins are not copied for every ceiling read.
+    let installed = opengrok_integrations::installed::list(&state.auth.store, owner).await?;
+    let installed: Vec<_> = installed.iter().map(|i| i.bundle.plugin()).collect();
+    let mut plugins: std::collections::BTreeMap<&str, _> = state
+        .plugins
+        .iter()
+        .map(|(name, p)| (name.as_str(), p))
+        .collect();
+    for plugin in &installed {
+        plugins
+            .entry(plugin.manifest.name.as_str())
+            .or_insert(plugin);
+    }
     // Available exactly when a turn would bind one (`tools_for_coworker`).
     let machine = crate::local_exec::enabled_machine(&state.auth.store, owner.as_str()).await;
     let mut rows: Vec<Value> = builtin_rows()
@@ -64,11 +81,15 @@ async fn rows(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet) -> Vec<Va
                 .chain(builtin_rows())
                 .any(|b| b == name)
     };
-    for plugin in state.plugins.values().filter(|p| free(&p.manifest.name)) {
+    for plugin in plugins.values().filter(|p| free(&p.manifest.name)) {
         let name = &plugin.manifest.name;
         // Agent Plugins 1.0.0 has no label; `name` is its human-readable name.
-        let mut row = json!({ "name": name, "kind": "plugin", "label": name,
-            "enabled": ceiling.allows_all_of(name) });
+        // An account's install is on only where it is named (`opengrok_policy::names_plugin`).
+        let on = match state.plugins.contains_key(name) {
+            true => ceiling.allows_all_of(name),
+            false => ceiling.whole_plugins().any(|named| named == name),
+        };
+        let mut row = json!({ "name": name, "kind": "plugin", "label": name, "enabled": on });
         if let Some(description) = &plugin.manifest.description {
             row["description"] = json!(description);
         }
@@ -77,14 +98,14 @@ async fn rows(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet) -> Vec<Va
         }
         rows.push(row);
     }
-    let loaded = |name: &str| state.plugins.values().any(|p| p.manifest.name == name);
+    let loaded = |name: &str| plugins.values().any(|p| p.manifest.name == name);
     for name in ceiling
         .whole_plugins()
         .filter(|name| free(name) && !loaded(name))
     {
         rows.push(json!({ "name": name, "kind": "plugin", "enabled": true, "available": false }));
     }
-    rows
+    Ok(rows)
 }
 
 /// The owner, or the refusal: another account's coworker reads as "no such coworker", never as a
@@ -134,7 +155,10 @@ pub(super) async fn get_ceiling(
 }
 
 async fn reply(state: &AgUiState, owner: &AccountId, ceiling: &ToolSet, version: i64) -> Response {
-    let tools = rows(state, owner, ceiling).await;
+    let tools = match rows(state, owner, ceiling).await {
+        Ok(rows) => rows,
+        Err(e) => return unavailable(&e),
+    };
     Json(json!({ "tools": tools, "version": version })).into_response()
 }
 
@@ -173,7 +197,10 @@ pub(super) async fn put_ceiling(
         Ok(found) => found,
         Err(error) => return unavailable(&error),
     };
-    let shown = rows(&state, &account_id, &now).await;
+    let shown = match rows(&state, &account_id, &now).await {
+        Ok(rows) => rows,
+        Err(e) => return unavailable(&e),
+    };
     let mut entries = BTreeSet::new();
     for name in enabled {
         match shown.iter().find(|row| row["name"] == name.as_str()) {

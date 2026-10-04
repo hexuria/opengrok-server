@@ -171,6 +171,8 @@ throwaway signup addresses.
 | `OG_PLUGINS_DIR` | Agent Plugins installed on this server, one directory each |
 | `OG_PLUGIN_CONNECT_TIMEOUT_MS` | default `5000`: what one plugin server gets for `initialize` + `tools/list` together. Servers are dialled concurrently before a turn's first model call, so this is the most a dead one can delay a turn; a server that misses it is left out of that turn, named in a WARN, and the coworker is told it is unavailable. A server that failed is not tried again for 30 s, and a listed one is reused for 60 s (per principal, coworker and credential) |
 | `OG_PLUGIN_CALL_TIMEOUT_MS` | default `60000`: what one plugin `tools/call` gets. On the deadline the server is sent `notifications/cancelled` and the model gets a result saying the call may still have taken effect. Zero or junk in either is refused with a WARN and the default used — an unbounded wait is the bug these exist to prevent |
+| `OG_PLUGIN_REGISTRY` | default `hexuria/plugin-marketplace`: the public GitHub `owner/repository` whose `.grok-plugin/marketplace.json` an account installs plugins from (#356, [`plugin-registry.md`](../plugin-registry.md)). A value that is not one is logged at boot and every `/plugins` route answers 503 |
+| `OG_PLUGIN_REGISTRY_TOKEN` | optional: a GitHub token sent to `api.github.com` only, for the catalog's commit, compare and tree reads. Without one, those reads share GitHub's anonymous 60-an-hour budget for this server's address |
 
 ## Diagnostics
 
