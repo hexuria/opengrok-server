@@ -171,7 +171,13 @@ impl Bundle {
         for (name, server) in &mut plugin.mcp.servers {
             if let McpServer::StreamableHttp { headers, .. } = server {
                 let key = crate::token_key(name);
-                if headers.is_empty() && values.contains_key(&key) {
+                if !headers.values().any(|value| value.contains("${"))
+                    && !headers.keys().any(|name| {
+                        name.eq_ignore_ascii_case("authorization")
+                            || name.eq_ignore_ascii_case("x-api-key")
+                    })
+                    && values.contains_key(&key)
+                {
                     headers.insert("Authorization".into(), format!("Bearer ${{{key}}}"));
                 }
             }
@@ -182,7 +188,12 @@ impl Bundle {
         let mut names = std::collections::BTreeSet::new();
         for (server_name, server) in &self.mcp.servers {
             if let McpServer::StreamableHttp { headers, .. } = server {
-                if headers.is_empty() {
+                if !headers.values().any(|value| value.contains("${"))
+                    && !headers.keys().any(|name| {
+                        name.eq_ignore_ascii_case("authorization")
+                            || name.eq_ignore_ascii_case("x-api-key")
+                    })
+                {
                     names.insert(server_name.clone());
                 }
                 for value in headers.values() {

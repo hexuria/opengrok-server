@@ -99,3 +99,14 @@ fn explicitly_supplied_bearers_stay_with_their_own_server() {
         _ => unreachable!(),
     }
 }
+
+#[test]
+fn routing_headers_do_not_hide_the_bearer_connector() {
+    let bundle = Bundle::from_files(&files(r#"{"name":"demo"}"#,r#"{"mcpServers":{"demo":{"type":"http","url":"https://example.com/mcp/oauth","headers":{"x-client-source":"opengrok"}}}}"#)).unwrap();
+    assert_eq!(bundle.connectors(), vec!["demo"]);
+    let plugin = bundle.plugin_with_values(&[("DEMO_TOKEN".into(), "secret".into())].into());
+    if let McpServer::StreamableHttp { headers, .. } = &plugin.mcp.servers["demo"] {
+        assert_eq!(headers["x-client-source"], "opengrok");
+        assert_eq!(headers["Authorization"], "Bearer ${DEMO_TOKEN}");
+    }
+}

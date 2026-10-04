@@ -31,9 +31,53 @@ This is server #356. NativeChat #184/#185/#186, several service accounts and per
 pins (#359), the account chooser (#360), additional plugin loaders (#361), the live official
 GitHub MCP pilot (#362), and the blocked Gmail server decision (#363) are not claimed complete.
 No client UI or wire-corpus entry is added here. The client must keep its conformance ledger
-until new route recordings are vendored. This evidence uses controlled HTTP fixtures; it does
-not assert successful authentication to real external MCP services.
+until new route recordings are vendored. The base verification above uses controlled HTTP fixtures. The live supplement below checks
+real services; it still does not assert a successful OAuth login.
 
 The source and verification ownership decisions, API contract and Grok Build reuse assessment
 are in [`docs/plugin-registry.md`](../../plugin-registry.md). No Grok Build code was copied or
 added as a dependency. Its desktop token-file store does not replace this account-scoped vault.
+
+## Live supplement — 4 October 2026
+
+The owner requested live verification. Public responses and immutable source pins are captured
+in [`live-2026-10-04.json`](live-2026-10-04.json). The two network tests are explicitly ignored
+in normal CI; run them with:
+
+```sh
+OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok_gate \
+  cargo test --locked -p opengrok-server --test against_plugin_registry live_ -- --ignored --nocapture
+```
+
+- The actual `hexuria/plugin-marketplace` catalog returned 30 entries at commit
+  `77a16ec85ded1c3b133f686bd2e1bea36090e124`.
+- The API installed Exa from `exa-labs/exa-grok-plugin` at
+  `879fae0c814765c43f39ea8f56aae1d44e9d9bc8`, kept it private to the synthetic account, and
+  uninstalled it successfully. The manifest's unsupported skill and command components remain
+  visible with reasons; no unsupported skill body was silently truncated.
+- The pinned bundle declares `https://mcp.exa.ai/mcp/oauth`, with a routing header and an explicit
+  upstream note requiring OAuth. Its MCP initialization returned `Auth required`. The initial
+  expectation of usable tools therefore FAILED; the final boundary probe asserts this refusal.
+  Passing the boundary probe means the limitation was reproduced, not that OAuth works.
+- Exa's separate documented public endpoint `https://mcp.exa.ai/mcp` initialized and listed
+  `web_search_exa` and `web_fetch_exa` through the production MCP client. It was tested as a
+  transport baseline; the installed bundle's URL was never rewritten to that public endpoint.
+- No search, fetch, or other remote tool was executed. No personal token or browser login was
+  used. OAuth discovery/consent/refresh and the Grok reconnect helper are still NOT adopted.
+
+The first test Bot had no computer, so the existing toolbox path exited before MCP connection.
+The live harness now uses an inert computer provider, creates no VM, and refuses every command.
+With computer availability and policy allowance established, a direct production-client probe
+isolated the real refusal to authentication. Temporary diagnostic logging was removed.
+
+This exposed a separate bearer-connector defect: a routing header such as `x-exa-source` hid the
+server's token connector and prevented optional bearer injection. A regression test failed with
+`[]` instead of `["demo"]` before the fix, and passed after it. The fix preserves routing headers,
+does not overwrite explicit auth headers or token placeholders, and keeps the existing account
+credential namespace. It does not implement OAuth.
+
+Fresh checks after that fix: 53 plugin/integration unit tests, 2 fixture/HTTP tests, and 2 opt-in
+live boundary tests passed; affected crates' all-target Clippy passed with warnings denied.
+The live tests' outcome for the pinned OAuth connector remains **blocked pending implementation**.
+The earlier formal/run checks are unchanged: this fix only changes deterministic header and
+connector construction, with no journal, scheduler, ownership, or persistence protocol change.

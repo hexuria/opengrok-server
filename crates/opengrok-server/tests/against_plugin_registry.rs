@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use opengrok_box::{BoxError, BoxResult, CommandOutput, Computer, StartedCommand};
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
 use opengrok_core::id::AccountId;
 use opengrok_harness::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
@@ -67,6 +68,46 @@ async fn seed_account(store: &PgStore, email: &str, org: Option<&str>) -> Accoun
     id
 }
 
+/// A box that is always up and never asked to do anything: the listing only looks at it.
+struct IdleBox;
+
+#[async_trait::async_trait]
+impl Computer for IdleBox {
+    async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
+        Ok(format!("bx_idle_{}", uuid::Uuid::now_v7().simple()))
+    }
+    async fn run(&self, _b: &str, _c: &str, _t: u32) -> BoxResult<CommandOutput> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn start(&self, _b: &str, _c: &str) -> BoxResult<StartedCommand> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn watch(&self, _b: &str, _p: &str) -> BoxResult<StartedCommand> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn read_file(&self, _b: &str, _p: &str) -> BoxResult<String> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn write_file(&self, _b: &str, _p: &str, _c: &str) -> BoxResult<()> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn expose_port(&self, _b: &str, _p: u16, _t: &str) -> BoxResult<String> {
+        Err(BoxError::NoSuchBox)
+    }
+    async fn stop(&self, _b: &str) -> BoxResult<()> {
+        Ok(())
+    }
+    async fn resume(&self, _b: &str) -> BoxResult<()> {
+        Ok(())
+    }
+    async fn destroy(&self, _b: &str) -> BoxResult<()> {
+        Ok(())
+    }
+    async fn state(&self, _b: &str) -> BoxResult<String> {
+        Ok("running".to_string())
+    }
+}
+
 struct ReadPluginSkill;
 #[async_trait::async_trait]
 impl ModelDoor for ReadPluginSkill {
@@ -103,6 +144,14 @@ async fn harness(
     database_url: &str,
     registry: opengrok_integrations::registry::Registry,
 ) -> Harness {
+    harness_with_computer(database_url, registry, None).await
+}
+
+async fn harness_with_computer(
+    database_url: &str,
+    registry: opengrok_integrations::registry::Registry,
+    computer: Option<Arc<dyn Computer>>,
+) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(database_url)
@@ -122,7 +171,7 @@ async fn harness(
         door: Arc::new(ReadPluginSkill),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
-        computer: None,
+        computer,
         vault: Some(Arc::new(
             opengrok_store::Vault::from_base64_keys(
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -674,4 +723,184 @@ async fn registry_resolves_local_and_external_commits_without_a_database() {
     unsafe_entry.path = String::new();
     unsafe_entry.repository = "../evil".into();
     assert!(registry.bundle(&unsafe_entry).await.is_err());
+}
+
+/// Explicitly opt-in: public service availability and rate limits cannot decide CI.
+#[tokio::test]
+#[ignore = "live GitHub catalog and Exa MCP discovery; no search or personal token"]
+async fn live_pinned_registry_bundle_reports_oauth_required() {
+    let url = database_or_skip!();
+    let registry =
+        opengrok_integrations::registry::Registry::github("hexuria/plugin-marketplace".into())
+            .unwrap();
+    let h = harness_with_computer(&url, registry, Some(Arc::new(IdleBox))).await;
+    let owner = h.person(None).await;
+    let stranger = h.person(None).await;
+    let (status, catalog, text) = h
+        .call(&owner, "GET", "/fixture/plugins/catalog", None)
+        .await;
+    assert_eq!(status, 200, "live catalog: {text}");
+    let revision = catalog["revision"].as_str().unwrap();
+    let entries = catalog["plugins"].as_array().unwrap();
+    let exa = entries
+        .iter()
+        .find(|p| p["name"] == "exa")
+        .expect("registry lists Exa");
+    let (status, detail, text) = h
+        .call(
+            &owner,
+            "GET",
+            &format!("/fixture/plugins/catalog/exa?revision={revision}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "real bundle detail: {text}");
+    assert!(
+        detail["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["kind"] == "mcp" && p["supported"] == true)
+    );
+    let (status, installed, text) = h
+        .call(
+            &owner,
+            "POST",
+            "/fixture/plugins/installations",
+            Some(json!({"name":"exa","registryRevision":revision})),
+        )
+        .await;
+    assert_eq!(status, 201, "real bundle install: {text}");
+    let (status, hired, text) = h
+        .call(
+            &owner,
+            "POST",
+            "/coworkers",
+            Some(json!({"name":"Live catalog check"})),
+        )
+        .await;
+    assert_eq!(status, 201, "hire: {text}");
+    let bot = hired["id"].as_str().unwrap();
+    let path = format!("/coworkers/{bot}/ceiling");
+    let (status, ceiling, text) = h.call(&owner, "GET", &path, None).await;
+    assert_eq!(status, 200, "ceiling: {text}");
+    assert_eq!(
+        h.call(
+            &owner,
+            "PUT",
+            &path,
+            Some(json!({"enabled":["exa"],"version":ceiling["version"]}))
+        )
+        .await
+        .0,
+        200
+    );
+    let aid = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let bid = opengrok_core::id::CoworkerId::from_stored(bot);
+    let (coworker, _) = h.store.load_coworker(&bid).await.unwrap();
+    assert!(
+        coworker.computer().is_some(),
+        "MCP toolbox path requires a provisioned computer"
+    );
+    let policy = h.store.policy_to_use(&aid, &bid).await.unwrap();
+    assert!(opengrok_policy::may_run_any_under(
+        &aid, &bid, "exa.exa.", &policy
+    ));
+    let installs = opengrok_integrations::installed::for_turn(&h.store, &aid, &bid)
+        .await
+        .unwrap();
+    let (endpoints, problems) =
+        opengrok_tools::mcp::endpoints_for(&installs[0].bundle.plugin(), &BTreeMap::new());
+    assert!(problems.is_empty());
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].url, "https://mcp.exa.ai/mcp/oauth");
+    let dialled = opengrok_tools::mcp::Pool::global()
+        .dial("live-oauth-boundary", endpoints, |_| true)
+        .await;
+    assert!(
+        dialled.tools.is_empty(),
+        "this pinned endpoint requires OAuth"
+    );
+    assert!(
+        dialled
+            .unavailable
+            .get("exa.exa")
+            .is_some_and(|e| e.contains("Auth required")),
+        "{:?}",
+        dialled.unavailable
+    );
+    let (status, tools, text) = h
+        .call(&owner, "GET", &format!("/coworkers/{bot}/tools"), None)
+        .await;
+    assert_eq!(status, 200, "tools: {text}");
+    let remote: Vec<_> = tools["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["kind"] == "plugin")
+        .map(|t| t["name"].clone())
+        .collect();
+    assert!(
+        remote.is_empty(),
+        "OAuth-protected tools must not be claimed reachable: {tools}"
+    );
+    assert!(
+        h.call(&stranger, "GET", "/fixture/plugins/installations", None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        h.call(&owner, "DELETE", "/fixture/plugins/installations/exa", None)
+            .await
+            .0,
+        204
+    );
+    assert!(
+        h.call(&owner, "GET", "/fixture/plugins/installations", None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    println!(
+        "LIVE_REGISTRY_EVIDENCE {}",
+        json!({"registry":catalog["registry"],"registryRevision":revision,
+        "catalogEntries":entries.len(),"plugin":"exa","repository":exa["repository"],"sourceRevision":installed["revision"],
+        "parts":detail["parts"],"remoteTools":remote,"crossAccountVisible":false,"uninstalled":true,
+        "oauthUsed":false,"toolCalls":0,"connectionOutcome":"blocked: Auth required"})
+    );
+}
+
+#[tokio::test]
+#[ignore = "live anonymous Exa MCP transport baseline; no search is executed"]
+async fn live_anonymous_mcp_transport_lists_tools() {
+    // Exa's documented public endpoint differs from the registry's pinned OAuth endpoint.
+    let endpoint = opengrok_tools::mcp::Endpoint {
+        plugin: "exa".into(),
+        server: "public".into(),
+        url: "https://mcp.exa.ai/mcp".into(),
+        headers: BTreeMap::new(),
+    };
+    let connected = opengrok_tools::mcp::Pool::global()
+        .dial("live-anonymous-baseline", vec![endpoint], |_| true)
+        .await;
+    assert!(
+        connected.unavailable.is_empty(),
+        "{:?}",
+        connected.unavailable
+    );
+    assert!(!connected.tools.is_empty());
+    let names: Vec<_> = connected
+        .tools
+        .iter()
+        .map(|t| t.remote_name.clone())
+        .collect();
+    println!(
+        "LIVE_MCP_BASELINE {}",
+        json!({"endpoint":"https://mcp.exa.ai/mcp","remoteTools":names,"oauthUsed":false,"toolCalls":0})
+    );
 }

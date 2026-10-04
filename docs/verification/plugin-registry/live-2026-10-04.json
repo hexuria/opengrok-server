@@ -1,0 +1,50 @@
+{
+  "date": "2026-10-04",
+  "baseCommit": "f171449",
+  "records": [
+    {
+      "endpoint": "https://mcp.exa.ai/mcp",
+      "remoteTools": [
+        "web_search_exa",
+        "web_fetch_exa"
+      ],
+      "oauthUsed": false,
+      "toolCalls": 0
+    },
+    {
+      "registry": "hexuria/plugin-marketplace",
+      "registryRevision": "77a16ec85ded1c3b133f686bd2e1bea36090e124",
+      "catalogEntries": 30,
+      "plugin": "exa",
+      "repository": "exa-labs/exa-grok-plugin",
+      "sourceRevision": "879fae0c814765c43f39ea8f56aae1d44e9d9bc8",
+      "parts": [
+        {
+          "kind": "mcp",
+          "name": "exa",
+          "supported": true,
+          "reason": null
+        },
+        {
+          "kind": "skill",
+          "name": "exa-search",
+          "supported": false,
+          "reason": "skill name or frontmatter is invalid, body exceeds 8000 characters, or description exceeds 300"
+        },
+        {
+          "kind": "commands",
+          "name": "commands",
+          "supported": false,
+          "reason": "commands has no loader (#361)"
+        }
+      ],
+      "remoteTools": [],
+      "crossAccountVisible": false,
+      "uninstalled": true,
+      "oauthUsed": false,
+      "toolCalls": 0,
+      "connectionOutcome": "blocked: Auth required"
+    }
+  ],
+  "oauthAndReconnectHelpersAdopted": false
+}

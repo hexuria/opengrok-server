@@ -55,8 +55,9 @@ can switch installed plugin names through the existing Bot ceiling routes. Built
 configured deployment plugin names are reserved at install, preventing tool-prefix collisions.
 
 Each installed plugin resolves only its own token namespace. Header placeholders follow the
-existing `${CONNECTOR_TOKEN}` convention. A streamable-HTTP server declaring no headers may
-operate keylessly; an explicitly supplied token adds a bearer header only to that server.
+existing `${CONNECTOR_TOKEN}` convention. A streamable-HTTP server declaring no auth headers or token placeholders may
+operate keylessly; routing headers are preserved, and an explicitly supplied token adds a bearer
+header only to that server. Explicit Authorization/x-api-key headers are not overwritten.
 This iteration does not launch browser OAuth flows for arbitrary MCP servers. Discovery,
 OAuth consent, and refresh integration require an account-bound adapter before they can ship.
 
