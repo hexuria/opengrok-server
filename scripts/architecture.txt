@@ -6,7 +6,7 @@
 # like scripts/crate-ceilings.txt: a new edge fails, and so does a listed edge the code no longer
 # has, so the removal lands here in the same change and cannot quietly come back. The bans are
 # CLAUDE.md's workspace table made checkable: opengrok-core "depends on nothing", the contract
-# and policy crates do no I/O, and nothing but the server speaks HTTP as a server.
+# and policy crates do no I/O, and HTTP adapters live only in the server and plugin-api crates.
 #
 # opengrok-harness's edges to store, tools, box and policy are what #101 wants to narrow to
 # traits; each one removed there is a line shortened here.
@@ -33,7 +33,11 @@ opengrok-tools: opengrok-box opengrok-core opengrok-plugins opengrok-policy open
     | axum sqlx
 opengrok-harness: opengrok-box opengrok-core opengrok-policy opengrok-store opengrok-tools opengrok-wire
     | axum
-opengrok-server: opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
+opengrok-integrations: opengrok-core opengrok-plugins opengrok-store
+    | axum
+opengrok-plugin-api: opengrok-core opengrok-integrations opengrok-plugins opengrok-store
+    |
+opengrok-server: opengrok-plugin-api opengrok-integrations opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
     |
 opengrok: opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-server opengrok-store
     |

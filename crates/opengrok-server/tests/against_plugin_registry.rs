@@ -1,0 +1,677 @@
+//! #356: a registry install is pinned, encrypted, and account-owned at the HTTP and run boundaries.
+//!
+//! Tests drive the registry HTTP routes and an actual scripted turn, since a stored row alone
+//! cannot establish the account boundary. One test needs Postgres; the adapter test does not.
+
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
+use opengrok_core::id::AccountId;
+use opengrok_harness::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
+use opengrok_server::agui::AgUiState;
+use opengrok_server::auth::{AuthState, TokenMinter};
+use opengrok_server::connections::routes::Connectors;
+use opengrok_server::host_state::HostState;
+use opengrok_store::PgStore;
+use serde_json::{Value, json};
+
+macro_rules! database_or_skip {
+    () => {
+        match std::env::var("OG_DATABASE_URL") {
+            Ok(url) => opengrok_store::gate_database_or_panic(url),
+            Err(_) => {
+                eprintln!("skipping: OG_DATABASE_URL is not set");
+                return;
+            }
+        }
+    };
+}
+
+async fn seed_account(store: &PgStore, email: &str, org: Option<&str>) -> AccountId {
+    let id = AccountId::new();
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let events = Account::default()
+        .decide(AccountCommand::Register {
+            email: email.to_string(),
+            password_hash: "x".to_string(),
+            first_name: "Skill".to_string(),
+            last_name: String::new(),
+            org_id: org.unwrap_or_default().to_string(),
+            plan: Plan::Ultra,
+            verified: true,
+            enabled: true,
+            at_ms,
+        })
+        .expect("register");
+    let view = AccountView {
+        id: id.clone(),
+        email: email.to_string(),
+        plan: Plan::Ultra,
+        trial: false,
+        updated_at_ms: at_ms,
+        password_hash: Some("x".to_string()),
+        first_name: "Skill".to_string(),
+        last_name: String::new(),
+        org_id: org.map(str::to_string),
+        verified: true,
+        enabled: true,
+        avatar_url: None,
+    };
+    store
+        .append_account(&id, 0, &events, &view)
+        .await
+        .expect("append account");
+    id
+}
+
+struct ReadPluginSkill;
+#[async_trait::async_trait]
+impl ModelDoor for ReadPluginSkill {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let deltas = if request.messages.iter().any(|m| m.role == "tool") {
+            vec![ModelDelta::Text("done".into())]
+        } else {
+            vec![
+                ModelDelta::ToolCallStart {
+                    id: "read-plugin".into(),
+                    name: "use_skill".into(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: "read-plugin".into(),
+                    delta: r#"{"name":"demo.triage"}"#.into(),
+                },
+                ModelDelta::ToolCallEnd {
+                    id: "read-plugin".into(),
+                },
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
+    }
+}
+
+struct Harness {
+    base: String,
+    agui: AgUiState,
+    store: PgStore,
+    client: reqwest::Client,
+}
+
+async fn harness(
+    database_url: &str,
+    registry: opengrok_integrations::registry::Registry,
+) -> Harness {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(database_url)
+        .await
+        .expect("connect to Postgres");
+    opengrok_store::migrations::run(&pool)
+        .await
+        .expect("migrations");
+    let store = PgStore::new(pool);
+    let auth = AuthState::new(
+        store.clone(),
+        Arc::new(TokenMinter::new(b"skills-secret")),
+        "host@og.local".to_string(),
+    );
+    let agui = AgUiState {
+        auth,
+        door: Arc::new(ReadPluginSkill),
+        model: "oag/cheap".to_string(),
+        auto_review_model: "oag/cheap".to_string(),
+        computer: None,
+        vault: Some(Arc::new(
+            opengrok_store::Vault::from_base64_keys(
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                &[],
+            )
+            .expect("vault"),
+        )),
+        connectors: Connectors {
+            providers: Arc::new(BTreeMap::new()),
+            redirect_uri: "http://127.0.0.1/callback".to_string(),
+        },
+        plugins: Arc::new(BTreeMap::new()),
+        host_settings: None,
+    };
+    let gateway = HostState::new(agui.clone(), None);
+    let app = opengrok_server::router(agui.clone(), gateway).nest(
+        "/fixture",
+        opengrok_server::plugin_registry::router_with_registry(agui.clone(), Some(registry)),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    Harness {
+        base: format!("http://127.0.0.1:{}", addr.port()),
+        agui,
+        store,
+        client: reqwest::Client::new(),
+    }
+}
+
+impl Harness {
+    async fn person(&self, org: Option<&str>) -> String {
+        let email = format!("skills-{}@og.local", uuid::Uuid::now_v7().simple());
+        let account = seed_account(&self.store, &email, org).await;
+        self.agui
+            .auth
+            .minter
+            .mint_access(
+                account.as_str(),
+                "sess-test",
+                &email,
+                "ultra",
+                chrono::Utc::now().timestamp(),
+                3600,
+            )
+            .expect("mint access")
+    }
+
+    async fn call(
+        &self,
+        token: &str,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, Value, String) {
+        let url = format!("{}{path}", self.base);
+        let request = match method {
+            "GET" => self.client.get(url),
+            "POST" => self.client.post(url),
+            "PUT" => self.client.put(url),
+            "DELETE" => self.client.delete(url),
+            "PATCH" => self.client.patch(url),
+            _ => panic!("no such method in this harness: {method}"),
+        }
+        .header("authorization", format!("Bearer {token}"));
+        let request = match body {
+            Some(body) => request.json(&body),
+            None => request,
+        };
+        let response = request.send().await.expect("send");
+        let status = response.status().as_u16();
+        let text = response.text().await.expect("text");
+        let value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        (status, value, text)
+    }
+}
+
+const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+async fn registry_fixture() -> (
+    opengrok_integrations::registry::Registry,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    use axum::{
+        Router,
+        extract::Path,
+        response::{IntoResponse, Response},
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let advanced = Arc::new(AtomicBool::new(false));
+    let flag = advanced.clone();
+    let app = Router::new().route("/{*path}", axum::routing::get(move |Path(path): Path<String>| {
+        let flag = flag.clone();
+        async move {
+            let json = |value: Value| -> Response { axum::Json(value).into_response() };
+            if path == "repos/fixture/marketplace/commits/HEAD" {
+                return json(json!({"sha": if flag.load(Ordering::SeqCst) {NEW} else {OLD}}));
+            }
+            if path.starts_with("repos/fixture/upstream/git/trees/") {
+                return json(json!({"tree":[{"path":"bundle/plugin.json","type":"blob","mode":"100644"}], "truncated":false}));
+            }
+            if path.ends_with("/bundle/plugin.json") { return json(json!({"name":"external"})); }
+            if path.starts_with("repos/fixture/marketplace/git/trees/") {
+                return json(json!({"truncated":false,"tree": [
+                    {"path":"plugins/demo/.grok-plugin/plugin.json","type":"blob","mode":"100644"},
+                    {"path":"plugins/demo/.mcp.json","type":"blob","mode":"100644"},
+                    {"path":"plugins/demo/skills/triage/SKILL.md","type":"blob","mode":"100644"},
+                    {"path":"plugins/demo/skills/triage/reference.txt","type":"blob","mode":"100644"},
+                    {"path":"plugins/demo/commands/deploy.md","type":"blob","mode":"100644"}
+                ]}));
+            }
+            if path.ends_with("/.grok-plugin/marketplace.json") {
+                return json(json!({"name":"fixture", "plugins":[{"name":"demo","description":"Demo","source":{"type":"local","path":"./plugins/demo"}}, {"name":"external","source":{"source":"url","url":"https://github.com/fixture/upstream.git","sha":OLD,"path":"bundle"}}]}));
+            }
+            if path.ends_with("plugins/demo/.grok-plugin/plugin.json") {
+                return json(json!({"name":"demo", "description":if path.contains(OLD) {"old bundle"} else {"new bundle"}, "hooks":{}}));
+            }
+            if path.ends_with("plugins/demo/.mcp.json") {
+                return json(json!({"mcpServers": {
+                    "hosted":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer ${DEMO_TOKEN}"}},
+                    "local":{"command":"never-launch-me"}
+                }}));
+            }
+            if path.ends_with("/skills/triage/SKILL.md") { return "---\nname: triage\ndescription: Triage safely\n---\nRead the reference first.".into_response(); }
+            if path.ends_with("/skills/triage/reference.txt") { return "pinned reference".into_response(); }
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (
+        opengrok_integrations::registry::Registry::new(
+            base.clone(),
+            base,
+            "fixture/marketplace".into(),
+        )
+        .unwrap(),
+        advanced,
+    )
+}
+
+#[tokio::test]
+async fn pinned_installations_and_credentials_belong_only_to_the_driving_account() {
+    let url = database_or_skip!();
+    let (registry, advanced) = registry_fixture().await;
+    let h = harness(&url, registry).await;
+    let org = format!("org_registry_{}", uuid::Uuid::now_v7());
+    let a = h.person(Some(&org)).await;
+    let b = h.person(Some(&org)).await;
+    let account =
+        |token: &str| AccountId::from_stored(h.agui.auth.minter.verify_access(token).unwrap().sub);
+    let aid = account(&a);
+    let bid = account(&b);
+    let catalog_path = "/fixture/plugins/catalog";
+    assert_eq!(h.call("", "GET", catalog_path, None).await.0, 401);
+    let (status, catalog, _) = h.call(&a, "GET", catalog_path, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(catalog["revision"], OLD);
+    let (status, detail, _) = h
+        .call(
+            &a,
+            "GET",
+            &format!("{catalog_path}/demo?revision={OLD}"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{detail}");
+    assert!(
+        detail["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "local" && p["supported"] == false && p["reason"].is_string())
+    );
+    assert!(
+        detail["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["kind"] == "hooks" && p["supported"] == false)
+    );
+    let install_path = "/fixture/plugins/installations";
+    let install = json!({"name":"demo","registryRevision":OLD});
+    assert_eq!(
+        h.call(
+            &a,
+            "POST",
+            install_path,
+            Some(json!({"name":"demo","registryRevision":"main"}))
+        )
+        .await
+        .0,
+        422
+    );
+    let (status, row, text) = h
+        .call(&a, "POST", install_path, Some(install.clone()))
+        .await;
+    assert_eq!(status, 201, "{text}");
+    assert_eq!(row["revision"], OLD);
+    assert_eq!(h.call(&a, "POST", install_path, Some(install)).await.0, 409);
+    assert!(
+        h.call(&b, "GET", install_path, None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let credential_path = "/fixture/plugins/installations/demo/credentials/demo";
+    assert_eq!(
+        h.call(
+            &b,
+            "PUT",
+            credential_path,
+            Some(json!({"token":"other-secret"}))
+        )
+        .await
+        .0,
+        404
+    );
+    let token = "private-plugin-test-token";
+    assert_eq!(
+        h.call(&a, "PUT", credential_path, Some(json!({"token":token})))
+            .await
+            .0,
+        204
+    );
+    let values = opengrok_integrations::installed::values(
+        &h.store,
+        h.agui.vault.as_ref().unwrap(),
+        &aid,
+        "demo",
+    )
+    .await
+    .unwrap();
+    assert_eq!(values["DEMO_TOKEN"], token);
+    assert!(
+        opengrok_integrations::installed::values(
+            &h.store,
+            h.agui.vault.as_ref().unwrap(),
+            &bid,
+            "demo"
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    let cipher: Vec<u8> = sqlx::query_scalar("select ciphertext from secret_store where id = $1")
+        .bind(format!("plugin/{aid}/demo/demo"))
+        .fetch_one(h.store.pool())
+        .await
+        .unwrap();
+    assert!(
+        !cipher
+            .windows(token.len())
+            .any(|bytes| bytes == token.as_bytes())
+    );
+    assert!(
+        !h.call(&a, "GET", install_path, None)
+            .await
+            .2
+            .contains(token)
+    );
+    assert!(
+        h.call(&a, "GET", "/connectors", None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["plugin"] == "demo")
+    );
+    assert!(
+        h.call(&b, "GET", "/connectors", None)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let (status, hired, text) = h
+        .call(
+            &a,
+            "POST",
+            "/coworkers",
+            Some(json!({"name":"Registry bot"})),
+        )
+        .await;
+    assert_eq!(status, 201, "{text}");
+    let bot = hired["id"].as_str().unwrap();
+    let bot_id = opengrok_core::id::CoworkerId::from_stored(bot);
+    assert_eq!(
+        opengrok_integrations::installed::for_turn(&h.store, &aid, &bot_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        opengrok_integrations::installed::for_turn(&h.store, &bid, &bot_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let ceiling_path = format!("/coworkers/{bot}/ceiling");
+    let (status, ceiling, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    assert_eq!(status, 200);
+    assert!(
+        ceiling["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "demo" && r["kind"] == "plugin")
+    );
+    assert_eq!(
+        h.call(
+            &a,
+            "PUT",
+            &ceiling_path,
+            Some(json!({"enabled":["demo"],"version":ceiling["version"]}))
+        )
+        .await
+        .0,
+        200
+    );
+    let (_, current, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    assert_eq!(
+        h.call(
+            &a,
+            "PUT",
+            &ceiling_path,
+            Some(json!({"enabled":[],"version":current["version"]}))
+        )
+        .await
+        .0,
+        200
+    );
+    // Stop the model path before any paid inference: tools listing uses the same SkillSource.
+    let (status, tools, _) = h
+        .call(&a, "GET", &format!("/coworkers/{bot}/tools"), None)
+        .await;
+    assert_eq!(status, 200, "{tools}");
+    assert!(tools.to_string().contains("use_skill"));
+    let (status, _, sse) = h.call(&a, "POST", "/ag-ui", Some(json!({
+        "threadId": format!("thr_{}",uuid::Uuid::now_v7()), "runId": uuid::Uuid::now_v7().to_string(),
+        "messages":[{"id":"m1","role":"user","content":"triage"}], "forwardedProps":{"coworkerId":bot}
+    }))).await;
+    assert_eq!(status, 200);
+    assert!(sse.contains("RUN_FINISHED"), "{sse}");
+    assert!(sse.contains("Read the reference first."), "{sse}");
+    assert!(sse.contains("THIRD-PARTY PLUGIN"));
+    assert!(
+        sse.contains("files are not on your computer")
+            || sse.contains("this coworker has no computer")
+    );
+    assert_eq!(
+        h.call(
+            &a,
+            "PATCH",
+            &format!("/coworkers/{bot}"),
+            Some(json!({"visibility":"org"}))
+        )
+        .await
+        .0,
+        200
+    );
+    // Even after the member installs the same plugin, the shared bot is not their bot.
+    assert_eq!(
+        h.call(
+            &b,
+            "POST",
+            install_path,
+            Some(json!({"name":"demo","registryRevision":OLD}))
+        )
+        .await
+        .0,
+        201
+    );
+    assert_eq!(
+        h.call(
+            &b,
+            "PUT",
+            credential_path,
+            Some(json!({"token":"member-token"}))
+        )
+        .await
+        .0,
+        204
+    );
+    let (status, member_tools, _) = h
+        .call(&b, "GET", &format!("/coworkers/{bot}/tools"), None)
+        .await;
+    assert_eq!(
+        status, 404,
+        "the tools configuration belongs to the owner: {member_tools}"
+    );
+    assert!(!member_tools.to_string().contains("use_skill"));
+    let (status, _, member_turn) = h.call(&b, "POST", "/ag-ui", Some(json!({
+        "threadId": format!("thr_{}",uuid::Uuid::now_v7()), "runId": uuid::Uuid::now_v7().to_string(),
+        "messages":[{"id":"m1","role":"user","content":"triage"}], "forwardedProps":{"coworkerId":bot}
+    }))).await;
+    assert_eq!(status, 200, "{member_turn}");
+    assert!(member_turn.contains("RUN_FINISHED"), "{member_turn}");
+    assert!(!member_turn.contains("Read the reference first."));
+    assert!(!member_turn.contains("THIRD-PARTY PLUGIN"));
+
+    assert!(
+        opengrok_integrations::installed::for_turn(&h.store, &bid, &bot_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    advanced.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        h.call(&a, "GET", catalog_path, None).await.1["revision"],
+        NEW
+    );
+    let kept = h.call(&a, "GET", install_path, None).await.1;
+    assert_eq!(kept[0]["revision"], OLD);
+    assert_eq!(kept[0]["bundle"]["manifest"]["description"], "old bundle");
+    // A member can remove their own snapshot, never the owner's. The owner's secret survives.
+    assert_eq!(
+        h.call(&b, "DELETE", "/fixture/plugins/installations/demo", None)
+            .await
+            .0,
+        204
+    );
+    assert_eq!(
+        opengrok_integrations::installed::values(
+            &h.store,
+            h.agui.vault.as_ref().unwrap(),
+            &aid,
+            "demo"
+        )
+        .await
+        .unwrap()["DEMO_TOKEN"],
+        token
+    );
+    assert_eq!(
+        h.call(&a, "DELETE", "/fixture/plugins/installations/demo", None)
+            .await
+            .0,
+        204
+    );
+    let secrets: i64 = sqlx::query_scalar("select count(*) from secret_store where id = $1")
+        .bind(format!("plugin/{aid}/demo/demo"))
+        .fetch_one(h.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(secrets, 0);
+    assert!(
+        opengrok_integrations::installed::for_turn(&h.store, &aid, &bot_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Reinstall is the explicit update: only this request selects the new revision.
+    assert_eq!(
+        h.call(
+            &a,
+            "POST",
+            install_path,
+            Some(json!({"name":"demo","registryRevision":NEW}))
+        )
+        .await
+        .0,
+        201
+    );
+    let updated = h.call(&a, "GET", install_path, None).await.1;
+    assert_eq!(updated[0]["revision"], NEW);
+    assert_eq!(
+        updated[0]["bundle"]["manifest"]["description"],
+        "new bundle"
+    );
+    assert!(
+        opengrok_integrations::installed::values(
+            &h.store,
+            h.agui.vault.as_ref().unwrap(),
+            &aid,
+            "demo"
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    let (save, removed) = tokio::join!(
+        opengrok_integrations::installed::credential(
+            &h.store,
+            h.agui.vault.as_ref().unwrap(),
+            &aid,
+            "demo",
+            "demo",
+            "raced-token",
+            1
+        ),
+        opengrok_integrations::installed::uninstall(&h.store, &aid, "demo")
+    );
+    assert!(save.is_ok());
+    assert!(removed.unwrap());
+    let orphan_count: i64 = sqlx::query_scalar("select count(*) from secret_store where id = $1")
+        .bind(format!("plugin/{aid}/demo/demo"))
+        .fetch_one(h.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        orphan_count, 0,
+        "save/uninstall ordering must never leave an orphan secret"
+    );
+}
+
+#[tokio::test]
+async fn registry_resolves_local_and_external_commits_without_a_database() {
+    let (registry, flag) = registry_fixture().await;
+    let old = registry.catalog(None).await.unwrap();
+    assert_eq!(old.revision, OLD);
+    let external = old.plugins.iter().find(|p| p.name == "external").unwrap();
+    assert_eq!(external.repository, "fixture/upstream");
+    assert_eq!(external.revision, OLD);
+    assert_eq!(
+        registry.bundle(external).await.unwrap().manifest.name,
+        "external"
+    );
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(registry.catalog(None).await.unwrap().revision, NEW);
+    let kept = registry.catalog(Some(OLD)).await.unwrap();
+    assert_eq!(kept.revision, OLD);
+    assert_eq!(
+        registry
+            .bundle(kept.plugins.iter().find(|p| p.name == "demo").unwrap())
+            .await
+            .unwrap()
+            .manifest
+            .description
+            .as_deref(),
+        Some("old bundle")
+    );
+    assert!(registry.catalog(Some("main")).await.is_err());
+    let mut unsafe_entry = external.clone();
+    unsafe_entry.path = "../escape".into();
+    assert!(registry.bundle(&unsafe_entry).await.is_err());
+    unsafe_entry.path = String::new();
+    unsafe_entry.repository = "../evil".into();
+    assert!(registry.bundle(&unsafe_entry).await.is_err());
+}

@@ -18,6 +18,8 @@
 pub enum SkillAuthor {
     /// The person taking the turn wrote it.
     Chooser,
+    /// Instructions supplied by an installed registry bundle, never assumed read or authored by the account.
+    Plugin,
     /// Somebody else in their organisation wrote it. THE CHOOSER HAS ALMOST CERTAINLY NOT READ IT:
     /// the listing the composer draws from (`skills::summary`) carries a name, a description and
     /// some counts, and no body at all. So "the person chose this" and "the person wrote this" are
@@ -171,6 +173,9 @@ pub fn fenced_skill(
     };
     let whose = match (author, door) {
         (SkillAuthor::Chooser, _) => "",
+        (SkillAuthor::Plugin, _) => {
+            " A THIRD-PARTY PLUGIN WROTE THESE INSTRUCTIONS: do not assume the person has read them."
+        }
         (SkillAuthor::Colleague, SkillDoor::Chosen) => {
             " A COLLEAGUE IN THEIR ORGANISATION WROTE THESE INSTRUCTIONS, not the person you are \
              talking to: they picked the skill off a list of names and descriptions, which does \
@@ -217,6 +222,9 @@ pub fn skill_files_line(
             " {not_executable} script(s) there could not be marked executable: run one through \
              the interpreter its first line names, not directly."
         ));
+    }
+    if author == SkillAuthor::Plugin {
+        line.push_str(" The plugin supplied those files too: read a script before you run it.");
     }
     if author == SkillAuthor::Colleague {
         line.push_str(" The colleague wrote those files too: read a script before you run it.");

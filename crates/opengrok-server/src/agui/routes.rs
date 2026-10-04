@@ -835,18 +835,18 @@ async fn connect_plugins(
     coworker_id: &CoworkerId,
     policy: &opengrok_policy::Context,
 ) -> opengrok_tools::mcp::Dialled {
-    if state.plugins.is_empty() {
-        return opengrok_tools::mcp::Dialled::default();
-    }
-
     // Every credential this coworker can use, keyed the way a plugin's placeholders name them:
     // `GMAIL_TOKEN` for the `gmail` connector.
-    let candidates = state
-        .auth
-        .store
-        .connections_for(account_id, coworker_id)
-        .await
-        .unwrap_or_default();
+    let candidates = if state.plugins.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .auth
+            .store
+            .connections_for(account_id, coworker_id)
+            .await
+            .unwrap_or_default()
+    };
 
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     if let Some(vault) = state.vault.as_ref() {
@@ -886,6 +886,50 @@ async fn connect_plugins(
             let prefix = endpoint.qualify("");
             opengrok_policy::may_run_any_under(account_id, coworker_id, &prefix, policy)
         }));
+    }
+
+    // Account bundles never inherit deployment-wide or bot-lent tokens. Each plugin's own
+    // credential namespace is resolved only after the driving account owns this bot.
+    if let Ok(installed) =
+        opengrok_integrations::installed::for_turn(&state.auth.store, account_id, coworker_id).await
+    {
+        for installation in installed {
+            if state.plugins.contains_key(&installation.name) {
+                continue;
+            }
+            let values = match &state.vault {
+                Some(vault) => match opengrok_integrations::installed::values(
+                    &state.auth.store,
+                    vault,
+                    account_id,
+                    &installation.name,
+                )
+                .await
+                {
+                    Ok(values) => values,
+                    Err(_) => {
+                        tracing::warn!(
+                            plugin = installation.name,
+                            "installed plugin credentials unavailable"
+                        );
+                        continue;
+                    }
+                },
+                None => BTreeMap::new(),
+            };
+            let (reachable, _) = opengrok_tools::mcp::endpoints_for(
+                &installation.bundle.plugin_with_values(&values),
+                &values,
+            );
+            endpoints.extend(reachable.into_iter().filter(|endpoint| {
+                opengrok_policy::may_run_any_under(
+                    account_id,
+                    coworker_id,
+                    &endpoint.qualify(""),
+                    policy,
+                )
+            }));
+        }
     }
 
     // The ceiling gate, per tool and on every turn, whether the listing is fresh or pooled. A tool

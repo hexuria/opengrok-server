@@ -501,7 +501,31 @@ pub(crate) async fn onto(
         name: skill.name,
         description: skill.description,
     });
-    with_offers(state, account, runner, offers.collect())
+    let mut offers: Vec<SkillOffer> = offers.collect();
+    if let Ok(installed) =
+        opengrok_integrations::installed::for_turn(&state.auth.store, account, coworker).await
+    {
+        for installation in installed {
+            for (skill, text) in &installation.bundle.skills {
+                let name = format!("{}.{skill}", installation.name);
+                if !opengrok_plugins::is_valid_name(&name) || offers.iter().any(|o| o.name == name)
+                {
+                    continue;
+                }
+                offers.push(SkillOffer {
+                    id: format!(
+                        "plugin/{coworker}/{}/{}/{skill}",
+                        installation.name, installation.revision
+                    ),
+                    name,
+                    description: opengrok_plugins::split_frontmatter(text)
+                        .description
+                        .unwrap_or_default(),
+                });
+            }
+        }
+    }
+    with_offers(state, account, runner, offers)
 }
 
 /// `onto` for a resume: exactly the skills its run captured (`RunEvent::Started::offered_skills`),
@@ -551,6 +575,9 @@ struct Reader {
 #[async_trait::async_trait]
 impl SkillSource for Reader {
     async fn read(&self, offer: &SkillOffer) -> Option<SkillRead> {
+        if offer.id.starts_with("plugin/") {
+            return self.plugin_skill(offer).await;
+        }
         let skill = match for_turn(&self.state, &self.who, &offer.id).await {
             Ok(skill) => skill,
             Err(why) => {
@@ -562,6 +589,68 @@ impl SkillSource for Reader {
         Some(SkillRead {
             instructions: skill.body,
             author: skill.author,
+            files,
+        })
+    }
+}
+
+impl Reader {
+    async fn plugin_skill(&self, offer: &SkillOffer) -> Option<SkillRead> {
+        let parts: Vec<&str> = offer.id.split('/').collect();
+        let ["plugin", bot, name, revision, skill] = parts.as_slice() else {
+            return None;
+        };
+        let bot = CoworkerId::from_stored(*bot);
+        let rows =
+            opengrok_integrations::installed::for_turn(&self.state.auth.store, &self.who, &bot)
+                .await
+                .ok()?;
+        let installation = rows
+            .into_iter()
+            .find(|p| p.name == *name && p.revision == *revision)?;
+        let text = installation.bundle.skills.get(*skill)?;
+        let parsed = opengrok_plugins::split_frontmatter(text);
+        let author = crate::persona::SkillAuthor::Plugin;
+        let prefix = format!("skills/{skill}/");
+        let files: Vec<(String, Vec<u8>)> = installation
+            .bundle
+            .files
+            .iter()
+            .filter_map(|(p, t)| {
+                p.strip_prefix(&prefix)
+                    .filter(|p| check_path(p).is_ok())
+                    .map(|p| (p.into(), t.as_bytes().to_vec()))
+            })
+            .collect();
+        let files = if files.is_empty() {
+            None
+        } else {
+            Some(match &self.target {
+                Some((computer, box_id)) => {
+                    let under = format!(".skills/plugin-{name}/{skill}/{revision}");
+                    match opengrok_box::bundle::place(computer.as_ref(), box_id, &under, &files)
+                        .await
+                    {
+                        Ok(placed) => crate::persona::skill_files_line(
+                            &placed.dir,
+                            placed.written.len(),
+                            placed.skipped.len(),
+                            placed.not_executable.len(),
+                            author,
+                        ),
+                        Err(_) => crate::persona::skill_files_unavailable_line(
+                            "plugin files could not be copied",
+                        ),
+                    }
+                }
+                None => {
+                    crate::persona::skill_files_unavailable_line("this coworker has no computer")
+                }
+            })
+        };
+        Some(SkillRead {
+            instructions: parsed.body,
+            author,
             files,
         })
     }

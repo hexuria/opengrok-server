@@ -64,13 +64,28 @@ pub fn router(state: AgUiState) -> Router {
 /// configured provider, in the map's order, which is by name. An ARRAY, always: a deployment
 /// that configures none offers nothing, and that is an answer, not an error.
 pub async fn list_connectors(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
-    if account_from_bearer(&state, &headers).is_none() {
+    let Some(account) = account_from_bearer(&state, &headers) else {
         return refused(StatusCode::UNAUTHORIZED, "sign in first");
-    }
+    };
     let names = state.connectors.providers.keys();
-    let rows: Vec<serde_json::Value> = names
+    let mut rows: Vec<serde_json::Value> = names
         .map(|name| serde_json::json!({ "name": name, "label": label_of(name) }))
         .collect();
+    match opengrok_integrations::installed::list(&state.auth.store, &account).await {
+        Ok(installed) => {
+            for installation in installed {
+                for name in installation.bundle.connectors() {
+                    rows.push(serde_json::json!({"name": name, "label": label_of(&name), "plugin": installation.name, "authentication": "token"}));
+                }
+            }
+        }
+        Err(_) => {
+            return refused(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "installed connectors could not be read",
+            );
+        }
+    }
     Json(rows).into_response()
 }
 

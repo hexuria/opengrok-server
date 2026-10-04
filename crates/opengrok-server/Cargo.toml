@@ -32,6 +32,8 @@ tracing-subscriber.workspace = true
 workspace = true
 
 [dependencies]
+opengrok-plugin-api = { path = "../opengrok-plugin-api" }
+opengrok-integrations = { path = "../opengrok-integrations" }
 # Reversible scrubbing of what leaves for the provider. A hand-rolled version
 # would have to re-solve check-digit-preserving substitution and stand-ins that
 # arrive split across stream fragments; both are already tested there.

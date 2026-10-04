@@ -43,6 +43,7 @@ pub mod mcp_door;
 pub mod models;
 pub mod pairs;
 pub mod persona;
+pub mod plugin_registry;
 pub mod points;
 pub mod recipes;
 pub mod recovery;
@@ -82,7 +83,8 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
         .merge(recipes::router(state.clone()))
         .merge(workflows::router(state.clone()))
         .merge(skills::router(state.clone()))
-        .merge(artifacts::router(state.clone()));
+        .merge(artifacts::router(state.clone()))
+        .merge(plugin_registry::router(state.clone()));
     #[cfg(feature = "jev")]
     let app = app.merge(jev::routes::router(state.clone()));
     let app = app
