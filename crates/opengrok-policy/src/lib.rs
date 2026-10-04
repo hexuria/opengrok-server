@@ -299,6 +299,30 @@ pub fn decide(
     }
 }
 
+/// Whether an account-installed plugin is switched on: what the ceiling and grant BOTH admit names
+/// it whole (`"<plugin>.*"`), on a live grant for this coworker. Every missing piece answers no.
+///
+/// NAMED, NOT MERELY ADMITTED. `All` admits every plugin without naming one, and an installed
+/// plugin is code an account chose from a registry, not the server's own: on a Bot whose tools
+/// were "all", an uninstall-then-install at a new pin went live without anyone choosing it again.
+/// So such a plugin is on only once its owner switches it on by name, which a ceiling save does.
+/// Its skills and its servers both answer to this; its tools still meet [`decide`] one by one.
+pub fn names_plugin(
+    principal: &AccountId,
+    coworker: &CoworkerId,
+    plugin: &str,
+    context: &Context,
+) -> bool {
+    if !decide(principal, coworker, Action::UseCoworker, context).is_allowed() {
+        return false;
+    }
+    let (Some(grant), Some(ceiling)) = (&context.grant, &context.ceiling) else {
+        return false;
+    };
+    let both = ceiling.tools.intersect(&grant.profile);
+    &ceiling.coworker == coworker && both.whole_plugins().any(|named| named == plugin)
+}
+
 /// Whether ANY tool whose name starts with `prefix` could be run (or held for a yes) — so a
 /// caller can skip reaching a plugin server the coworker could use nothing from.
 ///
@@ -363,6 +387,34 @@ mod tests {
                 tools: ceiling,
             }),
         }
+    }
+
+    #[test]
+    fn an_installed_plugin_is_on_only_where_both_layers_name_it() {
+        let named = ToolSet::only(["demo.*", "shell"]);
+        let on = |ceiling: ToolSet, profile: ToolSet| {
+            names_plugin(
+                &principal(),
+                &coworker(),
+                "demo",
+                &granted(profile, ceiling),
+            )
+        };
+        assert!(on(named.clone(), named.clone()));
+        assert!(on(ToolSet::All, named.clone()));
+        assert!(
+            !on(ToolSet::All, ToolSet::All),
+            "all tools never names a plugin"
+        );
+        assert!(!on(named.clone(), ToolSet::only(["shell"])));
+        assert!(!on(ToolSet::only(["demo.hosted.search"]), ToolSet::All));
+        assert!(!on(ToolSet::only(["demolition.*"]), ToolSet::All));
+        assert!(!names_plugin(
+            &principal(),
+            &coworker(),
+            "demo",
+            &Context::default()
+        ));
     }
 
     /// The single most important rule: a missing grant is a denial, never a default-allow.

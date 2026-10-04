@@ -255,6 +255,26 @@ impl Harness {
 
 const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const FORK: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+/// The credentials a turn reading the current install would get.
+async fn current_values(h: &Harness, account: &AccountId, name: &str) -> BTreeMap<String, String> {
+    let installs = opengrok_integrations::installed::list(&h.store, account)
+        .await
+        .unwrap();
+    let Some(installation) = installs.into_iter().find(|i| i.name == name) else {
+        return BTreeMap::new();
+    };
+    let vault = h.agui.vault.as_ref().unwrap();
+    opengrok_integrations::installed::values_for_installation(
+        &h.store,
+        vault,
+        account,
+        &installation,
+    )
+    .await
+    .unwrap()
+}
 
 async fn registry_fixture() -> (
     opengrok_integrations::registry::Registry,
@@ -274,6 +294,16 @@ async fn registry_fixture() -> (
             let json = |value: Value| -> Response { axum::Json(value).into_response() };
             if path == "repos/fixture/marketplace/commits/HEAD" {
                 return json(json!({"sha": if flag.load(Ordering::SeqCst) {NEW} else {OLD}}));
+            }
+            // OLD is NEW's parent on the default branch; FORK is reachable from neither.
+            if let Some(range) = path.strip_prefix("repos/fixture/marketplace/compare/") {
+                let status = match range.split_once("...") {
+                    Some((base, head)) if base == head => "identical",
+                    Some((OLD, NEW)) => "ahead",
+                    Some((NEW, OLD)) => "behind",
+                    _ => "diverged",
+                };
+                return json(json!({"status": status}));
             }
             if path.starts_with("repos/fixture/upstream/git/trees/") {
                 return json(json!({"tree":[{"path":"bundle/plugin.json","type":"blob","mode":"100644"}], "truncated":false}));
@@ -316,7 +346,8 @@ async fn registry_fixture() -> (
             base,
             "fixture/marketplace".into(),
         )
-        .unwrap(),
+        .unwrap()
+        .with_head_ttl(std::time::Duration::ZERO),
         advanced,
     )
 }
@@ -407,26 +438,9 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
             .0,
         204
     );
-    let values = opengrok_integrations::installed::values(
-        &h.store,
-        h.agui.vault.as_ref().unwrap(),
-        &aid,
-        "demo",
-    )
-    .await
-    .unwrap();
+    let values = current_values(&h, &aid, "demo").await;
     assert_eq!(values["DEMO_TOKEN"], token);
-    assert!(
-        opengrok_integrations::installed::values(
-            &h.store,
-            h.agui.vault.as_ref().unwrap(),
-            &bid,
-            "demo"
-        )
-        .await
-        .unwrap()
-        .is_empty()
-    );
+    assert!(current_values(&h, &bid, "demo").await.is_empty());
     let cipher: Vec<u8> = sqlx::query_scalar("select ciphertext from secret_store where id = $1")
         .bind(format!("plugin/{aid}/demo/demo"))
         .fetch_one(h.store.pool())
@@ -471,6 +485,35 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
     assert_eq!(status, 201, "{text}");
     let bot = hired["id"].as_str().unwrap();
     let bot_id = opengrok_core::id::CoworkerId::from_stored(bot);
+    // "ALL TOOLS" NEVER SWITCHES AN INSTALL ON: it admits every plugin without naming one, and an
+    // account's install is on only where it is named. Its row says off, and no skill is offered.
+    use opengrok_policy::ToolSet;
+    let at = chrono::Utc::now().timestamp_millis();
+    h.store
+        .grant_access(
+            &aid,
+            &bot_id,
+            &ToolSet::All,
+            &ToolSet::All,
+            &ToolSet::None,
+            at,
+        )
+        .await
+        .unwrap();
+    let (_, everything, _) = h
+        .call(&a, "GET", &format!("/coworkers/{bot}/ceiling"), None)
+        .await;
+    let demo = everything["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "demo");
+    assert_eq!(demo.unwrap()["enabled"], false, "{everything}");
+    assert!(
+        opengrok_integrations::turn::skill_offers(&h.store, &aid, &bot_id)
+            .await
+            .is_empty()
+    );
     assert_eq!(
         opengrok_integrations::installed::for_turn(&h.store, &aid, &bot_id)
             .await
@@ -517,18 +560,35 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
         .0,
         200
     );
+    // SWITCHED OFF, THE PLUGIN'S SKILLS ARE NOT OFFERED, and a model naming one anyway reads
+    // nothing: before, the ceiling gated its MCP tools only and `use_skill` handed over the text.
+    let (status, tools, _) = h
+        .call(&a, "GET", &format!("/coworkers/{bot}/tools"), None)
+        .await;
+    assert_eq!(status, 200, "{tools}");
+    assert!(!tools.to_string().contains("use_skill"), "{tools}");
+    let turn = || async {
+        let (status, _, sse) = h.call(&a, "POST", "/ag-ui", Some(json!({
+            "threadId": format!("thr_{}",uuid::Uuid::now_v7()), "runId": uuid::Uuid::now_v7().to_string(),
+            "messages":[{"id":"m1","role":"user","content":"triage"}], "forwardedProps":{"coworkerId":bot}
+        }))).await;
+        assert_eq!(status, 200);
+        assert!(sse.contains("RUN_FINISHED"), "{sse}");
+        sse
+    };
+    let off = turn().await;
+    assert!(!off.contains("Read the reference first."), "{off}");
+    assert!(!off.contains("THIRD-PARTY PLUGIN"), "{off}");
+    let (_, current, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    let on = json!({"enabled":["demo"],"version":current["version"]});
+    assert_eq!(h.call(&a, "PUT", &ceiling_path, Some(on)).await.0, 200);
     // Stop the model path before any paid inference: tools listing uses the same SkillSource.
     let (status, tools, _) = h
         .call(&a, "GET", &format!("/coworkers/{bot}/tools"), None)
         .await;
     assert_eq!(status, 200, "{tools}");
     assert!(tools.to_string().contains("use_skill"));
-    let (status, _, sse) = h.call(&a, "POST", "/ag-ui", Some(json!({
-        "threadId": format!("thr_{}",uuid::Uuid::now_v7()), "runId": uuid::Uuid::now_v7().to_string(),
-        "messages":[{"id":"m1","role":"user","content":"triage"}], "forwardedProps":{"coworkerId":bot}
-    }))).await;
-    assert_eq!(status, 200);
-    assert!(sse.contains("RUN_FINISHED"), "{sse}");
+    let sse = turn().await;
     assert!(sse.contains("Read the reference first."), "{sse}");
     assert!(sse.contains("THIRD-PARTY PLUGIN"));
     assert!(
@@ -607,22 +667,23 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
             .0,
         204
     );
-    assert_eq!(
-        opengrok_integrations::installed::values(
-            &h.store,
-            h.agui.vault.as_ref().unwrap(),
-            &aid,
-            "demo"
-        )
-        .await
-        .unwrap()["DEMO_TOKEN"],
-        token
-    );
+    assert_eq!(current_values(&h, &aid, "demo").await["DEMO_TOKEN"], token);
     assert_eq!(
         h.call(&a, "DELETE", "/fixture/plugins/installations/demo", None)
             .await
             .0,
         204
+    );
+    // Uninstall takes the plugin out of every Bot's ceiling: nothing is left to switch a
+    // replacement install on without its owner choosing it again.
+    let (_, after, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    assert!(
+        !after["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "demo"),
+        "{after}"
     );
     let secrets: i64 = sqlx::query_scalar("select count(*) from secret_store where id = $1")
         .bind(format!("plugin/{aid}/demo/demo"))
@@ -650,21 +711,20 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
     );
     let updated = h.call(&a, "GET", install_path, None).await.1;
     assert_eq!(updated[0]["revision"], NEW);
+    let (_, reinstalled, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    assert!(
+        reinstalled["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "demo" && r["enabled"] == false),
+        "{reinstalled}"
+    );
     assert_eq!(
         updated[0]["bundle"]["manifest"]["description"],
         "new bundle"
     );
-    assert!(
-        opengrok_integrations::installed::values(
-            &h.store,
-            h.agui.vault.as_ref().unwrap(),
-            &aid,
-            "demo"
-        )
-        .await
-        .unwrap()
-        .is_empty()
-    );
+    assert!(current_values(&h, &aid, "demo").await.is_empty());
     let (save, removed) = tokio::join!(
         opengrok_integrations::installed::credential(
             &h.store,
@@ -675,7 +735,7 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
             "raced-token",
             1
         ),
-        opengrok_integrations::installed::uninstall(&h.store, &aid, "demo")
+        opengrok_integrations::installed::uninstall(&h.store, &aid, "demo", 1)
     );
     assert!(save.is_ok());
     assert!(removed.unwrap());
@@ -717,6 +777,17 @@ async fn registry_resolves_local_and_external_commits_without_a_database() {
         Some("old bundle")
     );
     assert!(registry.catalog(Some("main")).await.is_err());
+    // GitHub can place it, but not on the default branch: a fork's commit under the parent path.
+    assert!(matches!(
+        registry.catalog(Some(FORK)).await,
+        Err(opengrok_integrations::registry::Error::Refused(_))
+    ));
+    // A replica whose HEAD is cached for five minutes still takes a pin newer than it.
+    let (cached, moved) = registry_fixture().await;
+    let cached = cached.with_head_ttl(std::time::Duration::from_secs(300));
+    assert_eq!(cached.catalog(None).await.unwrap().revision, OLD);
+    moved.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(cached.catalog(Some(NEW)).await.unwrap().revision, NEW);
     let mut unsafe_entry = external.clone();
     unsafe_entry.path = "../escape".into();
     assert!(registry.bundle(&unsafe_entry).await.is_err());
@@ -730,9 +801,11 @@ async fn registry_resolves_local_and_external_commits_without_a_database() {
 #[ignore = "live GitHub catalog and Exa MCP discovery; no search or personal token"]
 async fn live_pinned_registry_bundle_reports_oauth_required() {
     let url = database_or_skip!();
-    let registry =
-        opengrok_integrations::registry::Registry::github("hexuria/plugin-marketplace".into())
-            .unwrap();
+    let registry = opengrok_integrations::registry::Registry::github(
+        "hexuria/plugin-marketplace".into(),
+        std::env::var("OG_PLUGIN_REGISTRY_TOKEN").ok(),
+    )
+    .unwrap();
     let h = harness_with_computer(&url, registry, Some(Arc::new(IdleBox))).await;
     let owner = h.person(None).await;
     let stranger = h.person(None).await;
@@ -884,6 +957,7 @@ async fn live_anonymous_mcp_transport_lists_tools() {
         server: "public".into(),
         url: "https://mcp.exa.ai/mcp".into(),
         headers: BTreeMap::new(),
+        harden: None,
     };
     let connected = opengrok_tools::mcp::Pool::global()
         .dial("live-anonymous-baseline", vec![endpoint], |_| true)
@@ -908,7 +982,7 @@ async fn live_anonymous_mcp_transport_lists_tools() {
 #[tokio::test]
 async fn an_old_installation_snapshot_cannot_receive_a_replacement_token() {
     let url = database_or_skip!();
-    let (registry, _) = registry_fixture().await;
+    let (registry, advanced) = registry_fixture().await;
     let h = harness(&url, registry).await;
     let owner = h.person(None).await;
     let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
@@ -939,6 +1013,7 @@ async fn an_old_installation_snapshot_cannot_receive_a_replacement_token() {
         .0,
         204
     );
+    advanced.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         h.call(
             &owner,
@@ -986,4 +1061,281 @@ async fn an_old_installation_snapshot_cannot_receive_a_replacement_token() {
     .await
     .unwrap();
     assert_eq!(current_values["DEMO_TOKEN"], "replacement-secret");
+}
+
+/// A registry whose entries and bundles each break one rule `docs/plugin-registry.md` states.
+async fn hostile_registry() -> opengrok_integrations::registry::Registry {
+    use axum::{
+        extract::Path,
+        response::{IntoResponse, Response},
+    };
+    let app = axum::Router::new().route("/{*path}", axum::routing::get(|Path(path): Path<String>| async move {
+        let json = |value: Value| -> Response { axum::Json(value).into_response() };
+        let blob = |path: &str| json!({"path": path, "type": "blob", "mode": "100644"});
+        match path.as_str() {
+            "repos/fixture/hostile/commits/HEAD" => return json(json!({"sha": OLD})),
+            // GitHub failing is an outage, never a verdict that the pin is a fork's.
+            "repos/fixture/hostile/compare/dddddddddddddddddddddddddddddddddddddddd...aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => {
+                return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            "repos/fixture/hostile/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => {
+                let mut tree = vec![
+                    blob("plugins/good/plugin.json"),
+                    blob("plugins/good/.mcp.json"),
+                    blob("plugins/good/skills/ok/SKILL.md"),
+                    blob("plugins/good/skills/ok/logo.png"),
+                    blob("plugins/good/skills/ok/API Guide.md"),
+                    json!({"path": "plugins/good/skills/ok/link", "type": "blob", "mode": "120000"}),
+                    blob("plugins/liar/plugin.json"),
+                    blob("plugins/huge/plugin.json"),
+                    blob("plugins/huge/skills/x/big.txt"),
+                    blob("plugins/many/plugin.json"),
+                ];
+                tree.extend((0..129).map(|i| blob(&format!("plugins/many/skills/s/{i}.md"))));
+                return json(json!({"truncated": false, "tree": tree}));
+            }
+            "repos/fixture/truncated/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => {
+                return json(json!({"truncated": true, "tree": [blob("plugin.json")]}));
+            }
+            "repos/fixture/upstream/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => {
+                return json(json!({"truncated": false, "tree": [blob("bundle/plugin.json")]}));
+            }
+            _ => {}
+        }
+        if path.ends_with("/.grok-plugin/marketplace.json") {
+            return json(json!({"plugins": [
+                {"name": "good", "source": "./plugins/good/"},
+                {"name": "Bad.Name", "source": "./plugins/good"},
+                {"name": "dup", "source": "./plugins/good"},
+                {"name": "dup", "source": "./plugins/liar"},
+                {"name": "escape", "source": "../outside"},
+                {"name": "ext", "source": {"source": "url", "url": "https://github.com/fixture/upstream.git", "sha": OLD, "path": "./bundle"}},
+                {"name": "trunc", "source": {"source": "url", "url": "https://github.com/fixture/truncated", "sha": OLD}},
+                {"name": "liar", "source": "./plugins/liar"},
+                {"name": "huge", "source": "./plugins/huge"},
+                {"name": "many", "source": "./plugins/many"},
+                {"name": "a-name-that-is-entirely-valid-in-its-characters-but-runs-past-sixty-four", "source": "./plugins/good"},
+                {"description": "a row with no name is left out"}
+            ]}));
+        }
+        if path.ends_with("plugins/good/plugin.json") { return json(json!({"name": "good"})); }
+        if path.ends_with("bundle/plugin.json") { return json(json!({"name": "ext"})); }
+        if path.ends_with("plugins/liar/plugin.json") { return json(json!({"name": "someone-else"})); }
+        if path.ends_with("plugins/huge/plugin.json") { return json(json!({"name": "huge"})); }
+        if path.ends_with("plugins/many/plugin.json") { return json(json!({"name": "many"})); }
+        if path.ends_with("plugins/good/.mcp.json") {
+            return json(json!({"mcpServers": {
+                "fine": {"type": "http", "url": "https://mcp.example.com/mcp"},
+                "insecure": {"type": "http", "url": "http://mcp.example.com/mcp"},
+                "private": {"type": "http", "url": "https://10.0.0.1/mcp"},
+                "loopback": {"type": "http", "url": "https://127.1/mcp"},
+                "off": {"type": "http", "url": "https://mcp.example.com/off", "disabled": true},
+                "needs-oauth": {"type": "http", "url": "https://mcp.example.com/o", "oauth": {}},
+                "extra": {"type": "http", "url": "https://mcp.example.com/e", "timeout": 5}
+            }}));
+        }
+        if path.ends_with("skills/ok/SKILL.md") { return "---\nname: ok\n---\nFine.".into_response(); }
+        if path.ends_with("skills/ok/logo.png") { return vec![0x89u8, 0x50, 0xff, 0xfe].into_response(); }
+        if path.ends_with("skills/x/big.txt") { return "x".repeat(2 * 1024 * 1024 + 1).into_response(); }
+        axum::http::StatusCode::NOT_FOUND.into_response()
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    opengrok_integrations::registry::Registry::new(base.clone(), base, "fixture/hostile".into())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds() {
+    use opengrok_integrations::registry::Error;
+    let registry = hostile_registry().await;
+    let catalog = registry.catalog(None).await.unwrap();
+    let entry = |name: &str| {
+        catalog
+            .plugins
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        catalog.plugins.len(),
+        10,
+        "the nameless row is left out, the rest kept"
+    );
+    // Judged whole, not cut to 64 first and then read as valid.
+    let long = "a-name-that-is-entirely-valid-in-its-characters-but-runs-past-sixty-four";
+    for (name, why) in [
+        ("Bad.Name", "plugin name is not a valid tool prefix"),
+        (long, "plugin name is not a valid tool prefix"),
+        ("dup", "two registry entries share this name"),
+        ("escape", "registry bundle path is unsafe"),
+    ] {
+        assert_eq!(
+            entry(name).unavailable_reason.as_deref(),
+            Some(why),
+            "{name}"
+        );
+        assert!(matches!(
+            registry.bundle(&entry(name)).await,
+            Err(Error::Refused(_))
+        ));
+    }
+    assert_eq!(entry("good").path, "plugins/good");
+    assert_eq!(entry("ext").path, "bundle");
+    assert_eq!(
+        registry.bundle(&entry("ext")).await.unwrap().manifest.name,
+        "ext"
+    );
+
+    let good = registry.bundle(&entry("good")).await.unwrap();
+    // The same source, unavailable at another registry commit: the cached bundle does not answer.
+    let mut pulled = entry("good");
+    pulled.unavailable_reason = Some("two registry entries share this name".into());
+    assert!(matches!(
+        registry.bundle(&pulled).await,
+        Err(Error::Refused(_))
+    ));
+    let reason = |kind: &str, name: &str| {
+        let part = good.parts.iter().find(|p| p.kind == kind && p.name == name);
+        part.and_then(|p| p.reason.clone()).unwrap_or_default()
+    };
+    assert_eq!(good.mcp.servers.keys().collect::<Vec<_>>(), ["fine"]);
+    assert_eq!(reason("mcp", "insecure"), "remote MCP requires HTTPS");
+    assert_eq!(
+        reason("mcp", "private"),
+        "remote MCP must name a public host"
+    );
+    assert_eq!(
+        reason("mcp", "loopback"),
+        "remote MCP must name a public host"
+    );
+    assert_eq!(reason("mcp", "off"), "its author switched this server off");
+    assert!(reason("mcp", "needs-oauth").contains("OAuth"));
+    assert_eq!(
+        reason("mcp", "extra"),
+        "MCP field `timeout` is not supported"
+    );
+    // One PNG, one odd name and one symlink are three skipped files, not a failed install.
+    assert_eq!(good.skills.len(), 1);
+    assert_eq!(
+        reason("file", "skills/ok/logo.png"),
+        "not a UTF-8 text file"
+    );
+    assert_eq!(
+        reason("file", "skills/ok/API Guide.md"),
+        "file name is not a plain path"
+    );
+    assert_eq!(
+        reason("file", "skills/ok/link"),
+        "symlinks are not followed"
+    );
+
+    for (name, why) in [
+        ("trunc", "repository tree is truncated"),
+        ("liar", "bundle name disagrees with registry"),
+        ("huge", "registry file exceeds 2 MiB"),
+        ("many", "bundle exceeds 128 files"),
+    ] {
+        match registry.bundle(&entry(name)).await {
+            Err(Error::Refused(said)) => assert_eq!(said, why, "{name}"),
+            other => panic!("{name}: {:?}", other.map(|b| b.parts)),
+        }
+    }
+    // A malformed pin is the request's fault; one off the default branch is refused, not served.
+    assert!(matches!(
+        registry.catalog(Some("main")).await,
+        Err(Error::Request(_))
+    ));
+    assert!(matches!(
+        registry.catalog(Some(FORK)).await,
+        Err(Error::Refused(_))
+    ));
+    let outage = "dddddddddddddddddddddddddddddddddddddddd";
+    assert!(matches!(
+        registry.catalog(Some(outage)).await,
+        Err(Error::Upstream(_))
+    ));
+}
+
+/// Installs and uninstalls by one account at once never deadlock. Each takes the plugin out of the
+/// ceiling and grants of EVERY Bot the account owns, locking all of those rows; taken in whatever
+/// order a scan met them, two such transactions could each hold a row the other waited on, and
+/// Postgres killed one, which the person saw as a 503. Every Bot is switched back on between
+/// rounds, so each pass really rewrites rows and moves them in the heap, as real traffic does.
+///
+/// A RACE, SO IT CATCHES THE BUG OFTEN, NOT ALWAYS: with the `order by` taken out of
+/// `installed::switch_off` it hit "deadlock detected" in about half its runs here, and with it in
+/// place it never did. A green run alone does not prove the order; a red one always means a cycle.
+#[tokio::test]
+async fn installs_by_one_account_at_once_never_deadlock() {
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness(&url, registry).await;
+    let owner = h.person(None).await;
+    let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let mut bots = Vec::new();
+    for i in 0..8 {
+        let hire = json!({"name": format!("Busy bot {i}")});
+        let (status, hired, text) = h.call(&owner, "POST", "/coworkers", Some(hire)).await;
+        assert_eq!(status, 201, "{text}");
+        bots.push(opengrok_core::id::CoworkerId::from_stored(
+            hired["id"].as_str().unwrap(),
+        ));
+    }
+    let plugins = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+    ];
+    let rounds = 12;
+    let work = plugins.map(|plugin| {
+        let (store, account, bots) = (h.store.clone(), account.clone(), bots.clone());
+        tokio::spawn(async move {
+            let files: BTreeMap<String, String> = [(
+                "plugin.json".to_string(),
+                json!({ "name": plugin }).to_string(),
+            )]
+            .into();
+            let bundle = opengrok_plugins::bundle::Bundle::from_files(&files).unwrap();
+            let catalog = opengrok_integrations::registry::Catalog {
+                registry: "fixture/marketplace".into(),
+                revision: OLD.into(),
+                plugins: Vec::new(),
+            };
+            let entry = opengrok_integrations::registry::Entry {
+                name: plugin.into(),
+                description: String::new(),
+                repository: "fixture/marketplace".into(),
+                revision: OLD.into(),
+                path: String::new(),
+                unavailable_reason: None,
+            };
+            let on = opengrok_policy::ToolSet::only([format!("{plugin}.*"), "shell".into()]);
+            for round in 0..rounds {
+                let at = round + 1;
+                // Switched on everywhere, one Bot at a time, as a ceiling screen saves it.
+                for bot in &bots {
+                    store
+                        .set_ceiling(&account, bot, &on, None, at)
+                        .await
+                        .unwrap();
+                }
+                let installed = opengrok_integrations::installed::install(
+                    &store, &account, &catalog, &entry, &bundle, at,
+                )
+                .await;
+                assert!(installed.is_ok(), "{plugin} round {round}: {installed:?}");
+                let removed =
+                    opengrok_integrations::installed::uninstall(&store, &account, plugin, at).await;
+                assert!(
+                    matches!(removed, Ok(true)),
+                    "{plugin} round {round}: {removed:?}"
+                );
+            }
+        })
+    });
+    for task in work {
+        task.await
+            .expect("no task panicked: no install or uninstall was killed as a deadlock");
+    }
 }

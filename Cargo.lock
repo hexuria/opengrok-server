@@ -2314,7 +2314,9 @@ dependencies = [
  "futures",
  "opengrok-core",
  "opengrok-plugins",
+ "opengrok-policy",
  "opengrok-store",
+ "opengrok-tools",
  "proptest",
  "reqwest 0.13.4",
  "serde",
@@ -2323,6 +2325,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2333,7 +2336,6 @@ dependencies = [
  "chrono",
  "opengrok-core",
  "opengrok-integrations",
- "opengrok-plugins",
  "opengrok-store",
  "serde",
  "serde_json",

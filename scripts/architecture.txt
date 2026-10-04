@@ -33,9 +33,9 @@ opengrok-tools: opengrok-box opengrok-core opengrok-plugins opengrok-policy open
     | axum sqlx
 opengrok-harness: opengrok-box opengrok-core opengrok-policy opengrok-store opengrok-tools opengrok-wire
     | axum
-opengrok-integrations: opengrok-core opengrok-plugins opengrok-store
+opengrok-integrations: opengrok-core opengrok-plugins opengrok-policy opengrok-store opengrok-tools
     | axum
-opengrok-plugin-api: opengrok-core opengrok-integrations opengrok-plugins opengrok-store
+opengrok-plugin-api: opengrok-core opengrok-integrations opengrok-store
     |
 opengrok-server: opengrok-plugin-api opengrok-integrations opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
     |

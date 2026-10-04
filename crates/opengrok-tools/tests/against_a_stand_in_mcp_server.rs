@@ -206,6 +206,7 @@ fn endpoint(url: &str, headers: &[(&str, &str)]) -> Endpoint {
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
             .collect::<BTreeMap<_, _>>(),
+        harden: None,
     }
 }
 

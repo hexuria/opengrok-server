@@ -9,7 +9,8 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, put},
 };
-use opengrok_integrations::{installed, registry::Registry};
+use opengrok_integrations::installed;
+use opengrok_integrations::registry::{Error, Registry};
 use serde::Deserialize;
 
 #[derive(Clone)]
@@ -32,6 +33,14 @@ pub fn router(state: RegistryState) -> Router {
             put(credential),
         )
         .with_state(state)
+}
+/// A request this server should not have been sent is the client's (422), a registry that did not
+/// answer is upstream's (502), and a bundle this server will not take is the bundle's (422).
+fn registry_refused(error: &Error) -> Response {
+    match error {
+        Error::Upstream(why) => refused(502, why),
+        Error::Request(why) | Error::Refused(why) => refused(422, why),
+    }
 }
 fn refused(status: u16, why: &str) -> Response {
     (
@@ -57,7 +66,7 @@ async fn catalog(
     };
     match registry.catalog(pin.revision.as_deref()).await {
         Ok(catalog) => Json(catalog).into_response(),
-        Err(error) => refused(502, &error.to_string()),
+        Err(error) => registry_refused(&error),
     }
 }
 async fn detail(
@@ -74,14 +83,14 @@ async fn detail(
     };
     let catalog = match registry.catalog(pin.revision.as_deref()).await {
         Ok(c) => c,
-        Err(e) => return refused(502, &e.to_string()),
+        Err(e) => return registry_refused(&e),
     };
     let Some(entry) = catalog.plugins.iter().find(|e| e.name == name) else {
         return refused(404, "no such plugin");
     };
     match registry.bundle(entry).await {
         Ok(bundle) => Json(serde_json::json!({"entry": entry, "registryRevision": catalog.revision, "parts": bundle.parts, "connectors": bundle.connectors()})).into_response(),
-        Err(error) => refused(422, &error.to_string()),
+        Err(error) => registry_refused(&error),
     }
 }
 async fn list(State(s): State<RegistryState>, headers: HeaderMap) -> Response {
@@ -120,16 +129,18 @@ async fn install(
     let Some(registry) = &s.registry else {
         return refused(503, "plugin registry is unavailable");
     };
-    let catalog = match registry.catalog(Some(&request.registry_revision)).await {
-        Ok(c) => c,
-        Err(e) => return refused(502, &e.to_string()),
+    let (catalog, entry) = match registry
+        .installable(&request.registry_revision, &request.name)
+        .await
+    {
+        Ok(Some(found)) => found,
+        Ok(None) => return refused(404, "no such plugin"),
+        Err(e) => return registry_refused(&e),
     };
-    let Some(entry) = catalog.plugins.iter().find(|e| e.name == request.name) else {
-        return refused(404, "no such plugin");
-    };
+    let entry = &entry;
     let bundle = match registry.bundle(entry).await {
         Ok(b) => b,
-        Err(e) => return refused(422, &e.to_string()),
+        Err(e) => return registry_refused(&e),
     };
     match installed::install(&s.store, &account, &catalog, entry, &bundle, chrono::Utc::now().timestamp_millis()).await {
         Ok(()) => (StatusCode::CREATED, Json(serde_json::json!({"name": entry.name, "revision": entry.revision, "registryRevision": catalog.revision, "parts": bundle.parts}))).into_response(),
@@ -145,7 +156,8 @@ async fn uninstall(
     let Some(account) = (s.authenticate)(&headers) else {
         return refused(401, "sign in first");
     };
-    match installed::uninstall(&s.store, &account, &name).await {
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    match installed::uninstall(&s.store, &account, &name, at_ms).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => refused(404, "no such installation"),
         Err(_) => refused(503, "plugin could not be uninstalled"),
