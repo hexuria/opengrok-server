@@ -898,11 +898,11 @@ async fn connect_plugins(
                 continue;
             }
             let values = match &state.vault {
-                Some(vault) => match opengrok_integrations::installed::values(
+                Some(vault) => match opengrok_integrations::installed::values_for_installation(
                     &state.auth.store,
                     vault,
                     account_id,
-                    &installation.name,
+                    &installation,
                 )
                 .await
                 {

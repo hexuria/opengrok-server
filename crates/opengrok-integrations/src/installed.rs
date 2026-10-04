@@ -133,21 +133,66 @@ pub async fn credential(
     tx.commit().await?;
     Ok(true)
 }
+
 pub async fn values(
     store: &PgStore,
     vault: &Vault,
     account: &AccountId,
     name: &str,
 ) -> StoreResult<std::collections::BTreeMap<String, String>> {
-    let rows = sqlx::query("select connector,secret_id from plugin_credential where account_id = $1 and plugin_name = $2")
-        .bind(account.as_str()).bind(name).fetch_all(store.pool()).await?;
+    read_values(store, vault, account, name, None).await
+}
+
+/// Ciphertext and snapshot eligibility are read together. Reading secret ids first and opening
+/// them later allowed uninstall/reinstall to replace the secret between those two statements.
+pub async fn values_for_installation(
+    store: &PgStore,
+    vault: &Vault,
+    account: &AccountId,
+    installation: &Installation,
+) -> StoreResult<std::collections::BTreeMap<String, String>> {
+    let expected = serde_json::to_value(&installation.bundle)
+        .map_err(|_| StoreError::Corrupt("invalid installation snapshot".into()))?;
+    read_values(
+        store,
+        vault,
+        account,
+        &installation.name,
+        Some((installation.installed_at_ms, expected)),
+    )
+    .await
+}
+
+async fn read_values(
+    store: &PgStore,
+    vault: &Vault,
+    account: &AccountId,
+    name: &str,
+    expected: Option<(i64, serde_json::Value)>,
+) -> StoreResult<std::collections::BTreeMap<String, String>> {
+    let (at_ms, bundle) = match expected {
+        Some((at, bundle)) => (Some(at), Some(bundle)),
+        None => (None, None),
+    };
+    let rows = sqlx::query("select c.connector,c.secret_id,s.nonce,s.ciphertext,s.key_id
+        from plugin_credential c join plugin_installation p on p.account_id=c.account_id and p.name=c.plugin_name
+        join secret_store s on s.id=c.secret_id
+        where c.account_id=$1 and c.plugin_name=$2
+        and ($3::bigint is null or p.installed_at_ms=$3) and ($4::jsonb is null or p.bundle=$4)")
+        .bind(account.as_str()).bind(name).bind(at_ms).bind(bundle).fetch_all(store.pool()).await?;
     let mut values = std::collections::BTreeMap::new();
     for row in rows {
         let connector: String = row.try_get("connector")?;
         let id: String = row.try_get("secret_id")?;
-        if let Some(token) = store.open_credential(vault, &id).await? {
-            values.insert(opengrok_plugins::token_key(&connector), token);
-        }
+        let sealed = opengrok_store::Sealed {
+            nonce: row.try_get("nonce")?,
+            ciphertext: row.try_get("ciphertext")?,
+            key_id: row.try_get("key_id")?,
+        };
+        values.insert(
+            opengrok_plugins::token_key(&connector),
+            vault.open(&id, &sealed)?,
+        );
     }
     Ok(values)
 }

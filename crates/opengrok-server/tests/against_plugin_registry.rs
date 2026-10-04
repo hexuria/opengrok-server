@@ -904,3 +904,86 @@ async fn live_anonymous_mcp_transport_lists_tools() {
         json!({"endpoint":"https://mcp.exa.ai/mcp","remoteTools":names,"oauthUsed":false,"toolCalls":0})
     );
 }
+
+#[tokio::test]
+async fn an_old_installation_snapshot_cannot_receive_a_replacement_token() {
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness(&url, registry).await;
+    let owner = h.person(None).await;
+    let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let route = "/fixture/plugins/installations";
+    assert_eq!(
+        h.call(
+            &owner,
+            "POST",
+            route,
+            Some(json!({"name":"demo","registryRevision":OLD}))
+        )
+        .await
+        .0,
+        201
+    );
+    let snapshot = opengrok_integrations::installed::list(&h.store, &account)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        h.call(
+            &owner,
+            "DELETE",
+            "/fixture/plugins/installations/demo",
+            None
+        )
+        .await
+        .0,
+        204
+    );
+    assert_eq!(
+        h.call(
+            &owner,
+            "POST",
+            route,
+            Some(json!({"name":"demo","registryRevision":NEW}))
+        )
+        .await
+        .0,
+        201
+    );
+    assert_eq!(
+        h.call(
+            &owner,
+            "PUT",
+            "/fixture/plugins/installations/demo/credentials/demo",
+            Some(json!({"token":"replacement-secret"}))
+        )
+        .await
+        .0,
+        204
+    );
+    let old_values = opengrok_integrations::installed::values_for_installation(
+        &h.store,
+        h.agui.vault.as_ref().unwrap(),
+        &account,
+        &snapshot,
+    )
+    .await
+    .unwrap();
+    assert!(
+        old_values.is_empty(),
+        "a snapshot captured before uninstall must not receive the replacement credential"
+    );
+    let current = opengrok_integrations::installed::list(&h.store, &account)
+        .await
+        .unwrap()
+        .remove(0);
+    let current_values = opengrok_integrations::installed::values_for_installation(
+        &h.store,
+        h.agui.vault.as_ref().unwrap(),
+        &account,
+        &current,
+    )
+    .await
+    .unwrap();
+    assert_eq!(current_values["DEMO_TOKEN"], "replacement-secret");
+}
