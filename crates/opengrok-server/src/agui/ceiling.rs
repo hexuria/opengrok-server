@@ -39,11 +39,18 @@ async fn rows(
     owner: &AccountId,
     ceiling: &ToolSet,
 ) -> Result<Vec<Value>, opengrok_store::StoreError> {
-    let mut plugins = (*state.plugins).clone();
-    for installation in opengrok_integrations::installed::list(&state.auth.store, owner).await? {
+    // By reference: the deployment's plugins are not copied for every ceiling read.
+    let installed = opengrok_integrations::installed::list(&state.auth.store, owner).await?;
+    let installed: Vec<_> = installed.iter().map(|i| i.bundle.plugin()).collect();
+    let mut plugins: std::collections::BTreeMap<&str, _> = state
+        .plugins
+        .iter()
+        .map(|(name, p)| (name.as_str(), p))
+        .collect();
+    for plugin in &installed {
         plugins
-            .entry(installation.name)
-            .or_insert_with(|| installation.bundle.plugin());
+            .entry(plugin.manifest.name.as_str())
+            .or_insert(plugin);
     }
     // Available exactly when a turn would bind one (`tools_for_coworker`).
     let machine = crate::local_exec::enabled_machine(&state.auth.store, owner.as_str()).await;

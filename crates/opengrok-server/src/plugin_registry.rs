@@ -2,9 +2,7 @@
 use crate::agui::AgUiState;
 use opengrok_integrations::registry::Registry;
 pub fn router(state: AgUiState) -> axum::Router {
-    let repo =
-        std::env::var("OG_PLUGIN_REGISTRY").unwrap_or_else(|_| "hexuria/plugin-marketplace".into());
-    router_with_registry(state, Registry::github(repo).ok())
+    router_with_registry(state, Registry::from_env())
 }
 pub fn router_with_registry(state: AgUiState, registry: Option<Registry>) -> axum::Router {
     let reserved_names = opengrok_tools::Executor::every_builtin()

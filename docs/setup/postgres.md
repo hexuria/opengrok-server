@@ -152,7 +152,7 @@ tools, run inside the container.
 
 ## Data-transforming migrations
 
-Today's schema (`crates/opengrok-store/src/migrations.rs`) is one script, `SCHEMA`, of `create …
+Today's schema (`crates/opengrok-store/src/schema.sql`, included by `migrations.rs` as `SCHEMA`) is one script, of `create …
 if not exists` and `alter … add column if not exists`. Every boot, from every replica, takes one
 advisory lock (`MIGRATION_LOCK_KEY`, which must never change, or two versions overlapping on one
 deploy take different locks) and replays `SCHEMA` **when its SHA-256 is not yet in

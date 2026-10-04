@@ -110,3 +110,72 @@ fn routing_headers_do_not_hide_the_bearer_connector() {
         assert_eq!(headers["Authorization"], "Bearer ${DEMO_TOKEN}");
     }
 }
+
+#[test]
+fn a_hosted_server_must_name_a_public_host() {
+    for url in [
+        "https://mcp.example.com/mcp",
+        "https://mcp.example.com:8443/mcp",
+        "https://8.8.8.8/mcp",
+        "https://[2606:4700::1111]/mcp",
+    ] {
+        assert!(public_https(url), "{url}");
+    }
+    for url in [
+        "http://mcp.example.com/mcp",
+        "https://localhost/mcp",
+        "https://LOCALHOST./mcp",
+        "https://x.localhost/mcp",
+        "https://127.0.0.1/mcp",
+        "https://127.1/mcp",
+        "https://0x7f.1/mcp",
+        "https://2130706433/mcp",
+        "https://10.1.2.3/mcp",
+        "https://172.16.0.1/mcp",
+        "https://192.168.1.1/mcp",
+        "https://169.254.169.254/latest",
+        "https://100.64.0.1/mcp",
+        "https://0.0.0.0/mcp",
+        "https://[::1]/mcp",
+        "https://[fe80::1]/mcp",
+        "https://[fd12::1]/mcp",
+        "https://[::ffff:10.0.0.1]/mcp",
+        "https://[2001:db8::1]/mcp",
+        "https://user@mcp.example.com/mcp",
+        "https:///mcp",
+    ] {
+        assert!(!public_https(url), "{url}");
+    }
+}
+
+#[test]
+fn each_unsupported_skill_says_which_rule_it_broke() {
+    let mut files: BTreeMap<String, String> =
+        [("plugin.json".into(), r#"{"name":"demo"}"#.into())].into();
+    let long_body = format!(
+        "---\nname: long\n---\n{}",
+        "x".repeat(MAX_SKILL_BODY_CHARS + 1)
+    );
+    let long_description = format!(
+        "---\nname: wordy\ndescription: {}\n---\nbody",
+        "d".repeat(MAX_SKILL_DESCRIPTION_CHARS + 1)
+    );
+    for (name, text) in [
+        ("Bad_Name", "---\nname: x\n---\nbody".to_string()),
+        ("open", "---\nname: open\nno closing fence".to_string()),
+        ("long", long_body),
+        ("wordy", long_description),
+    ] {
+        files.insert(format!("skills/{name}/SKILL.md"), text);
+    }
+    let bundle = Bundle::from_files(&files).unwrap();
+    assert!(bundle.skills.is_empty());
+    let reason = |name: &str| {
+        let part = bundle.parts.iter().find(|p| p.name == name).unwrap();
+        part.reason.clone().unwrap()
+    };
+    assert_eq!(reason("Bad_Name"), "skill name is not a valid name");
+    assert_eq!(reason("open"), "SKILL.md frontmatter has no closing fence");
+    assert_eq!(reason("long"), "skill body exceeds 8000 characters");
+    assert_eq!(reason("wordy"), "skill description exceeds 300 characters");
+}

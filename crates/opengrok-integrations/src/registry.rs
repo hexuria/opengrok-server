@@ -1,8 +1,10 @@
 //! GitHub registry adapter. Sources are read at immutable commits, with bounded bytes and time.
-use opengrok_plugins::bundle::Bundle;
+use futures::StreamExt;
+use opengrok_plugins::bundle::{Bundle, Part};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct Registry {
@@ -10,6 +12,11 @@ pub struct Registry {
     api: String,
     raw: String,
     repo: String,
+    /// Sent to `api` only, never to `raw` or a source URL: anonymous reads share one 60-an-hour
+    /// budget per server address, which one person browsing could spend for everyone.
+    token: Option<String>,
+    cache: Arc<Mutex<Cache>>,
+    head_ttl: Duration,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,12 +35,41 @@ pub struct Catalog {
     pub revision: String,
     pub plugins: Vec<Entry>,
 }
+/// Which side is at fault decides the status a route answers: a request it should not have sent,
+/// a registry that did not answer, or a bundle this server will not take.
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct Error(pub String);
-fn bad(why: &str) -> Error {
-    Error(why.into())
+pub enum Error {
+    #[error("{0}")]
+    Request(String),
+    #[error("{0}")]
+    Upstream(String),
+    #[error("{0}")]
+    Refused(String),
 }
+fn upstream(why: &str) -> Error {
+    Error::Upstream(why.into())
+}
+fn refused(why: &str) -> Error {
+    Error::Refused(why.into())
+}
+
+/// Commits never change, so what was read at one is kept; only "which commit is HEAD" expires.
+/// Bounded by clearing when full: the cache is an optimisation, and a miss only costs a fetch.
+#[derive(Default)]
+struct Cache {
+    head: Option<(Instant, String)>,
+    reachable: BTreeMap<String, ()>,
+    catalogs: BTreeMap<String, Catalog>,
+    bundles: BTreeMap<(String, String, String, String), Bundle>,
+}
+const CACHED: usize = 64;
+fn keep<K: Ord, V>(map: &mut BTreeMap<K, V>, key: K, value: V) {
+    if map.len() >= CACHED {
+        map.clear();
+    }
+    map.insert(key, value);
+}
+
 pub fn revision_ok(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -58,155 +94,284 @@ fn github_repo(url: &str) -> Option<String> {
         .trim_end_matches(".git");
     repo_ok(repo).then(|| repo.into())
 }
+/// A source path as marketplaces write it (`./plugins/x`, `plugins/x/`, `.`), as the tree names
+/// it; `None` when it is not a plain relative path. Local and external sources alike: only local
+/// ones had `./` stripped, so `"./bundle"` on an external source failed the whole catalog.
+fn bundle_path(raw: &str) -> Option<String> {
+    let path = raw.strip_prefix("./").unwrap_or(raw).trim_end_matches('/');
+    let path = if path == "." { "" } else { path };
+    (path.is_empty() || path_ok(path)).then(|| path.into())
+}
+/// A skipped file stays visible as a part, so the person sees what the bundle carried and why it
+/// was left behind, rather than the whole plugin failing over one PNG.
+fn skipped(path: &str, why: &str) -> Part {
+    Part {
+        kind: "file".into(),
+        name: path.chars().take(200).collect(),
+        supported: false,
+        reason: Some(why.into()),
+    }
+}
 impl Registry {
-    pub fn github(repo: String) -> Result<Self, Error> {
-        Self::new(
+    /// The deployment's registry: `OG_PLUGIN_REGISTRY` (an `owner/repository`, by default
+    /// `hexuria/plugin-marketplace`) and, optionally, `OG_PLUGIN_REGISTRY_TOKEN` for GitHub's API.
+    /// An unusable value is said once, at boot, by name: swallowed, it switched the whole feature
+    /// off and every `/plugins` route answered 503 with nothing in the log to say why.
+    pub fn from_env() -> Option<Self> {
+        let repo = std::env::var("OG_PLUGIN_REGISTRY")
+            .unwrap_or_else(|_| "hexuria/plugin-marketplace".into());
+        let token = std::env::var("OG_PLUGIN_REGISTRY_TOKEN").ok();
+        Self::github(repo.clone(), token)
+            .inspect_err(|error| {
+                tracing::error!(%error, registry = repo, "OG_PLUGIN_REGISTRY is unusable; /plugins answers 503");
+            })
+            .ok()
+    }
+    pub fn github(repo: String, token: Option<String>) -> Result<Self, Error> {
+        let mut registry = Self::new(
             "https://api.github.com".into(),
             "https://raw.githubusercontent.com".into(),
             repo,
-        )
+        )?;
+        registry.token = token.filter(|t| !t.is_empty());
+        Ok(registry)
     }
     /// Separate roots permit a local recording server in integration tests. Deployment routes
     /// use `github`, never roots or source URLs from a request.
     pub fn new(api: String, raw: String, repo: String) -> Result<Self, Error> {
         if !repo_ok(&repo) {
-            return Err(bad("registry must be a GitHub owner/repository"));
+            return Err(Error::Request(
+                "registry must be a GitHub owner/repository".into(),
+            ));
         }
         let client = reqwest::Client::builder()
             .user_agent("opengrok-plugin-registry")
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|_| bad("registry client unavailable"))?;
+            .map_err(|_| upstream("registry client unavailable"))?;
         Ok(Self {
             client,
             api,
             raw,
             repo,
+            token: None,
+            cache: Arc::default(),
+            head_ttl: Duration::from_secs(300),
         })
     }
+    /// How long "this commit is HEAD" is believed. Five minutes keeps browsing to a dozen API
+    /// calls an hour; a test that moves HEAD under a running server sets zero.
+    #[must_use]
+    pub fn with_head_ttl(mut self, ttl: Duration) -> Self {
+        self.head_ttl = ttl;
+        self
+    }
+    fn cached<T>(&self, read: impl FnOnce(&mut Cache) -> T) -> Option<T> {
+        // A poisoned lock is a cache that cannot be trusted, never a request that fails.
+        self.cache.lock().ok().map(|mut cache| read(&mut cache))
+    }
     async fn bytes(&self, url: String) -> Result<Vec<u8>, Error> {
-        let mut response = self
-            .client
-            .get(url)
+        let mut request = self.client.get(&url);
+        if let Some(token) = self.token.as_ref().filter(|_| url.starts_with(&self.api)) {
+            request = request.bearer_auth(token);
+        }
+        let mut response = request
             .send()
             .await
-            .map_err(|_| bad("registry could not be reached"))?;
+            .map_err(|_| upstream("registry could not be reached"))?;
+        // Not there is an answer about the commit; anything else is the registry not answering.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(refused("registry file not found at that commit"));
+        }
         if !response.status().is_success() {
-            return Err(bad("registry file unavailable"));
+            return Err(upstream("registry file unavailable"));
         }
         let mut bytes = Vec::new();
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| bad("registry read failed"))?
+            .map_err(|_| upstream("registry read failed"))?
         {
             if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
-                return Err(bad("registry file exceeds 2 MiB"));
+                return Err(refused("registry file exceeds 2 MiB"));
             }
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
     }
     async fn json(&self, url: String) -> Result<serde_json::Value, Error> {
-        serde_json::from_slice(&self.bytes(url).await?).map_err(|_| bad("invalid registry JSON"))
+        serde_json::from_slice(&self.bytes(url).await?)
+            .map_err(|_| upstream("invalid registry JSON"))
     }
-    async fn file(&self, repo: &str, sha: &str, path: &str) -> Result<String, Error> {
-        String::from_utf8(
-            self.bytes(format!("{}/{repo}/{sha}/{path}", self.raw))
-                .await?,
-        )
-        .map_err(|_| bad("bundle file is not UTF-8"))
+    async fn file(&self, repo: &str, sha: &str, path: &str) -> Result<Vec<u8>, Error> {
+        self.bytes(format!("{}/{repo}/{sha}/{path}", self.raw))
+            .await
+    }
+    async fn head(&self) -> Result<String, Error> {
+        let fresh = self.cached(|c| c.head.clone()).flatten();
+        if let Some((_, sha)) = fresh.filter(|(at, _)| at.elapsed() < self.head_ttl) {
+            return Ok(sha);
+        }
+        let sha: String = self
+            .json(format!("{}/repos/{}/commits/HEAD", self.api, self.repo))
+            .await?["sha"]
+            .as_str()
+            .filter(|s| revision_ok(s))
+            .ok_or_else(|| upstream("registry commit missing"))?
+            .to_lowercase();
+        self.cached(|c| c.head = Some((Instant::now(), sha.clone())));
+        Ok(sha)
+    }
+    /// A pinned registry commit must be one the registry's own default branch reached. Any 40 hex
+    /// characters would otherwise do, including a commit from a fork, which GitHub serves under
+    /// the parent's path, carrying a marketplace nobody here curated.
+    async fn reachable(&self, sha: &str, head: &str) -> Result<(), Error> {
+        if sha == head || self.cached(|c| c.reachable.contains_key(sha)) == Some(true) {
+            return Ok(());
+        }
+        let url = format!("{}/repos/{}/compare/{sha}...{head}", self.api, self.repo);
+        let not_ours = || refused("that revision is not on the registry's default branch");
+        // GitHub answers 404 for a commit it cannot place against HEAD; an outage stays one.
+        let compared = self.json(url).await.map_err(|error| match error {
+            Error::Refused(_) => not_ours(),
+            other => other,
+        })?;
+        if !["ahead", "identical"].contains(&compared["status"].as_str().unwrap_or_default()) {
+            return Err(not_ours());
+        }
+        self.cached(|c| keep(&mut c.reachable, sha.to_string(), ()));
+        Ok(())
     }
     pub async fn catalog(&self, revision: Option<&str>) -> Result<Catalog, Error> {
         let sha = match revision {
             Some(sha) if revision_ok(sha) => sha.to_lowercase(),
-            Some(_) => return Err(bad("revision must be a full 40-character commit SHA")),
-            None => self
-                .json(format!("{}/repos/{}/commits/HEAD", self.api, self.repo))
-                .await?["sha"]
-                .as_str()
-                .filter(|s| revision_ok(s))
-                .ok_or_else(|| bad("registry commit missing"))?
-                .into(),
+            Some(_) => {
+                return Err(Error::Request(
+                    "revision must be a full 40-character commit SHA".into(),
+                ));
+            }
+            None => self.head().await?,
         };
-        let text = self
+        // Only a reachable commit's catalog is ever kept, so a hit needs no second look.
+        if let Some(catalog) = self.cached(|c| c.catalogs.get(&sha).cloned()).flatten() {
+            return Ok(catalog);
+        }
+        let head = self.head().await?;
+        self.reachable(&sha, &head).await?;
+        let bytes = self
             .file(&self.repo, &sha, ".grok-plugin/marketplace.json")
             .await?;
         let value: serde_json::Value =
-            serde_json::from_str(&text).map_err(|_| bad("invalid marketplace JSON"))?;
+            serde_json::from_slice(&bytes).map_err(|_| upstream("invalid marketplace JSON"))?;
         let plugins = value["plugins"]
             .as_array()
-            .ok_or_else(|| bad("marketplace needs plugins"))?;
+            .ok_or_else(|| upstream("marketplace needs plugins"))?;
         if plugins.len() > 256 {
-            return Err(bad("registry exceeds 256 entries"));
+            return Err(refused("registry exceeds 256 entries"));
         }
-        let mut entries = BTreeMap::new();
+        let mut entries: BTreeMap<String, Entry> = BTreeMap::new();
+        // ONE BAD ROW IS ONE UNAVAILABLE ENTRY, never a catalog that fails for every person. A
+        // row without a name at all cannot be shown, so only it is left out.
         for row in plugins {
-            let name = row["name"]
+            let Some(name) = row["name"]
                 .as_str()
-                .filter(|s| opengrok_plugins::is_valid_name(s) && !s.contains('.'))
-                .ok_or_else(|| bad("invalid registry plugin name"))?
-                .to_string();
+                .map(|n| n.chars().take(64).collect::<String>())
+            else {
+                continue;
+            };
             let source = &row["source"];
-            let (repo, pinned, path, why) = if let Some(local) = source.as_str().or_else(|| {
+            let (repo, pinned, path, mut why) = if let Some(local) = source.as_str().or_else(|| {
                 source["path"]
                     .as_str()
                     .filter(|_| source["type"] == "local")
             }) {
-                let path = local.strip_prefix("./").unwrap_or(local);
-                (self.repo.clone(), sha.clone(), path.into(), None)
+                (self.repo.clone(), sha.clone(), bundle_path(local), None)
             } else if let Some(repo) = source["url"].as_str().and_then(github_repo) {
                 let pinned = source["sha"].as_str().unwrap_or_default().to_lowercase();
                 let why =
                     (!revision_ok(&pinned)).then(|| "external source has no pinned commit".into());
-                (
-                    repo,
-                    pinned,
-                    source["path"].as_str().unwrap_or_default().into(),
-                    why,
-                )
+                let path = bundle_path(source["path"].as_str().unwrap_or_default());
+                (repo, pinned, path, why)
             } else {
-                (
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    Some("source is not a supported GitHub bundle".into()),
-                )
+                let why = Some("source is not a supported GitHub bundle".into());
+                (String::new(), String::new(), Some(String::new()), why)
             };
-            if !path.is_empty() && !path_ok(&path) {
-                return Err(bad("registry bundle path is unsafe"));
+            if !opengrok_plugins::is_valid_name(&name) || name.contains('.') {
+                why = Some("plugin name is not a valid tool prefix".into());
+            } else if path.is_none() {
+                why = why.or(Some("registry bundle path is unsafe".into()));
             }
             let entry = Entry {
                 name: name.clone(),
                 description: row["description"].as_str().unwrap_or_default().into(),
                 repository: repo,
                 revision: pinned,
-                path,
+                path: path.unwrap_or_default(),
                 unavailable_reason: why,
             };
-            if entries.insert(name, entry).is_some() {
-                return Err(bad("duplicate plugin name in registry"));
+            match entries.get_mut(&name) {
+                // Neither twin is installable: which one a name meant cannot be told.
+                Some(first) => {
+                    first.unavailable_reason = Some("two registry entries share this name".into())
+                }
+                None => {
+                    entries.insert(name, entry);
+                }
             }
         }
-        Ok(Catalog {
+        let catalog = Catalog {
             registry: self.repo.clone(),
-            revision: sha,
+            revision: sha.clone(),
             plugins: entries.into_values().collect(),
-        })
+        };
+        self.cached(|c| keep(&mut c.catalogs, sha, catalog.clone()));
+        Ok(catalog)
+    }
+    /// What an install may take: the entry at the pinned commit, provided the registry still lists
+    /// it as installable now. A plugin the maintainers pulled is not installable at an old pin.
+    /// `None` when the pinned catalog has no such plugin.
+    pub async fn installable(
+        &self,
+        revision: &str,
+        name: &str,
+    ) -> Result<Option<(Catalog, Entry)>, Error> {
+        let pinned = self.catalog(Some(revision)).await?;
+        let Some(entry) = pinned.plugins.iter().find(|e| e.name == name).cloned() else {
+            return Ok(None);
+        };
+        let current = self.catalog(None).await?;
+        let listed = current.plugins.iter().find(|e| e.name == name);
+        if !listed.is_some_and(|e| e.unavailable_reason.is_none()) {
+            return Err(refused("the registry no longer lists this plugin"));
+        }
+        Ok(Some((pinned, entry)))
     }
     pub async fn bundle(&self, entry: &Entry) -> Result<Bundle, Error> {
-        tokio::time::timeout(Duration::from_secs(60), self.fetch_bundle(entry))
+        let key = (
+            entry.repository.clone(),
+            entry.revision.clone(),
+            entry.path.clone(),
+            entry.name.clone(),
+        );
+        if let Some(bundle) = self.cached(|c| c.bundles.get(&key).cloned()).flatten() {
+            return Ok(bundle);
+        }
+        let bundle = tokio::time::timeout(Duration::from_secs(60), self.fetch_bundle(entry))
             .await
-            .map_err(|_| bad("bundle fetch exceeded 60 seconds"))?
+            .map_err(|_| upstream("bundle fetch exceeded 60 seconds"))??;
+        self.cached(|c| keep(&mut c.bundles, key, bundle.clone()));
+        Ok(bundle)
     }
     async fn fetch_bundle(&self, entry: &Entry) -> Result<Bundle, Error> {
-        if entry.unavailable_reason.is_some()
-            || !repo_ok(&entry.repository)
+        if let Some(why) = &entry.unavailable_reason {
+            return Err(Error::Refused(why.clone()));
+        }
+        if !repo_ok(&entry.repository)
             || !revision_ok(&entry.revision)
             || (!entry.path.is_empty() && !path_ok(&entry.path))
         {
-            return Err(bad("this source cannot be installed"));
+            return Err(refused("this source cannot be installed"));
         }
         let tree = self
             .json(format!(
@@ -215,26 +380,23 @@ impl Registry {
             ))
             .await?;
         if tree["truncated"] == true {
-            return Err(bad("repository tree is truncated"));
+            return Err(refused("repository tree is truncated"));
         }
         let rows = tree["tree"]
             .as_array()
-            .ok_or_else(|| bad("repository tree missing"))?;
+            .ok_or_else(|| upstream("repository tree missing"))?;
         let prefix = if entry.path.is_empty() {
             String::new()
         } else {
             format!("{}/", entry.path)
         };
-        let mut files = BTreeMap::new();
-        let mut total = 0;
+        let mut wanted = Vec::new();
+        let mut parts = Vec::new();
         for row in rows {
-            let Some(full) = row["path"].as_str() else {
+            let Some(path) = row["path"].as_str().and_then(|p| p.strip_prefix(&prefix)) else {
                 continue;
             };
-            let Some(path) = full.strip_prefix(&prefix) else {
-                continue;
-            };
-            let wanted = [
+            let named = [
                 "plugin.json",
                 ".grok-plugin/plugin.json",
                 ".claude-plugin/plugin.json",
@@ -246,31 +408,56 @@ impl Registry {
                 || ["skills/", "commands/", "agents/", "hooks/", "lsp/"]
                     .iter()
                     .any(|p| path.starts_with(p));
-            if !wanted || row["type"] != "blob" {
+            if !named || row["type"] != "blob" {
                 continue;
             }
-            if !path_ok(path) || row["mode"] == "120000" {
-                return Err(bad("bundle contains unsafe path or symlink"));
+            if wanted.len() + parts.len() >= 128 {
+                return Err(refused("bundle exceeds 128 files"));
             }
-            if files.len() >= 128 {
-                return Err(bad("bundle exceeds 128 files"));
-            }
-            // Presence is enough for an unsupported component; do not fetch executable hooks.
-            let text = if path.starts_with("skills/") || path.ends_with(".json") {
-                self.file(&entry.repository, &entry.revision, full).await?
+            if row["mode"] == "120000" {
+                parts.push(skipped(path, "symlinks are not followed"));
+            } else if !path_ok(path) {
+                parts.push(skipped(path, "file name is not a plain path"));
             } else {
-                String::new()
-            };
-            total += text.len();
-            if total > 2 * 1024 * 1024 {
-                return Err(bad("bundle exceeds 2 MiB"));
+                wanted.push(path.to_string());
             }
-            files.insert(path.to_string(), text);
         }
-        let bundle = Bundle::from_files(&files).map_err(Error)?;
+        // Presence is enough for an unsupported component; do not fetch executable hooks. Eight at
+        // a time: one by one, a skills-heavy bundle on a slow link ran out of its 60 seconds.
+        let prefix = &prefix;
+        let fetched = futures::stream::iter(wanted.into_iter().map(|path| async move {
+            let fetch = path.starts_with("skills/") || path.ends_with(".json");
+            let bytes = if fetch {
+                let full = format!("{prefix}{path}");
+                self.file(&entry.repository, &entry.revision, &full).await?
+            } else {
+                Vec::new()
+            };
+            Ok::<_, Error>((path, bytes))
+        }))
+        .buffer_unordered(8);
+        futures::pin_mut!(fetched);
+        let mut files = BTreeMap::new();
+        let mut total = 0;
+        while let Some(fetched) = fetched.next().await {
+            let (path, bytes) = fetched?;
+            total += bytes.len();
+            if total > 2 * 1024 * 1024 {
+                return Err(refused("bundle exceeds 2 MiB"));
+            }
+            match String::from_utf8(bytes) {
+                Ok(text) => {
+                    files.insert(path, text);
+                }
+                Err(_) => parts.push(skipped(&path, "not a UTF-8 text file")),
+            }
+        }
+        let mut bundle = Bundle::from_files(&files).map_err(Error::Refused)?;
         if bundle.manifest.name != entry.name {
-            return Err(bad("bundle name disagrees with registry"));
+            return Err(refused("bundle name disagrees with registry"));
         }
+        parts.sort_by(|a, b| a.name.cmp(&b.name));
+        bundle.parts.extend(parts);
         Ok(bundle)
     }
 }

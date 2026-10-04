@@ -888,49 +888,10 @@ async fn connect_plugins(
         }));
     }
 
-    // Account bundles never inherit deployment-wide or bot-lent tokens. Each plugin's own
-    // credential namespace is resolved only after the driving account owns this bot.
-    if let Ok(installed) =
-        opengrok_integrations::installed::for_turn(&state.auth.store, account_id, coworker_id).await
-    {
-        for installation in installed {
-            if state.plugins.contains_key(&installation.name) {
-                continue;
-            }
-            let values = match &state.vault {
-                Some(vault) => match opengrok_integrations::installed::values_for_installation(
-                    &state.auth.store,
-                    vault,
-                    account_id,
-                    &installation,
-                )
-                .await
-                {
-                    Ok(values) => values,
-                    Err(_) => {
-                        tracing::warn!(
-                            plugin = installation.name,
-                            "installed plugin credentials unavailable"
-                        );
-                        continue;
-                    }
-                },
-                None => BTreeMap::new(),
-            };
-            let (reachable, _) = opengrok_tools::mcp::endpoints_for(
-                &installation.bundle.plugin_with_values(&values),
-                &values,
-            );
-            endpoints.extend(reachable.into_iter().filter(|endpoint| {
-                opengrok_policy::may_run_any_under(
-                    account_id,
-                    coworker_id,
-                    &endpoint.qualify(""),
-                    policy,
-                )
-            }));
-        }
-    }
+    let (store, vault) = (&state.auth.store, state.vault.as_deref());
+    let operator = |name: &str| state.plugins.contains_key(name);
+    let turn = opengrok_integrations::turn::endpoints;
+    endpoints.extend(turn(store, vault, account_id, coworker_id, policy, operator).await);
 
     // The ceiling gate, per tool and on every turn, whether the listing is fresh or pooled. A tool
     // the coworker may not run is not offered at all — being told about a tool that always

@@ -192,6 +192,9 @@ pub struct Endpoint {
     /// Headers with placeholders already filled. Contains a bearer token, so this type has a
     /// hand-written `Debug`.
     pub headers: BTreeMap<String, String>,
+    /// Applied to this session's HTTP client. An account-installed bundle names its own URL, so
+    /// it is dialled without redirects and only to public addresses (`opengrok_integrations::net`).
+    pub harden: Option<fn(reqwest::ClientBuilder) -> reqwest::ClientBuilder>,
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -299,6 +302,7 @@ pub fn endpoints_for(
                     server: name.clone(),
                     url: url.clone(),
                     headers: filled,
+                    harden: None,
                 });
             }
         }
@@ -552,8 +556,8 @@ impl Session {
         // A CONNECT timeout and never a whole-request one: the transport holds a long-lived
         // stream open for server messages, and a request timeout would cut it mid-session. The
         // handshake, the listing and each call are bounded one by one instead.
-        let client = reqwest::Client::builder()
-            .connect_timeout(deadlines.connect)
+        let harden = endpoint.harden.unwrap_or(|builder| builder);
+        let client = harden(reqwest::Client::builder().connect_timeout(deadlines.connect))
             .build()
             .map_err(|error| McpError::Unreachable {
                 server: endpoint.key(),

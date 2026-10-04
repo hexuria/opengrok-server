@@ -8,7 +8,6 @@ license.workspace = true
 workspace = true
 [dependencies]
 opengrok-core = { path = "../opengrok-core" }
-opengrok-plugins = { path = "../opengrok-plugins" }
 opengrok-store = { path = "../opengrok-store" }
 opengrok-integrations = { path = "../opengrok-integrations" }
 axum.workspace = true

@@ -12,7 +12,7 @@ The model door is scripted and does not make billed provider calls.
 | --- | --- | --- |
 | Unit-tested bundle adaptation, refusal reporting, third-party framing, token namespace construction, and original provider behavior | `cargo test --locked -p opengrok-plugins -p opengrok-integrations --lib` | 52 passed. Includes unchanged provider tests moved with their implementation. |
 | Property-tested path and revision acceptance | Two proptest cases within that unit run | Random strings up to 150 characters for paths and 70 for revisions; sampled, not exhaustive. Accepted paths have no traversal/URL controls and accepted revisions are full hexadecimal hashes. |
-| Integration-tested catalog and ownership contract | `OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok_gate cargo test --locked -p opengrok-server --test against_plugin_registry` | 2 passed. One local HTTP registry adapter test and one Postgres/HTTP/turn test. |
+| Integration-tested catalog and ownership contract | `OG_DATABASE_URL=postgres://oag:oag@127.0.0.1:5452/opengrok_gate cargo test --locked -p opengrok-server --test against_plugin_registry` | 2 passed at the time (now 4: see the review follow-up below). One local HTTP registry adapter test and one Postgres/HTTP/turn test. |
 | Installation pin persists when catalog HEAD moves | Local registry starts at one commit and advances to another after installation | GET installations keeps the old bundle and pin; only uninstall followed by POST selects the new pin. External sources retain their own commit. |
 | Account secrets remain encrypted and private | HTTP credential save, ciphertext query, cross-account reads/writes, and scripted shared-Bot turn | Another account cannot save an absent installation, read the owner's token, or read their skill. Even installing its own copy does not offer that copy to a shared Bot the account does not own. Token is absent from ciphertext plaintext windows and listing responses. |
 | Uninstall removes credentials atomically | Postgres integration: concurrent credential save and uninstall via `tokio::join!` | One two-request interleaving run; row locking and the transaction leave zero orphan secret rows. This is an integration test, not exhaustive concurrency verification. |
@@ -81,3 +81,32 @@ live boundary tests passed; affected crates' all-target Clippy passed with warni
 The live tests' outcome for the pinned OAuth connector remains **blocked pending implementation**.
 The earlier formal/run checks are unchanged: this fix only changes deterministic header and
 connector construction, with no journal, scheduler, ownership, or persistence protocol change.
+
+## Review follow-up — 4 October 2026
+
+A code review of PR #366 raised fifteen findings. Each was checked against the code before it
+was fixed; the regression test that now asserts it is named. Base for these checks: the PR head
+`899f0ef`.
+
+| Finding | Confirmed by | Fixed in | Asserted by |
+| --- | --- | --- | --- |
+| A bundle's MCP URL only had to start `https://`; the client followed up to 10 redirects, so a `307` to `http://127.0.0.1:<port>` re-sent the POST and its headers inside the deployment | `Session::connect_within` built its client with no redirect policy; nothing refused private targets | `opengrok_plugins::bundle::public_https`, `opengrok_integrations::net` (`harden`: no redirects, public-only resolver), `Endpoint::harden` | `a_hosted_server_must_name_a_public_host`, `private_and_disguised_addresses_are_never_public`, `a_name_resolving_to_loopback_is_refused`, `a_hardened_client_does_not_follow_redirects` |
+| Plugin skills were offered and read with the plugin switched off on the Bot | `skills::onto` had no ceiling check; the old integration test asserted `use_skill` after switching the plugin off | `turn::switched_on`, checked at offer and again at read | `pinned_installations_and_credentials_belong_only_to_the_driving_account` (off: no `use_skill`, no body; on: body), `a_plugin_is_on_only_where_ceiling_and_grant_both_admit_it_whole` |
+| Any 40-hex `registryRevision` was trusted | `catalog(Some(sha))` fetched it without asking where it came from | `Registry::reachable` (compare API) and `installable` (still listed at HEAD) | `registry_resolves_local_and_external_commits_without_a_database` (diverged commit), the hostile registry's 404 commit |
+| Uninstall left `<plugin>.*` in ceilings and grants, so a reinstall went live unasked | `uninstall` touched neither table | `installed::switch_off` in the install and uninstall transactions | main integration test: no `demo` row after uninstall, `enabled: false` after reinstall; `switching_a_plugin_off_takes_only_its_own_entries` |
+| Plugin skill files were copied without the running-computer check | `plugin_skill` called `bundle::place` directly | shared `skills::files_line` | existing skill-file tests through the shared function |
+| One non-UTF-8 or oddly named file failed the whole bundle | `file()` and `path_ok` returned `Err` | per-file `file` parts | `one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds` |
+| One malformed catalog entry failed the catalog | early `return Err` for name, path, duplicates | per-entry `unavailableReason`; `./` stripped for external sources | same test |
+| Credentials compared the bundle JSON every turn | `p.bundle = $4::jsonb` | `incarnation` column | `an_old_installation_snapshot_cannot_receive_a_replacement_token` |
+| The purge left plugin rows | not in the per-table list | two deletes | `everyone_but_the_allowlist_goes_and_the_allowlist_keeps_everything` footprint |
+| Registry reads uncached, sequential, anonymous | no cache; one fetch at a time | immutable-commit cache, 5-minute HEAD, eight fetches at a time, optional `OG_PLUGIN_REGISTRY_TOKEN` | covered by the fixture tests; the budget itself is GitHub's and not exercised |
+| Unknown MCP fields dropped, server reported supported | `McpServer` drops unknown keys | `hosted_refusal` | hostile registry: `disabled`, `oauth`, `timeout` |
+| One unreadable installation broke the ceiling and Connections | `collect::<StoreResult<_>>` | per-row `readable`, logged | — (corrupt JSON cannot be written through the API) |
+| A bad `OG_PLUGIN_REGISTRY` was silent | `.ok()` | `Registry::from_env` logs at boot | — |
+| Most documented refusals were untested | — | — | the hostile-registry test |
+| Crate ceilings met by moving SQL; docs not updated | `crate-size.sh` counts `.rs` only | stated in `docs/plugin-registry.md`; CLAUDE.md and `postgres.md` updated; unused `opengrok-plugins` edge of `opengrok-plugin-api` removed | `scripts/check-architecture.sh` |
+
+Not changed: the `opengrok-integrations`/`opengrok-plugin-api` split itself and the
+`schema.sql` extraction stand; the follow-up states what the line count measures rather than
+undoing the structure. `MANIFEST.json`'s `server_sha` is rewritten by `scripts/record-wire.sh`
+on the next recording after merge.

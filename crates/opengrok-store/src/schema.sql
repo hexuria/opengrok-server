@@ -1284,6 +1284,10 @@ create table if not exists plugin_installation (
     installed_at_ms bigint not null,
     primary key (account_id, name)
 );
+-- Which install a captured snapshot was, compared when its credentials are read. Comparing the
+-- bundle JSON instead re-sent megabytes per turn, and a field added to `Bundle` with a default
+-- would have made every stored snapshot unequal to itself and silently withheld its credentials.
+alter table plugin_installation add column if not exists incarnation text not null default gen_random_uuid()::text;
 create table if not exists plugin_credential (
     account_id text not null,
     plugin_name text not null,
