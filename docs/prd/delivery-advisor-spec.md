@@ -3,19 +3,24 @@
 Status: draft for review  
 Branch: `auto-steer`  
 Parent PRD: [`docs/prd/auto-steer.md`](./auto-steer.md)  
-Proposed crate: `pua-pack-autosteer` in [hexuria/pua](https://github.com/hexuria/pua) (see update below)  
+Proposed home: opengrok-server (server ingress crate; consumes [hexuria/pua](https://github.com/hexuria/pua) engine — see update below)  
 Toolchain: Rust 1.99.0 (workspace `rust-toolchain.toml` pin), edition 2024, `#![forbid(unsafe_code)]`  
 Default: **off** (config flag)
 
-> **Update 2026-10-05 (codebase analysis).** This spec becomes the **autosteer pack** of the
-> [PUA (Predictable Universal Advisor)](https://github.com/hexuria/pua/blob/main/docs/spec.md) spec
-> (§6.1 there), as the crate `pua-pack-autosteer` in the separate repo `hexuria/pua`. "Predictable" means
-> deterministic: the same input gives the same scores, with no sampling. PUA is tier 0, below Jev.
-> Paths below that say `crates/opengrok-advisor/` now mean `packs/pua-pack-autosteer/` in hexuria/pua,
-> and opengrok-server or NativeChat would pin it by git tag or rev.
+> **Update 2026-10-05 (codebase analysis + owner decision).** Delivery advice is a **consumer of**
+> [PUA (Predictable Universal Advisor)](https://github.com/hexuria/pua/blob/main/docs/spec.md)
+> ("Predictable" = deterministic scores, no sampling). PUA is tier 0, below Jev. The pack left
+> `hexuria/pua` in Phase 2; the engine stays in PUA and consumers pin it by git tag or rev.
+>
+> **Owner decision 2026-10-05:** the **authoritative** classify→apply gate for queue / steer /
+> interrupt lives on **opengrok-server ingress** (message intake / pending create), not on the
+> NativeChat client. Client-side advice dies when the app closes and is easy to bypass by just
+> sending. [nativechat#194](https://github.com/hexuria/nativechat/pull/194) (client crate handoff)
+> was closed for that reason. Optional NativeChat confirm chips remain UX only.
+>
 > Three changes override the text below:
-> 1. The hook moves from `pending.rs create` to **NativeChat `OnSend::Auto`** in `send_policy.rs`.
->    The server does not decide queue vs steer today. The server route or annotation is optional.
+> 1. The hook stays (or returns) on **server ingress** (`pending.rs` create / equivalent intake).
+>    NativeChat `OnSend` / chips may surface suggestions; they are **not** the gate.
 > 2. The steer-splice guard (§5) is **re-scoped**. The splice never rewrites the user's instruction.
 >    It inserts clipped tool calls + `STEER_CONTINUATION` (`agui/routes.rs:4870-4977`), so the guard
 >    only reports protected spans lost to that clipping.
@@ -45,7 +50,7 @@ make no claim about, BCSC's proprietary math ("H-Manifold") or code.
 
 ### 1.2 Non-goals
 
-- **Never routes alone.** The advisor returns a suggestion. Server policy or the user decides.
+- **Never routes alone.** The advisor returns a suggestion. **Server policy** applies it (or asks the user via a chip). The client alone must not be the only enforcer.
 - **Never overrides exact rules:** explicit reply-to, explicit target, Kill / stop on a `run_id`.
 - No LLM, no GPU, no network call in the default path.
 - No gradient training. Rules and lexicon are hand-written data; vectors are computed by formula.

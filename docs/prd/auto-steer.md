@@ -140,6 +140,7 @@ Do **not** require Kill only on the original “do X” user message.
 **Phase E — optional deterministic delivery advisor**
 
 - CPU-only, rule-and-vector advisor that *suggests* queue / steer / interrupt and a target when exact rules (reply-to, explicit target, Kill) leave a message unresolved; abstains when unsure. Never routes alone; config flag, default off. See [delivery-advisor-spec.md](./delivery-advisor-spec.md).
+- **Enforcement is on opengrok-server ingress** (not NativeChat). The client may show confirm chips; closing the app must not disable the gate, and a client that just keeps sending must not bypass it. nativechat#194 (client crate) was closed for this reason.
 
 ### 7.3 API sketch (Phase C; refine in implementation)
 
@@ -159,9 +160,13 @@ Exact paths may follow existing AG-UI style; this is intent, not frozen URL law.
 
 ## 8. NativeChat implementation notes
 
+NativeChat owns **UX** (rail, labels, Kill, reply-to). It does **not** own the authoritative
+queue/steer/interrupt classify→apply gate — that is opengrok-server ingress (see Phase E and
+[delivery-advisor-spec.md](./delivery-advisor-spec.md)).
+
 Primary code today:
 
-- `src/send_policy.rs` — `OnSend`, `SendPlan`, `plan_send`
+- `src/send_policy.rs` — `OnSend`, `SendPlan`, `plan_send` (optional chips / local hints only)
 - `src/state.rs` — `take_running_turn_for_steer`, stop-before-post, `drain_queued_send`, `settle_parked_cards`
 
 Changes (direction):
@@ -172,8 +177,9 @@ Changes (direction):
 4. Reply-to sets `target_run_id` on the outbound turn.
 5. Kill → `stop_run(run_id)` only.
 6. Keep conversation pending queue for untargeted messages until Phase C.
+7. Do not treat `OnSend::Auto` as the only delivery gate; server must still classify/apply.
 
-Sibling PR in `hexuria/nativechat` should reference this PRD.
+Sibling PR in `hexuria/nativechat` should reference this PRD for UX only.
 
 ## 9. Phased rollout
 
@@ -234,3 +240,4 @@ Suggested reviewers: OpenGrok maintainer agent, NativeChat maintainer agent, adv
 | 2026-10-05 | Steer is harness delivery; models generally do not implement steer. |
 | 2026-10-05 | UI ships before same-run inject; do not fake Cursor steer in docs until Phase C. |
 | 2026-10-05 | Composer stays free; Kill is per-workstream. |
+| 2026-10-05 | Authoritative queue/steer/interrupt classify→apply is **opengrok-server ingress**, not NativeChat. nativechat#194 closed; client chips are UX only. |
