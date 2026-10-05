@@ -3,9 +3,19 @@
 Status: draft for review  
 Branch: `auto-steer`  
 Parent PRD: [`docs/prd/auto-steer.md`](./auto-steer.md)  
-Proposed crate: `crates/opengrok-advisor`  
+Proposed crate: ~~`crates/opengrok-advisor`~~ → `crates/opengrok-reso-pack-autosteer` (see update below)  
 Toolchain: Rust 1.99.0 (workspace `rust-toolchain.toml` pin), edition 2024, `#![forbid(unsafe_code)]`  
 Default: **off** (config flag)
+
+> **Update 2026-10-05 (codebase analysis).** This spec becomes the **autosteer pack** of the
+> [deterministic resonance library](./deterministic-resonance-library-spec.md) (§6.1 there).
+> Three changes override the text below:
+> 1. The hook moves from `pending.rs create` to **NativeChat `OnSend::Auto`** in `send_policy.rs`.
+>    The server does not decide queue vs steer today. The server route or annotation is optional.
+> 2. The steer-splice guard (§5) is **re-scoped**. The splice never rewrites the user's instruction.
+>    It inserts clipped tool calls + `STEER_CONTINUATION` (`agui/routes.rs:4870-4977`), so the guard
+>    only reports protected spans lost to that clipping.
+> 3. Target selection waits for PRD Phase B. Before that, the pack advises delivery class only.
 
 ---
 
