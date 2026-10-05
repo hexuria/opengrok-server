@@ -3,12 +3,16 @@
 Status: draft for review  
 Branch: `auto-steer`  
 Parent PRD: [`docs/prd/auto-steer.md`](./auto-steer.md)  
-Proposed crate: ~~`crates/opengrok-advisor`~~ → `crates/opengrok-reso-pack-autosteer` (see update below)  
+Proposed crate: `pua-pack-autosteer` in [hexuria/pua](https://github.com/hexuria/pua) (see update below)  
 Toolchain: Rust 1.99.0 (workspace `rust-toolchain.toml` pin), edition 2024, `#![forbid(unsafe_code)]`  
 Default: **off** (config flag)
 
 > **Update 2026-10-05 (codebase analysis).** This spec becomes the **autosteer pack** of the
-> [deterministic resonance library](./deterministic-resonance-library-spec.md) (§6.1 there).
+> [PUA (Predictable Universal Advisor)](https://github.com/hexuria/pua/blob/main/docs/spec.md) spec
+> (§6.1 there), as the crate `pua-pack-autosteer` in the separate repo `hexuria/pua`. "Predictable" means
+> deterministic: the same input gives the same scores, with no sampling. PUA is tier 0, below Jev.
+> Paths below that say `crates/opengrok-advisor/` now mean `packs/pua-pack-autosteer/` in hexuria/pua,
+> and opengrok-server or NativeChat would pin it by git tag or rev.
 > Three changes override the text below:
 > 1. The hook moves from `pending.rs create` to **NativeChat `OnSend::Auto`** in `send_policy.rs`.
 >    The server does not decide queue vs steer today. The server route or annotation is optional.
