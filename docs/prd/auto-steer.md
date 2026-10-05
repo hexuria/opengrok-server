@@ -4,7 +4,8 @@ Status: draft for review
 Branch: `auto-steer`  
 Repos: `hexuria/opengrok-server` (contracts + this PRD) · `hexuria/nativechat` (UI/UX implementation)  
 Audience: implementers and reviewing agents  
-Related research: conversation with Prime (2026-10-05) on queue / steer / interrupt; Cursor Agent docs; OpenGrok stop + pending paths
+Related research: conversation with Prime (2026-10-05) on queue / steer / interrupt; Cursor Agent docs; OpenGrok stop + pending paths  
+Related spec: [Deterministic delivery advisor (Phase E)](./delivery-advisor-spec.md)
 
 ---
 
@@ -136,6 +137,10 @@ Do **not** require Kill only on the original “do X” user message.
 
 - Only if product accepts partial tool outcomes: wire researched `POST /boxes/{id}/interrupt` (or equivalent) into stop path carefully with `open_tools` accounting. Not required for UI v1.
 
+**Phase E — optional deterministic delivery advisor**
+
+- CPU-only, rule-and-vector advisor that *suggests* queue / steer / interrupt and a target when exact rules (reply-to, explicit target, Kill) leave a message unresolved; abstains when unsure. Never routes alone; config flag, default off. See [delivery-advisor-spec.md](./delivery-advisor-spec.md).
+
 ### 7.3 API sketch (Phase C; refine in implementation)
 
 ```text
@@ -178,6 +183,7 @@ Sibling PR in `hexuria/nativechat` should reference this PRD.
 | **B** | Concurrent runs per conversation + routing by reply-to | X and Y both active; fix X / stop Y isolated |
 | **C** | Pending-steer inject same run | Mid-run correction does not require new `run_id`; eng docs drop “coarse steer” alias |
 | **D** | Optional box interrupt | Documented `takesEffect` for hard abort cases |
+| **E** | Optional deterministic delivery advisor (after A/B; offline prototype any time) | Suggestions journaled and replayable; wrong-target ~0 at `standard`; abstain falls back to default policy |
 
 ## 10. Risks
 
