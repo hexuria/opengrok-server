@@ -1,0 +1,4 @@
+# PUA (pinned in Cargo.toml) needs Rust 1.99; the rest of opengrok is on 1.95 until it bumps.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]

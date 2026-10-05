@@ -1,0 +1,16 @@
+# Determinism guard rails (spec §5 rule 3): no unordered maps, clocks, RNG or env reads in
+# library code. Tests may unwrap/expect.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is unspecified; use BTreeMap or a sorted Vec (spec §5 rule 3)" },
+    { path = "std::collections::HashSet", reason = "iteration order is unspecified; use BTreeSet or a sorted Vec (spec §5 rule 3)" },
+]
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "no clocks in PUA (spec §5 rule 3)" },
+    { path = "std::time::Instant::now", reason = "no clocks in PUA (spec §5 rule 3)" },
+    { path = "std::env::var", reason = "no environment reads in PUA (spec §5 rule 3)" },
+    { path = "std::env::var_os", reason = "no environment reads in PUA (spec §5 rule 3)" },
+    { path = "std::env::vars", reason = "no environment reads in PUA (spec §5 rule 3)" },
+]

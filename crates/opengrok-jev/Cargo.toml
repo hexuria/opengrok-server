@@ -1,0 +1,44 @@
+[package]
+name = "opengrok-jev"
+description = "Jev wire shapes (noul / choice / score) to and from PUA core types: the one float boundary, the off-menu guard and a labelled escalation fallback. No HTTP client."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+# Its own workspace for now: PUA requires Rust 1.99 and the opengrok workspace (and CI) pin 1.95.
+# When opengrok bumps rust-toolchain.toml and ci.yml, delete this table and rust-toolchain.toml
+# here, add the crate to the root `members`, and give it a line in scripts/architecture.txt.
+[workspace]
+
+[dependencies]
+# PUA engine, pinned by git rev (no PUA tag yet).
+pua-core = { git = "https://github.com/hexuria/pua", rev = "e1635f12908deda99308f03222c4265043e0e749", features = ["serde"] }
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+
+# Same bar as the PUA engine. float_arithmetic stays denied: the boundary functions carry a
+# local #[allow] with the reason.
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+float_arithmetic = "deny"
+float_cmp = "deny"
+dbg_macro = "deny"
+todo = "deny"
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
