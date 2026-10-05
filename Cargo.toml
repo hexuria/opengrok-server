@@ -5,6 +5,8 @@
 # straight line: core knows nothing, everything else knows core.
 [workspace]
 resolver = "3"
+# Its own workspace until opengrok moves to Rust 1.99 (PUA's rust-version); see its Cargo.toml.
+exclude = ["crates/opengrok-jev"]
 members = [
   "crates/opengrok-plugin-api", # authenticated registry HTTP adapter
   "crates/opengrok-integrations", # registry I/O and account-owned pinned bundles
