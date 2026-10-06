@@ -56,6 +56,9 @@ const REST_PREFIXES: &[&str] = &[
     "/inference-relay",
     // The Auto-review modal's policy: its rows by scope and the resolved view (#354).
     "/auto-review",
+    // The plugin marketplace (NativeChat #184): the catalog, a plugin's pinned detail, the
+    // person's installs, and the tokens pasted for an install's services (#359).
+    "/plugins",
 ];
 
 /// Routes under those prefixes that are not JSON NativeChat reads: the screen proxy serves noVNC's
@@ -79,6 +82,22 @@ const REST_LEFT_OUT: &[&str] = &[
 /// A turn that reads an attached skill with `use_skill` has a tool call's shapes, and NativeChat
 /// asked for one recorded (#270).
 const ALSO_KEEP: &[(&str, &str)] = &[
+    // Several accounts for one service (#359): two sign-ins of one connector, and two pasted
+    // accounts of kind `token`, have one account's shape, so only a pin keeps the lists NativeChat
+    // reads them from.
+    (
+        "accounts_are_added_reconnected_and_pinned_by_id",
+        "/connections",
+    ),
+    (
+        "a_second_pasted_account_is_added_beside_the_first_and_each_bot_uses_its_own",
+        "/connections",
+    ),
+    // An account signed in to at an installed plugin's own server is kind `mcp` (#364).
+    (
+        "a_plugin_account_is_signed_in_at_its_own_server_refreshed_and_used_by_its_bot",
+        "/connections",
+    ),
     (
         "a_turn_reads_an_attached_skill_with_use_skill_and_gets_its_body",
         "/ag-ui/runs/{run_id}",

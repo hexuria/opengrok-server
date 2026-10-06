@@ -1,0 +1,33 @@
+{
+  "method": "GET",
+  "path": "/connections",
+  "status": 200,
+  "body": [
+    {
+      "id": "conn_demo_acct_0199bb4e-0000-7000-8000-000000000001_0199bb4e000070008000000000000002",
+      "connector": "demo",
+      "owner": {
+        "scope": "user",
+        "id": "acct_0199bb4e-0000-7000-8000-000000000001"
+      },
+      "label": "Demo",
+      "loans": [],
+      "updatedAtMs": 1790000000000,
+      "expiresAtMs": null,
+      "kind": "token"
+    },
+    {
+      "id": "conn_demo_acct_0199bb4e-0000-7000-8000-000000000001_0199bb4e000070008000000000000003",
+      "connector": "demo",
+      "owner": {
+        "scope": "user",
+        "id": "acct_0199bb4e-0000-7000-8000-000000000001"
+      },
+      "label": "Demo 2",
+      "loans": [],
+      "updatedAtMs": 1790000001000,
+      "expiresAtMs": null,
+      "kind": "token"
+    }
+  ]
+}

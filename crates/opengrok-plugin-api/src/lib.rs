@@ -13,6 +13,8 @@ use opengrok_integrations::installed;
 use opengrok_integrations::registry::{Error, Registry};
 use serde::Deserialize;
 
+mod accounts;
+
 #[derive(Clone)]
 pub struct RegistryState {
     pub store: opengrok_store::PgStore,
@@ -30,8 +32,9 @@ pub fn router(state: RegistryState) -> Router {
         .route("/plugins/installations/{name}", delete(uninstall))
         .route(
             "/plugins/installations/{name}/credentials/{connector}",
-            put(credential),
+            put(credential).post(add_credential),
         )
+        .merge(accounts::router())
         .with_state(state)
 }
 /// A request this server should not have been sent is the client's (422), a registry that did not
@@ -89,7 +92,7 @@ async fn detail(
         return refused(404, "no such plugin");
     };
     match registry.bundle(entry).await {
-        Ok(bundle) => Json(serde_json::json!({"entry": entry, "registryRevision": catalog.revision, "parts": bundle.parts, "connectors": bundle.connectors()})).into_response(),
+        Ok(bundle) => Json(serde_json::json!({"entry": entry, "registryRevision": catalog.revision, "parts": bundle.parts, "connectors": bundle.connectors(), "manifest": bundle.manifest})).into_response(),
         Err(error) => registry_refused(&error),
     }
 }
@@ -97,9 +100,33 @@ async fn list(State(s): State<RegistryState>, headers: HeaderMap) -> Response {
     let Some(account) = (s.authenticate)(&headers) else {
         return refused(401, "sign in first");
     };
-    match installed::list(&s.store, &account).await {
-        Ok(rows) => Json(rows).into_response(),
-        Err(_) => refused(503, "installed plugins could not be read"),
+    let listed = installed::list(&s.store, &account).await;
+    let bound = installed::bindings(&s.store, &account).await;
+    match (listed, bound) {
+        // Each with the services its accounts are for (`Bundle::connectors`), as the catalog's
+        // detail names them, and the pasted accounts it holds (#359), so an app lists an install's
+        // accounts without reading its servers or guessing whose a token account is.
+        (Ok(rows), Ok(bound)) => {
+            let rows: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|row| {
+                    let connectors = row.bundle.connectors();
+                    let accounts: Vec<serde_json::Value> = bound
+                        .iter()
+                        .filter(|(plugin, _, _)| *plugin == row.name)
+                        .map(|(_, connector, id)| {
+                            serde_json::json!({"connector": connector, "connectionId": id})
+                        })
+                        .collect();
+                    let mut value = serde_json::to_value(&row).unwrap_or_default();
+                    value["connectors"] = serde_json::json!(connectors);
+                    value["accounts"] = serde_json::json!(accounts);
+                    value
+                })
+                .collect();
+            Json(rows).into_response()
+        }
+        _ => refused(503, "installed plugins could not be read"),
     }
 }
 #[derive(Deserialize)]
@@ -164,9 +191,70 @@ async fn uninstall(
     }
 }
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Credential {
     token: String,
+    /// Which of the install's accounts for the service this token replaces (#359). Absent, the
+    /// only one (or the first); with several, absent is refused, since which is meant cannot be
+    /// told.
+    #[serde(default)]
+    connection_id: Option<String>,
+}
+fn token_refused(token: &str) -> Option<Response> {
+    (token.is_empty() || token.len() > 16384 || token.contains(['\r', '\n'])).then(|| {
+        refused(
+            422,
+            "token must be nonempty, single-line and at most 16384 bytes",
+        )
+    })
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewCredential {
+    token: String,
+}
+/// Add another pasted account for an installed plugin's service (#359, D3): always a new account,
+/// as a sign-in adds one. The reply names it, so an app can rename or pin it.
+async fn add_credential(
+    State(s): State<RegistryState>,
+    headers: HeaderMap,
+    Path((name, connector)): Path<(String, String)>,
+    request: Result<Json<NewCredential>, JsonRejection>,
+) -> Response {
+    let Some(account) = (s.authenticate)(&headers) else {
+        return refused(401, "sign in first");
+    };
+    let Ok(Json(request)) = request else {
+        return refused(422, "send a token only");
+    };
+    if let Some(refusal) = token_refused(&request.token) {
+        return refusal;
+    }
+    let Some(vault) = &s.vault else {
+        return refused(503, "credential vault is unavailable");
+    };
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let how = installed::Save::Add;
+    match installed::save(
+        &s.store,
+        vault,
+        &account,
+        &name,
+        &connector,
+        &request.token,
+        at_ms,
+        how,
+    )
+    .await
+    {
+        Ok(Some(id)) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"connectionId": id})),
+        )
+            .into_response(),
+        Ok(None) => refused(404, "no such installed connector"),
+        Err(_) => refused(503, "credential could not be saved"),
+    }
 }
 async fn credential(
     State(s): State<RegistryState>,
@@ -179,33 +267,34 @@ async fn credential(
     };
     let request = match request {
         Ok(Json(request)) => request,
-        Err(_) => return refused(422, "send a token only"),
+        Err(_) => return refused(422, "send a token, and connectionId to name an account"),
     };
-    if request.token.is_empty()
-        || request.token.len() > 16384
-        || request.token.contains(['\r', '\n'])
-    {
-        return refused(
-            422,
-            "token must be nonempty, single-line and at most 16384 bytes",
-        );
+    if let Some(refusal) = token_refused(&request.token) {
+        return refusal;
     }
     let Some(vault) = &s.vault else {
         return refused(503, "credential vault is unavailable");
     };
-    match installed::credential(
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    let how = installed::Save::Replace(request.connection_id.as_deref());
+    match installed::save(
         &s.store,
         vault,
         &account,
         &name,
         &connector,
         &request.token,
-        chrono::Utc::now().timestamp_millis(),
+        at_ms,
+        how,
     )
     .await
     {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
-        Ok(false) => refused(404, "no such installed connector"),
+        Ok(Some(_)) => StatusCode::NO_CONTENT.into_response(),
+        Ok(None) => refused(404, "no such installed connector"),
+        Err(opengrok_store::StoreError::Conflict) => refused(
+            409,
+            "this plugin has several accounts for that service; send connectionId to name one",
+        ),
         Err(_) => refused(503, "credential could not be saved"),
     }
 }

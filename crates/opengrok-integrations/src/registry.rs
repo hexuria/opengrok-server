@@ -23,6 +23,12 @@ pub struct Registry {
 pub struct Entry {
     pub name: String,
     pub description: String,
+    /// The marketplace's category, not a ranking inferred by the client.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// The marketplace's `homepage` for it, as listed.
+    #[serde(default)]
+    pub homepage: Option<String>,
     pub repository: String,
     pub revision: String,
     pub path: String,
@@ -106,6 +112,11 @@ fn bundle_path(raw: &str) -> Option<String> {
 }
 /// A skipped file stays visible as a part, so the person sees what the bundle carried and why it
 /// was left behind, rather than the whole plugin failing over one PNG.
+/// How many of a bundle's skill reference files are fetched, and how many bytes of them. Within the
+/// bundle's own 2 MiB, leaving room for its manifests and `SKILL.md`s.
+const MAX_REFERENCES: usize = 256;
+const REFERENCE_BYTES: u64 = 1536 * 1024;
+
 fn skipped(path: &str, why: &str) -> Part {
     Part {
         kind: "file".into(),
@@ -337,6 +348,15 @@ impl Registry {
             let entry = Entry {
                 name: name.clone(),
                 description: row["description"].as_str().unwrap_or_default().into(),
+                category: row["category"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|category| !category.is_empty())
+                    .map(str::to_owned),
+                homepage: row["homepage"]
+                    .as_str()
+                    .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+                    .map(str::to_owned),
                 repository: repo,
                 revision: pinned,
                 path: path.unwrap_or_default(),
@@ -426,6 +446,10 @@ impl Registry {
         };
         let mut wanted = Vec::new();
         let mut parts = Vec::new();
+        // A skill's reference files are read on demand, so they are best effort: kept while they
+        // fit, and the rest named once as left out. Refusing the whole plugin for them (Cloudflare's
+        // skills have more than the cap) lost the skills that did fit.
+        let (mut references, mut reference_bytes, mut left_out) = (0usize, 0u64, 0usize);
         for row in rows {
             let Some(path) = row["path"].as_str().and_then(|p| p.strip_prefix(&prefix)) else {
                 continue;
@@ -445,7 +469,16 @@ impl Registry {
             if !named || row["type"] != "blob" {
                 continue;
             }
-            if wanted.len() + parts.len() >= 128 {
+            let reference = path.starts_with("skills/") && !path.ends_with("/SKILL.md");
+            if reference {
+                let size = row["size"].as_u64().unwrap_or(0);
+                if references >= MAX_REFERENCES || reference_bytes + size > REFERENCE_BYTES {
+                    left_out += 1;
+                    continue;
+                }
+                references += 1;
+                reference_bytes += size;
+            } else if wanted.len() - references + parts.len() >= 128 {
                 return Err(refused("bundle exceeds 128 files"));
             }
             if row["mode"] == "120000" {
@@ -455,6 +488,18 @@ impl Registry {
             } else {
                 wanted.push(path.to_string());
             }
+        }
+        if left_out > 0 {
+            parts.push(Part {
+                kind: "reference".into(),
+                name: format!("{left_out} skill reference files"),
+                supported: false,
+                reason: Some(format!(
+                    "past this server's limit of {MAX_REFERENCES} reference files and {} KiB; \
+                     the skills install without them",
+                    REFERENCE_BYTES >> 10
+                )),
+            });
         }
         // Presence is enough for an unsupported component; do not fetch executable hooks. Eight at
         // a time: one by one, a skills-heavy bundle on a slow link ran out of its 60 seconds.

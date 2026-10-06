@@ -32,6 +32,7 @@ pub mod message_bot;
 pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
 pub mod observe;
 pub use observe::{Observe, Seen};
+pub mod plugin_desk;
 pub mod routine;
 pub mod skill;
 pub mod workflow;
@@ -751,7 +752,82 @@ pub struct Executor {
     /// The person's routines (#316), and whether this run may only list them: a run a routine
     /// started may not make one, or a routine could breed routines. `None` offers none.
     routines: Option<(Arc<dyn routine::RoutineDesk>, bool)>,
+    /// The person's plugins and accounts (#359), through the desk the Plugins routes use. `None`
+    /// offers none.
+    plugin_desk: Option<Arc<dyn plugin_desk::PluginDesk>>,
+    /// A Bot with no computer that still has plugin tools (`without_a_computer`): no built-in is
+    /// offered, and one called anyway is refused in words rather than sent to a box that is not
+    /// there.
+    boxless: bool,
 }
+
+/// The box a Bot with no computer is given so its plugin tools can run: every box call is
+/// refused, and none is ever offered (`Executor::without_a_computer`).
+struct NoComputer;
+
+#[async_trait::async_trait]
+impl Computer for NoComputer {
+    async fn create(&self, _ttl: Option<u64>) -> opengrok_box::BoxResult<String> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn run(
+        &self,
+        _box_id: &str,
+        _command: &str,
+        _timeout: u32,
+    ) -> opengrok_box::BoxResult<opengrok_box::CommandOutput> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn start(
+        &self,
+        _box_id: &str,
+        _command: &str,
+    ) -> opengrok_box::BoxResult<opengrok_box::StartedCommand> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn watch(
+        &self,
+        _box_id: &str,
+        _process: &str,
+    ) -> opengrok_box::BoxResult<opengrok_box::StartedCommand> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn read_file(&self, _box_id: &str, _path: &str) -> opengrok_box::BoxResult<String> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn write_file(
+        &self,
+        _box_id: &str,
+        _path: &str,
+        _content: &str,
+    ) -> opengrok_box::BoxResult<()> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn expose_port(
+        &self,
+        _box_id: &str,
+        _port: u16,
+        _title: &str,
+    ) -> opengrok_box::BoxResult<String> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn stop(&self, _box_id: &str) -> opengrok_box::BoxResult<()> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn resume(&self, _box_id: &str) -> opengrok_box::BoxResult<()> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn destroy(&self, _box_id: &str) -> opengrok_box::BoxResult<()> {
+        Err(opengrok_box::BoxError::NoSuchBox)
+    }
+    async fn state(&self, _box_id: &str) -> opengrok_box::BoxResult<String> {
+        Ok("absent".to_string())
+    }
+}
+
+/// What a Bot with no computer is told when it calls a computer tool anyway.
+pub const NO_COMPUTER: &str =
+    "This Bot has no computer, so it cannot run computer tools. Its plugins' tools still work.";
 
 /// The built-ins that need a display.
 const SCREEN_TOOLS: &[&str] = &["open_url", "computer"];
@@ -868,6 +944,8 @@ impl Executor {
             egress_policy: EgressPolicy::default(),
             egress_policy_unconfirmed: false,
             routines: None,
+            plugin_desk: None,
+            boxless: false,
         }
     }
 
@@ -879,6 +957,21 @@ impl Executor {
         }
     }
 
+    /// An executor for a Bot with no computer: only what is attached to it (its plugins) is
+    /// offered. A plugin is the person's account at a service, not something that runs on a box,
+    /// so a Bot without one still uses it (#359).
+    pub fn without_a_computer(policy: opengrok_policy::Context) -> Self {
+        Self {
+            boxless: true,
+            ..Self::with_policy(Arc::new(NoComputer), policy)
+        }
+    }
+
+    /// Whether a box stands behind this executor.
+    pub fn has_computer(&self) -> bool {
+        !self.boxless
+    }
+
     /// Offer the routine tools over `desk`, where the ceiling and the grant allow each (#316).
     #[must_use]
     pub fn with_routines(mut self, desk: Arc<dyn routine::RoutineDesk>) -> Self {
@@ -886,10 +979,30 @@ impl Executor {
         self
     }
 
+    /// Offer the plugin tools over `desk`, where the ceiling and the grant allow each (#359).
+    #[must_use]
+    pub fn with_plugin_desk(mut self, desk: Arc<dyn plugin_desk::PluginDesk>) -> Self {
+        self.plugin_desk = Some(desk);
+        self
+    }
+
+    /// The plugin tools this run is offered: all of them with a desk, none without.
+    fn plugin_desk_tools(&self) -> impl Iterator<Item = &'static str> + '_ {
+        let take = if self.plugin_desk.is_some() {
+            plugin_desk::TOOLS.len()
+        } else {
+            0
+        };
+        plugin_desk::TOOLS.into_iter().take(take)
+    }
+
     /// Only `list_routines`, for a run a routine started: it may not make or change one.
     #[must_use]
     pub fn with_routines_listing_only(mut self) -> Self {
         self.routines = self.routines.map(|(desk, _)| (desk, true));
+        // Nor any plugin tool (#359): nobody is watching such a run to answer a card or finish a
+        // sign-in, and a routine must not install or switch on what its person never chose.
+        self.plugin_desk = None;
         self
     }
 
@@ -968,6 +1081,9 @@ impl Executor {
     /// before running a round so it can say "waking the computer" on the stream.
     pub async fn box_needs_wake(&self, context: &ToolContext, call: &ToolCall) -> bool {
         let tool_name = self.internal_tool_name(&call.name);
+        if self.boxless {
+            return false;
+        }
         if !needs_the_box(&tool_name) || !self.would_reach_the_box(context, call, &tool_name) {
             return false;
         }
@@ -991,8 +1107,9 @@ impl Executor {
     /// policy denies or parks on a card, a screen tool while a form holds the screen, or a screen
     /// tool the egress tunnel will ask about first, never reaches the box, so nothing wakes.
     fn would_reach_the_box(&self, context: &ToolContext, call: &ToolCall, tool_name: &str) -> bool {
-        // A routine is the server's (#316): its tools never touch the box, so nothing wakes.
-        if routine::is_routine_tool(tool_name) {
+        // A routine is the server's (#316), and so is a plugin tool (#359): neither touches the
+        // box, so nothing wakes.
+        if routine::is_routine_tool(tool_name) || plugin_desk::is_plugin_desk_tool(tool_name) {
             return false;
         }
         let decision = opengrok_policy::decide(
@@ -1320,6 +1437,7 @@ impl Executor {
         Self::builtin_tool_names()
             .iter()
             .copied()
+            .filter(move |_| !self.boxless)
             .filter(move |name| self.screen || !SCREEN_TOOLS.contains(name))
             .filter(move |name| {
                 !self.network_off() || !BROWSER_TOOLS.contains(name) || *name == REQUEST_USER_FORM
@@ -1343,6 +1461,7 @@ impl Executor {
                     .then(|| USER_MACHINE_SHELL.to_string()),
             )
             .chain(self.routine_tools().map(str::to_string))
+            .chain(self.plugin_desk_tools().map(str::to_string))
             .chain(
                 self.plugin_tools
                     .iter()
@@ -1368,6 +1487,7 @@ impl Executor {
             .copied()
             .chain([USER_MACHINE_SHELL, message_bot::MESSAGE_BOT])
             .chain(routine::TOOLS)
+            .chain(plugin_desk::TOOLS)
     }
 
     /// A built-in's words as `tool_schemas` offers them, less what a turn adds (a recipe list);
@@ -1379,7 +1499,9 @@ impl Executor {
         if name == message_bot::MESSAGE_BOT {
             return Some(message_bot::MESSAGE_BOT_DESCRIPTION);
         }
-        routine::description(name).or(builtin_tool_spec(name).map(|(description, _)| description))
+        routine::description(name)
+            .or(plugin_desk::description(name))
+            .or(builtin_tool_spec(name).map(|(description, _)| description))
     }
 
     /// Internal dotted `qualified_name` ↔ OpenAI-safe wire name for this coworker's plugins.
@@ -1572,6 +1694,8 @@ impl Executor {
         }
         let routines = self.routine_tools().filter(|name| permitted(name));
         schemas.extend(routines.filter_map(routine::schema));
+        let plugin_desk = self.plugin_desk_tools().filter(|name| permitted(name));
+        schemas.extend(plugin_desk.filter_map(plugin_desk::schema));
         let plugin_wires = self.plugin_wire_names();
         let mut schema_budget = crate::mcp::MAX_ADVERTISED_SCHEMAS_BYTES;
         for tool in &self.plugin_tools {
@@ -1610,6 +1734,9 @@ impl Executor {
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
         let tool_name = self.internal_tool_name(&call.name);
+        if self.boxless && Self::builtin_tool_names().contains(&tool_name.as_str()) {
+            return ToolResult::refused(&call.id, NO_COMPUTER);
+        }
         // grok-box:local has neither binary (checked 22 Sep 2026). A box shell that names
         // them wakes the desktop, misses PATH, and then tries to fetch one. Refuse before
         // the egress card and before the box is started. The user machine is the other tool.
@@ -1627,6 +1754,22 @@ impl Executor {
             (true, Some((desk, listing))) => {
                 let call_of = (tool_name.as_str(), &arguments);
                 match routine::admit(desk.as_ref(), *listing, context, call_of).await {
+                    Ok(admitted) => Some((desk.clone(), admitted)),
+                    Err(why) => return ToolResult::refused(&call.id, why),
+                }
+            }
+        };
+        // A plugin tool's arguments, and for one that asks first what it acts on, as stored, are
+        // asked BEFORE any gate too (#359).
+        let plugin_call = match (
+            plugin_desk::is_plugin_desk_tool(&tool_name),
+            self.plugin_desk.as_ref(),
+        ) {
+            (false, _) => None,
+            (true, None) => return ToolResult::refused(&call.id, "plugins are not on offer here"),
+            (true, Some(desk)) => {
+                let call_of = (tool_name.as_str(), &arguments);
+                match plugin_desk::admit(desk.as_ref(), context, call_of).await {
                     Ok(admitted) => Some((desk.clone(), admitted)),
                     Err(why) => return ToolResult::refused(&call.id, why),
                 }
@@ -1687,8 +1830,12 @@ impl Executor {
                 &self.policy,
             );
             // A DELETE ALWAYS ASKS (#316), on the policy's card, in words naming the routine as
-            // stored: an allow becomes the ask, and a grant's own ask says which routine.
-            let delete = routine.as_ref().and_then(|(_, (_, card))| card.clone());
+            // stored: an allow becomes the ask, and a grant's own ask says which routine. So does
+            // a plugin tool that cannot be undone or reaches another Bot (#359).
+            let delete = routine
+                .as_ref()
+                .and_then(|(_, (_, card))| card.clone())
+                .or_else(|| plugin_call.as_ref().and_then(|(_, (_, card))| card.clone()));
             if decision.needs_approval() || (decision.is_allowed() && delete.is_some()) {
                 let why = decision.reason().unwrap_or("a human yes").to_string();
                 Gate::Ask(AwaitingReason::PolicyApproval, delete.unwrap_or(why))
@@ -1828,6 +1975,9 @@ impl Executor {
         // The server's own desk, as the context's account: no box is resolved or woken.
         if let Some((desk, (ask, _))) = routine {
             return routine::run(desk.as_ref(), context, &call.id, ask).await;
+        }
+        if let Some((desk, (ask, _))) = plugin_call {
+            return plugin_desk::run(desk.as_ref(), context, &call.id, ask).await;
         }
 
         // `machine: "group"` aims the call at the room's shared computer; anything else is the

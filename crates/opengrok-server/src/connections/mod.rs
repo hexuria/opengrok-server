@@ -5,6 +5,7 @@
 
 pub mod flow;
 pub mod oauth;
+pub mod plugin_signin;
 pub mod routes;
 
 pub use flow::{FlowError, exchange_code, refresh, sign_state, verify_state};

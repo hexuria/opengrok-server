@@ -25,3 +25,7 @@ uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# The plugin tools' names, so the pass that adds them to old ceilings is checked against them.
+opengrok-tools = { path = "../opengrok-tools" }

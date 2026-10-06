@@ -766,6 +766,103 @@ async fn plugin_tools_join_the_offered_set() {
     );
 }
 
+/// A Bot with no computer still has its plugins (#359): only they are offered, and a computer tool
+/// called anyway is refused in words, never sent to a box.
+#[tokio::test]
+async fn without_a_computer_only_the_plugins_are_offered() {
+    let executor = Executor::without_a_computer(permissive()).with_plugin_tools(
+        BTreeMap::new(),
+        vec![crate::mcp::McpTool {
+            qualified_name: "cloudflare.api.list_zones".to_string(),
+            remote_name: "list_zones".to_string(),
+            ..Default::default()
+        }],
+    );
+    assert!(!executor.has_computer());
+    assert_eq!(executor.tool_names(), ["cloudflare.api.list_zones"]);
+    let (account, coworker) = (
+        AccountId::from_stored("acct_1"),
+        CoworkerId::from_stored("cw_1"),
+    );
+    assert_eq!(executor.tool_schemas(&account, &coworker).len(), 1);
+    let result = executor
+        .execute(
+            &context_with_box("box_mine"),
+            &call("shell", json!({"command": "ls"})),
+        )
+        .await;
+    assert!(!result.ok);
+    assert!(result.content.contains(crate::NO_COMPUTER), "{result:?}");
+}
+
+/// A desk whose every ask-first answer is `card`, and that records what it carried out.
+struct StandInDesk {
+    card: Option<String>,
+    done: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl crate::plugin_desk::PluginDesk for StandInDesk {
+    async fn answer(&self, _: &ToolContext, ask: crate::plugin_desk::Ask) -> Result<Value, String> {
+        self.done.lock().unwrap().push(format!("{ask:?}"));
+        Ok(json!({"done": true}))
+    }
+    async fn ask_first(
+        &self,
+        _: &ToolContext,
+        _: &crate::plugin_desk::Ask,
+    ) -> Result<Option<String>, String> {
+        Ok(self.card.clone())
+    }
+}
+
+/// A plugin tool that asks first parks on the policy's card in the desk's words and does nothing;
+/// once that call is approved it runs. One that does not ask just runs (#359, the owner's rule).
+#[tokio::test]
+async fn a_plugin_tool_that_asks_first_runs_only_once_approved() {
+    let card = "Uninstall demo? Its account is removed with it.".to_string();
+    let desk = Arc::new(StandInDesk {
+        card: Some(card.clone()),
+        done: Mutex::new(Vec::new()),
+    });
+    let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_desk(desk.clone());
+    assert!(
+        executor
+            .tool_names()
+            .contains(&"uninstall_plugin".to_string())
+    );
+    let uninstall = call("uninstall_plugin", json!({"plugin": "demo"}));
+    let parked = executor
+        .execute(&context_with_box("box_mine"), &uninstall)
+        .await;
+    assert!(parked.awaiting_approval, "{parked:?}");
+    assert!(parked.content.contains(&card), "{parked:?}");
+    assert!(desk.done.lock().unwrap().is_empty());
+
+    let approved = allowing(Arc::new(SpyComputer::default()))
+        .with_plugin_desk(desk.clone())
+        .with_approved([uninstall.id.clone()]);
+    let ran = approved
+        .execute(&context_with_box("box_mine"), &uninstall)
+        .await;
+    assert!(ran.ok, "{ran:?}");
+    assert_eq!(desk.done.lock().unwrap().len(), 1);
+
+    let quiet = Arc::new(StandInDesk {
+        card: None,
+        done: Mutex::new(Vec::new()),
+    });
+    let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_desk(quiet.clone());
+    let list = call("list_plugins", json!({}));
+    assert!(
+        executor
+            .execute(&context_with_box("box_mine"), &list)
+            .await
+            .ok
+    );
+    assert_eq!(quiet.done.lock().unwrap().len(), 1);
+}
+
 fn openai_safe_wire(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name

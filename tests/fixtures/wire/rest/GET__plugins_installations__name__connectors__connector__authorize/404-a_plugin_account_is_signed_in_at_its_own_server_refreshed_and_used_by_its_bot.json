@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/plugins/installations/demo/connectors/demo/authorize",
+  "status": 404,
+  "body": {
+    "error": "no such account"
+  }
+}

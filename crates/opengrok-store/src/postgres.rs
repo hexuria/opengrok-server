@@ -1376,12 +1376,28 @@ impl PgStore {
         state: &Connection,
         update: &CredentialUpdate<'_>,
     ) -> StoreResult<i64> {
+        let mut tx = self.pool.begin().await?;
+        let seq = Self::append_connection_in(&mut tx, id, expected_seq, events, state, update);
+        let seq = seq.await?;
+        tx.commit().await?;
+        Ok(seq)
+    }
+
+    /// `append_connection` in a transaction the caller holds: a pasted token is saved under its
+    /// installation's row lock, so an uninstall cannot land between the two (#359).
+    pub async fn append_connection_in(
+        tx: &mut sqlx::PgConnection,
+        id: &str,
+        expected_seq: i64,
+        events: &[ConnectionEvent],
+        state: &Connection,
+        update: &CredentialUpdate<'_>,
+    ) -> StoreResult<i64> {
         let CredentialUpdate {
             secret,
             expires_at_ms,
             at_ms,
         } = *update;
-        let mut tx = self.pool.begin().await?;
         let stream = format!("connection/{id}");
         let mut seq = expected_seq;
 
@@ -1409,9 +1425,9 @@ impl PgStore {
         };
 
         sqlx::query(
-            "insert into connection_view
-               (id, connector, scope, owner_id, label, disconnected, updated_at_ms, expires_at_ms)
-             values ($1, $2, $3, $4, $5, $6, $7, $8)
+            "insert into connection_view (id, connector, scope, owner_id, label, disconnected,
+               updated_at_ms, expires_at_ms, kind)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              on conflict (id) do update set
                connector = excluded.connector,
                scope = excluded.scope,
@@ -1421,7 +1437,8 @@ impl PgStore {
                updated_at_ms = excluded.updated_at_ms,
                -- Kept when a caller has nothing newer to say, so a lend does not erase the expiry
                -- the last token exchange recorded.
-               expires_at_ms = coalesce(excluded.expires_at_ms, connection_view.expires_at_ms)",
+               expires_at_ms = coalesce(excluded.expires_at_ms, connection_view.expires_at_ms),
+               kind = excluded.kind",
         )
         .bind(id)
         .bind(&state.connector)
@@ -1431,6 +1448,7 @@ impl PgStore {
         .bind(state.disconnected)
         .bind(at_ms)
         .bind(expires_at_ms)
+        .bind(state.kind.word())
         .execute(&mut *tx)
         .await?;
 
@@ -1455,15 +1473,20 @@ impl PgStore {
         }
 
         // A disconnected connection keeps its record and loses its credential. The row saying it
-        // once existed is worth keeping; the token is not.
+        // once existed is worth keeping; the token is not. A pasted token's is kept under the id
+        // its plugin binding names, which sealed it; and the pins naming it go too (#359), so no
+        // Bot is left set to an account that is gone.
         if state.disconnected {
-            sqlx::query("delete from secret_store where id = $1")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "delete from secret_store where id = $1
+                    or id in (select secret_id from plugin_credential where connection_id = $1)",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            let unpin = sqlx::query("delete from bot_connection_pin where connection_id = $1");
+            unpin.bind(id).execute(&mut *tx).await?;
         }
-
-        tx.commit().await?;
         Ok(seq)
     }
 
@@ -1478,54 +1501,19 @@ impl PgStore {
     ) -> StoreResult<Vec<ConnectionView>> {
         let rows = sqlx::query(
             "select v.id, v.connector, v.scope, v.owner_id, v.label, v.updated_at_ms,
-                    v.expires_at_ms
+                    v.expires_at_ms, v.kind
                from connection_view v
               where v.disconnected = false
                 and ( v.scope = 'global'
                    or (v.scope = 'user' and v.owner_id = $1)
                    or (v.scope = 'bot'  and v.owner_id = $2) )
-              order by v.updated_at_ms desc",
+              order by v.connector, v.label, v.id",
         )
         .bind(account.as_str())
         .bind(coworker.as_str())
         .fetch_all(&self.pool)
         .await?;
-
-        let mut views = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id: String = row.try_get("id")?;
-            let scope: String = row.try_get("scope")?;
-            let owner_id: Option<String> = row.try_get("owner_id")?;
-            let owner = match (scope.as_str(), owner_id) {
-                ("user", Some(id)) => Owner::User(AccountId::from_stored(id)),
-                ("bot", Some(id)) => Owner::Bot(CoworkerId::from_stored(id)),
-                _ => Owner::Global,
-            };
-
-            let loans =
-                sqlx::query("select coworker_id from connection_loan where connection_id = $1")
-                    .bind(&id)
-                    .fetch_all(&self.pool)
-                    .await?
-                    .into_iter()
-                    .map(|row| {
-                        Ok(CoworkerId::from_stored(
-                            row.try_get::<String, _>("coworker_id")?,
-                        ))
-                    })
-                    .collect::<StoreResult<_>>()?;
-
-            views.push(ConnectionView {
-                id,
-                connector: row.try_get("connector")?,
-                owner,
-                label: row.try_get("label")?,
-                loans,
-                updated_at_ms: row.try_get("updated_at_ms")?,
-                expires_at_ms: row.try_get("expires_at_ms")?,
-            });
-        }
-        Ok(views)
+        self.connection_views(rows).await
     }
 
     /// Every connection this account owns, for showing a person what they have connected.
@@ -1534,38 +1522,50 @@ impl PgStore {
         account: &AccountId,
     ) -> StoreResult<Vec<ConnectionView>> {
         let rows = sqlx::query(
-            "select id, connector, label, updated_at_ms, expires_at_ms from connection_view
+            "select id, connector, scope, owner_id, label, updated_at_ms, expires_at_ms, kind
+               from connection_view
               where scope = 'user' and owner_id = $1 and disconnected = false
-              order by connector",
+              order by connector, label, id",
         )
         .bind(account.as_str())
         .fetch_all(&self.pool)
         .await?;
+        self.connection_views(rows).await
+    }
 
+    /// `connection_view` rows as views, each with its loans.
+    async fn connection_views(
+        &self,
+        rows: Vec<sqlx::postgres::PgRow>,
+    ) -> StoreResult<Vec<ConnectionView>> {
         let mut views = Vec::with_capacity(rows.len());
         for row in rows {
             let id: String = row.try_get("id")?;
-            let loans =
-                sqlx::query("select coworker_id from connection_loan where connection_id = $1")
-                    .bind(&id)
-                    .fetch_all(&self.pool)
-                    .await?
-                    .into_iter()
-                    .map(|row| {
-                        Ok(CoworkerId::from_stored(
-                            row.try_get::<String, _>("coworker_id")?,
-                        ))
-                    })
-                    .collect::<StoreResult<_>>()?;
-
+            let owner = match (
+                row.try_get::<String, _>("scope")?.as_str(),
+                row.try_get::<Option<String>, _>("owner_id")?,
+            ) {
+                ("user", Some(id)) => Owner::User(AccountId::from_stored(id)),
+                ("bot", Some(id)) => Owner::Bot(CoworkerId::from_stored(id)),
+                _ => Owner::Global,
+            };
+            let kind: String = row.try_get("kind")?;
+            let kind = opengrok_core::connection::ConnectionKind::from_word(&kind)
+                .ok_or_else(|| StoreError::Corrupt(format!("connection kind {kind}")))?;
+            let loans = "select coworker_id from connection_loan where connection_id = $1";
+            let loans: Vec<String> = sqlx::query_scalar(loans)
+                .bind(&id)
+                .fetch_all(&self.pool)
+                .await?;
             views.push(ConnectionView {
                 id,
                 connector: row.try_get("connector")?,
-                owner: Owner::User(account.clone()),
+                owner,
                 label: row.try_get("label")?,
-                loans,
+                loans: loans.into_iter().map(CoworkerId::from_stored).collect(),
                 updated_at_ms: row.try_get("updated_at_ms")?,
                 expires_at_ms: row.try_get("expires_at_ms")?,
+                kind,
             });
         }
         Ok(views)

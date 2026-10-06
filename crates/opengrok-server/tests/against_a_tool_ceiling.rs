@@ -196,11 +196,14 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 }
 
 /// Every built-in row the ceiling answers, in order: the box's tools, the person's machine and
-/// `message_bot` (#314), then the one row of the routine tools (#316) in place of all four.
+/// `message_bot` (#314), then the one row of the routine tools (#316) in place of all of them,
+/// and the one row of the plugin tools (#359) in place of all ten.
 fn builtins() -> Vec<&'static str> {
-    let routine = |name: &&str| opengrok_tools::routine::is_routine_tool(name);
-    let rows = Executor::every_builtin().filter(|name| !routine(name));
-    rows.chain([opengrok_tools::routine::ROW]).collect()
+    use opengrok_tools::{plugin_desk, routine};
+    let grouped =
+        |name: &&str| routine::is_routine_tool(name) || plugin_desk::is_plugin_desk_tool(name);
+    let rows = Executor::every_builtin().filter(|name| !grouped(name));
+    rows.chain([routine::ROW, plugin_desk::ROW]).collect()
 }
 
 struct Harness {

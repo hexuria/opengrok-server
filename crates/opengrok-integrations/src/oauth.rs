@@ -66,6 +66,17 @@ pub struct StateClaims {
     /// Set when the connection is to belong to a coworker rather than the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coworker: Option<String>,
+    /// The account a reconnect refreshes (#359). Absent, the sign-in adds one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
+    /// The unfinished sign-in this one is (`attempts`), which the callback finishes or marks
+    /// failed. Absent on a reconnect: a refused reconnect leaves the account as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<String>,
+    /// The installed plugin an MCP sign-in is for (#364): the callback trades the code at that
+    /// plugin's own provider rather than at a configured one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
     /// Fresh per attempt, so two tabs do not collide.
     pub nonce: String,
     /// Seconds. Short — a state that outlives the walk to the provider and back is a state
@@ -212,7 +223,7 @@ impl TokenResponse {
 }
 
 /// Percent-encode a query value. Small and explicit rather than a dependency for one function.
-fn encode(value: &str) -> String {
+pub(crate) fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {

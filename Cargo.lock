@@ -2326,6 +2326,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2432,6 +2433,7 @@ dependencies = [
  "opengrok-events",
  "opengrok-policy",
  "opengrok-testdb",
+ "opengrok-tools",
  "opengrok-wire",
  "rand 0.10.2",
  "serde",

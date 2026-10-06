@@ -28,14 +28,171 @@ async fn installed(store: &PgStore, account: &AccountId, bot: &CoworkerId) -> Ve
         .unwrap_or_default()
 }
 
+/// What one message asked of its plugins: those it tagged (`forwardedProps.mentionedPlugins`,
+/// kept by [`mentioned`]) and the account picked on a "Which account?" card for this turn, by
+/// plugin then connector (`forwardedProps.pluginAccounts`). Nothing in it is stored.
+#[derive(Debug, Clone, Default)]
+pub struct TurnPlugins {
+    pub mentioned: Vec<String>,
+    pub chosen: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl TurnPlugins {
+    fn chosen_for(&self, plugin: &str) -> BTreeMap<String, String> {
+        self.chosen.get(plugin).cloned().unwrap_or_default()
+    }
+}
+
+/// The plugins named in this turn's message that it may use: installed by the driving account,
+/// on a Bot that account owns (`installed::for_turn` checks the owner in SQL). Anything else is
+/// dropped here, so a member's `@name` on a shared Bot, or a name nobody installed, can never
+/// widen a ceiling (`opengrok_policy::with_mentioned`).
+pub async fn mentioned(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+    asked: &[String],
+) -> Vec<String> {
+    if asked.is_empty() {
+        return Vec::new();
+    }
+    let installs = installed(store, account, bot).await;
+    asked
+        .iter()
+        .filter(|name| installs.iter().any(|install| &install.name == *name))
+        .cloned()
+        .collect()
+}
+
+/// The plugins the driving account installed that are off for this turn of its own `bot`: neither
+/// switched on nor tagged in the message. The turn is told their names, so a Bot asked for one
+/// says how to use it (a tag) instead of hunting for its credentials (6 Oct 2026: a Bot with
+/// Cloudflare off asked for a Cloudflare key through a password form). Nothing for a Bot that is
+/// not the account's: a member's turn on a shared Bot is told of no install of the owner's.
+pub async fn switched_off(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+    mentioned: &[String],
+) -> Vec<String> {
+    let installs = installed(store, account, bot).await;
+    if installs.is_empty() {
+        return Vec::new();
+    }
+    let Some(policy) = turn_policy(store, account, bot).await else {
+        return Vec::new();
+    };
+    installs
+        .into_iter()
+        .map(|install| install.name)
+        .filter(|name| !mentioned.contains(name) && !switched_on(account, bot, name, &policy))
+        .collect()
+}
+
+/// Whether `bot` is `account`'s own and live: only its owner is asked to install or sign in from
+/// a tag, since a member's tag on a shared Bot gives nothing (`mentioned`).
+async fn owns(store: &PgStore, account: &AccountId, bot: &CoworkerId) -> bool {
+    let owned = sqlx::query_scalar::<_, bool>(
+        "select exists(select 1 from coworker_view where id = $1 and account_id = $2 and not retired)",
+    )
+    .bind(bot.as_str())
+    .bind(account.as_str())
+    .fetch_one(store.pool())
+    .await;
+    owned
+        .inspect_err(|error| tracing::warn!(%error, %bot, "a Bot's owner could not be read"))
+        .unwrap_or(false)
+}
+
+/// The CUSTOM name a turn answers with, instead of asking the model, when a plugin the message
+/// tagged cannot be used yet (#360).
+pub const PLUGIN_NEEDS: &str = "opengrok.pluginNeeds";
+
+/// What each tagged plugin still needs before this turn can use it, as the card lists them; empty
+/// when the turn can go ahead (`PLUGIN_NEEDS`):
+///
+/// - `{"plugin", "need": "install"}`: tagged but not installed;
+/// - `{"plugin", "connector", "need": "choose", "accounts": [{"id", "label", "kind"}]}`: several
+///   accounts and neither a pin nor this turn's pick says which. THE BOT NEVER GUESSES;
+/// - `{"plugin", "connector", "need": "account"}`: no account, for a service that needs one.
+///
+/// Read before the model is asked, so a turn never starts on a plugin it would have to sit out,
+/// and the answer re-sends the same message with the pick (`TurnPlugins::chosen`) or after the
+/// install or sign-in. Nothing for a member's tag on a shared Bot: it gives nothing to ask about.
+pub async fn needs(
+    store: &PgStore,
+    vault: Option<&Vault>,
+    account: &AccountId,
+    bot: &CoworkerId,
+    asked: &[String],
+    turn: &TurnPlugins,
+) -> Vec<serde_json::Value> {
+    if asked.is_empty() || !owns(store, account, bot).await {
+        return Vec::new();
+    }
+    let mut needs = Vec::new();
+    for plugin in asked.iter().filter(|name| !turn.mentioned.contains(name)) {
+        needs.push(serde_json::json!({ "plugin": plugin, "need": "install" }));
+    }
+    let Some(vault) = vault else {
+        return needs;
+    };
+    for installation in installed(store, account, bot).await {
+        if !turn.mentioned.contains(&installation.name) {
+            continue;
+        }
+        let plugin = &installation.name;
+        let chosen = turn.chosen_for(plugin);
+        let read = installed::values_choosing(store, vault, account, bot, &installation, &chosen);
+        let credentials = match read.await {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                tracing::warn!(plugin, %error, "a tagged plugin's accounts could not be read");
+                continue;
+            }
+        };
+        for (connector, accounts) in credentials.choices {
+            let accounts: Vec<serde_json::Value> = accounts
+                .into_iter()
+                .map(
+                    |(id, label, kind)| serde_json::json!({"id": id, "label": label, "kind": kind}),
+                )
+                .collect();
+            needs.push(serde_json::json!({
+                "plugin": plugin, "connector": connector, "need": "choose", "accounts": accounts,
+            }));
+        }
+        for connector in credentials.missing {
+            // A placeholder needs a token outright. A server that declares no auth may be keyless,
+            // and is asked whether it has a sign-in of its own (remembered a while).
+            let required = installation.bundle.needs_a_token(&connector)
+                || match crate::mcp_oauth::server_url(&installation.bundle, &connector) {
+                    Some(url) => {
+                        crate::mcp_oauth::offers_sign_in(&crate::mcp_oauth::http(), &url).await
+                    }
+                    None => false,
+                };
+            if required {
+                needs.push(serde_json::json!({
+                    "plugin": plugin, "connector": connector, "need": "account",
+                }));
+            }
+        }
+    }
+    needs
+}
+
 /// Every server of an installed plugin this turn may reach, hardened (`crate::net`). `operator`
-/// names a deployment plugin, which keeps its name: account bundles never shadow one.
+/// names a deployment plugin, which keeps its name: account bundles never shadow one. A plugin
+/// `turn` tagged is dialled although its switch is off, since the person asked for it by name,
+/// with the account the turn picked where it picked one.
 pub async fn endpoints(
     store: &PgStore,
     vault: Option<&Vault>,
     account: &AccountId,
     bot: &CoworkerId,
     policy: &Context,
+    turn: &TurnPlugins,
     operator: impl Fn(&str) -> bool,
 ) -> Vec<Endpoint> {
     let mut endpoints = Vec::new();
@@ -43,16 +200,38 @@ pub async fn endpoints(
     // credential namespace is resolved only after the driving account owns this bot.
     for installation in installed(store, account, bot).await {
         // Switched on by name, like its skills: `All` does not dial a bundle nobody chose.
-        if operator(&installation.name) || !switched_on(account, bot, &installation.name, policy) {
+        let asked = turn.mentioned.contains(&installation.name);
+        if operator(&installation.name)
+            || !(asked || switched_on(account, bot, &installation.name, policy))
+        {
             continue;
         }
+        let plugin = &installation.name;
         let values = match vault {
             Some(vault) => {
-                match installed::values_for_installation(store, vault, account, &installation).await
+                // An MCP account about to lapse is refreshed first (#364), so the turn is not
+                // handed a token its server refuses a minute later.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis() as i64);
+                let http = crate::mcp_oauth::http();
+                let public = crate::mcp_oauth::PUBLIC;
+                crate::mcp_oauth::refresh_due(&http, public, store, vault, account, plugin, now)
+                    .await;
+                let chosen = turn.chosen_for(plugin);
+                match installed::values_choosing(store, vault, account, bot, &installation, &chosen)
+                    .await
                 {
-                    Ok(values) => values,
+                    Ok(turn) if turn.needs_choice.is_empty() => turn.values,
+                    // Several accounts and no pin: nobody has said which one this Bot acts as, and
+                    // a guess would act as the wrong one. The plugin sits this turn out, as one
+                    // whose server will not connect does, until #360 asks the person.
+                    Ok(turn) => {
+                        let connectors = turn.needs_choice;
+                        tracing::info!(plugin, ?connectors, %bot, "an installed plugin needs a choice of account; it is unavailable this turn");
+                        continue;
+                    }
                     Err(error) => {
-                        let plugin = &installation.name;
                         tracing::warn!(plugin, %error, "installed plugin credentials unavailable");
                         continue;
                     }

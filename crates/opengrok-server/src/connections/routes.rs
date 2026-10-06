@@ -15,10 +15,12 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use opengrok_core::connection::{Connection, ConnectionCommand, Owner};
 use opengrok_core::id::{AccountId, CoworkerId};
+use opengrok_integrations::accounts::{self, label_of};
+use opengrok_integrations::attempts;
 use serde::Deserialize;
 
 use crate::agui::routes::{AgUiState, account_from_bearer, now_ms};
@@ -54,8 +56,26 @@ pub fn router(state: AgUiState) -> Router {
         .route("/connections", get(list_connections))
         .route("/connections/{connector}/authorize", get(authorize))
         .route("/connections/callback", get(callback))
+        // A sign-in that has not finished (#359): "Needs Auth", and the Reopen that resumes it.
+        .route("/connections/attempts", get(list_attempts))
+        .route(
+            "/connections/attempts/{id}",
+            patch(rename_attempt).delete(dismiss_attempt),
+        )
+        .route("/connections/attempts/{id}/reopen", get(reopen_attempt))
+        // Signing in at an installed plugin's own MCP server (#364).
+        .route(
+            "/plugins/installations/{name}/connectors/{connector}/authorize",
+            get(super::plugin_signin::authorize),
+        )
+        .route(
+            "/plugins/installations/{name}/connectors/{connector}/sign-in",
+            get(super::plugin_signin::method),
+        )
+        .route("/connections/{id}/reconnect", get(reconnect))
         .route("/connections/{id}/lend", post(lend))
         .route("/connections/{id}/revoke", post(revoke))
+        // `PATCH` (rename) and the pins are the plugin API's (#359, `opengrok-plugin-api`).
         .route("/connections/{id}", delete(disconnect))
         .with_state(state)
 }
@@ -89,28 +109,6 @@ pub async fn list_connectors(State(state): State<AgUiState>, headers: HeaderMap)
     Json(rows).into_response()
 }
 
-/// What a person reads for a connector. Its name is lowercase and sometimes clipped (`gdrive`),
-/// and an app has nowhere else to learn "Google Drive"; a name the table lacks reads as itself
-/// with a capital.
-fn label_of(name: &str) -> String {
-    let label = match name {
-        "gmail" => "Gmail",
-        "gdrive" => "Google Drive",
-        "gcal" => "Google Calendar",
-        "gdocs" => "Google Docs",
-        "gsheets" => "Google Sheets",
-        "github" => "GitHub",
-        "gitlab" => "GitLab",
-        "onedrive" => "OneDrive",
-        _ => {
-            let mut chars = name.chars();
-            let first = chars.next().map(|first| first.to_uppercase());
-            return first.into_iter().flatten().chain(chars).collect();
-        }
-    };
-    label.to_string()
-}
-
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
     /// Give the connection to a coworker rather than to the person signing in. Used when a
@@ -134,6 +132,55 @@ pub async fn authorize(
     let Some(account_id) = account_from_bearer(&state, &headers) else {
         return refused(StatusCode::UNAUTHORIZED, "sign in first");
     };
+    link(&state, account_id, connector, query, Mode::Add).await
+}
+
+/// Reconnect one account (#359): `authorize`'s link, carrying the account the callback refreshes
+/// and keeps the label of. Only its owner's, or a Bot's own account for that Bot's owner; any
+/// other is the same 404 as none, so an id reveals nothing.
+pub async fn reconnect(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(mut query): Query<AuthorizeQuery>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    let (connector, bot) = match accounts::reconnectable(&state.auth.store, &account_id, &id).await
+    {
+        Ok(accounts::Reconnect::Link { connector, bot }) => (connector, bot),
+        Ok(accounts::Reconnect::NotFound) => {
+            return refused(StatusCode::NOT_FOUND, "no such connection");
+        }
+        // Signed in instead, an OAuth token would sit where an installed plugin's server reads it.
+        Ok(accounts::Reconnect::Token) => {
+            let sentence = "a pasted token is replaced by pasting a new one, not by signing in";
+            return refused(StatusCode::UNPROCESSABLE_ENTITY, sentence);
+        }
+        Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    };
+    query.coworker_id = bot.map(|bot| bot.to_string());
+    link(&state, account_id, connector, query, Mode::Reconnect(id)).await
+}
+
+/// What a sign-in link is for. Adding starts an unfinished sign-in the callback finishes (or marks
+/// failed), and Reopen resumes one; a reconnect refreshes an account that already works, so a
+/// refused one leaves nothing to reopen.
+enum Mode {
+    Add,
+    Reopen(String),
+    Reconnect(String),
+}
+
+/// The sign-in link both answer with: one link and one state however it is handed over.
+async fn link(
+    state: &AgUiState,
+    account_id: AccountId,
+    connector: String,
+    query: AuthorizeQuery,
+    mode: Mode,
+) -> Response {
     let Some(config) = state.connectors.providers.get(&connector) else {
         let sentence = format!("no connector named {connector}");
         return refused(StatusCode::NOT_FOUND, &sentence);
@@ -161,6 +208,30 @@ pub async fn authorize(
         }
     }
 
+    // Started only once the connector and the Bot have been checked, so a refused link leaves no
+    // "Needs Auth" behind for a sign-in that never could have begun.
+    let (connection, attempt) = match mode {
+        Mode::Reconnect(id) => (Some(id), None),
+        Mode::Reopen(id) => (None, Some(id)),
+        Mode::Add => {
+            let coworker = query.coworker_id.as_deref();
+            match attempts::start(
+                &state.auth.store,
+                &account_id,
+                &connector,
+                coworker,
+                now_ms(),
+            )
+            .await
+            {
+                Ok(attempt) => (None, Some(attempt.id)),
+                Err(error) => {
+                    return refused(StatusCode::SERVICE_UNAVAILABLE, &error.to_string());
+                }
+            }
+        }
+    };
+
     let claims = StateClaims {
         sub: account_id.to_string(),
         connector: connector.clone(),
@@ -171,6 +242,9 @@ pub async fn authorize(
         }
         .to_string(),
         coworker: query.coworker_id.clone(),
+        connection,
+        attempt,
+        plugin: None,
         // Fresh per attempt, so two tabs do not collide on one state.
         nonce: opengrok_core::id::RunId::new().to_string(),
         exp: 0,
@@ -213,6 +287,16 @@ pub async fn callback(
     Query(query): Query<CallbackQuery>,
 ) -> Response {
     if let Some(error) = query.error {
+        // The provider sends the state back with its refusal: the sign-in it names now needs
+        // auth, and says why. A state that does not verify names nothing we will believe.
+        if let Some(claims) = query
+            .state
+            .as_deref()
+            .and_then(|s| verify_state(&state.auth.minter, s).ok())
+        {
+            let why = format!("the provider did not connect: {error}");
+            failed(&state, &claims, &why).await;
+        }
         // A person who declined is not a failure to report as one.
         return (
             StatusCode::OK,
@@ -229,6 +313,10 @@ pub async fn callback(
         Ok(claims) => claims,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
+    // An installed plugin's sign-in trades its code at that plugin's own provider (#364).
+    if claims.plugin.is_some() {
+        return super::plugin_signin::finish(&state, &claims, &code).await;
+    }
 
     let Some(config) = state.connectors.providers.get(&claims.connector) else {
         return (
@@ -249,6 +337,7 @@ pub async fn callback(
     {
         Ok(token) => token,
         Err(error) => {
+            failed(&state, &claims, &error.to_string()).await;
             return (StatusCode::BAD_GATEWAY, error.to_string()).into_response();
         }
     };
@@ -259,18 +348,21 @@ pub async fn callback(
         _ => Owner::User(account_id.clone()),
     };
 
-    // One connection per (connector, owner): re-authenticating replaces the credential rather than
-    // adding a rival nobody chooses between.
-    let connection_id = match &owner {
-        Owner::Bot(coworker) => format!("conn_{}_{}", claims.connector, coworker),
-        Owner::User(account) => format!("conn_{}_{}", claims.connector, account),
-        Owner::Global => format!("conn_{}_global", claims.connector),
-    };
-
-    let (existing, seq) = match state.auth.store.load_connection(&connection_id).await {
-        Ok(loaded) => loaded,
+    // A plain sign-in always adds an account, and a reconnect refreshes the one it named (#359).
+    // There was one per connector and owner, so connecting a second Gmail replaced the first.
+    let landing = accounts::landing(&state.auth.store, &claims, &owner);
+    let (connection_id, existing, seq, mut label) = match landing.await {
+        Ok(landing) => (landing.id, landing.connection, landing.seq, landing.label),
         Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     };
+    // The account an unfinished sign-in adds is the one the person saw waiting, under the label
+    // they saw (and may have renamed). One that was dismissed while they were away still adds it:
+    // they did sign in.
+    if let Some(id) = claims.attempt.as_deref()
+        && let Ok(Some(attempt)) = attempts::get(&state.auth.store, &account_id, id).await
+    {
+        label = attempt.label;
+    }
 
     // Google issues a refresh token only on the first consent, so the stored one is kept when the
     // provider omits it — see `TokenResponse::refresh_token_to_store`.
@@ -288,19 +380,18 @@ pub async fn callback(
 
     let at_ms = now_ms();
     let mut connection = existing;
-    // A disconnected connection is connected afresh, never refreshed: `connected` stays true after
-    // a disconnect and `Refresh` refuses one. Deciding on `connected` alone, with that refusal
-    // swallowed into no events, told a person who reconnected Gmail it was connected while the
-    // row stayed disconnected.
+    // Only a live account is refreshed: `connected` stays true after a disconnect and `Refresh`
+    // refuses one. Deciding on `connected` alone, with that refusal swallowed into no events, told
+    // a person who reconnected Gmail it was connected while the row stayed disconnected.
     let command = if connection.connected && !connection.disconnected {
         ConnectionCommand::Refresh { at_ms }
     } else {
         ConnectionCommand::Connect {
             connector: claims.connector.clone(),
             owner,
-            // The label is what a person sees; a real deployment fetches the provider's own
-            // profile here. The connector name is honest until that exists.
-            label: claims.connector.clone(),
+            // What a person sees: the service's name, numbered among their accounts for it
+            // (`accounts::new_label`), until the provider's own profile is fetched here.
+            label,
             at_ms,
         }
     };
@@ -350,6 +441,14 @@ pub async fn callback(
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
     }
 
+    // Connected, so it no longer needs auth. A failure here leaves a stale "Needs Auth" beside a
+    // working account, which the person can dismiss; it never undoes the account.
+    if let Some(id) = claims.attempt.as_deref()
+        && let Err(error) = attempts::remove(&state.auth.store, &account_id, id).await
+    {
+        tracing::warn!(%error, "a finished sign-in could not be cleared");
+    }
+
     // The refresh token is its own row: it outlives the access token, and keeping them apart means
     // rotating one does not disturb the other.
     if let Some(refresh) = refresh_to_store
@@ -370,6 +469,121 @@ pub async fn callback(
         ),
     )
         .into_response()
+}
+
+/// Mark the sign-in a state names as needing auth, with why. Best effort: the callback's own answer
+/// to the browser is what the person is reading, and a store that cannot record this still lets
+/// them try again from the app.
+async fn failed(state: &AgUiState, claims: &StateClaims, why: &str) {
+    let Some(id) = claims.attempt.as_deref() else {
+        return;
+    };
+    let account = AccountId::from_stored(claims.sub.clone());
+    if claims.plugin.is_some() {
+        let redirect = &state.connectors.redirect_uri;
+        let pending = attempts::mcp_pending(&state.auth.store, &account, id, redirect).await;
+        let reconnect = matches!(pending, Ok(Some(ref p)) if p.target.is_some());
+        return super::plugin_signin::give_up(state, &account, id, reconnect, why).await;
+    }
+    if let Err(error) = attempts::fail(&state.auth.store, &account, id, why, now_ms()).await {
+        tracing::warn!(%error, "a refused sign-in could not be recorded");
+    }
+}
+
+/// The person's unfinished sign-ins, oldest first per service. An ARRAY, always.
+pub async fn list_attempts(State(state): State<AgUiState>, headers: HeaderMap) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    match attempts::list(&state.auth.store, &account_id).await {
+        Ok(rows) => Json(rows).into_response(),
+        Err(error) => refused(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
+    }
+}
+
+/// Reopen an unfinished sign-in: `authorize`'s link for THE SAME attempt, back to pending, so the
+/// account it adds keeps its label and no second row appears. Another person's is the same 404 as
+/// none.
+pub async fn reopen_attempt(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(mut query): Query<AuthorizeQuery>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    let attempt = match attempts::get(&state.auth.store, &account_id, &id).await {
+        Ok(Some(attempt)) => attempt,
+        Ok(None) => return refused(StatusCode::NOT_FOUND, "no such sign-in"),
+        Err(error) => return refused(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
+    };
+    // An installed plugin's sign-in reopens at that plugin's own provider.
+    if attempt.plugin.is_some() {
+        let format = query.format.clone();
+        return super::plugin_signin::reopen(&state, account_id, &attempt, format.as_deref()).await;
+    }
+    // The Bot it was for, never one the request names: a reopen resumes, it does not redirect.
+    query.coworker_id = attempt.coworker_id.clone();
+    let response = link(
+        &state,
+        account_id.clone(),
+        attempt.connector,
+        query,
+        Mode::Reopen(id.clone()),
+    )
+    .await;
+    // Pending again only once a link was actually handed out.
+    if response.status().is_success() || response.status().is_redirection() {
+        let _ = attempts::reopen(&state.auth.store, &account_id, &id, now_ms()).await;
+    }
+    response
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameAttempt {
+    pub label: String,
+}
+
+/// Rename a sign-in before it finishes, by the rule `PATCH /connections/{id}` renames an account.
+pub async fn rename_attempt(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    request: Result<Json<RenameAttempt>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    let Ok(Json(request)) = request else {
+        return refused(StatusCode::UNPROCESSABLE_ENTITY, "send a label only");
+    };
+    let Some(label) = opengrok_core::connection::tidy_label(&request.label) else {
+        let sentence = opengrok_core::connection::ConnectionError::BadLabel.to_string();
+        return refused(StatusCode::UNPROCESSABLE_ENTITY, &sentence);
+    };
+    match attempts::rename(&state.auth.store, &account_id, &id, &label, now_ms()).await {
+        Ok(Some(attempt)) => Json(attempt).into_response(),
+        Ok(None) => refused(StatusCode::NOT_FOUND, "no such sign-in"),
+        Err(error) => refused(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
+    }
+}
+
+/// Give up on a sign-in. A browser still at the provider can finish it: they did sign in.
+pub async fn dismiss_attempt(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(account_id) = account_from_bearer(&state, &headers) else {
+        return refused(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    match attempts::remove(&state.auth.store, &account_id, &id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => refused(StatusCode::NOT_FOUND, "no such sign-in"),
+        Err(error) => refused(StatusCode::SERVICE_UNAVAILABLE, &error.to_string()),
+    }
 }
 
 /// What a person has connected, and who they have lent it to.
@@ -436,7 +650,7 @@ pub async fn disconnect(
 /// A refusal as `{"error": sentence}`: an app reads a bare-text body as coming from a proxy in
 /// front of the server, and the person loses the sentence (#262, asked again by NativeChat for
 /// these routes in #267).
-fn refused(status: StatusCode, sentence: &str) -> Response {
+pub(super) fn refused(status: StatusCode, sentence: &str) -> Response {
     (status, Json(serde_json::json!({ "error": sentence }))).into_response()
 }
 

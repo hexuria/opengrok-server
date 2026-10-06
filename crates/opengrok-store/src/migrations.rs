@@ -131,6 +131,27 @@ update grant_view
    and not (profile->'only' ? 'run_routine')
    and not exists (select 1 from schema_migrations where name = 'the-routine-runs-join-the-ceiling');
 insert into schema_migrations (name) values ('the-routine-runs-join-the-ceiling') on conflict do nothing;
+-- #359: a Bot's plugin tools are one ceiling row, on by default like Routines, so every list
+-- ceiling and its owner's profile gains them ONCE; one without them after this was switched off,
+-- and a set that admits nothing still admits nothing.
+update ceiling_view
+   set version = version + 1,
+       tools = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
+         from (select distinct jsonb_array_elements_text((tools->'only') || '["add_plugin_account",
+           "install_plugin", "list_plugin_accounts", "list_plugins", "pick_plugin_account",
+           "plugin_details", "remove_plugin_account", "rename_plugin_account",
+           "set_plugin_for_bot", "uninstall_plugin"]'::jsonb) tool) known))
+ where tools ? 'only' and not (tools->'only' ?& '{add_plugin_account,install_plugin,list_plugin_accounts,list_plugins,pick_plugin_account,plugin_details,remove_plugin_account,rename_plugin_account,set_plugin_for_bot,uninstall_plugin}')
+   and not exists (select 1 from schema_migrations where name = 'the-plugin-tools-join-the-ceiling');
+update grant_view
+   set profile = jsonb_build_object('only', (select jsonb_agg(tool order by tool collate "C")
+         from (select distinct jsonb_array_elements_text((profile->'only') || '["add_plugin_account",
+           "install_plugin", "list_plugin_accounts", "list_plugins", "pick_plugin_account",
+           "plugin_details", "remove_plugin_account", "rename_plugin_account",
+           "set_plugin_for_bot", "uninstall_plugin"]'::jsonb) tool) known))
+ where profile ? 'only' and not (profile->'only' ?& '{add_plugin_account,install_plugin,list_plugin_accounts,list_plugins,pick_plugin_account,plugin_details,remove_plugin_account,rename_plugin_account,set_plugin_for_bot,uninstall_plugin}')
+   and not exists (select 1 from schema_migrations where name = 'the-plugin-tools-join-the-ceiling');
+insert into schema_migrations (name) values ('the-plugin-tools-join-the-ceiling') on conflict do nothing;
 "#;
 
 /// Apply the schema. Safe to call on every boot and from every replica.

@@ -1,0 +1,6 @@
+{
+  "method": "PUT",
+  "path": "/plugins/installations/demo/credentials/demo",
+  "status": 204,
+  "body": ""
+}

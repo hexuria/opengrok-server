@@ -140,6 +140,82 @@ fn preferred_tools_from(input: &RunAgentInput) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The most plugins one message may name. A composer puts one tag per plugin, and a body naming
+/// hundreds is not a person typing: each name costs an install lookup.
+const MAX_MENTIONED_PLUGINS: usize = 16;
+
+/// The plugins the person tagged in THIS message (`@cloudflare`), by install name.
+///
+/// UNLIKE `preferTools`, A MENTION GIVES ACCESS: a plugin switched off for this Bot is switched on
+/// for this one turn, because typing its name is the person asking for it. Who may ask is
+/// `turn::mentioned`'s to decide; this only reads the field, bounded, each name of a shape a
+/// plugin name can have.
+// Provenance: the client sends `forwardedProps.mentionedPlugins: ["cloudflare"]` (#359).
+fn mentioned_plugins_from(input: &RunAgentInput) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let listed = input
+        .forwarded_props
+        .get("mentionedPlugins")
+        .and_then(|value| value.as_array());
+    for name in listed
+        .into_iter()
+        .flatten()
+        .filter_map(|name| name.as_str())
+    {
+        let name = name.trim();
+        let usable = opengrok_plugins::is_valid_name(name) && !name.contains('.');
+        if usable && !names.iter().any(|seen| seen == name) {
+            names.push(name.to_string());
+        }
+        if names.len() == MAX_MENTIONED_PLUGINS {
+            break;
+        }
+    }
+    names
+}
+
+/// The account picked on a "Which account?" card for THIS turn, by plugin then connector:
+/// `{"cloudflare": {"cloudflare": "conn_…"}}`. Only ever narrows which of the person's own
+/// accounts is used (`installed::values_choosing`); bounded like the tags.
+// Provenance: the client sends `forwardedProps.pluginAccounts` when a card's answer re-sends (#360).
+fn plugin_accounts_from(input: &RunAgentInput) -> BTreeMap<String, BTreeMap<String, String>> {
+    let Some(plugins) = input
+        .forwarded_props
+        .get("pluginAccounts")
+        .and_then(|value| value.as_object())
+    else {
+        return BTreeMap::new();
+    };
+    plugins
+        .iter()
+        .take(MAX_MENTIONED_PLUGINS)
+        .filter_map(|(plugin, connectors)| {
+            let picks: BTreeMap<String, String> = connectors
+                .as_object()?
+                .iter()
+                .take(MAX_MENTIONED_PLUGINS)
+                .filter_map(|(connector, id)| Some((connector.clone(), id.as_str()?.to_string())))
+                .collect();
+            Some((plugin.clone(), picks))
+        })
+        .collect()
+}
+
+/// The whole answer to a turn whose tagged plugins need something first: the run starts, says
+/// what each needs (`turn::PLUGIN_NEEDS`), and finishes. No model is asked and nothing is
+/// recorded, since the card's answer sends the same message again as a turn of its own.
+fn plugin_needs_answer(input: &RunAgentInput, needs: Vec<serde_json::Value>) -> Response {
+    let mut projection =
+        opengrok_harness::Projection::new(&input.thread_id, &input.run_id, now_ms());
+    let mut events = projection.start();
+    let value = serde_json::json!({ "needs": needs });
+    events.push(projection.custom(opengrok_integrations::turn::PLUGIN_NEEDS, value));
+    events.extend(projection.finish());
+    sse(futures::stream::iter(
+        events.into_iter().map(Ok::<_, std::io::Error>),
+    ))
+}
+
 /// The named tools that this bot can actually run, in the order they were named.
 ///
 /// A name the bot was never offered is dropped rather than repeated: a system message that
@@ -432,11 +508,52 @@ pub(crate) async fn tools_for_coworker(
     review_approved: &[String],
     wake_patience: std::time::Duration,
 ) -> Option<ToolRunner> {
+    let gates = (approved, review_approved);
+    let turn = opengrok_integrations::turn::TurnPlugins::default();
+    tools_for_turn(state, account_id, coworker_id, gates, wake_patience, &turn).await
+}
+
+/// [`tools_for_coworker`] for a turn whose message tagged plugins (`@cloudflare`): each one
+/// `turn::mentioned` kept is switched on for this turn only (`with_mentioned`), with the account
+/// the turn picked where it picked one.
+pub(crate) async fn tools_for_turn(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+    (approved, review_approved): (&[String], &[String]),
+    wake_patience: std::time::Duration,
+    turn: &opengrok_integrations::turn::TurnPlugins,
+) -> Option<ToolRunner> {
     let coworker_id = coworker_id.clone();
     let (coworker, _) = state.auth.store.load_coworker(&coworker_id).await.ok()?;
-    // A coworker with no computer gets no tools rather than tools that cannot run: a tool the
-    // model is told about but that always refuses is a dead end it keeps trying.
-    coworker.computer()?;
+    // A coworker with no computer gets no computer tools rather than tools that cannot run: a
+    // tool the model is told about but that always refuses is a dead end it keeps trying. Its
+    // plugins are another matter: they are the person's accounts at services, not programs on a
+    // box, so a Bot without a computer still gets those (#359).
+    if coworker.computer().is_none() {
+        let policy = state
+            .auth
+            .store
+            .policy_to_use(account_id, &coworker_id)
+            .await
+            .ok()?;
+        let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
+        let plugins = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
+        if plugins.tools.is_empty() && plugins.unavailable.is_empty() {
+            return None;
+        }
+        let context = opengrok_tools::ToolContext::from_coworker(
+            account_id.clone(),
+            coworker_id.clone(),
+            &coworker,
+        );
+        let executor = opengrok_tools::Executor::without_a_computer(policy)
+            .with_plugins(plugins)
+            .with_plugin_desk(plugin_desk(state))
+            .with_approved(approved.iter().cloned())
+            .with_review_approved(review_approved.iter().cloned());
+        return Some(ToolRunner::new(executor, context));
+    }
     // Resolve the provider for this coworker's computer by its account's effective sharing mode and
     // scope (per-org / per-account / per-bot), then that scope's recorded kind — so tools run on the
     // same provider that created the box.
@@ -535,12 +652,13 @@ pub(crate) async fn tools_for_coworker(
         .policy_to_use(account_id, &coworker_id)
         .await
         .ok()?;
+    let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
 
     // The plugins this coworker may use, connected with its own credentials. On a shared
     // coworker that includes its `bot`-scoped connections, which its OWNER authorised: a member's
     // turn acts through them, while the owner's `user`-scoped ones stay the owner's (ROADMAP
     // 19.4). Narrowing that is a decision about what sharing lends, not a filter to add here.
-    let plugins = connect_plugins(state, account_id, &coworker_id, &policy).await;
+    let plugins = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
 
     // Bind the SCOPE's live box, not the coworker's frozen hire-time id. They match at hire, but a
     // reset or re-provision changes the account's box while the aggregate id stays put — and this is
@@ -616,7 +734,9 @@ pub(crate) async fn tools_for_coworker(
         // whether they are offered, and the context's account and Bot are all they answer for.
         .with_routines(Arc::new(crate::autonomy::desk::Tools {
             state: state.clone(),
-        }));
+        }))
+        // The person's plugins and accounts (#359), through the desk the Plugins routes use.
+        .with_plugin_desk(plugin_desk(state));
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin. The executor offers it only where the
@@ -661,6 +781,14 @@ pub(crate) async fn tools_for_coworker(
     }
 
     Some(ToolRunner::new(executor, context))
+}
+
+/// The desk a turn's plugin tools answer through, on the registry the Plugins routes serve.
+fn plugin_desk(state: &AgUiState) -> Arc<dyn opengrok_tools::plugin_desk::PluginDesk> {
+    Arc::new(crate::plugin_desk::Tools {
+        state: state.clone(),
+        registry: crate::plugin_registry::registry(),
+    })
 }
 
 /// The conversation of a run suspended on a user-form: it holds the screen whether or not the
@@ -797,26 +925,10 @@ async fn live_token(
 /// Written down rather than merely logged: a person looking at their connections should see it is
 /// gone, and the next run should not try again.
 async fn disconnect_revoked(state: &AgUiState, id: &str) -> Result<(), opengrok_store::StoreError> {
-    let (mut connection, seq) = state.auth.store.load_connection(id).await?;
-    let at_ms = now_ms();
-    let events = connection
-        .decide(opengrok_core::connection::ConnectionCommand::Disconnect { at_ms })
-        .unwrap_or_default();
-    for event in &events {
-        connection.apply(event);
-    }
-    state
-        .auth
-        .store
-        .append_connection(
-            id,
-            seq,
-            &events,
-            &connection,
-            &opengrok_store::CredentialUpdate::none(at_ms),
-        )
-        .await?;
-    Ok(())
+    let mut tx = state.auth.store.pool().begin().await?;
+    let remove = opengrok_integrations::accounts::remove_in;
+    remove(&state.auth.store, &mut tx, id, now_ms()).await?;
+    Ok(tx.commit().await?)
 }
 
 /// Open a session with every plugin server this coworker can both reach and be permitted to use.
@@ -834,36 +946,18 @@ async fn connect_plugins(
     account_id: &opengrok_core::id::AccountId,
     coworker_id: &CoworkerId,
     policy: &opengrok_policy::Context,
+    turn: &opengrok_integrations::turn::TurnPlugins,
 ) -> opengrok_tools::mcp::Dialled {
     // Every credential this coworker can use, keyed the way a plugin's placeholders name them:
-    // `GMAIL_TOKEN` for the `gmail` connector.
-    let candidates = if state.plugins.is_empty() {
-        Vec::new()
-    } else {
-        state
-            .auth
-            .store
-            .connections_for(account_id, coworker_id)
-            .await
-            .unwrap_or_default()
-    };
-
+    // `GMAIL_TOKEN` for the `gmail` connector. Which account serves each service is the Bot's
+    // pin or the only one it may use, never a guess between several (#359, `resolve`).
     let mut values: BTreeMap<String, String> = BTreeMap::new();
-    if let Some(vault) = state.vault.as_ref() {
-        for connector in candidates
-            .iter()
-            .map(|candidate| candidate.connector.clone())
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            // The domain decides which of several connections wins — bot's own, then lent, then
-            // global. That rule is pure and tested; this only asks it.
-            let Some(chosen) =
-                opengrok_core::connection::resolve(&candidates, &connector, coworker_id)
-            else {
-                continue;
-            };
-            if let Some(token) = live_token(state, vault, chosen).await {
-                values.insert(opengrok_plugins::token_key(&connector), token);
+    if let Some(vault) = state.vault.as_ref().filter(|_| !state.plugins.is_empty()) {
+        let store = &state.auth.store;
+        let chosen = opengrok_integrations::accounts::for_operator_plugins;
+        for chosen in chosen(store, account_id, coworker_id).await {
+            if let Some(token) = live_token(state, vault, &chosen).await {
+                values.insert(opengrok_plugins::token_key(&chosen.connector), token);
             }
         }
     }
@@ -890,8 +984,17 @@ async fn connect_plugins(
 
     let (store, vault) = (&state.auth.store, state.vault.as_deref());
     let operator = |name: &str| state.plugins.contains_key(name);
-    let turn = opengrok_integrations::turn::endpoints;
-    endpoints.extend(turn(store, vault, account_id, coworker_id, policy, operator).await);
+    let installed = opengrok_integrations::turn::endpoints;
+    let dialled = installed(
+        store,
+        vault,
+        account_id,
+        coworker_id,
+        policy,
+        turn,
+        operator,
+    );
+    endpoints.extend(dialled.await);
 
     // The ceiling gate, per tool and on every turn, whether the listing is fresh or pooled. A tool
     // the coworker may not run is not offered at all — being told about a tool that always
@@ -2281,14 +2384,25 @@ async fn list_tools(
             }))
         })
         .collect();
-    // The routine tools are listed as their ceiling's one row (#316), as the Tools card shows it.
-    use opengrok_tools::routine;
+    // The routine tools are listed as their ceiling's one row (#316), as the Tools card shows it,
+    // and so are the plugin tools (#359).
+    use opengrok_tools::{plugin_desk, routine};
     let routines =
         |row: &serde_json::Value| row["name"].as_str().is_some_and(routine::is_routine_tool);
-    let (offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(routines);
+    let (offered, tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(routines);
+    let desk = |row: &serde_json::Value| {
+        row["name"]
+            .as_str()
+            .is_some_and(plugin_desk::is_plugin_desk_tool)
+    };
+    let (desk_offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(desk);
     if !offered.is_empty() {
         tools.push(serde_json::json!({ "name": routine::ROW,
             "description": routine::ROW_DESCRIPTION, "kind": "builtin" }));
+    }
+    if !desk_offered.is_empty() {
+        tools.push(serde_json::json!({ "name": plugin_desk::ROW,
+            "description": plugin_desk::ROW_DESCRIPTION, "kind": "builtin" }));
     }
     Json(serde_json::json!({ "tools": tools })).into_response()
 }
@@ -2933,11 +3047,44 @@ async fn start_claimed_turn(
     // Read once. The tool runner needs it to bind the run, and the system prompt needs it to say
     // so; reading it twice would let the two disagree about what the person chose.
     let chosen = chosen_recipe_from(&input);
+    // The plugins this message named, kept to those its driving account installed on a Bot it
+    // owns; read once, so the tools and the sentence naming them cannot disagree.
+    let asked_plugins = mentioned_plugins_from(&input);
+    let mut turn_plugins = opengrok_integrations::turn::TurnPlugins {
+        chosen: plugin_accounts_from(&input),
+        ..Default::default()
+    };
+    if let (Some(account), Some(coworker)) = (&account_id, &run_coworker) {
+        let store = &state.auth.store;
+        let kept = opengrok_integrations::turn::mentioned(store, account, coworker, &asked_plugins);
+        turn_plugins.mentioned = kept.await;
+        // A tagged plugin this turn could not use yet is asked about BEFORE the model is: the
+        // turn answers with the card and ends, and the card's answer sends the same message again
+        // (#360). Parking instead would resume without the tags, which live only on this request.
+        let vault = state.vault.as_deref();
+        let asked = (&asked_plugins, &turn_plugins);
+        let needs =
+            opengrok_integrations::turn::needs(store, vault, account, coworker, asked.0, asked.1)
+                .await;
+        if !needs.is_empty() {
+            return plugin_needs_answer(&input, needs);
+        }
+    }
+    let mentioned = turn_plugins.mentioned.clone();
+    let plugins_off = match (&account_id, &run_coworker) {
+        (Some(account), Some(coworker)) => {
+            let store = &state.auth.store;
+            opengrok_integrations::turn::switched_off(store, account, coworker, &mentioned).await
+        }
+        _ => Vec::new(),
+    };
     // No bearer, no identity, and therefore no computer tools.
     let tools = match (&account_id, &run_coworker) {
         (Some(account), Some(coworker)) => {
             let patience = TURN_WAKE_PATIENCE;
-            let runner = tools_for_coworker(&state, account, coworker, &[], &[], patience).await;
+            let gates: (&[String], &[String]) = (&[], &[]);
+            let runner =
+                tools_for_turn(&state, account, coworker, gates, patience, &turn_plugins).await;
             match (runner, chosen.clone()) {
                 (Some(runner), Some((recipe, values))) => {
                     Some(runner.with_chosen_recipe(recipe, values))
@@ -3033,7 +3180,7 @@ async fn start_claimed_turn(
                 &persona,
                 route.asks(&model),
                 Some(&format!(
-                    "{speaker}\n\n{}{}{}{}{}{}{}",
+                    "{speaker}\n\n{}{}{}{}{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -3047,6 +3194,8 @@ async fn start_claimed_turn(
                         .map(ToolRunner::unavailable_plugins_line)
                         .unwrap_or_default(),
                     crate::persona::preferred_tools_line(&preferred),
+                    crate::persona::mentioned_plugins_line(&mentioned, &asked_plugins),
+                    crate::persona::plugins_off_line(&plugins_off),
                     // After what it may do, as the author's words they are, and before this
                     // message's own choices: a skill it may reach for on any turn.
                     tools

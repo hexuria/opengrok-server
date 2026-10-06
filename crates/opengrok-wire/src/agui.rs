@@ -304,7 +304,10 @@ pub const SENT_TYPES: &[EventType] = &[
 /// `agui/pending.rs`; `user-form` in opengrok-server `agui/user_form.rs`;
 /// `credential.offer_save` in opengrok-tools `credential.rs`; and `opengrok.inferenceSource` in
 /// opengrok-harness `lib.rs`, right after `RUN_STARTED`: `{kind, model}`, where the turn asks;
-/// `opengrok.timeline` in `pair.rs`, a row of a Bot's main chat (#314).
+/// `opengrok.timeline` in `pair.rs`, a row of a Bot's main chat (#314); `opengrok.pluginNeeds` in
+/// opengrok-server `agui/routes.rs`, the whole answer to a turn whose tagged plugins need an
+/// install, an account or a choice first: `{needs: [{plugin, connector?, need, accounts?}]}`
+/// (`turn::needs` in opengrok-integrations, #360).
 pub const CUSTOM_NAMES: &[&str] = &[
     "run-awaiting-approval",
     "run-stopped",
@@ -315,6 +318,7 @@ pub const CUSTOM_NAMES: &[&str] = &[
     "credential.offer_save",
     "opengrok.inferenceSource",
     "opengrok.timeline",
+    "opengrok.pluginNeeds",
 ];
 
 #[cfg(test)]

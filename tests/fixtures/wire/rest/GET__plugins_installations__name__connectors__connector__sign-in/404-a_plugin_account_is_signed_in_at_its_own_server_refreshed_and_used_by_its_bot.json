@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/plugins/installations/nope/connectors/demo/sign-in",
+  "status": 404,
+  "body": {
+    "error": "no such installed plugin"
+  }
+}

@@ -2,5 +2,5 @@
   "method": "POST",
   "path": "/skills/skl_0199bb4e-0000-7000-8000-000000000001/versions",
   "status": 413,
-  "body": "the skill body is 9000 characters, over the 8000 allowed — a skill shares one system message with the coworker's own role, and a longer one would replace it rather than add to it"
+  "body": "the skill body is 66536 characters, over the 65536 allowed — a skill shares one system message with the coworker's own role, and a longer one would replace it rather than add to it"
 }

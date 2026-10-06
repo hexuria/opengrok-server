@@ -54,6 +54,12 @@ struct SignedState {
     scope: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     coworker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin: Option<String>,
     nonce: String,
     exp: i64,
     /// Marks this as a connection state and not an access token. Without it, an access token would
@@ -77,6 +83,9 @@ pub fn sign_state(
         connector: claims.connector.clone(),
         scope: claims.scope.clone(),
         coworker: claims.coworker.clone(),
+        connection: claims.connection.clone(),
+        attempt: claims.attempt.clone(),
+        plugin: claims.plugin.clone(),
         nonce: claims.nonce.clone(),
         exp,
         purpose: STATE_PURPOSE.to_string(),
@@ -104,6 +113,9 @@ pub fn verify_state(minter: &TokenMinter, state: &str) -> Result<StateClaims, Fl
         connector: signed.connector,
         scope: signed.scope,
         coworker: signed.coworker,
+        connection: signed.connection,
+        attempt: signed.attempt,
+        plugin: signed.plugin,
         nonce: signed.nonce,
         exp: signed.exp,
     })

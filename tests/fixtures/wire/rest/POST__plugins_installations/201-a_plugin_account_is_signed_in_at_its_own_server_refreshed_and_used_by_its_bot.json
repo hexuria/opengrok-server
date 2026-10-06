@@ -1,0 +1,42 @@
+{
+  "method": "POST",
+  "path": "/plugins/installations",
+  "status": 201,
+  "body": {
+    "name": "demo",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "registryRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "parts": [
+      {
+        "kind": "mcp",
+        "name": "hosted",
+        "supported": true,
+        "reason": null
+      },
+      {
+        "kind": "mcp",
+        "name": "local",
+        "supported": false,
+        "reason": "stdio MCP is refused: installing a bundle cannot launch a process"
+      },
+      {
+        "kind": "skill",
+        "name": "triage",
+        "supported": true,
+        "reason": null
+      },
+      {
+        "kind": "commands",
+        "name": "commands",
+        "supported": false,
+        "reason": "commands has no loader (#361)"
+      },
+      {
+        "kind": "hooks",
+        "name": "hooks",
+        "supported": false,
+        "reason": "hooks has no loader (#361)"
+      }
+    ]
+  }
+}

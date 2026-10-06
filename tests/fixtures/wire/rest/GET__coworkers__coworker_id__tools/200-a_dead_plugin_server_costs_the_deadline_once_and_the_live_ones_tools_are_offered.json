@@ -33,6 +33,11 @@
         "name": "routines",
         "description": "List, make, edit, delete and run this Bot's routines when you ask in chat. Deleting one always asks you first.",
         "kind": "builtin"
+      },
+      {
+        "name": "plugins",
+        "description": "Find, install and remove plugins, add and manage their accounts, and switch them on for your Bots when you ask in chat. Uninstalling, removing an account, or changing another Bot always asks you first.",
+        "kind": "builtin"
       }
     ]
   }

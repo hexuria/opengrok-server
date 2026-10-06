@@ -1,0 +1,17 @@
+{
+  "method": "GET",
+  "path": "/connections/attempts",
+  "status": 200,
+  "body": [
+    {
+      "id": "attempt_0199bb4e000070008000000000000001",
+      "connector": "gmail",
+      "label": "Gmail",
+      "coworkerId": null,
+      "status": "failed",
+      "error": "the provider did not connect: access_denied",
+      "updatedAtMs": 1790000000000,
+      "plugin": null
+    }
+  ]
+}

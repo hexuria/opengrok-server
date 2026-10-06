@@ -65,6 +65,13 @@
         "description": "List, make, edit, delete and run this Bot's routines when you ask in chat. Deleting one always asks you first.",
         "enabled": true,
         "label": "Routines"
+      },
+      {
+        "name": "plugins",
+        "kind": "builtin",
+        "description": "Find, install and remove plugins, add and manage their accounts, and switch them on for your Bots when you ask in chat. Uninstalling, removing an account, or changing another Bot always asks you first.",
+        "enabled": true,
+        "label": "Plugins"
       }
     ],
     "version": 0

@@ -220,6 +220,9 @@ fn claims() -> StateClaims {
         connector: "gmail".to_string(),
         scope: "user".to_string(),
         coworker: None,
+        connection: None,
+        attempt: None,
+        plugin: None,
         nonce: "n1".to_string(),
         exp: 0,
     }

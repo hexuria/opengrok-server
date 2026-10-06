@@ -323,6 +323,46 @@ pub fn names_plugin(
     &ceiling.coworker == coworker && both.whole_plugins().any(|named| named == plugin)
 }
 
+/// `context` with each of `plugins` admitted whole, for ONE turn whose driving account owns the
+/// coworker and named those plugins in its message (`@cloudflare`).
+///
+/// A WIDENING, AND THE ONLY ONE. It is sound because both layers it touches are the owner's own
+/// word: the ceiling is the owner's setting, and on their own Bot the grant is theirs too, which is
+/// why switching a plugin on saves it into both. A mention is that same person switching it on
+/// for one message, and nothing is stored. The caller proves ownership and that each plugin is
+/// installed by that account (`turn::mentioned`); a member of an org typing a name on a shared
+/// Bot must never reach here, since for them both layers are somebody else's word. `All` stays
+/// `All`: it already admits every tool, and the caller dials a mentioned plugin by name
+/// (`names_plugin` answers no for `All`).
+#[must_use]
+pub fn with_mentioned(mut context: Context, plugins: &[String]) -> Context {
+    fn widened(tools: ToolSet, plugins: &[String]) -> ToolSet {
+        let named: BTreeSet<String> = plugins.iter().map(|p| every_tool_of(p)).collect();
+        match tools {
+            ToolSet::All => ToolSet::All,
+            _ if named.is_empty() => tools,
+            ToolSet::None => ToolSet::Only(named),
+            ToolSet::Only(mut names) => {
+                names.extend(named);
+                ToolSet::Only(names)
+            }
+        }
+    }
+    if let Some(ceiling) = context.ceiling.as_mut() {
+        ceiling.tools = widened(
+            std::mem::replace(&mut ceiling.tools, ToolSet::None),
+            plugins,
+        );
+    }
+    if let Some(grant) = context.grant.as_mut() {
+        grant.profile = widened(
+            std::mem::replace(&mut grant.profile, ToolSet::None),
+            plugins,
+        );
+    }
+    context
+}
+
 /// Whether ANY tool whose name starts with `prefix` could be run (or held for a yes) — so a
 /// caller can skip reaching a plugin server the coworker could use nothing from.
 ///

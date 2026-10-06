@@ -18,18 +18,19 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_policy::ToolSet;
-use opengrok_tools::{Executor, USER_MACHINE_SHELL, routine};
+use opengrok_tools::{Executor, USER_MACHINE_SHELL, plugin_desk, routine};
 use serde_json::{Value, json};
 
 use super::routes::{AgUiState, account_from_bearer, now_ms, owned_coworker};
 use crate::health::refusal;
 
-/// The built-ins' rows: one per built-in, and ONE for the four routine tools, which it switches
-/// together (#316, the owner's call): a person decides whether a Bot keeps routines, not which
-/// verb of it.
+/// The built-ins' rows: one per built-in, ONE for the routine tools, which it switches together
+/// (#316, the owner's call): a person decides whether a Bot keeps routines, not which verb of it;
+/// and one for the plugin tools, the same way (#359).
 fn builtin_rows() -> impl Iterator<Item = &'static str> {
-    let rows = Executor::every_builtin().filter(|name| !routine::is_routine_tool(name));
-    rows.chain([routine::ROW])
+    let rows = Executor::every_builtin()
+        .filter(|name| !routine::is_routine_tool(name) && !plugin_desk::is_plugin_desk_tool(name));
+    rows.chain([routine::ROW, plugin_desk::ROW])
 }
 
 /// The rows as `ceiling` sets them, plus one per plugin it still switches on that this server no
@@ -59,6 +60,7 @@ async fn rows(
             let description = Executor::builtin_description(name).unwrap_or_default();
             let on = match name {
                 routine::ROW => routine::TOOLS.iter().all(|tool| ceiling.allows(tool)),
+                plugin_desk::ROW => plugin_desk::TOOLS.iter().all(|tool| ceiling.allows(tool)),
                 name => ceiling.allows(name),
             };
             let mut row = json!({ "name": name, "kind": "builtin",
@@ -68,6 +70,9 @@ async fn rows(
             }
             if name == routine::ROW {
                 row["label"] = json!(routine::ROW_LABEL);
+            }
+            if name == plugin_desk::ROW {
+                row["label"] = json!(plugin_desk::ROW_LABEL);
             }
             row
         })
@@ -188,28 +193,47 @@ pub(super) async fn put_ceiling(
             return refusal(422, &format!("send {{\"enabled\": [names]}}: {why}"));
         }
     };
+    match save(&state, &account_id, &coworker_id, enabled, version).await {
+        Ok((tools, version)) => reply(&state, &account_id, &tools, version).await,
+        Err(refused) => refused,
+    }
+}
+
+/// Write `enabled`, named as the rows a GET shows, as `coworker`'s ceiling: the PUT's body, and
+/// what a Bot's `set_plugin_for_bot` sends (#359), so the two cannot store different things.
+async fn save(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    enabled: Vec<String>,
+    version: Option<i64>,
+) -> Result<(ToolSet, i64), Response> {
     // Named against the rows a GET shows now. A built-in is a row whether or not it is available,
     // so it can be switched on or off either way ON PURPOSE: the ceiling records the intent, and a
     // turn offers the tool only once it is there (the machine, once one is enrolled). A plugin
     // this server does not load has no row until it is switched on, so it may be kept, never
     // added. Nothing is written until every name is one.
-    let (now, _) = match state.auth.store.ceiling_at(&coworker_id).await {
+    let (now, _) = match state.auth.store.ceiling_at(coworker_id).await {
         Ok(found) => found,
-        Err(error) => return unavailable(&error),
+        Err(error) => return Err(unavailable(&error)),
     };
-    let shown = match rows(&state, &account_id, &now).await {
+    let shown = match rows(state, account_id, &now).await {
         Ok(rows) => rows,
-        Err(e) => return unavailable(&e),
+        Err(e) => return Err(unavailable(&e)),
     };
     let mut entries = BTreeSet::new();
     for name in enabled {
         match shown.iter().find(|row| row["name"] == name.as_str()) {
-            None => return refusal(422, &format!("no tool or plugin named {name}")),
+            None => return Err(refusal(422, &format!("no tool or plugin named {name}"))),
             Some(row) if row["kind"] == "plugin" => {
                 entries.insert(opengrok_policy::every_tool_of(&name))
             }
             Some(_) if name == routine::ROW => {
                 entries.extend(routine::TOOLS.map(str::to_string));
+                true
+            }
+            Some(_) if name == plugin_desk::ROW => {
+                entries.extend(plugin_desk::TOOLS.map(str::to_string));
                 true
             }
             Some(_) => entries.insert(name),
@@ -220,17 +244,62 @@ pub(super) async fn put_ceiling(
     } else {
         ToolSet::Only(entries)
     };
-    let (store, who, whom) = (&state.auth.store, &account_id, &coworker_id);
+    let (store, who, whom) = (&state.auth.store, account_id, coworker_id);
     match store
         .set_ceiling(who, whom, &tools, version, now_ms())
         .await
     {
-        Ok(Some(version)) => reply(&state, &account_id, &tools, version).await,
+        Ok(Some(version)) => Ok((tools, version)),
         Ok(None) => {
             let changed = "the tools changed since you looked";
             let body = json!({ "error": changed, "code": "ceiling-changed" });
-            (StatusCode::CONFLICT, Json(body)).into_response()
+            Err((StatusCode::CONFLICT, Json(body)).into_response())
         }
-        Err(error) => unavailable(&error),
+        Err(error) => Err(unavailable(&error)),
+    }
+}
+
+/// Switch `plugin` on or off for `coworker`, as its Tools card would: every other row stays as a
+/// GET shows it. `Ok(false)` when it already was. The caller has checked the Bot is the person's.
+pub(crate) async fn set_plugin(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    plugin: &str,
+    on: bool,
+) -> Result<bool, String> {
+    let said = |why: &str| why.to_string();
+    let (now, version) = state
+        .auth
+        .store
+        .ceiling_at(coworker_id)
+        .await
+        .map_err(|_| said("this Bot's tools could not be read now"))?;
+    let shown = rows(state, account_id, &now)
+        .await
+        .map_err(|_| said("this Bot's tools could not be read now"))?;
+    let row = shown
+        .iter()
+        .find(|row| row["kind"] == "plugin" && row["name"] == plugin);
+    let Some(row) = row else {
+        return Err(format!("{plugin} is not installed; call list_plugins."));
+    };
+    if row["enabled"] == on {
+        return Ok(false);
+    }
+    let mut enabled: Vec<String> = shown
+        .iter()
+        .filter(|row| row["enabled"] == true && row["name"] != plugin)
+        .filter_map(|row| row["name"].as_str().map(str::to_string))
+        .collect();
+    if on {
+        enabled.push(plugin.to_string());
+    }
+    match save(state, account_id, coworker_id, enabled, Some(version)).await {
+        Ok(_) => Ok(true),
+        Err(response) if response.status() == StatusCode::CONFLICT => {
+            Err(said("this Bot's tools changed just now; try again."))
+        }
+        Err(_) => Err(said("this Bot's tools could not be saved now")),
     }
 }

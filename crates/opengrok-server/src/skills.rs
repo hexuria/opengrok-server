@@ -18,9 +18,10 @@
 //! - everybody else is told there is no such skill, because telling them it exists but is not
 //!   theirs is already an answer about somebody else's account.
 //!
-//! THE BODY IS CAPPED AT 8000 CHARACTERS (`MAX_SKILL_BODY_CHARS`). A skill lands in the same
-//! single system message as the standing role, which `persona::MAX_ROLE_CHARS` holds to 1000; an
-//! unbounded skill body would not be an instruction in that message, it would BE that message.
+//! THE BODY IS CAPPED (`MAX_SKILL_BODY_CHARS`, 64 KiB: sized to published skills, see its note).
+//! A chosen skill lands in the same single system message as the standing role, which
+//! `persona::MAX_ROLE_CHARS` holds to 1000; an unbounded skill body would not be an instruction in
+//! that message, it would BE that message.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -138,8 +139,8 @@ pub(crate) enum Action {
     Read,
     /// Run it in a turn: put its body inside a coworker's system message. A SEPARATE ACTION FROM
     /// `Read` even though today's answer is the same, because the two are different questions.
-    /// Reading is seeing a name, a description and a body on a page. Invoking is up to 8000
-    /// characters of somebody's prose landing beside a coworker's box, its shell, its machine
+    /// Reading is seeing a name, a description and a body on a page. Invoking is up to
+    /// `MAX_SKILL_BODY_CHARS` of somebody's prose landing beside a coworker's box, its shell, its machine
     /// shell and its saved-credential flow, chosen off a listing (`summary`) that does not carry
     /// the body — so the chooser has very likely not read what they picked.
     Invoke,
@@ -1876,7 +1877,7 @@ async fn from_tape(
             "the model answered with frontmatter and no instructions",
         );
     }
-    // REFUSED, NOT CUT, and for `for_turn`'s reason: a body cut at 8000 characters ends
+    // REFUSED, NOT CUT, and for `for_turn`'s reason: a body cut at the cap ends
     // mid-sentence and nothing downstream can tell it from a whole one. The prompt asks for a
     // quarter of this, so a body that arrives over it is a model that ignored a plain
     // instruction — the last thing to paper over on the way into a system message.

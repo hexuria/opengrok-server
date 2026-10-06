@@ -55,6 +55,49 @@ impl Owner {
     }
 }
 
+/// How a connection was made, which decides who it may ever serve (#359).
+///
+/// A PASTED TOKEN IS NEVER LENT AND NEVER A BOT'S. A person pasted it for a plugin installed on
+/// their own account, whose server is a third party's, so it serves that person's own Bots in
+/// their own turns and nothing else; no change to a view can widen that (the rule beside
+/// `plugin_installation` in the schema).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionKind {
+    /// A provider's sign-in through this deployment's own OAuth app: every connection before #359.
+    #[default]
+    Oauth,
+    /// A token a person pasted for a plugin they installed.
+    Token,
+    /// A sign-in to an installed plugin's own MCP server, through that server's OAuth (#364).
+    /// Its token is for a third party's server the person chose, so it is held as a pasted token
+    /// is: their own Bots only, never lent.
+    Mcp,
+}
+
+impl ConnectionKind {
+    /// As `connection_view.kind` and the wire spell it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Oauth => "oauth",
+            Self::Token => "token",
+            Self::Mcp => "mcp",
+        }
+    }
+
+    /// An installed plugin's account, pasted or signed in to at its own server: its person's own
+    /// Bots only, and never lent.
+    pub fn is_plugin_account(self) -> bool {
+        matches!(self, Self::Token | Self::Mcp)
+    }
+
+    pub fn from_word(word: &str) -> Option<Self> {
+        [Self::Oauth, Self::Token, Self::Mcp]
+            .into_iter()
+            .find(|kind| kind.word() == word)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ConnectionEvent {
@@ -65,6 +108,9 @@ pub enum ConnectionEvent {
         /// What to show a person: `you@work.com`, an org name. Never a secret.
         label: String,
         at_ms: i64,
+        /// Absent from every event before #359, all of which were sign-ins.
+        #[serde(default)]
+        kind: ConnectionKind,
     },
     /// The token was replaced — a refresh, or a re-authentication.
     Refreshed {
@@ -83,6 +129,11 @@ pub enum ConnectionEvent {
     Disconnected {
         at_ms: i64,
     },
+    /// Renamed by its owner, to tell two accounts for one service apart (#359).
+    Relabelled {
+        label: String,
+        at_ms: i64,
+    },
 }
 
 impl ConnectionEvent {
@@ -93,6 +144,7 @@ impl ConnectionEvent {
             Self::LoanedTo { .. } => "connection-loaned",
             Self::LoanRevoked { .. } => "connection-loan-revoked",
             Self::Disconnected { .. } => "connection-disconnected",
+            Self::Relabelled { .. } => "connection-relabelled",
         }
     }
 }
@@ -104,6 +156,7 @@ pub struct Connection {
     pub connector: String,
     pub owner: Option<Owner>,
     pub label: String,
+    pub kind: ConnectionKind,
     /// Coworkers this has been lent to. A bot-owned connection needs no loans — it is already the
     /// coworker's — but lending one on is allowed, and is how a team of coworkers shares one bot
     /// account.
@@ -118,6 +171,10 @@ pub enum ConnectionError {
     Disconnected,
     #[error("a global connection is not one person's to lend")]
     GlobalNotLendable,
+    #[error("an installed plugin's account is its owner's alone and cannot be lent")]
+    TokenNotLendable,
+    #[error("a label is 1 to {LABEL_MAX_CHARS} characters")]
+    BadLabel,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +182,22 @@ pub enum ConnectionCommand {
     Connect {
         connector: String,
         owner: Owner,
+        label: String,
+        at_ms: i64,
+    },
+    /// A token a person pasted. Its owner is an account, so a Bot's or the deployment's token
+    /// cannot even be spelled.
+    /// A sign-in at an installed plugin's own MCP server (#364). Its owner is an account, as a
+    /// pasted token's is.
+    ConnectMcp {
+        connector: String,
+        owner: AccountId,
+        label: String,
+        at_ms: i64,
+    },
+    ConnectToken {
+        connector: String,
+        owner: AccountId,
         label: String,
         at_ms: i64,
     },
@@ -140,6 +213,11 @@ pub enum ConnectionCommand {
         at_ms: i64,
     },
     Disconnect {
+        at_ms: i64,
+    },
+    /// The label as a person typed it: `decide` tidies it, and refuses what `tidy_label` does.
+    Rename {
+        label: String,
         at_ms: i64,
     },
 }
@@ -159,6 +237,7 @@ impl Connection {
                 connector,
                 owner,
                 label,
+                kind,
                 ..
             } => {
                 self.connected = true;
@@ -166,7 +245,9 @@ impl Connection {
                 self.connector = connector.clone();
                 self.owner = Some(owner.clone());
                 self.label = label.clone();
+                self.kind = *kind;
             }
+            ConnectionEvent::Relabelled { label, .. } => self.label = label.clone(),
             ConnectionEvent::Refreshed { .. } => {}
             ConnectionEvent::LoanedTo { coworker, .. } => {
                 self.loans.insert(coworker.clone());
@@ -215,6 +296,33 @@ impl Connection {
                 owner,
                 label,
                 at_ms,
+                kind: ConnectionKind::Oauth,
+            }]),
+
+            ConnectionCommand::ConnectMcp {
+                connector,
+                owner,
+                label,
+                at_ms,
+            } => Ok(vec![ConnectionEvent::Connected {
+                connector,
+                owner: Owner::User(owner),
+                label,
+                at_ms,
+                kind: ConnectionKind::Mcp,
+            }]),
+
+            ConnectionCommand::ConnectToken {
+                connector,
+                owner,
+                label,
+                at_ms,
+            } => Ok(vec![ConnectionEvent::Connected {
+                connector,
+                owner: Owner::User(owner),
+                label,
+                at_ms,
+                kind: ConnectionKind::Token,
             }]),
 
             ConnectionCommand::Refresh { at_ms } => {
@@ -228,6 +336,9 @@ impl Connection {
                 // the lender controls it, and nobody does.
                 if self.owner == Some(Owner::Global) {
                     return Err(ConnectionError::GlobalNotLendable);
+                }
+                if self.kind.is_plugin_account() {
+                    return Err(ConnectionError::TokenNotLendable);
                 }
                 // Lending twice is not an error — it is the same intent arriving again, and
                 // returning no event keeps the log free of duplicates that say nothing.
@@ -248,6 +359,16 @@ impl Connection {
             ConnectionCommand::Disconnect { at_ms } => {
                 self.alive()?;
                 Ok(vec![ConnectionEvent::Disconnected { at_ms }])
+            }
+
+            ConnectionCommand::Rename { label, at_ms } => {
+                self.alive()?;
+                let label = tidy_label(&label).ok_or(ConnectionError::BadLabel)?;
+                // The name it already has is the same intent arriving again, like lending twice.
+                if label == self.label {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![ConnectionEvent::Relabelled { label, at_ms }])
             }
         }
     }
@@ -281,6 +402,10 @@ pub struct ConnectionView {
     /// forever against a provider that issues no refresh token.
     #[serde(default)]
     pub expires_at_ms: Option<i64>,
+    /// `oauth` or `token` (#359), so an app offers a sign-in to reconnect one and a paste for the
+    /// other.
+    #[serde(default)]
+    pub kind: ConnectionKind,
 }
 
 impl ConnectionView {
@@ -300,37 +425,96 @@ impl ConnectionView {
 }
 
 impl ConnectionView {
-    fn usable_by(&self, coworker: &CoworkerId) -> bool {
-        match &self.owner {
-            Owner::Bot(owner) => owner == coworker || self.loans.contains(coworker),
-            Owner::User(_) => self.loans.contains(coworker),
-            Owner::Global => true,
+    /// May this Bot, which `owner` hired, use this connection?
+    pub fn usable_by(&self, bot: &CoworkerId, owner: &AccountId) -> bool {
+        match (&self.owner, self.kind) {
+            // A pasted token serves its own person's Bots and nobody else's, and is never lent.
+            (Owner::User(person), kind) if kind.is_plugin_account() => person == owner,
+            (_, kind) if kind.is_plugin_account() => false,
+            (Owner::Bot(own), _) => own == bot || self.loans.contains(bot),
+            (Owner::User(_), _) => self.loans.contains(bot),
+            (Owner::Global, _) => true,
         }
     }
 }
 
-/// Which connection a coworker should use for a connector.
+/// What `resolve` found for one connector on one Bot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolved<'a> {
+    /// The Bot's pin, or the only connection it could use.
+    Use(&'a ConnectionView),
+    /// Several would do and nothing says which, so the person must choose (#360). Never settled
+    /// by recency: the most recently updated acted as whichever account somebody last touched.
+    NeedsChoice(Vec<&'a ConnectionView>),
+    /// Nothing this Bot may use, which the caller treats as "not connected", never as "use
+    /// whatever is nearest".
+    None,
+}
+
+/// Which connection a Bot uses for a connector (#359). `owner` is the account that hired it.
 ///
-/// THE MOST SPECIFIC USABLE ONE WINS: the coworker's own, then one lent to it, then the
-/// deployment's. Ties inside a scope go to the most recently updated, so re-authenticating fixes a
-/// stale token rather than adding a second one nobody chooses between.
-///
-/// Returns `None` when nothing is usable — which the caller must treat as "not connected", never
-/// as "use whatever is nearest".
+/// THE PIN, WHILE THE BOT MAY STILL USE IT. Otherwise the one usable connection of the most
+/// specific scope: the Bot's own, then one lent to it, then the deployment's, because a Bot given
+/// its own account must act as itself. A scope holding several is a choice for the person, never
+/// a guess.
 pub fn resolve<'a>(
     candidates: &'a [ConnectionView],
     connector: &str,
-    coworker: &CoworkerId,
-) -> Option<&'a ConnectionView> {
-    candidates
+    bot: &CoworkerId,
+    owner: &AccountId,
+    pin: Option<&str>,
+) -> Resolved<'a> {
+    let usable: Vec<&ConnectionView> = candidates
         .iter()
-        .filter(|candidate| candidate.connector == connector)
-        .filter(|candidate| candidate.usable_by(coworker))
-        .max_by_key(|candidate| (candidate.owner.specificity(), candidate.updated_at_ms))
+        .filter(|candidate| candidate.connector == connector && candidate.usable_by(bot, owner))
+        .collect();
+    let mut pinned = usable.iter().copied();
+    if let Some(pinned) = pinned.find(|usable| Some(usable.id.as_str()) == pin) {
+        return Resolved::Use(pinned);
+    }
+    let Some(top) = usable.iter().map(|usable| usable.owner.specificity()).max() else {
+        return Resolved::None;
+    };
+    let eligible: Vec<&ConnectionView> = usable
+        .into_iter()
+        .filter(|usable| usable.owner.specificity() == top)
+        .collect();
+    if let [only] = eligible[..] {
+        return Resolved::Use(only);
+    }
+    Resolved::NeedsChoice(eligible)
+}
+
+/// The longest label a person may give an account, in characters.
+pub const LABEL_MAX_CHARS: usize = 80;
+
+/// A label as a person typed it, trimmed: `None` when that leaves nothing, or more than
+/// `LABEL_MAX_CHARS` characters.
+pub fn tidy_label(raw: &str) -> Option<String> {
+    let label = raw.trim();
+    let fits = !label.is_empty() && label.chars().count() <= LABEL_MAX_CHARS;
+    fits.then(|| label.to_string())
+}
+
+/// The label a new account starts with (#359): the service's own name, then "Gmail 2",
+/// "Gmail 3"…, the first that none of `taken`, its owner's live accounts for that service, reads
+/// as. Compared without case, so an account labelled `gmail` before accounts had labels of their
+/// own still counts as the first, rather than sitting beside a "Gmail".
+pub fn default_label<'a>(service: &str, taken: impl IntoIterator<Item = &'a str>) -> String {
+    let taken: BTreeSet<String> = taken.into_iter().map(str::to_lowercase).collect();
+    let numbered = |n: usize| match n {
+        1 => service.to_string(),
+        n => format!("{service} {n}"),
+    };
+    // Some `n` up to one past the count is always free, so the range always finds one.
+    (1..=taken.len() + 1)
+        .map(numbered)
+        .find(|label| !taken.contains(&label.to_lowercase()))
+        .unwrap_or_else(|| numbered(taken.len() + 1))
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -353,6 +537,15 @@ mod tests {
             loans: loans.iter().cloned().collect(),
             updated_at_ms: at,
             expires_at_ms: None,
+            kind: ConnectionKind::Oauth,
+        }
+    }
+
+    /// The id `resolve` settles on, when it settles on one.
+    fn used(candidates: &[ConnectionView]) -> Option<&str> {
+        match resolve(candidates, "gmail", &bot(), &person(), None) {
+            Resolved::Use(chosen) => Some(chosen.id.as_str()),
+            Resolved::NeedsChoice(_) | Resolved::None => None,
         }
     }
 
@@ -502,7 +695,7 @@ mod tests {
             view("lent", Owner::User(person()), &[bot()], 100),
             view("own", Owner::Bot(bot()), &[], 1),
         ];
-        assert_eq!(resolve(&candidates, "gmail", &bot()).unwrap().id, "own");
+        assert_eq!(used(&candidates), Some("own"));
     }
 
     /// And a lent one beats the house key: the more specific answer to "whose is this" wins.
@@ -512,24 +705,32 @@ mod tests {
             view("house", Owner::Global, &[], 100),
             view("lent", Owner::User(person()), &[bot()], 1),
         ];
-        assert_eq!(resolve(&candidates, "gmail", &bot()).unwrap().id, "lent");
+        assert_eq!(used(&candidates), Some("lent"));
     }
 
     /// A connection belonging to somebody who never lent it is not a candidate at all.
     #[test]
     fn an_unlent_connection_is_invisible() {
         let candidates = vec![view("theirs", Owner::User(person()), &[], 100)];
-        assert!(resolve(&candidates, "gmail", &bot()).is_none());
+        assert_eq!(
+            resolve(&candidates, "gmail", &bot(), &person(), None),
+            Resolved::None
+        );
     }
 
-    /// Re-authenticating replaces a stale token rather than adding a rival nobody picks between.
+    /// Two accounts in one scope are a choice for the person (#359). The newest used to win,
+    /// which acted as whichever account somebody had last touched.
     #[test]
-    fn the_newest_wins_inside_a_scope() {
+    fn two_in_one_scope_need_a_choice_whichever_is_newer() {
         let candidates = vec![
             view("old", Owner::User(person()), &[bot()], 10),
             view("new", Owner::User(person()), &[bot()], 20),
         ];
-        assert_eq!(resolve(&candidates, "gmail", &bot()).unwrap().id, "new");
+        let Resolved::NeedsChoice(choices) = resolve(&candidates, "gmail", &bot(), &person(), None)
+        else {
+            panic!("two lent accounts and no pin are a choice");
+        };
+        assert_eq!(choices.len(), 2);
     }
 
     /// Nothing usable must read as "not connected", never as "use whatever is nearest".
@@ -537,7 +738,9 @@ mod tests {
     fn a_different_connector_is_never_substituted() {
         let mut github = view("gh", Owner::Global, &[], 100);
         github.connector = "github".to_string();
-        assert!(resolve(&[github], "gmail", &bot()).is_none());
+        let candidates = [github];
+        let none = resolve(&candidates, "gmail", &bot(), &person(), None);
+        assert_eq!(none, Resolved::None);
     }
 
     /// A token that expires mid-flight fails for a reason nobody can reproduce.
@@ -566,6 +769,9 @@ mod tests {
 
     #[test]
     fn nothing_at_all_resolves_to_nothing() {
-        assert!(resolve(&[], "gmail", &bot()).is_none());
+        assert_eq!(
+            resolve(&[], "gmail", &bot(), &person(), None),
+            Resolved::None
+        );
     }
 }

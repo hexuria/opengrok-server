@@ -1,5 +1,10 @@
-//! Persistence is account scoped at every read and write. There is no lending operation.
+//! Persistence is account scoped at every read and write. There is no lending operation: a token
+//! pasted for an install is an account of its person's (#359), which never serves anyone else.
+use crate::accounts;
 use crate::registry::{Catalog, Entry};
+use opengrok_core::connection::{
+    self, Connection, ConnectionCommand, ConnectionKind, ConnectionView, Owner, Resolved,
+};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_plugins::bundle::Bundle;
 use opengrok_policy::ToolSet;
@@ -57,6 +62,25 @@ pub async fn list(store: &PgStore, account: &AccountId) -> StoreResult<Vec<Insta
         .fetch_all(store.pool())
         .await?;
     Ok(readable(rows))
+}
+/// Which of `account`'s pasted accounts each install holds, as `(plugin, connector, connection)`
+/// (#359): a token account is one install's, and `GET /connections` cannot say whose. Live accounts
+/// only, in a stable order.
+pub async fn bindings(
+    store: &PgStore,
+    account: &AccountId,
+) -> StoreResult<Vec<(String, String, String)>> {
+    let rows = sqlx::query_as(
+        "select c.plugin_name, c.connector, c.connection_id
+           from plugin_credential c
+           join connection_view v on v.id = c.connection_id and not v.disconnected
+          where c.account_id = $1
+          order by c.plugin_name, c.connector, v.updated_at_ms, c.connection_id",
+    )
+    .bind(account.as_str())
+    .fetch_all(store.pool())
+    .await?;
+    Ok(rows)
 }
 pub async fn for_turn(
     store: &PgStore,
@@ -146,6 +170,20 @@ pub async fn uninstall(
         return Ok(false);
     }
     switch_off(&mut tx, account, name, at_ms).await?;
+    // The accounts pasted for this install go with it, as its credentials always did (#356): an
+    // update is an uninstall then an install, and a token pasted for one URL must not reach a
+    // replacement's. Removed, each loses its secret and the pins naming it (`append_connection_in`).
+    let bound: Vec<String> = sqlx::query_scalar(
+        "select connection_id from plugin_credential
+          where account_id = $1 and plugin_name = $2 and connection_id is not null",
+    )
+    .bind(account.as_str())
+    .bind(name)
+    .fetch_all(&mut *tx)
+    .await?;
+    for id in bound {
+        accounts::remove_in(store, &mut tx, &id, at_ms).await?;
+    }
     sqlx::query("delete from secret_store where id in (select secret_id from plugin_credential where account_id = $1 and plugin_name = $2)")
         .bind(account.as_str()).bind(name).execute(&mut *tx).await?;
     sqlx::query("delete from plugin_installation where account_id = $1 and name = $2")
@@ -236,6 +274,12 @@ async fn switch_off(
     Ok(())
 }
 
+/// Save a token pasted for one of an install's connectors: an account of the person's for that
+/// service, of kind `token` (#359), which the install's binding names. Pasted again it refreshes
+/// that account; pasted after the person removed that account, it starts a new one.
+///
+/// ALL UNDER THE INSTALL'S ROW LOCK, the account's events, its secret and the binding, so an
+/// uninstall cannot land between them and leave a live account whose install is gone.
 pub async fn credential(
     store: &PgStore,
     vault: &Vault,
@@ -245,6 +289,42 @@ pub async fn credential(
     token: &str,
     at_ms: i64,
 ) -> StoreResult<bool> {
+    let saved = save(
+        store,
+        vault,
+        account,
+        name,
+        connector,
+        token,
+        at_ms,
+        Save::Replace(None),
+    );
+    Ok(saved.await?.is_some())
+}
+
+/// How a pasted token lands (#359, D3): adding always makes another account, as a sign-in does,
+/// and replacing names the account whose token it is. `Replace(None)` is the route before several
+/// accounts per service: the only account, or the first.
+pub enum Save<'a> {
+    Add,
+    Replace(Option<&'a str>),
+}
+
+/// Save a pasted token for an installed plugin's connector. `None` when there is no such install,
+/// connector or (for a named replace) account of this install's; `Conflict` for an unnamed replace
+/// when the install has several accounts for the connector, since which one is meant cannot be
+/// told. The reply is the account's id.
+#[allow(clippy::too_many_arguments)]
+pub async fn save(
+    store: &PgStore,
+    vault: &Vault,
+    account: &AccountId,
+    name: &str,
+    connector: &str,
+    token: &str,
+    at_ms: i64,
+    how: Save<'_>,
+) -> StoreResult<Option<String>> {
     let mut tx = store.pool().begin().await?;
     let row = sqlx::query(
         "select bundle from plugin_installation where account_id = $1 and name = $2 for update",
@@ -254,55 +334,215 @@ pub async fn credential(
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
-        return Ok(false);
+        return Ok(None);
     };
     let bundle: Bundle = serde_json::from_value(row.try_get("bundle")?)
         .map_err(|_| StoreError::Corrupt("invalid bundle".into()))?;
     if !bundle.connectors().iter().any(|c| c == connector) {
-        return Ok(false);
+        return Ok(None);
     }
-    let id = format!("plugin/{account}/{name}/{connector}");
-    let sealed = vault.seal(&id, token)?;
+    let bound: Vec<(Option<String>, String)> = sqlx::query_as(
+        "select connection_id, secret_id from plugin_credential
+          where account_id = $1 and plugin_name = $2 and connector = $3
+          order by secret_id",
+    )
+    .bind(account.as_str())
+    .bind(name)
+    .bind(connector)
+    .fetch_all(&mut *tx)
+    .await?;
+    // The binding this token replaces, if any: its account and the secret id it is sealed under.
+    let replacing = match how {
+        Save::Add => None,
+        Save::Replace(Some(target)) => {
+            match bound.iter().find(|(id, _)| id.as_deref() == Some(target)) {
+                Some(found) => Some(found.clone()),
+                None => return Ok(None),
+            }
+        }
+        Save::Replace(None) => match bound.as_slice() {
+            [] => None,
+            [only] => Some(only.clone()),
+            _ => return Err(StoreError::Conflict),
+        },
+    };
+    let (mut id, mut connection, mut seq) = (String::new(), Connection::default(), 0);
+    if let Some((Some(bound), _)) = &replacing {
+        (connection, seq) = store.load_connection(bound).await?;
+        id = bound.clone();
+    }
+    let command = if connection.connected && !connection.disconnected {
+        ConnectionCommand::Refresh { at_ms }
+    } else {
+        // A removed account keeps its history to itself; this token starts a new one.
+        let owner = Owner::User(account.clone());
+        (id, connection, seq) = (
+            accounts::new_id(connector, &owner),
+            Connection::default(),
+            0,
+        );
+        let label = accounts::new_label(&mut *tx, &owner, connector).await?;
+        let (connector, owner) = (connector.to_string(), account.clone());
+        ConnectionCommand::ConnectToken {
+            connector,
+            owner,
+            label,
+            at_ms,
+        }
+    };
+    let events = connection
+        .decide(command)
+        .map_err(|error| StoreError::Corrupt(error.to_string()))?;
+    for event in &events {
+        connection.apply(event);
+    }
+    let none = opengrok_store::CredentialUpdate::none(at_ms);
+    PgStore::append_connection_in(&mut tx, &id, seq, &events, &connection, &none).await?;
+    // A replaced token is sealed under the id it always had, which its binding names: the seal's
+    // associated data, so a token saved before #359 opens where it lies. An added account gets an
+    // id of its own beside them, the first under the id an install's only token always had.
+    let secret_id = match &replacing {
+        Some((_, secret_id)) => secret_id.clone(),
+        None if bound.is_empty() => format!("plugin/{account}/{name}/{connector}"),
+        None => format!("plugin/{account}/{name}/{connector}/{id}"),
+    };
+    let sealed = vault.seal(&secret_id, token)?;
     sqlx::query("insert into secret_store(id,nonce,ciphertext,key_id,updated_at_ms) values($1,$2,$3,$4,$5)
         on conflict(id) do update set nonce=excluded.nonce,ciphertext=excluded.ciphertext,key_id=excluded.key_id,updated_at_ms=excluded.updated_at_ms")
-        .bind(&id).bind(sealed.nonce).bind(sealed.ciphertext).bind(sealed.key_id).bind(at_ms).execute(&mut *tx).await?;
-    sqlx::query("insert into plugin_credential(account_id,plugin_name,connector,secret_id) values($1,$2,$3,$4) on conflict do nothing")
-        .bind(account.as_str()).bind(name).bind(connector).bind(&id).execute(&mut *tx).await?;
+        .bind(&secret_id).bind(sealed.nonce).bind(sealed.ciphertext).bind(sealed.key_id).bind(at_ms).execute(&mut *tx).await?;
+    sqlx::query("insert into plugin_credential(account_id,plugin_name,connector,secret_id,connection_id) values($1,$2,$3,$4,$5)
+        on conflict (secret_id) do update set connection_id = excluded.connection_id")
+        .bind(account.as_str()).bind(name).bind(connector).bind(&secret_id).bind(&id).execute(&mut *tx).await?;
     tx.commit().await?;
-    Ok(true)
+    Ok(Some(id))
 }
 
-/// The credentials of exactly the install `installation` was read from: none once it has been
-/// uninstalled, even if the same name was installed again since. Ciphertext and snapshot
-/// eligibility are read together. Reading secret ids first and opening them later allowed
-/// uninstall/reinstall to replace the secret between those two statements.
+/// An account a "Which account?" card lists: `(id, label, kind)`.
+pub type AccountChoice = (String, String, String);
+
+/// What one turn of a Bot gets for an install: a token for each connector that resolves, and the
+/// connectors where several accounts would do and no pin says which (#360 asks the person).
+#[derive(Debug, Default)]
+pub struct TurnCredentials {
+    pub values: std::collections::BTreeMap<String, String>,
+    pub needs_choice: Vec<String>,
+    /// For each connector in `needs_choice`, the accounts the person chooses between, as a card
+    /// lists them: `(id, label, kind)`. Never a secret.
+    pub choices: Vec<(String, Vec<AccountChoice>)>,
+    /// The connectors this Bot has no account for at all.
+    pub missing: Vec<String>,
+}
+
+/// The tokens `bot` uses for `installation`'s connectors (#359): of the person's pasted accounts
+/// for each service, the Bot's pin or the only one (`connection::resolve`), and never a sign-in,
+/// which an installed plugin's third-party server must not be handed.
+///
+/// None once the install has been uninstalled, even if the same name was installed again since,
+/// and none on a Bot `account` does not own: a member's turn on a shared Bot uses no account-owned
+/// token, the owner's or the member's. Accounts, ciphertext and snapshot eligibility are read in
+/// one statement. Reading secret ids first and opening them later allowed uninstall/reinstall to
+/// replace the secret between those two statements.
 pub async fn values_for_installation(
     store: &PgStore,
     vault: &Vault,
     account: &AccountId,
+    bot: &CoworkerId,
     installation: &Installation,
-) -> StoreResult<std::collections::BTreeMap<String, String>> {
-    let rows = sqlx::query("select c.connector,c.secret_id,s.nonce,s.ciphertext,s.key_id
-        from plugin_credential c join plugin_installation p on p.account_id=c.account_id and p.name=c.plugin_name
-        join secret_store s on s.id=c.secret_id
-        where c.account_id=$1 and c.plugin_name=$2 and p.incarnation=$3")
-        .bind(account.as_str()).bind(&installation.name).bind(&installation.incarnation)
-        .fetch_all(store.pool()).await?;
-    let mut values = std::collections::BTreeMap::new();
+) -> StoreResult<TurnCredentials> {
+    let none = std::collections::BTreeMap::new();
+    values_choosing(store, vault, account, bot, installation, &none).await
+}
+
+/// [`values_for_installation`] with the account the person picked on a "Which account?" card for
+/// THIS turn, by connector (`forwardedProps.pluginAccounts`). It outranks the Bot's pin for the
+/// turn and is never stored; Remember on the card stores a pin through its own route. A pick that
+/// is not one of the candidates read below (somebody else's id, a removed account) picks nothing.
+pub async fn values_choosing(
+    store: &PgStore,
+    vault: &Vault,
+    account: &AccountId,
+    bot: &CoworkerId,
+    installation: &Installation,
+    chosen: &std::collections::BTreeMap<String, String>,
+) -> StoreResult<TurnCredentials> {
+    let connectors = installation.bundle.connectors();
+    let rows = sqlx::query(
+        "select v.id, v.connector, v.label, v.updated_at_ms, v.expires_at_ms, v.kind, c.secret_id,
+                s.nonce, s.ciphertext, s.key_id,
+                (select b.connection_id from bot_connection_pin b
+                  where b.coworker_id = w.id and b.connector = v.connector) as pinned
+           from plugin_installation p
+           join coworker_view w on w.id = $4 and w.account_id = p.account_id and not w.retired
+           join connection_view v on v.scope = 'user' and v.owner_id = p.account_id
+                and v.kind in ('token', 'mcp') and not v.disconnected
+           join plugin_credential c on c.connection_id = v.id
+                and c.account_id = p.account_id and c.plugin_name = p.name
+           join secret_store s on s.id = c.secret_id
+          where p.account_id = $1 and p.name = $2 and p.incarnation = $3
+            and v.connector = any($5)",
+    )
+    .bind(account.as_str())
+    .bind(&installation.name)
+    .bind(&installation.incarnation)
+    .bind(bot.as_str())
+    .bind(&connectors)
+    .fetch_all(store.pool())
+    .await?;
+    let (mut candidates, mut sealed, mut pins) = (Vec::new(), Vec::new(), Vec::new());
     for row in rows {
+        let id: String = row.try_get("id")?;
         let connector: String = row.try_get("connector")?;
-        let id: String = row.try_get("secret_id")?;
-        let sealed = opengrok_store::Sealed {
+        if let Some(pinned) = row.try_get::<Option<String>, _>("pinned")? {
+            pins.push((connector.clone(), pinned));
+        }
+        let secret = opengrok_store::Sealed {
             nonce: row.try_get("nonce")?,
             ciphertext: row.try_get("ciphertext")?,
             key_id: row.try_get("key_id")?,
         };
-        values.insert(
-            opengrok_plugins::token_key(&connector),
-            vault.open(&id, &sealed)?,
-        );
+        sealed.push((id.clone(), row.try_get::<String, _>("secret_id")?, secret));
+        candidates.push(ConnectionView {
+            id,
+            connector,
+            owner: Owner::User(account.clone()),
+            label: row.try_get("label")?,
+            loans: Default::default(),
+            updated_at_ms: row.try_get("updated_at_ms")?,
+            expires_at_ms: row.try_get("expires_at_ms")?,
+            kind: ConnectionKind::from_word(&row.try_get::<String, _>("kind")?)
+                .unwrap_or(ConnectionKind::Token),
+        });
     }
-    Ok(values)
+    let mut turn = TurnCredentials::default();
+    for connector in &connectors {
+        let pin = pins.iter().find(|(pinned, _)| pinned == connector);
+        let pin = chosen
+            .get(connector)
+            .map(String::as_str)
+            .or(pin.map(|(_, id)| id.as_str()));
+        // The Bot is `account`'s: the statement above read nothing for one it is not.
+        match connection::resolve(&candidates, connector, bot, account, pin) {
+            Resolved::Use(chosen) => {
+                if let Some((_, secret_id, secret)) =
+                    sealed.iter().find(|(id, ..)| *id == chosen.id)
+                {
+                    let token = vault.open(secret_id, secret)?;
+                    turn.values
+                        .insert(opengrok_plugins::token_key(connector), token);
+                }
+            }
+            Resolved::NeedsChoice(eligible) => {
+                turn.needs_choice.push(connector.clone());
+                let listed = eligible.iter().map(|view| {
+                    let kind = view.kind.word().to_string();
+                    (view.id.clone(), view.label.clone(), kind)
+                });
+                turn.choices.push((connector.clone(), listed.collect()));
+            }
+            Resolved::None => turn.missing.push(connector.clone()),
+        }
+    }
+    Ok(turn)
 }
 
 #[cfg(test)]
