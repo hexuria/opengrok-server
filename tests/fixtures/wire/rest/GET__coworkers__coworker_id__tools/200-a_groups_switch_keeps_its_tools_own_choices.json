@@ -37,14 +37,6 @@
         "summary": "Asks you to fill in a form in chat."
       },
       {
-        "name": "live_api_send",
-        "description": "Send a message",
-        "kind": "plugin",
-        "plugin": "live",
-        "qualified": "live.api.send",
-        "mode": "always"
-      },
-      {
         "name": "routines",
         "description": "List, make, edit, delete and run this Bot's routines when you ask in chat. Deleting one always asks you first.",
         "kind": "builtin",
@@ -85,7 +77,7 @@
             "name": "run_routine",
             "description": "Run one of this Bot's routines now, as the person's Run now does, by its id or its name from list_routines: this Bot is woken with the routine's prompt, on the routine's own thread, and you are told the run's id. A paused routine, or one whose plan cannot answer now, is refused in words.",
             "kind": "builtin",
-            "mode": "always",
+            "mode": "never",
             "label": "Run routine",
             "summary": "Runs one of this Bot's routines now."
           }

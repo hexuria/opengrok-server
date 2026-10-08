@@ -312,6 +312,9 @@ pub async fn skill_offers(
             continue;
         }
         for (skill, text) in skills {
+            if opengrok_policy::skill_switched_off(&policy, plugin, skill) {
+                continue;
+            }
             let name = format!("{plugin}.{skill}");
             if opengrok_plugins::is_valid_name(&name) {
                 let description = opengrok_plugins::split_frontmatter(text).description;
@@ -350,7 +353,9 @@ pub async fn skill(store: &PgStore, account: &AccountId, id: &str) -> Option<Plu
     };
     let bot = CoworkerId::from_stored(*bot);
     let policy = turn_policy(store, account, &bot).await?;
-    if !switched_on(account, &bot, name, &policy) {
+    if !switched_on(account, &bot, name, &policy)
+        || opengrok_policy::skill_switched_off(&policy, name, skill)
+    {
         tracing::warn!(
             skill = id,
             "a plugin skill was asked for while its plugin is switched off"

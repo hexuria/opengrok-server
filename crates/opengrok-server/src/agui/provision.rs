@@ -377,6 +377,21 @@ pub async fn resolve_mode(state: &AgUiState, account_id: &AccountId) -> (String,
     ("per-account".to_string(), org_id)
 }
 
+/// The sharing mode for one coworker: its own computer when its owner gave it one (a `bot` row
+/// in `computer_sharing`, 8 Oct 2026), else the account's. Every place that works out which box a
+/// coworker uses asks this, so the override can never put a coworker on two boxes at once.
+pub async fn resolve_mode_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &str,
+) -> (String, Option<String>) {
+    let (mode, org_id) = resolve_mode(state, account_id).await;
+    match state.auth.store.sharing_mode("bot", coworker_id).await {
+        Ok(Some(own)) if own == "per-bot" => (own, org_id),
+        _ => (mode, org_id),
+    }
+}
+
 /// The (scope, scope_id, box mode) a mode maps to: per-org shares one org box, per-account one box
 /// per member, per-bot a dedicated box each. An account with no org falls back to account scope.
 pub fn scope_for(
@@ -409,7 +424,7 @@ pub async fn scope_of(
     account_id: &AccountId,
     coworker_id: &str,
 ) -> (String, Option<String>, &'static str, String, BoxMode) {
-    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (mode, org_id) = resolve_mode_for(state, account_id, coworker_id).await;
     let group = state
         .auth
         .store
@@ -478,7 +493,7 @@ pub async fn ensure_computer_for(
     at_ms: i64,
 ) -> Provisioned {
     let store = &state.auth.store;
-    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (mode, org_id) = resolve_mode_for(state, account_id, coworker_id.as_str()).await;
     let (scope, scope_id, box_mode) = scope_for(
         &mode,
         account_id.as_str(),
@@ -659,7 +674,7 @@ pub async fn teardown_computer_for(
     coworker_id: &CoworkerId,
 ) {
     let store = &state.auth.store;
-    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (mode, org_id) = resolve_mode_for(state, account_id, coworker_id.as_str()).await;
     let group = store
         .load_coworker(coworker_id)
         .await
@@ -815,7 +830,7 @@ pub async fn scoped_box_row_for(
     // group", a group's /screen showed its owner's own box.
     let loaded = state.auth.store.load_coworker(coworker_id).await.ok();
     let (coworker, _) = loaded.filter(|(coworker, _)| !coworker.name.is_empty())?;
-    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (mode, org_id) = resolve_mode_for(state, account_id, coworker_id.as_str()).await;
     let (owner, id) = (account_id.as_str(), coworker_id.as_str());
     let (scope, scope_id, _) = scope_for(&mode, owner, org_id.as_deref(), id, coworker.is_group());
     let row = state
@@ -842,10 +857,10 @@ pub async fn live_boxes(
     viewer: &AccountId,
     views: &[&opengrok_core::coworker::CoworkerView],
 ) -> std::collections::HashMap<CoworkerId, String> {
-    let (mode, org) = resolve_mode(state, viewer).await;
     let mut live = std::collections::HashMap::new();
     for view in views {
         let Some(first) = &view.box_id else { continue };
+        let (mode, org) = resolve_mode_for(state, viewer, view.id.as_str()).await;
         let (owner, group) = (viewer.as_str(), !view.members.is_empty());
         let (scope, id, _) = scope_for(&mode, owner, org.as_deref(), view.id.as_str(), group);
         let now = match state.auth.store.scoped_computer_full(scope, &id).await {
@@ -883,7 +898,7 @@ pub async fn coworker_screen(
         Ok((coworker, _)) if !coworker.name.is_empty() => coworker.is_group(),
         _ => return absent(),
     };
-    let (mode, org_id) = resolve_mode(state, account_id).await;
+    let (mode, org_id) = resolve_mode_for(state, account_id, agent_id).await;
     let (scope, scope_id, _) = scope_for(
         &mode,
         account_id.as_str(),

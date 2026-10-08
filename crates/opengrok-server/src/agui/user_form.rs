@@ -201,6 +201,32 @@ pub async fn submit_user_form(
             json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
         );
     }
+    // A saved login fills only for a Bot it is shared with (8 Oct 2026). The fill names its
+    // login; one this Bot was never given is refused before anything is typed.
+    if (saved_login || passkey_card)
+        && let Some(login_id) = args.get("savedLoginId").and_then(Value::as_str)
+    {
+        let shared = state
+            .agui
+            .auth
+            .store
+            .logins_shared_with(account_id, coworker_id.as_str())
+            .await
+            .map(|ids| ids.iter().any(|id| id == login_id));
+        match shared {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    403,
+                    json!({ "error": NOT_SHARED, "message": NOT_SHARED_MESSAGE }),
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "a login's shares could not be read");
+                return (503, json!({ "error": "transcript unavailable" }));
+            }
+        }
+    }
     // A saved login is secret whatever the model called its fields. The initial result
     // and persisted answers must use the same suppression, including on collect cards.
     let shared = if saved_login || passkey_card {
@@ -885,6 +911,12 @@ fn call_id_of(entry: &Value) -> Option<&str> {
 
 /// The wire word NativeChat reads when a saved login is refused.
 pub const SHARED_COMPUTER: &str = "shared-computer";
+/// The saved login was never shared with this Bot.
+pub const NOT_SHARED: &str = "not-shared";
+pub const NOT_SHARED_MESSAGE: &str = "That saved login is not shared with this Bot. Share it from the card, or type the login by hand.";
+/// The coworker is shown to an org (or is not the person's own): everyone who drives it would
+/// share a session a saved login opened.
+pub const SHARED_BOT: &str = "shared-bot";
 pub const SHARED_COMPUTER_MESSAGE: &str = "This computer is shared with other bots or people, so a saved login is not used on it. Type the login by hand, or give this bot its own computer.";
 
 /// `savedLogin: true` marks values NativeChat took from the person's saved logins after
@@ -905,18 +937,31 @@ async fn fills_a_dedicated_box(
     account_id: &AccountId,
     coworker_id: &CoworkerId,
 ) -> bool {
-    let (_, _, _, _, mode) =
-        super::provision::scope_of(&state.agui, account_id, coworker_id.as_str()).await;
-    if mode != opengrok_core::coworker::BoxMode::Dedicated {
-        return false;
-    }
-    state
-        .agui
+    saved_login_refusal(&state.agui, account_id, coworker_id)
+        .await
+        .is_none()
+}
+
+/// Why a saved login cannot be used for this coworker, or `None` when it can: `shared-computer`
+/// when its box is shared, `shared-bot` when the coworker is shown to an org or is not the
+/// person's. One rule for the app's check before Touch ID and for the fill itself.
+pub(crate) async fn saved_login_refusal(
+    agui: &super::routes::AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Option<&'static str> {
+    let private = agui
         .auth
         .store
         .coworker_is_private_and_owned_by(account_id, coworker_id)
         .await
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !private {
+        return Some(SHARED_BOT);
+    }
+    let (_, _, _, _, mode) =
+        super::provision::scope_of(agui, account_id, coworker_id.as_str()).await;
+    (mode != opengrok_core::coworker::BoxMode::Dedicated).then_some(SHARED_COMPUTER)
 }
 
 fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {

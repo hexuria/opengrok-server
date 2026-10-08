@@ -659,6 +659,42 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
         sse.contains("files are not on your computer")
             || sse.contains("this coworker has no computer")
     );
+    // ONE SKILL OFF FOR THIS BOT, the plugin still on: it is no longer offered, and a ceiling
+    // save of the plugin's switch keeps that choice.
+    let skills_path = format!("/coworkers/{bot}/plugin-skills");
+    let (status, listed, _) = h.call(&a, "GET", &skills_path, None).await;
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["skills"][0]["skill"], "triage", "{listed}");
+    assert_eq!(listed["skills"][0]["on"], true, "{listed}");
+    let (status, page, _) = h
+        .call(&a, "GET", &format!("{skills_path}/demo/triage"), None)
+        .await;
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page["body"]
+            .as_str()
+            .unwrap()
+            .contains("Read the reference first.")
+    );
+    let off = json!({"plugin":"demo","skill":"triage","on":false});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(off)).await.0, 200);
+    let (_, current, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    let again = json!({"enabled":["demo"],"version":current["version"]});
+    assert_eq!(h.call(&a, "PUT", &ceiling_path, Some(again)).await.0, 200);
+    let (_, listed, _) = h.call(&a, "GET", &skills_path, None).await;
+    assert_eq!(listed["skills"][0]["on"], false, "{listed}");
+    let (_, tools, _) = h
+        .call(&a, "GET", &format!("/coworkers/{bot}/tools"), None)
+        .await;
+    assert!(!tools.to_string().contains("use_skill"), "{tools}");
+    let on = json!({"plugin":"demo","skill":"triage","on":true});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(on)).await.0, 200);
+    let (_, tools, _) = h
+        .call(&a, "GET", &format!("/coworkers/{bot}/tools"), None)
+        .await;
+    assert!(tools.to_string().contains("use_skill"), "{tools}");
+    let unknown = json!({"plugin":"demo","skill":"nope","on":false});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(unknown)).await.0, 422);
     assert_eq!(
         h.call(
             &a,
@@ -1234,7 +1270,17 @@ async fn a_second_pasted_account_is_added_beside_the_first_and_each_bot_uses_its
     .unwrap();
     assert_eq!(turn.values["DEMO_TOKEN"], "first-secret");
 
-    // Uninstalling takes every pasted account with it.
+    // Uninstalling takes every pasted account with it, and their secrets out of the vault: the
+    // dialog says the keys go, so the ciphertext must not outlive the accounts.
+    let sealed: Vec<String> = sqlx::query_scalar(
+        "select c.secret_id from plugin_credential c join connection_view v on v.id = c.connection_id
+          where c.account_id = $1 and c.plugin_name = 'demo'",
+    )
+    .bind(account.as_str())
+    .fetch_all(h.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(sealed.len(), 2, "{sealed:?}");
     let gone = h.call(
         &owner,
         "DELETE",
@@ -1251,6 +1297,12 @@ async fn a_second_pasted_account_is_added_beside_the_first_and_each_bot_uses_its
             .all(|row| row["kind"] != "token"),
         "{listed}"
     );
+    let kept: i64 = sqlx::query_scalar("select count(*) from secret_store where id = any($1)")
+        .bind(&sealed)
+        .fetch_one(h.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(kept, 0, "an uninstalled plugin's keys stayed in the vault");
 }
 
 /// `@demo` in a message is the owner switching demo on for that turn (#359): its server is dialled

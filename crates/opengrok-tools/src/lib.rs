@@ -32,6 +32,7 @@ pub mod message_bot;
 pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
 pub mod observe;
 pub use observe::{Observe, Seen};
+pub mod computer_desk;
 pub mod plugin_desk;
 pub mod routine;
 pub mod skill;
@@ -755,6 +756,11 @@ pub struct Executor {
     /// The person's plugins and accounts (#359), through the desk the Plugins routes use. `None`
     /// offers none.
     plugin_desk: Option<Arc<dyn plugin_desk::PluginDesk>>,
+    /// This Bot's own computer (7 Oct 2026), through the desk the Computer pane's routes use.
+    /// `None` offers none.
+    computer_desk: Option<Arc<dyn computer_desk::ComputerDesk>>,
+    /// A switched-on plugin's tools the person switched off for this Bot (`with_switched_off`).
+    switched_off: Vec<crate::mcp::McpTool>,
     /// A Bot with no computer that still has plugin tools (`without_a_computer`): no built-in is
     /// offered, and one called anyway is refused in words rather than sent to a box that is not
     /// there.
@@ -945,6 +951,8 @@ impl Executor {
             egress_policy_unconfirmed: false,
             routines: None,
             plugin_desk: None,
+            computer_desk: None,
+            switched_off: Vec::new(),
             boxless: false,
         }
     }
@@ -986,6 +994,23 @@ impl Executor {
         self
     }
 
+    /// Offer the computer tools over `desk`, where the ceiling and the grant allow each.
+    #[must_use]
+    pub fn with_computer_desk(mut self, desk: Arc<dyn computer_desk::ComputerDesk>) -> Self {
+        self.computer_desk = Some(desk);
+        self
+    }
+
+    /// The computer tools this run is offered: all of them with a desk, none without.
+    fn computer_desk_tools(&self) -> impl Iterator<Item = &'static str> + '_ {
+        let take = if self.computer_desk.is_some() {
+            computer_desk::TOOLS.len()
+        } else {
+            0
+        };
+        computer_desk::TOOLS.into_iter().take(take)
+    }
+
     /// The plugin tools this run is offered: all of them with a desk, none without.
     fn plugin_desk_tools(&self) -> impl Iterator<Item = &'static str> + '_ {
         let take = if self.plugin_desk.is_some() {
@@ -1003,6 +1028,8 @@ impl Executor {
         // Nor any plugin tool (#359): nobody is watching such a run to answer a card or finish a
         // sign-in, and a routine must not install or switch on what its person never chose.
         self.plugin_desk = None;
+        // Nor a computer tool: nobody is watching to answer a reset's card.
+        self.computer_desk = None;
         self
     }
 
@@ -1109,7 +1136,10 @@ impl Executor {
     fn would_reach_the_box(&self, context: &ToolContext, call: &ToolCall, tool_name: &str) -> bool {
         // A routine is the server's (#316), and so is a plugin tool (#359): neither touches the
         // box, so nothing wakes.
-        if routine::is_routine_tool(tool_name) || plugin_desk::is_plugin_desk_tool(tool_name) {
+        if routine::is_routine_tool(tool_name)
+            || plugin_desk::is_plugin_desk_tool(tool_name)
+            || computer_desk::is_computer_tool(tool_name)
+        {
             return false;
         }
         let decision = opengrok_policy::decide(
@@ -1387,6 +1417,134 @@ impl Executor {
         self
     }
 
+    /// Whether the person chose Always allow for `tool`, which otherwise asks first by rule (a
+    /// delete, an uninstall, a removal): `+<tool>` in this Bot's ceiling. It admits nothing by
+    /// itself; the tool must still be allowed.
+    pub fn asks_unasked(&self, tool: &str) -> bool {
+        match self.policy.ceiling.as_ref().map(|ceiling| &ceiling.tools) {
+            Some(opengrok_policy::ToolSet::Only(names)) => names.contains(&format!("+{tool}")),
+            _ => false,
+        }
+    }
+
+    /// The tools that ask first by rule, whatever the grant says, unless the person chose Always
+    /// allow (`asks_unasked`).
+    pub const ASK_BY_RULE: [&'static str; 6] = [
+        routine::DELETE_ROUTINE,
+        plugin_desk::UNINSTALL_PLUGIN,
+        plugin_desk::REMOVE_PLUGIN_ACCOUNT,
+        computer_desk::RESET_COMPUTER,
+        computer_desk::UPDATE_COMPUTER,
+        computer_desk::SET_NETWORK,
+    ];
+
+    /// A tool's choice for this Bot as a person reads it: `ask` (a card first), `always`, or
+    /// `never` (not offered). `tool` is the dotted name for a plugin's tool.
+    pub fn mode_of(&self, account: &AccountId, coworker: &CoworkerId, tool: &str) -> &'static str {
+        let decision = opengrok_policy::decide(
+            account,
+            coworker,
+            opengrok_policy::Action::RunTool(tool),
+            &self.policy,
+        );
+        if decision.needs_approval() {
+            "ask"
+        } else if !decision.is_allowed() {
+            "never"
+        } else if Self::ASK_BY_RULE.contains(&tool) && !self.asks_unasked(tool) {
+            "ask"
+        } else {
+            "always"
+        }
+    }
+
+    /// Whether `group`'s own switch is off for this Bot (7 Oct 2026): switched off as a whole,
+    /// or none of its tools in the ceiling at all.
+    pub fn group_off(&self, group: &str) -> bool {
+        let Some(ceiling) = self.policy.ceiling.as_ref() else {
+            return true;
+        };
+        ceiling.tools.group_off(group)
+            || opengrok_policy::TOOL_GROUPS
+                .iter()
+                .find(|(g, _)| *g == group)
+                .is_some_and(|(_, members)| {
+                    !members.iter().any(|t| ceiling.tools.allows_alone(t))
+                        && !members.iter().any(|t| ceiling.tools.names_never(t))
+                })
+    }
+
+    /// A tool's choice for the Bot as its own entries say it, whatever its group's switch: what a
+    /// group switched off keeps for each of its tools, and shows (7 Oct 2026).
+    pub fn mode_of_alone(
+        &self,
+        account: &AccountId,
+        coworker: &CoworkerId,
+        tool: &str,
+    ) -> &'static str {
+        let off = opengrok_policy::group_of(tool).filter(|group| {
+            self.policy
+                .ceiling
+                .as_ref()
+                .is_some_and(|ceiling| ceiling.tools.group_off(group))
+        });
+        let Some(group) = off else {
+            // A group left out entirely keeps no choices of its own: switching it on gives each
+            // tool its default, which is what it shows meanwhile.
+            if let Some(group) = opengrok_policy::group_of(tool)
+                && self.group_off(group)
+                && !self
+                    .policy
+                    .ceiling
+                    .as_ref()
+                    .is_some_and(|c| c.tools.names_never(tool))
+            {
+                return if Self::ASK_BY_RULE.contains(&tool) {
+                    "ask"
+                } else {
+                    "always"
+                };
+            }
+            return self.mode_of(account, coworker, tool);
+        };
+        // The switch is written into both layers (the ceiling and the owner's grant), so both
+        // are read as if it were on.
+        let mut policy = self.policy.clone();
+        if let Some(ceiling) = policy.ceiling.as_mut() {
+            ceiling.tools = ceiling.tools.with_group_on(group);
+        }
+        if let Some(grant) = policy.grant.as_mut() {
+            grant.profile = grant.profile.with_group_on(group);
+        }
+        let decision = opengrok_policy::decide(
+            account,
+            coworker,
+            opengrok_policy::Action::RunTool(tool),
+            &policy,
+        );
+        if decision.needs_approval() {
+            "ask"
+        } else if !decision.is_allowed() {
+            "never"
+        } else if Self::ASK_BY_RULE.contains(&tool) && !self.asks_unasked(tool) {
+            "ask"
+        } else {
+            "always"
+        }
+    }
+
+    /// The tools of a switched-on plugin that the person switched off for this Bot (Never allow):
+    /// never offered, kept so a listing can show them and they can be switched back on.
+    #[must_use]
+    pub fn with_switched_off(mut self, tools: Vec<crate::mcp::McpTool>) -> Self {
+        self.switched_off = tools;
+        self
+    }
+
+    pub fn switched_off(&self) -> &[crate::mcp::McpTool] {
+        &self.switched_off
+    }
+
     /// Attach what a dial produced: the sessions, the tools, and the servers that did not answer.
     #[must_use]
     pub fn with_plugins(mut self, dialled: crate::mcp::Dialled) -> Self {
@@ -1462,6 +1620,7 @@ impl Executor {
             )
             .chain(self.routine_tools().map(str::to_string))
             .chain(self.plugin_desk_tools().map(str::to_string))
+            .chain(self.computer_desk_tools().map(str::to_string))
             .chain(
                 self.plugin_tools
                     .iter()
@@ -1488,6 +1647,107 @@ impl Executor {
             .chain([USER_MACHINE_SHELL, message_bot::MESSAGE_BOT])
             .chain(routine::TOOLS)
             .chain(plugin_desk::TOOLS)
+            .chain(computer_desk::TOOLS)
+    }
+
+    /// What a person reads about a built-in tool or tool group, beside what the model reads
+    /// (`builtin_description`, written for the model, in its capitals): a short label and one
+    /// sentence. Apps list these; the model is never shown them (#359).
+    pub fn builtin_for_people(name: &str) -> Option<(&'static str, &'static str)> {
+        Some(match name {
+            "shell" => ("Shell", "Runs commands on the Bot's own computer."),
+            "read_file" => ("Read file", "Reads a file on the Bot's own computer."),
+            "write_file" => (
+                "Write file",
+                "Creates or changes a file on the Bot's own computer.",
+            ),
+            "open_url" => ("Open page", "Opens a web page in the Bot's own browser."),
+            "computer" => ("Computer", "Looks at the Bot's screen, clicks and types."),
+            REQUEST_USER_FORM => ("Ask with a form", "Asks you to fill in a form in chat."),
+            RUN_RECIPE => (
+                "Run recipe",
+                "Runs a task you taught on the Bot's computer.",
+            ),
+            USER_MACHINE_SHELL => (
+                "Your Mac's shell",
+                "Runs commands on this Mac, when you allow it.",
+            ),
+            message_bot::MESSAGE_BOT => {
+                ("Message a Bot", "Sends a message to another of your Bots.")
+            }
+            routine::ROW => (
+                routine::ROW_LABEL,
+                "Lists, makes, edits, deletes and runs this Bot's routines.",
+            ),
+            routine::LIST_ROUTINES => ("List routines", "Lists this Bot's routines."),
+            routine::CREATE_ROUTINE => (
+                "Create routine",
+                "Makes a routine that wakes this Bot on a schedule.",
+            ),
+            routine::UPDATE_ROUTINE => ("Update routine", "Changes one of this Bot's routines."),
+            routine::DELETE_ROUTINE => (
+                "Delete routine",
+                "Deletes one of this Bot's routines for good.",
+            ),
+            routine::RUN_ROUTINE => ("Run routine", "Runs one of this Bot's routines now."),
+            computer_desk::ROW => (
+                computer_desk::ROW_LABEL,
+                "Checks, starts, stops, restarts, resets and updates the Bot's own computer.",
+            ),
+            computer_desk::COMPUTER_STATUS => (
+                "Computer status",
+                "Reads whether the Bot's computer is running.",
+            ),
+            computer_desk::START_COMPUTER => ("Start computer", "Starts the Bot's computer."),
+            computer_desk::SHUTDOWN_COMPUTER => (
+                "Shut down computer",
+                "Shuts the Bot's computer down, keeping its files.",
+            ),
+            computer_desk::RESTART_COMPUTER => ("Restart computer", "Restarts the Bot's computer."),
+            computer_desk::RESET_COMPUTER => (
+                "Reset computer",
+                "Deletes everything on the Bot's computer for good.",
+            ),
+            computer_desk::UPDATE_COMPUTER => (
+                "Update computer",
+                "Rebuilds the Bot's computer on the newest image.",
+            ),
+            computer_desk::SET_NETWORK => (
+                "Set network",
+                "Sets what the Bot's computer may reach on your network.",
+            ),
+            plugin_desk::ROW => (
+                plugin_desk::ROW_LABEL,
+                "Finds, installs and removes plugins and manages their accounts.",
+            ),
+            plugin_desk::LIST_PLUGINS => ("List plugins", "Lists the plugins you can use."),
+            plugin_desk::PLUGIN_DETAILS => ("Plugin details", "Reads one plugin in full."),
+            plugin_desk::INSTALL_PLUGIN => ("Install plugin", "Installs a plugin for you."),
+            plugin_desk::UNINSTALL_PLUGIN => (
+                "Uninstall plugin",
+                "Uninstalls one of your plugins and its accounts.",
+            ),
+            plugin_desk::LIST_PLUGIN_ACCOUNTS => ("List accounts", "Lists your plugin accounts."),
+            plugin_desk::ADD_PLUGIN_ACCOUNT => {
+                ("Add account", "Shows you a card to add a plugin account.")
+            }
+            plugin_desk::RENAME_PLUGIN_ACCOUNT => {
+                ("Rename account", "Renames one of your plugin accounts.")
+            }
+            plugin_desk::REMOVE_PLUGIN_ACCOUNT => (
+                "Remove account",
+                "Removes one of your plugin accounts for good.",
+            ),
+            plugin_desk::SET_PLUGIN_FOR_BOT => (
+                "Switch plugin for a Bot",
+                "Switches a plugin on or off for a Bot.",
+            ),
+            plugin_desk::PICK_PLUGIN_ACCOUNT => (
+                "Pick account for a Bot",
+                "Chooses which account a Bot uses for a plugin.",
+            ),
+            _ => return None,
+        })
     }
 
     /// A built-in's words as `tool_schemas` offers them, less what a turn adds (a recipe list);
@@ -1501,6 +1761,7 @@ impl Executor {
         }
         routine::description(name)
             .or(plugin_desk::description(name))
+            .or(computer_desk::description(name))
             .or(builtin_tool_spec(name).map(|(description, _)| description))
     }
 
@@ -1515,6 +1776,21 @@ impl Executor {
             .collect();
         qualified.sort_unstable();
         crate::mcp::openai_unique_tool_names(Self::every_builtin(), qualified)
+    }
+
+    /// A plugin tool offered under `wire_name`: its dotted `<plugin>.<server>.<tool>` name, and the
+    /// title its server's annotations give it, for a person to read (never for a decision).
+    pub fn plugin_tool_named(&self, wire_name: &str) -> Option<(String, Option<String>)> {
+        let tool = self.lookup_plugin_tool(wire_name)?;
+        let title = tool
+            .annotations
+            .as_ref()
+            .and_then(|notes| notes.get("title"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string);
+        Some((tool.qualified_name.clone(), title))
     }
 
     /// Accept the model's OpenAI-safe name or a legacy dotted qualify. Policy, sessions and
@@ -1696,6 +1972,8 @@ impl Executor {
         schemas.extend(routines.filter_map(routine::schema));
         let plugin_desk = self.plugin_desk_tools().filter(|name| permitted(name));
         schemas.extend(plugin_desk.filter_map(plugin_desk::schema));
+        let computer = self.computer_desk_tools().filter(|name| permitted(name));
+        schemas.extend(computer.filter_map(computer_desk::schema));
         let plugin_wires = self.plugin_wire_names();
         let mut schema_budget = crate::mcp::MAX_ADVERTISED_SCHEMAS_BYTES;
         for tool in &self.plugin_tools {
@@ -1761,6 +2039,22 @@ impl Executor {
         };
         // A plugin tool's arguments, and for one that asks first what it acts on, as stored, are
         // asked BEFORE any gate too (#359).
+        let computer_call = match (
+            computer_desk::is_computer_tool(&tool_name),
+            self.computer_desk.as_ref(),
+        ) {
+            (false, _) => None,
+            (true, None) => {
+                return ToolResult::refused(&call.id, "this Bot's computer is not on offer here");
+            }
+            (true, Some(desk)) => {
+                let call_of = (tool_name.as_str(), &arguments);
+                match computer_desk::admit(desk.as_ref(), context, call_of).await {
+                    Ok(admitted) => Some((desk.clone(), admitted)),
+                    Err(why) => return ToolResult::refused(&call.id, why),
+                }
+            }
+        };
         let plugin_call = match (
             plugin_desk::is_plugin_desk_tool(&tool_name),
             self.plugin_desk.as_ref(),
@@ -1835,7 +2129,15 @@ impl Executor {
             let delete = routine
                 .as_ref()
                 .and_then(|(_, (_, card))| card.clone())
-                .or_else(|| plugin_call.as_ref().and_then(|(_, (_, card))| card.clone()));
+                .or_else(|| plugin_call.as_ref().and_then(|(_, (_, card))| card.clone()))
+                .or_else(|| {
+                    computer_call
+                        .as_ref()
+                        .and_then(|(_, (_, card))| card.clone())
+                });
+            // The person's Always allow for such a tool (`+<tool>` in the ceiling, #359) lifts
+            // that card; a grant's own ask still stands.
+            let delete = delete.filter(|_| !self.asks_unasked(&tool_name));
             if decision.needs_approval() || (decision.is_allowed() && delete.is_some()) {
                 let why = decision.reason().unwrap_or("a human yes").to_string();
                 Gate::Ask(AwaitingReason::PolicyApproval, delete.unwrap_or(why))
@@ -1978,6 +2280,9 @@ impl Executor {
         }
         if let Some((desk, (ask, _))) = plugin_call {
             return plugin_desk::run(desk.as_ref(), context, &call.id, ask).await;
+        }
+        if let Some((desk, (ask, _))) = computer_call {
+            return computer_desk::run(desk.as_ref(), context, &call.id, ask).await;
         }
 
         // `machine: "group"` aims the call at the room's shared computer; anything else is the

@@ -56,6 +56,65 @@ pub fn plugin_of(entry: &str) -> Option<&str> {
         .filter(|plugin| !plugin.is_empty() && !plugin.contains('*'))
 }
 
+/// The entry that keeps one tool out of a set that otherwise admits it: `-cloudflare.api.docs`
+/// beside `cloudflare.*` is Cloudflare without its docs tool (#359, a tool's Never allow). It
+/// only ever narrows: it is kept through every intersection and never admits anything.
+pub fn excluding(tool: &str) -> String {
+    format!("-{tool}")
+}
+
+/// The tool groups a Bot's Tools window switches as one (#359): each tool in a group is the
+/// person's own choice, and `-<group>` switches the whole group off without touching those
+/// choices, so switching it back on gives them back. Kept in step with `opengrok_tools`'
+/// `routine::TOOLS` and `plugin_desk::TOOLS` by a test there.
+pub const TOOL_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "routines",
+        &[
+            "list_routines",
+            "create_routine",
+            "update_routine",
+            "delete_routine",
+            "run_routine",
+        ],
+    ),
+    (
+        "plugins",
+        &[
+            "list_plugins",
+            "plugin_details",
+            "install_plugin",
+            "uninstall_plugin",
+            "list_plugin_accounts",
+            "add_plugin_account",
+            "rename_plugin_account",
+            "remove_plugin_account",
+            "set_plugin_for_bot",
+            "pick_plugin_account",
+        ],
+    ),
+    (
+        "manage_computer",
+        &[
+            "computer_status",
+            "start_computer",
+            "shutdown_computer",
+            "restart_computer",
+            "reset_computer",
+            "update_computer",
+            "set_network",
+        ],
+    ),
+];
+
+/// The group `tool` belongs to, if any.
+pub fn group_of(tool: &str) -> Option<&'static str> {
+    TOOL_GROUPS
+        .iter()
+        .find(|(_, members)| members.contains(&tool))
+        .map(|(group, _)| *group)
+}
+
 /// The entry that admits every tool `plugin` brings, today's and tomorrow's.
 pub fn every_tool_of(plugin: &str) -> String {
     format!("{plugin}.*")
@@ -77,9 +136,13 @@ fn kept_by<'a>(
 ) -> impl Iterator<Item = String> + 'a {
     names
         .iter()
-        .filter(move |name| match plugin_of(name) {
-            Some(plugin) => other.allows_all_of(plugin),
-            None => other.allows(name),
+        .filter(move |name| {
+            // An exclusion narrows whichever side said it, so it always stays.
+            name.starts_with('-')
+                || match plugin_of(name) {
+                    Some(plugin) => other.allows_all_of(plugin),
+                    None => other.allows(name),
+                }
         })
         .cloned()
 }
@@ -99,12 +162,44 @@ impl ToolSet {
     }
 
     pub fn allows(&self, tool: &str) -> bool {
+        self.allows_alone(tool) && group_of(tool).is_none_or(|group| !self.group_off(group))
+    }
+
+    /// Whether `tool` is admitted by its own entries, whatever its group's switch says: the
+    /// person's choice for it, which a group switched off keeps.
+    pub fn allows_alone(&self, tool: &str) -> bool {
         match self {
             Self::All => true,
             Self::Only(names) => {
-                names.contains(tool) || self.whole_plugins().any(|plugin| under(tool, plugin))
+                !tool.starts_with('-')
+                    && !names.contains(&excluding(tool))
+                    && (names.contains(tool)
+                        || self.whole_plugins().any(|plugin| under(tool, plugin)))
             }
             Self::None => false,
+        }
+    }
+
+    /// Whether `tool` carries its own Never (`-<tool>`).
+    pub fn names_never(&self, tool: &str) -> bool {
+        matches!(self, Self::Only(names) if names.contains(&excluding(tool)))
+    }
+
+    /// Whether the person switched `group` off as a whole (`-<group>`).
+    pub fn group_off(&self, group: &str) -> bool {
+        matches!(self, Self::Only(names) if names.contains(&excluding(group)))
+    }
+
+    /// This set with `group`'s switch back on: what its tools' own choices say.
+    #[must_use]
+    pub fn with_group_on(&self, group: &str) -> Self {
+        match self {
+            Self::Only(names) => {
+                let mut names = names.clone();
+                names.remove(&excluding(group));
+                Self::Only(names)
+            }
+            other => other.clone(),
         }
     }
 
@@ -323,6 +418,21 @@ pub fn names_plugin(
     &ceiling.coworker == coworker && both.whole_plugins().any(|named| named == plugin)
 }
 
+/// The ceiling entry that switches one plugin skill off for a Bot: `-skill:<plugin>.<skill>`.
+/// Prefixed so a skill never shares an entry with a tool of the same name.
+pub fn skill_entry(plugin: &str, skill: &str) -> String {
+    format!("skill:{plugin}.{skill}")
+}
+
+/// Whether the owner switched this one plugin skill off for the Bot, leaving the rest of its
+/// plugin on. Only the ceiling holds it: it is the owner's setting, like a plugin tool's Never.
+pub fn skill_switched_off(context: &Context, plugin: &str, skill: &str) -> bool {
+    context
+        .ceiling
+        .as_ref()
+        .is_some_and(|ceiling| ceiling.tools.names_never(&skill_entry(plugin, skill)))
+}
+
 /// `context` with each of `plugins` admitted whole, for ONE turn whose driving account owns the
 /// coworker and named those plugins in its message (`@cloudflare`).
 ///
@@ -404,6 +514,33 @@ pub fn may_run_any_under(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A tool kept out of a plugin admitted whole stays out, through the ceiling and the grant
+    /// alike, and nothing else of the plugin is touched (#359, Never allow).
+    #[test]
+    fn an_exclusion_keeps_one_tool_out_of_a_whole_plugin() {
+        let ceiling = ToolSet::only(["cloudflare.*", "-cloudflare.api.docs", "shell"]);
+        let grant = ToolSet::only(["cloudflare.*", "shell"]);
+        for set in [
+            ceiling.clone(),
+            ceiling.intersect(&grant),
+            grant.intersect(&ceiling),
+        ] {
+            assert!(set.allows("cloudflare.api.execute"), "{set:?}");
+            assert!(!set.allows("cloudflare.api.docs"), "{set:?}");
+            assert!(set.allows("shell"));
+            assert!(
+                set.allows_all_of("cloudflare"),
+                "the plugin itself stays on"
+            );
+        }
+        let off = ToolSet::only(["shell", "-shell"]);
+        assert!(!off.allows("shell"), "an exclusion wins over its own name");
+        assert!(
+            !ToolSet::only(["-x"]).allows("-x"),
+            "an exclusion admits nothing"
+        );
+    }
 
     fn principal() -> AccountId {
         AccountId::from_stored("acct_1")

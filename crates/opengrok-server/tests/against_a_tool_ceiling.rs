@@ -197,13 +197,18 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 
 /// Every built-in row the ceiling answers, in order: the box's tools, the person's machine and
 /// `message_bot` (#314), then the one row of the routine tools (#316) in place of all of them,
-/// and the one row of the plugin tools (#359) in place of all ten.
+/// the one row of the plugin tools (#359) in place of all ten, and the one row of the computer
+/// tools (7 Oct 2026) in place of all seven.
 fn builtins() -> Vec<&'static str> {
-    use opengrok_tools::{plugin_desk, routine};
-    let grouped =
-        |name: &&str| routine::is_routine_tool(name) || plugin_desk::is_plugin_desk_tool(name);
+    use opengrok_tools::{computer_desk, plugin_desk, routine};
+    let grouped = |name: &&str| {
+        routine::is_routine_tool(name)
+            || plugin_desk::is_plugin_desk_tool(name)
+            || computer_desk::is_computer_tool(name)
+    };
     let rows = Executor::every_builtin().filter(|name| !grouped(name));
-    rows.chain([routine::ROW, plugin_desk::ROW]).collect()
+    rows.chain([routine::ROW, plugin_desk::ROW, computer_desk::ROW])
+        .collect()
 }
 
 struct Harness {
@@ -594,7 +599,18 @@ async fn an_empty_ceiling_switches_every_row_off_and_offers_nothing() {
     assert_eq!(status, 200, "{put}");
     assert!(enabled(&put).is_empty(), "{put}");
     assert_eq!(put, h.ceiling(&agent).await);
-    assert!(h.listed(&agent).await.is_empty());
+    // Nothing is offered: the only rows left are the tool groups, listed so their pages can
+    // switch them back on, each with its own switch off (#359, 7 Oct 2026).
+    let (status, body) = h
+        .call(&h.token, "GET", &format!("/coworkers/{agent}/tools"), None)
+        .await;
+    assert_eq!(status, 200, "{body}");
+    for row in body["tools"].as_array().unwrap() {
+        assert!(
+            row["tools"].is_array() && row["enabled"] == false,
+            "offered on an empty ceiling: {row}"
+        );
+    }
     let policy = h
         .store
         .policy_for(&h.owner, &CoworkerId::from_stored(agent.clone()))

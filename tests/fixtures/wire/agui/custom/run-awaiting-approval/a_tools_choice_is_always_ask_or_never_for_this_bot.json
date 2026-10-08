@@ -1,0 +1,16 @@
+{
+  "type": "CUSTOM",
+  "timestamp": 100,
+  "name": "run-awaiting-approval",
+  "threadId": "thr-0199bb4e000070008000000000000001",
+  "runId": "0199bb4e-0000-7000-8000-000000000002",
+  "callId": "call-routine",
+  "tool": "create_routine",
+  "arguments": {
+    "prompt": "say hi",
+    "when": "0 9 * * *"
+  },
+  "reason": "policy-approval",
+  "why": "running create_routine on coworker cw_0199bb4e-0000-7000-8000-000000000003 needs a human yes",
+  "summary": "Make a routine that wakes at \"0 9 * * *\""
+}

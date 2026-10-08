@@ -537,7 +537,11 @@ pub async fn values_choosing(
                     let kind = view.kind.word().to_string();
                     (view.id.clone(), view.label.clone(), kind)
                 });
-                turn.choices.push((connector.clone(), listed.collect()));
+                // Oldest first, the same every time (ids are time-ordered): a card that shuffled
+                // its accounts between two asks would put a different one under the same tap.
+                let mut listed: Vec<AccountChoice> = listed.collect();
+                listed.sort_by(|a, b| a.0.cmp(&b.0));
+                turn.choices.push((connector.clone(), listed));
             }
             Resolved::None => turn.missing.push(connector.clone()),
         }

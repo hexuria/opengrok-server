@@ -863,6 +863,73 @@ async fn a_plugin_tool_that_asks_first_runs_only_once_approved() {
     assert_eq!(quiet.done.lock().unwrap().len(), 1);
 }
 
+/// The policy's tool groups are these crates' own groups, tool for tool, so a group's switch
+/// covers exactly the tools its page lists.
+#[test]
+fn the_policys_tool_groups_are_the_groups_tools_lists() {
+    let groups: Vec<(&str, Vec<&str>)> = opengrok_policy::TOOL_GROUPS
+        .iter()
+        .map(|(group, members)| (*group, members.to_vec()))
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            (routine::ROW, routine::TOOLS.to_vec()),
+            (plugin_desk::ROW, plugin_desk::TOOLS.to_vec()),
+            (computer_desk::ROW, computer_desk::TOOLS.to_vec())
+        ]
+    );
+}
+
+/// Every built-in tool, and each tool group's row, has a label and a sentence for people, so an
+/// app never has to show the model's words (written in its capitals) or make up its own (#359).
+#[test]
+fn every_built_in_has_words_for_people() {
+    for name in
+        Executor::every_builtin().chain([routine::ROW, plugin_desk::ROW, computer_desk::ROW])
+    {
+        let words = Executor::builtin_for_people(name);
+        assert!(words.is_some(), "{name} has no words for people");
+        let (label, summary) = words.unwrap_or_default();
+        assert!(!label.is_empty() && summary.ends_with('.'), "{name}");
+        assert_ne!(summary.to_uppercase(), summary, "{name}: not in capitals");
+    }
+    assert!(Executor::builtin_for_people("a_plugin_tool").is_none());
+}
+
+/// A plugin tool offered under its OpenAI-safe name is found again with its dotted name and its
+/// server's title, which is how the Bot's tools listing says which plugin a tool is from (#359).
+#[test]
+fn a_plugin_tool_is_named_by_its_wire_name() {
+    let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+        BTreeMap::new(),
+        vec![crate::mcp::McpTool {
+            qualified_name: "gmail.api.create_draft".to_string(),
+            remote_name: "create_draft".to_string(),
+            annotations: Some(json!({"title": "Create draft"})),
+            ..Default::default()
+        }],
+    );
+    let (account, coworker) = (
+        AccountId::from_stored("acct_1"),
+        CoworkerId::from_stored("cw_1"),
+    );
+    let wire = executor
+        .tool_schemas(&account, &coworker)
+        .iter()
+        .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string))
+        .find(|name| name.starts_with("gmail"))
+        .unwrap();
+    assert_eq!(
+        executor.plugin_tool_named(&wire),
+        Some((
+            "gmail.api.create_draft".to_string(),
+            Some("Create draft".to_string())
+        ))
+    );
+    assert_eq!(executor.plugin_tool_named("shell"), None);
+}
+
 fn openai_safe_wire(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name

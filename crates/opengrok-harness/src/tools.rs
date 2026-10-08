@@ -243,6 +243,48 @@ impl ToolRunner {
     /// The OpenAI tool definitions to advertise to the model this turn — the offering that pairs
     /// with `run_all`'s execution. The harness fills `ModelRequest.tools` from this before each door
     /// call, so the model actually knows the tools exist.
+    /// A tool's choice for this Bot (`Executor::mode_of`), and the switched-off tools of its
+    /// plugins (`Executor::switched_off`), for the Bot's tools listing.
+    /// Whether `group` is switched off for this Bot as a whole (7 Oct 2026).
+    pub fn group_off(&self, group: &str) -> bool {
+        self.executor
+            .as_ref()
+            .is_some_and(|(executor, _)| executor.group_off(group))
+    }
+
+    /// A tool's choice as its own entries say it, whatever its group's switch (7 Oct 2026).
+    pub fn mode_of_alone(&self, tool: &str) -> &'static str {
+        match self.executor.as_ref() {
+            Some((executor, context)) => {
+                executor.mode_of_alone(&context.account_id, &context.coworker_id, tool)
+            }
+            None => "always",
+        }
+    }
+
+    pub fn mode_of(&self, tool: &str) -> &'static str {
+        match self.executor.as_ref() {
+            Some((executor, context)) => {
+                executor.mode_of(&context.account_id, &context.coworker_id, tool)
+            }
+            None => "always",
+        }
+    }
+
+    pub fn switched_off(&self) -> Vec<opengrok_tools::mcp::McpTool> {
+        self.executor
+            .as_ref()
+            .map(|(executor, _)| executor.switched_off().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// A plugin tool offered under `wire_name`: its dotted name and its server's title
+    /// (`Executor::plugin_tool_named`).
+    pub fn plugin_tool_named(&self, wire_name: &str) -> Option<(String, Option<String>)> {
+        let (executor, _) = self.executor.as_ref()?;
+        executor.plugin_tool_named(wire_name)
+    }
+
     pub fn tool_schemas(&self) -> Vec<serde_json::Value> {
         let mut schemas = self
             .executor

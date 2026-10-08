@@ -1786,6 +1786,87 @@ impl PgStore {
         Ok(true)
     }
 
+    /// Share one of the person's own logins with one of their Bots, or take it back. `false` when
+    /// the login is not theirs (nothing written).
+    pub async fn set_site_login_shared(
+        &self,
+        account_id: &AccountId,
+        login_id: &str,
+        coworker_id: &str,
+        shared: bool,
+        at_ms: i64,
+    ) -> StoreResult<bool> {
+        let theirs = sqlx::query("select 1 from site_login where account_id = $1 and id = $2")
+            .bind(account_id.as_str())
+            .bind(login_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some();
+        if !theirs {
+            return Ok(false);
+        }
+        if shared {
+            sqlx::query(
+                "insert into site_login_share (login_id, coworker_id, account_id, shared_at_ms)
+                 values ($1, $2, $3, $4) on conflict (login_id, coworker_id) do nothing",
+            )
+            .bind(login_id)
+            .bind(coworker_id)
+            .bind(account_id.as_str())
+            .bind(at_ms)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "delete from site_login_share
+                 where login_id = $1 and coworker_id = $2 and account_id = $3",
+            )
+            .bind(login_id)
+            .bind(coworker_id)
+            .bind(account_id.as_str())
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(true)
+    }
+
+    /// The Bots one of the person's logins is shared with.
+    pub async fn site_login_bots(
+        &self,
+        account_id: &AccountId,
+        login_id: &str,
+    ) -> StoreResult<Vec<String>> {
+        let rows = sqlx::query(
+            "select coworker_id from site_login_share
+             where account_id = $1 and login_id = $2 order by shared_at_ms",
+        )
+        .bind(account_id.as_str())
+        .bind(login_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| row.try_get::<String, _>("coworker_id").map_err(Into::into))
+            .collect()
+    }
+
+    /// The person's logins shared with one of their Bots.
+    pub async fn logins_shared_with(
+        &self,
+        account_id: &AccountId,
+        coworker_id: &str,
+    ) -> StoreResult<Vec<String>> {
+        let rows = sqlx::query(
+            "select login_id from site_login_share where account_id = $1 and coworker_id = $2",
+        )
+        .bind(account_id.as_str())
+        .bind(coworker_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| row.try_get::<String, _>("login_id").map_err(Into::into))
+            .collect()
+    }
+
     /// The secrets of one of the person's own site logins, opened for their app alone.
     /// None when the row is not theirs.
     pub async fn open_site_login(

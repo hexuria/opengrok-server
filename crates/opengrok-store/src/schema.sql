@@ -974,6 +974,18 @@ alter table site_login add column if not exists passkey_user_handle text;
 alter table site_login drop constraint if exists site_login_account_id_origin_username_key;
 create unique index if not exists site_login_owner_site_name_kind
     on site_login (account_id, origin, username, kind);
+-- Which of the person's Bots may use which of their saved logins (8 Oct 2026). A row is a
+-- permission, not a copy: the secret stays sealed once under the login, so a changed password
+-- reaches every Bot it is shared with, and deleting the row takes the permission away. None
+-- at first: a Bot is given a login from its card or the login's Bots page.
+create table if not exists site_login_share (
+    login_id      text   not null references site_login (id) on delete cascade,
+    coworker_id   text   not null,
+    account_id    text   not null,
+    shared_at_ms  bigint not null,
+    primary key (login_id, coworker_id)
+);
+create index if not exists site_login_share_coworker on site_login_share (account_id, coworker_id);
 
 -- SKILLS. A named, versioned bundle of instructions a person invokes for one turn by typing
 -- `/name`: a SKILL.md body, plus whatever small files sit beside it. Owned by an account, visible

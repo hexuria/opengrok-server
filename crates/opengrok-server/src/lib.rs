@@ -38,6 +38,7 @@ pub mod jev {
         None
     }
 }
+pub mod computer_desk;
 pub mod local_exec;
 pub mod mcp_door;
 pub mod models;

@@ -936,10 +936,19 @@ async fn the_routines_are_one_row_that_switches_all_four() {
     assert_eq!(status, 200, "{now}");
     let listing = format!("/coworkers/{luna}/tools");
     let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    // Switched off, the group is still listed and says it is off; its tools keep their own
+    // choices (7 Oct 2026), and nothing in it is offered.
     assert!(
-        !tools_listed(&listed).contains(&"routines".to_string()),
+        tools_listed(&listed).contains(&"routines".to_string()),
         "{listed}"
     );
+    let group = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "routines")
+        .unwrap();
+    assert_eq!(group["enabled"], false, "{group}");
     h.call(&ada, &luna, "list_routines", json!({})).await;
     assert!(h.offered().is_empty(), "none of the four is offered");
 
@@ -949,6 +958,30 @@ async fn the_routines_are_one_row_that_switches_all_four() {
     let (status, now) = h.send(&ada, reqwest::Method::PUT, &path, Some(on)).await;
     assert_eq!(status, 200, "{now}");
     let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    // The row is no black box: it lists its five tools, each with its words, so "@routines:" and
+    // the Routines page read them from here.
+    let group = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "routines")
+        .cloned()
+        .unwrap();
+    let members: Vec<&str> = group["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(members, ROUTINE_TOOLS, "{group}");
+    assert!(
+        group["tools"][0]["description"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty())
+    );
     let listed = tools_listed(&listed);
     assert_eq!(
         listed.iter().filter(|name| *name == "routines").count(),
@@ -962,6 +995,330 @@ async fn the_routines_are_one_row_that_switches_all_four() {
     );
     h.call(&ada, &luna, "list_routines", json!({})).await;
     assert_eq!(h.offered(), ROUTINE_TOOLS);
+}
+
+/// One tool's choice for a Bot (#359): Ask puts a card in front of its next call, Never takes it
+/// off the offer, and Always lifts even the card a delete asks by rule. The Bot's tools listing
+/// says each choice, and a name the Bot has no row for is refused.
+#[tokio::test]
+async fn a_tools_choice_is_always_ask_or_never_for_this_bot() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let luna = h.hire(&ada, "Luna").await;
+    let listing = format!("/coworkers/{luna}/tools");
+    let mode = |listed: &Value, name: &str| -> Option<String> {
+        listed["tools"]
+            .as_array()?
+            .iter()
+            .find(|row| row["name"] == "routines")?["tools"]
+            .as_array()?
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .and_then(|tool| tool["mode"].as_str().map(str::to_string))
+    };
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    assert_eq!(
+        mode(&listed, "create_routine").as_deref(),
+        Some("always"),
+        "{listed}"
+    );
+    assert_eq!(
+        mode(&listed, "delete_routine").as_deref(),
+        Some("ask"),
+        "a delete asks by rule"
+    );
+
+    let set = |tool: &str, mode: &str| {
+        let body = json!({ "tool": tool, "mode": mode });
+        let path = format!("/coworkers/{luna}/tool-mode");
+        let h = &h;
+        let ada = &ada;
+        async move { h.send(ada, reqwest::Method::PUT, &path, Some(body)).await }
+    };
+    let (status, said) = set("create_routine", "ask").await;
+    assert_eq!(status, 200, "{said}");
+    let (status, said) = set("delete_routine", "always").await;
+    assert_eq!(status, 200, "{said}");
+    let (status, said) = set("run_routine", "never").await;
+    assert_eq!(status, 200, "{said}");
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    assert_eq!(
+        mode(&listed, "create_routine").as_deref(),
+        Some("ask"),
+        "{listed}"
+    );
+    assert_eq!(
+        mode(&listed, "delete_routine").as_deref(),
+        Some("always"),
+        "{listed}"
+    );
+    // Never is listed as never, so the Bot's page can switch it back on; it is not offered.
+    assert_eq!(
+        mode(&listed, "run_routine").as_deref(),
+        Some("never"),
+        "{listed}"
+    );
+
+    let called = h
+        .call(
+            &ada,
+            &luna,
+            "create_routine",
+            json!({"prompt": "say hi", "when": "0 9 * * *"}),
+        )
+        .await;
+    assert!(called.parked.is_some(), "ask puts a card first");
+    assert!(!h.offered().contains(&"run_routine".to_string()));
+    let (status, said) = set("run_routine", "always").await;
+    assert_eq!(status, 200, "{said}");
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    assert_eq!(
+        mode(&listed, "run_routine").as_deref(),
+        Some("always"),
+        "back on: {listed}"
+    );
+
+    // The group's tools keep one order whatever their choices, so a list never moves under the
+    // person's pointer, and each has a label and a sentence for people.
+    let members = |listed: &Value| -> Vec<String> {
+        listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "routines")
+            .map(|row| {
+                row["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["name"].as_str().unwrap().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (status, _) = set("list_routines", "never").await;
+    assert_eq!(status, 200);
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    assert_eq!(
+        members(&listed),
+        opengrok_tools::routine::TOOLS.map(str::to_string)
+    );
+    let group = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "routines")
+        .unwrap();
+    assert_eq!(group["label"], "Routines", "{group}");
+    assert_eq!(group["tools"][0]["label"], "List routines", "{group}");
+    assert!(
+        group["tools"][0]["summary"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
+    let shell = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "shell")
+        .unwrap();
+    assert_eq!(shell["label"], "Shell", "{shell}");
+    // Every tool of the group off: the group is still listed, each tool as never, so its page
+    // is the way back on.
+    for tool in opengrok_tools::routine::TOOLS {
+        let (status, said) = set(tool, "never").await;
+        assert_eq!(status, 200, "{tool}: {said}");
+    }
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    assert_eq!(
+        members(&listed),
+        opengrok_tools::routine::TOOLS.map(str::to_string),
+        "{listed}"
+    );
+    for tool in opengrok_tools::routine::TOOLS {
+        assert_eq!(mode(&listed, tool).as_deref(), Some("never"), "{tool}");
+    }
+
+    let (status, _) = set("no_such_tool", "never").await;
+    assert_eq!(status, 422);
+    let (status, _) = set("create_routine", "sometimes").await;
+    assert_eq!(status, 422);
+}
+
+/// A group's switch is its own (7 Oct 2026, the owner's call): switching Routines off makes the
+/// whole group unavailable and keeps each tool's choice; switching it back on gives the same
+/// choices back, never all five at once. The listing says the group's switch and the choices.
+#[tokio::test]
+async fn a_groups_switch_keeps_its_tools_own_choices() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let luna = h.hire(&ada, "Luna").await;
+    let set = |tool: &str, mode: &str| {
+        let body = json!({ "tool": tool, "mode": mode });
+        let path = format!("/coworkers/{luna}/tool-mode");
+        let h = &h;
+        let ada = &ada;
+        async move { h.send(ada, reqwest::Method::PUT, &path, Some(body)).await }
+    };
+    assert_eq!(set("run_routine", "never").await.0, 200);
+    let listing = format!("/coworkers/{luna}/tools");
+    let group = |listed: &Value| -> Value {
+        listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "routines")
+            .cloned()
+            .unwrap()
+    };
+    let modes = |group: &Value| -> Vec<(String, String)> {
+        group["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["name"].as_str().unwrap().into(),
+                    t["mode"].as_str().unwrap().into(),
+                )
+            })
+            .collect()
+    };
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    let before = modes(&group(&listed));
+    assert_eq!(group(&listed)["enabled"], true, "{listed}");
+
+    let ceiling_path = format!("/coworkers/{luna}/ceiling");
+    let (_, ceiling) = h
+        .send(&ada, reqwest::Method::GET, &ceiling_path, None)
+        .await;
+    let on: Vec<Value> = ceiling["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["enabled"] == true)
+        .map(|row| row["name"].clone())
+        .collect();
+    assert!(
+        on.contains(&json!("routines")),
+        "4 of 5 is a group that is on: {ceiling}"
+    );
+    let without: Vec<Value> = on
+        .iter()
+        .filter(|n| **n != json!("routines"))
+        .cloned()
+        .collect();
+    let (status, now) = h
+        .send(
+            &ada,
+            reqwest::Method::PUT,
+            &ceiling_path,
+            Some(json!({ "enabled": without })),
+        )
+        .await;
+    assert_eq!(status, 200, "{now}");
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    assert_eq!(group(&listed)["enabled"], false, "{listed}");
+    assert_eq!(
+        modes(&group(&listed)),
+        before,
+        "off keeps each tool's choice"
+    );
+    h.call(&ada, &luna, "list_routines", json!({})).await;
+    assert!(
+        !h.offered()
+            .iter()
+            .any(|t| opengrok_tools::routine::is_routine_tool(t)),
+        "none of the group is offered while it is off"
+    );
+
+    let (_, ceiling) = h
+        .send(&ada, reqwest::Method::GET, &ceiling_path, None)
+        .await;
+    let mut back: Vec<Value> = ceiling["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["enabled"] == true)
+        .map(|row| row["name"].clone())
+        .collect();
+    back.push(json!("routines"));
+    let (status, now) = h
+        .send(
+            &ada,
+            reqwest::Method::PUT,
+            &ceiling_path,
+            Some(json!({ "enabled": back })),
+        )
+        .await;
+    assert_eq!(status, 200, "{now}");
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    assert_eq!(group(&listed)["enabled"], true);
+    assert_eq!(
+        modes(&group(&listed)),
+        before,
+        "on gives the same choices back"
+    );
+}
+
+/// The computer tools (7 Oct 2026, the owner's step 7): one group, named apart from the `computer`
+/// built-in; reading the computer just happens, a reset asks first.
+#[tokio::test]
+async fn a_bots_computer_tools_are_one_group_and_a_reset_asks_first() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let ada = h.person().await;
+    let luna = h.hire(&ada, "Luna").await;
+    let listing = format!("/coworkers/{luna}/tools");
+    let group = |listed: &Value| -> Value {
+        listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "manage_computer")
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    // A new Bot has every built-in, the computer tools with them; what cannot be undone asks.
+    assert_eq!(group(&listed)["enabled"], true, "{listed}");
+
+    let ceiling_path = format!("/coworkers/{luna}/ceiling");
+    let (_, ceiling) = h
+        .send(&ada, reqwest::Method::GET, &ceiling_path, None)
+        .await;
+    assert_eq!(
+        ceiling["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "manage_computer")
+            .unwrap()["label"],
+        "Manage computer"
+    );
+    let (_, listed) = h.send(&ada, reqwest::Method::GET, &listing, None).await;
+    let computer = group(&listed);
+    assert_eq!(computer["enabled"], true, "{computer}");
+    let mode = |name: &str| {
+        computer["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == name)
+            .and_then(|t| t["mode"].as_str())
+            .map(str::to_string)
+    };
+    for asks in ["reset_computer", "update_computer", "set_network"] {
+        assert_eq!(mode(asks).as_deref(), Some("ask"), "{asks} asks first");
+    }
+    assert_eq!(mode("computer_status").as_deref(), Some("always"));
+
+    let read = h.call(&ada, &luna, "computer_status", json!({})).await;
+    assert!(read.parked.is_none(), "reading just happens");
+    let reset = h.call(&ada, &luna, "reset_computer", json!({})).await;
+    assert!(reset.parked.is_some(), "a reset asks first");
 }
 
 /// The ceiling as a Bot's settings read it: one row for its routines. One call on the route, for
@@ -983,7 +1340,8 @@ async fn a_bots_ceiling_lists_its_routines_as_one_row() {
         .cloned();
     let expected = json!({ "name": "routines", "kind": "builtin", "label": "Routines",
         "enabled": true, "description": "List, make, edit, delete and run this Bot's routines when you \
-        ask in chat. Deleting one always asks you first." });
+        ask in chat. Deleting one always asks you first.",
+        "summary": "Lists, makes, edits, deletes and runs this Bot's routines." });
     assert_eq!(routines, Some(expected));
 }
 

@@ -538,8 +538,8 @@ pub(crate) async fn tools_for_turn(
             .await
             .ok()?;
         let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
-        let plugins = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
-        if plugins.tools.is_empty() && plugins.unavailable.is_empty() {
+        let (plugins, off) = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
+        if plugins.tools.is_empty() && plugins.unavailable.is_empty() && off.is_empty() {
             return None;
         }
         let context = opengrok_tools::ToolContext::from_coworker(
@@ -549,6 +549,7 @@ pub(crate) async fn tools_for_turn(
         );
         let executor = opengrok_tools::Executor::without_a_computer(policy)
             .with_plugins(plugins)
+            .with_switched_off(off)
             .with_plugin_desk(plugin_desk(state))
             .with_approved(approved.iter().cloned())
             .with_review_approved(review_approved.iter().cloned());
@@ -557,7 +558,8 @@ pub(crate) async fn tools_for_turn(
     // Resolve the provider for this coworker's computer by its account's effective sharing mode and
     // scope (per-org / per-account / per-bot), then that scope's recorded kind — so tools run on the
     // same provider that created the box.
-    let (mode, org_id) = super::provision::resolve_mode(state, account_id).await;
+    let (mode, org_id) =
+        super::provision::resolve_mode_for(state, account_id, coworker_id.as_str()).await;
     let (scope, scope_id, _) = super::provision::scope_for(
         &mode,
         account_id.as_str(),
@@ -658,7 +660,8 @@ pub(crate) async fn tools_for_turn(
     // coworker that includes its `bot`-scoped connections, which its OWNER authorised: a member's
     // turn acts through them, while the owner's `user`-scoped ones stay the owner's (ROADMAP
     // 19.4). Narrowing that is a decision about what sharing lends, not a filter to add here.
-    let plugins = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
+    let (plugins, switched_off) =
+        connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
 
     // Bind the SCOPE's live box, not the coworker's frozen hire-time id. They match at hire, but a
     // reset or re-provision changes the account's box while the aggregate id stays put — and this is
@@ -725,6 +728,7 @@ pub(crate) async fn tools_for_turn(
         .with_screen(screen)
         .with_recipes(recipes, crate::recipes::source_for(state))
         .with_plugins(plugins)
+        .with_switched_off(switched_off)
         .with_approved(approved.iter().cloned())
         .with_review_approved(review_approved.iter().cloned())
         .with_egress_tunnel_mode(egress_tunnel)
@@ -736,7 +740,11 @@ pub(crate) async fn tools_for_turn(
             state: state.clone(),
         }))
         // The person's plugins and accounts (#359), through the desk the Plugins routes use.
-        .with_plugin_desk(plugin_desk(state));
+        .with_plugin_desk(plugin_desk(state))
+        // This Bot's own computer (7 Oct 2026), through the desk the Computer pane's routes use.
+        .with_computer_desk(Arc::new(crate::computer_desk::Tools {
+            state: state.clone(),
+        }));
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin. The executor offers it only where the
@@ -947,7 +955,10 @@ async fn connect_plugins(
     coworker_id: &CoworkerId,
     policy: &opengrok_policy::Context,
     turn: &opengrok_integrations::turn::TurnPlugins,
-) -> opengrok_tools::mcp::Dialled {
+) -> (
+    opengrok_tools::mcp::Dialled,
+    Vec<opengrok_tools::mcp::McpTool>,
+) {
     // Every credential this coworker can use, keyed the way a plugin's placeholders name them:
     // `GMAIL_TOKEN` for the `gmail` connector. Which account serves each service is the Bot's
     // pin or the only one it may use, never a guess between several (#359, `resolve`).
@@ -1004,10 +1015,25 @@ async fn connect_plugins(
         let decision = opengrok_policy::decide(account_id, coworker_id, action, policy);
         decision.is_allowed() || decision.needs_approval()
     };
+    // A tool the person switched off inside a plugin that is on (Never allow, `-<tool>`) is read
+    // too, and then kept apart: never offered, only listed, so it can be switched back on.
+    let switched_off = |tool: &str| match policy.ceiling.as_ref().map(|c| &c.tools) {
+        Some(opengrok_policy::ToolSet::Only(names)) => {
+            names.contains(&opengrok_policy::excluding(tool))
+        }
+        _ => false,
+    };
     let scope = format!("{account_id}/{coworker_id}");
-    opengrok_tools::mcp::Pool::global()
-        .dial(&scope, endpoints, permitted)
-        .await
+    let mut dialled = opengrok_tools::mcp::Pool::global()
+        .dial(&scope, endpoints, |tool| {
+            permitted(tool) || switched_off(tool)
+        })
+        .await;
+    let (off, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut dialled.tools)
+        .into_iter()
+        .partition(|tool| switched_off(&tool.qualified_name));
+    dialled.tools = kept;
+    (dialled, off)
 }
 
 /// `POST /ag-ui` lives on `HostState` so a UserForm CUSTOM can mint the gateway card and
@@ -1082,6 +1108,30 @@ pub fn router(state: AgUiState) -> Router {
         .route(
             "/coworkers/{coworker_id}/ceiling",
             get(super::ceiling::get_ceiling).put(super::ceiling::put_ceiling),
+        )
+        // One tool's choice for this Bot: always, ask or never (#359, `ceiling.rs`).
+        .route(
+            "/coworkers/{coworker_id}/tool-mode",
+            axum::routing::put(super::ceiling::put_tool_mode),
+        )
+        // Whether a saved login can be used for this Bot, asked before Touch ID, and the Bot's own
+        // computer apart from the account's shared one (`ceiling.rs`, 8 Oct 2026).
+        .route(
+            "/coworkers/{coworker_id}/saved-login",
+            get(super::ceiling::get_saved_login),
+        )
+        .route(
+            "/coworkers/{coworker_id}/own-computer",
+            axum::routing::put(super::ceiling::put_own_computer),
+        )
+        // One plugin skill on or off for this Bot, and its text for its page (`ceiling.rs`).
+        .route(
+            "/coworkers/{coworker_id}/plugin-skills",
+            get(super::ceiling::list_plugin_skills).put(super::ceiling::put_plugin_skill),
+        )
+        .route(
+            "/coworkers/{coworker_id}/plugin-skills/{plugin}/{skill}",
+            get(super::ceiling::get_plugin_skill),
         )
         .route(
             "/coworkers/{coworker_id}/computer/update",
@@ -2377,16 +2427,30 @@ async fn list_tools(
             } else {
                 "plugin"
             };
-            Some(serde_json::json!({
+            let mut row = serde_json::json!({
                 "name": name,
                 "description": function.get("description").and_then(serde_json::Value::as_str).unwrap_or(""),
                 "kind": kind,
-            }))
+            });
+            // Which plugin a tool is from, and what its server calls it for a person (#359), so
+            // an app can group a plugin's tools and show "@cloudflare:" without parsing names.
+            let mut policy_name = name.clone();
+            if let Some((qualified, title)) = runner.plugin_tool_named(&name) {
+                row["plugin"] = serde_json::json!(qualified.split('.').next().unwrap_or_default());
+                row["qualified"] = serde_json::json!(qualified);
+                if let Some(title) = title {
+                    row["title"] = serde_json::json!(title);
+                }
+                policy_name = qualified;
+            }
+            // This Bot's choice for the tool (#359): `always`, `ask` (a card first) or `never`.
+            row["mode"] = serde_json::json!(runner.mode_of(&policy_name));
+            Some(row)
         })
         .collect();
     // The routine tools are listed as their ceiling's one row (#316), as the Tools card shows it,
     // and so are the plugin tools (#359).
-    use opengrok_tools::{plugin_desk, routine};
+    use opengrok_tools::{computer_desk, plugin_desk, routine};
     let routines =
         |row: &serde_json::Value| row["name"].as_str().is_some_and(routine::is_routine_tool);
     let (offered, tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(routines);
@@ -2395,15 +2459,95 @@ async fn list_tools(
             .as_str()
             .is_some_and(plugin_desk::is_plugin_desk_tool)
     };
-    let (desk_offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(desk);
-    if !offered.is_empty() {
-        tools.push(serde_json::json!({ "name": routine::ROW,
-            "description": routine::ROW_DESCRIPTION, "kind": "builtin" }));
+    let (desk_offered, tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(desk);
+    let computer = |row: &serde_json::Value| {
+        row["name"]
+            .as_str()
+            .is_some_and(computer_desk::is_computer_tool)
+    };
+    let (computer_offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(computer);
+    // A plugin's tools the person switched off for this Bot are listed too, as `never`, so its
+    // page can switch them back on; they are not offered to the Bot.
+    for tool in runner.switched_off() {
+        let plugin = tool
+            .qualified_name
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let mut row = serde_json::json!({
+            "name": opengrok_tools::openai_safe_tool_name(&tool.qualified_name),
+            "description": tool.description.clone().unwrap_or_default(),
+            "kind": "plugin", "plugin": plugin, "qualified": tool.qualified_name, "mode": "never",
+        });
+        let title = tool
+            .annotations
+            .as_ref()
+            .and_then(|notes| notes.get("title"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(title) = title {
+            row["title"] = serde_json::json!(title);
+        }
+        tools.push(row);
     }
-    if !desk_offered.is_empty() {
-        tools.push(serde_json::json!({ "name": plugin_desk::ROW,
-            "description": plugin_desk::ROW_DESCRIPTION, "kind": "builtin" }));
+    // Each group lists every one of its tools in the group's own order, the offered ones with
+    // this Bot's choice and the rest as `never`, so a list never moves under the person's pointer
+    // and a group with every tool off still has a page to switch them back on from (#359).
+    let group = |offered: Vec<serde_json::Value>,
+                 members: &[&str],
+                 describe: fn(&str) -> Option<&'static str>| {
+        members
+            .iter()
+            .map(|name| {
+                offered
+                    .iter()
+                    .find(|row| row["name"] == *name)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        // Not offered: at Never, or its group is switched off, which keeps the
+                        // tool's own choice and shows it.
+                        serde_json::json!({ "name": name,
+                            "description": describe(name).unwrap_or_default(),
+                            "kind": "builtin", "mode": runner.mode_of_alone(name) })
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+    let offered = group(offered, &routine::TOOLS, routine::description);
+    let desk_offered = group(desk_offered, &plugin_desk::TOOLS, plugin_desk::description);
+    let computer_offered = group(
+        computer_offered,
+        &computer_desk::TOOLS,
+        computer_desk::description,
+    );
+    // `enabled` is the group's own switch (7 Oct 2026), apart from its tools' choices.
+    tools.push(serde_json::json!({ "name": routine::ROW,
+        "description": routine::ROW_DESCRIPTION, "kind": "builtin", "tools": offered,
+        "enabled": !runner.group_off(routine::ROW) }));
+    tools.push(serde_json::json!({ "name": plugin_desk::ROW,
+        "description": plugin_desk::ROW_DESCRIPTION, "kind": "builtin", "tools": desk_offered,
+        "enabled": !runner.group_off(plugin_desk::ROW) }));
+    tools.push(serde_json::json!({ "name": computer_desk::ROW,
+        "description": computer_desk::ROW_DESCRIPTION, "kind": "builtin", "tools": computer_offered,
+        "enabled": !runner.group_off(computer_desk::ROW) }));
+    // What a person reads about each built-in and group, beside the model's words (#359).
+    fn for_people(row: &mut serde_json::Value) {
+        if let Some((label, summary)) = row["name"]
+            .as_str()
+            .and_then(opengrok_tools::Executor::builtin_for_people)
+            .filter(|_| row["kind"] == "builtin")
+        {
+            row["label"] = serde_json::json!(label);
+            row["summary"] = serde_json::json!(summary);
+        }
+        if let Some(members) = row
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            members.iter_mut().for_each(for_people);
+        }
     }
+    tools.iter_mut().for_each(for_people);
     Json(serde_json::json!({ "tools": tools })).into_response()
 }
 
