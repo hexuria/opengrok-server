@@ -22,6 +22,7 @@ opengrok-box = { path = "../opengrok-box" }
 opengrok-policy = { path = "../opengrok-policy" }
 opengrok-plugins = { path = "../opengrok-plugins" }
 opengrok-recipes = { path = "../opengrok-recipes" }
+opengrok-forms = { path = "../opengrok-forms" }
 rmcp.workspace = true
 tokio.workspace = true
 serde.workspace = true

@@ -351,7 +351,7 @@ fn form_source(value: &Value) -> &Value {
 }
 
 /// Reject ambiguous ids before a card waits: its answers are keyed by id, not by row.
-pub(crate) fn validate_field_ids(arguments: &Value) -> Result<(), &'static str> {
+pub fn validate_field_ids(arguments: &Value) -> Result<(), &'static str> {
     let mut seen = BTreeSet::new();
     if let Some(fields) = form_source(arguments)
         .get("fields")

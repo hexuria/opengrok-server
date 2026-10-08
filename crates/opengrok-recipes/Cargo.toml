@@ -8,6 +8,7 @@ description = "A taught tape (raw pointer and key events) into the box's recipe 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

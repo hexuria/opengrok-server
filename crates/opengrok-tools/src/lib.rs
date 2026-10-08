@@ -16,13 +16,13 @@
 //! policy decision into an outage.
 
 pub mod review;
+pub use opengrok_forms as user_form;
+pub use opengrok_forms::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
 pub use review::{
     AwaitingReason, EGRESS_TUNNEL_ASK_REASON, Gate, JudgeFailure, Outcome, REDACTED,
     REVIEW_ASK_REASON, ReviewAsk, ReviewJudge, ReviewOutcome, ReviewPolicy, ReviewVerdict,
     ask_first_reason, combine, looks_like_a_secret, redact_arguments,
 };
-pub mod user_form;
-pub use user_form::{FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, REQUEST_USER_FORM};
 pub mod cards;
 pub mod credential;
 pub use credential::OFFER_SAVE;
@@ -30,8 +30,8 @@ pub mod mcp;
 pub mod message_bot;
 
 pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
-pub mod observe;
-pub use observe::{Observe, Seen};
+pub use opengrok_recipes::observe;
+pub use opengrok_recipes::{Observe, Seen};
 pub mod computer_desk;
 pub mod plugin_desk;
 pub mod routine;
