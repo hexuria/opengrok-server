@@ -1545,10 +1545,7 @@ async fn a_bot_manages_its_persons_plugins_and_asks_first_where_it_cannot_be_und
     let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
     let bot = credential_bot(&h, &account).await;
     let other = credential_bot(&h, &account).await;
-    let desk = opengrok_server::plugin_desk::Tools {
-        state: h.agui.clone(),
-        registry: Some(registry),
-    };
+    let desk = opengrok_server::plugin_desk::configured(&h.agui, Some(registry));
     let context = opengrok_tools::ToolContext {
         account_id: account.clone(),
         coworker_id: bot.clone(),

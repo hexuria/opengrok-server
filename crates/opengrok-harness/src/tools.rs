@@ -110,24 +110,26 @@ impl ToolRunner {
 
     /// The coworker whose tools these are, for the frames that name one.
     pub fn coworker_id(&self) -> Option<String> {
-        self.executor
-            .as_ref()
+        self.executor()
             .map(|(_, context)| context.coworker_id.to_string())
     }
 
-    /// Whether the box behind this runner has a screen.
+    /// Whether the box behind this runner has a screen, i.e. `open_url` and `computer` are on
+    /// offer. The prompt must say the same thing the offering does.
     pub fn has_screen(&self) -> bool {
         self.executor()
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
-    /// Whether the computer may not use the person's network.
+    /// The computer may not use the person's network while the tunnel is on: the browser tools
+    /// are withheld and the prompt says why. See `Executor::network_off`.
     pub fn network_off(&self) -> bool {
         self.executor()
             .is_some_and(|(executor, _)| executor.network_off())
     }
 
-    /// Whether network access has not been confirmed.
+    /// The withholding is a fail-closed stand-in, not the person's choice. See
+    /// `Executor::network_unconfirmed`.
     pub fn network_unconfirmed(&self) -> bool {
         self.executor()
             .is_some_and(|(executor, _)| executor.network_unconfirmed())
@@ -214,8 +216,7 @@ impl ToolRunner {
     /// The system-message sentence naming plugin servers that could not be reached this turn, or
     /// nothing. See `Executor::unavailable_plugins_line`.
     pub fn unavailable_plugins_line(&self) -> String {
-        self.executor
-            .as_ref()
+        self.executor()
             .map(|(executor, _)| executor.unavailable_plugins_line())
             .unwrap_or_default()
     }
