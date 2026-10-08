@@ -115,27 +115,21 @@ impl ToolRunner {
             .map(|(_, context)| context.coworker_id.to_string())
     }
 
-    /// Whether the box behind this runner has a screen, i.e. `open_url` and `computer` are on
-    /// offer. The prompt must say the same thing the offering does.
+    /// Whether the box behind this runner has a screen.
     pub fn has_screen(&self) -> bool {
-        self.executor
-            .as_ref()
+        self.executor()
             .is_some_and(|(executor, _)| executor.has_screen())
     }
 
-    /// The computer may not use the person's network while the tunnel is on: the browser tools
-    /// are withheld and the prompt says why. See `Executor::network_off`.
+    /// Whether the computer may not use the person's network.
     pub fn network_off(&self) -> bool {
-        self.executor
-            .as_ref()
+        self.executor()
             .is_some_and(|(executor, _)| executor.network_off())
     }
 
-    /// The withholding is a fail-closed stand-in, not the person's choice. See
-    /// `Executor::network_unconfirmed`.
+    /// Whether network access has not been confirmed.
     pub fn network_unconfirmed(&self) -> bool {
-        self.executor
-            .as_ref()
+        self.executor()
             .is_some_and(|(executor, _)| executor.network_unconfirmed())
     }
 
@@ -240,51 +234,14 @@ impl ToolRunner {
             .map(|(_, handler)| handler)
     }
 
+    /// The executor and identity for server-side listings that need the underlying policy APIs.
+    pub fn executor(&self) -> Option<&(Executor, ToolContext)> {
+        self.executor.as_ref()
+    }
+
     /// The OpenAI tool definitions to advertise to the model this turn — the offering that pairs
-    /// with `run_all`'s execution. The harness fills `ModelRequest.tools` from this before each door
-    /// call, so the model actually knows the tools exist.
-    /// A tool's choice for this Bot (`Executor::mode_of`), and the switched-off tools of its
-    /// plugins (`Executor::switched_off`), for the Bot's tools listing.
-    /// Whether `group` is switched off for this Bot as a whole (7 Oct 2026).
-    pub fn group_off(&self, group: &str) -> bool {
-        self.executor
-            .as_ref()
-            .is_some_and(|(executor, _)| executor.group_off(group))
-    }
-
-    /// A tool's choice as its own entries say it, whatever its group's switch (7 Oct 2026).
-    pub fn mode_of_alone(&self, tool: &str) -> &'static str {
-        match self.executor.as_ref() {
-            Some((executor, context)) => {
-                executor.mode_of_alone(&context.account_id, &context.coworker_id, tool)
-            }
-            None => "always",
-        }
-    }
-
-    pub fn mode_of(&self, tool: &str) -> &'static str {
-        match self.executor.as_ref() {
-            Some((executor, context)) => {
-                executor.mode_of(&context.account_id, &context.coworker_id, tool)
-            }
-            None => "always",
-        }
-    }
-
-    pub fn switched_off(&self) -> Vec<opengrok_tools::mcp::McpTool> {
-        self.executor
-            .as_ref()
-            .map(|(executor, _)| executor.switched_off().to_vec())
-            .unwrap_or_default()
-    }
-
-    /// A plugin tool offered under `wire_name`: its dotted name and its server's title
-    /// (`Executor::plugin_tool_named`).
-    pub fn plugin_tool_named(&self, wire_name: &str) -> Option<(String, Option<String>)> {
-        let (executor, _) = self.executor.as_ref()?;
-        executor.plugin_tool_named(wire_name)
-    }
-
+    /// with `run_all`'s execution. The harness fills `ModelRequest.tools` from this before each
+    /// door call, so the model actually knows the tools exist.
     pub fn tool_schemas(&self) -> Vec<serde_json::Value> {
         let mut schemas = self
             .executor

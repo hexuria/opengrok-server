@@ -2435,7 +2435,9 @@ async fn list_tools(
             // Which plugin a tool is from, and what its server calls it for a person (#359), so
             // an app can group a plugin's tools and show "@cloudflare:" without parsing names.
             let mut policy_name = name.clone();
-            if let Some((qualified, title)) = runner.plugin_tool_named(&name) {
+            if let Some((executor, _)) = runner.executor()
+                && let Some((qualified, title)) = executor.plugin_tool_named(&name)
+            {
                 row["plugin"] = serde_json::json!(qualified.split('.').next().unwrap_or_default());
                 row["qualified"] = serde_json::json!(qualified);
                 if let Some(title) = title {
@@ -2444,7 +2446,9 @@ async fn list_tools(
                 policy_name = qualified;
             }
             // This Bot's choice for the tool (#359): `always`, `ask` (a card first) or `never`.
-            row["mode"] = serde_json::json!(runner.mode_of(&policy_name));
+            row["mode"] = serde_json::json!(runner.executor().map_or("always", |(executor, context)| {
+                executor.mode_of(&context.account_id, &context.coworker_id, &policy_name)
+            }));
             Some(row)
         })
         .collect();
@@ -2468,7 +2472,11 @@ async fn list_tools(
     let (computer_offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(computer);
     // A plugin's tools the person switched off for this Bot are listed too, as `never`, so its
     // page can switch them back on; they are not offered to the Bot.
-    for tool in runner.switched_off() {
+    for tool in runner
+        .executor()
+        .into_iter()
+        .flat_map(|(executor, _)| executor.switched_off())
+    {
         let plugin = tool
             .qualified_name
             .split('.')
@@ -2508,7 +2516,9 @@ async fn list_tools(
                         // tool's own choice and shows it.
                         serde_json::json!({ "name": name,
                             "description": describe(name).unwrap_or_default(),
-                            "kind": "builtin", "mode": runner.mode_of_alone(name) })
+                            "kind": "builtin", "mode": runner.executor().map_or("always", |(executor, context)| {
+                                executor.mode_of_alone(&context.account_id, &context.coworker_id, name)
+                            }) })
                     })
             })
             .collect::<Vec<_>>()
@@ -2523,13 +2533,13 @@ async fn list_tools(
     // `enabled` is the group's own switch (7 Oct 2026), apart from its tools' choices.
     tools.push(serde_json::json!({ "name": routine::ROW,
         "description": routine::ROW_DESCRIPTION, "kind": "builtin", "tools": offered,
-        "enabled": !runner.group_off(routine::ROW) }));
+        "enabled": !runner.executor().is_some_and(|(executor, _)| executor.group_off(routine::ROW)) }));
     tools.push(serde_json::json!({ "name": plugin_desk::ROW,
         "description": plugin_desk::ROW_DESCRIPTION, "kind": "builtin", "tools": desk_offered,
-        "enabled": !runner.group_off(plugin_desk::ROW) }));
+        "enabled": !runner.executor().is_some_and(|(executor, _)| executor.group_off(plugin_desk::ROW)) }));
     tools.push(serde_json::json!({ "name": computer_desk::ROW,
         "description": computer_desk::ROW_DESCRIPTION, "kind": "builtin", "tools": computer_offered,
-        "enabled": !runner.group_off(computer_desk::ROW) }));
+        "enabled": !runner.executor().is_some_and(|(executor, _)| executor.group_off(computer_desk::ROW)) }));
     // What a person reads about each built-in and group, beside the model's words (#359).
     fn for_people(row: &mut serde_json::Value) {
         if let Some((label, summary)) = row["name"]
