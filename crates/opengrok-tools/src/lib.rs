@@ -1438,15 +1438,9 @@ impl Executor {
         computer_desk::SET_NETWORK,
     ];
 
-    /// A tool's choice for this Bot as a person reads it: `ask` (a card first), `always`, or
-    /// `never` (not offered). `tool` is the dotted name for a plugin's tool.
-    pub fn mode_of(&self, account: &AccountId, coworker: &CoworkerId, tool: &str) -> &'static str {
-        let decision = opengrok_policy::decide(
-            account,
-            coworker,
-            opengrok_policy::Action::RunTool(tool),
-            &self.policy,
-        );
+    /// The label a decided tool gets: an Allow still asks first on the ask-by-rule list unless
+    /// the person chose Always allow for it.
+    fn mode_label(&self, decision: &opengrok_policy::Decision, tool: &str) -> &'static str {
         if decision.needs_approval() {
             "ask"
         } else if !decision.is_allowed() {
@@ -1456,6 +1450,18 @@ impl Executor {
         } else {
             "always"
         }
+    }
+
+    /// A tool's choice for this Bot as a person reads it: `ask` (a card first), `always`, or
+    /// `never` (not offered). `tool` is the dotted name for a plugin's tool.
+    pub fn mode_of(&self, account: &AccountId, coworker: &CoworkerId, tool: &str) -> &'static str {
+        let decision = opengrok_policy::decide(
+            account,
+            coworker,
+            opengrok_policy::Action::RunTool(tool),
+            &self.policy,
+        );
+        self.mode_label(&decision, tool)
     }
 
     /// Whether `group`'s own switch is off for this Bot (7 Oct 2026): switched off as a whole,
@@ -1522,15 +1528,7 @@ impl Executor {
             opengrok_policy::Action::RunTool(tool),
             &policy,
         );
-        if decision.needs_approval() {
-            "ask"
-        } else if !decision.is_allowed() {
-            "never"
-        } else if Self::ASK_BY_RULE.contains(&tool) && !self.asks_unasked(tool) {
-            "ask"
-        } else {
-            "always"
-        }
+        self.mode_label(&decision, tool)
     }
 
     /// The tools of a switched-on plugin that the person switched off for this Bot (Never allow):
