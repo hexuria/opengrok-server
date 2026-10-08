@@ -14,7 +14,7 @@ pub mod cards;
 pub mod computers;
 pub mod connections;
 pub mod domain_proof;
-pub mod gateway_admin;
+pub use opengrok_gateway_admin as gateway_admin;
 pub mod health;
 pub mod hooks;
 pub mod host_state;

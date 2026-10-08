@@ -338,5 +338,5 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/jev_reviewer.rs"]
+#[path = "../tests/unit/jev_reviewer.rs"]
 mod tests;

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
-use crate::jev::MockJev;
+use crate::mock::MockJev;
 use cred_swap_core::detect::candidates::{Survey, candidates};
 use cred_swap_core::detect::merge;
 use cred_swap_core::{Cloak, Decision, Policy, Style, Surrogates};

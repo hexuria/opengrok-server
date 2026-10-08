@@ -104,13 +104,6 @@ pub(crate) fn to_chat_messages(
     crate::agui::routes::to_chat_messages_with(input, &attached)
 }
 
-impl crate::local_exec::broker::ExecOutcome {
-    /// Did the command run to a normal completion (exit 0)?
-    pub fn succeeded(&self) -> bool {
-        self.case == "success" && self.exit_code == Some(0)
-    }
-}
-
 /// A TXT lookup answered from a map, which a test publishes records into — so a claim can be
 /// proven end to end without owning a domain. Reached as `domain_proof::StaticDns`.
 #[derive(Default)]

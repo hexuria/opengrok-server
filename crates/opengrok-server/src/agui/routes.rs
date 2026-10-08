@@ -793,10 +793,10 @@ pub(crate) async fn tools_for_turn(
 
 /// The desk a turn's plugin tools answer through, on the registry the Plugins routes serve.
 fn plugin_desk(state: &AgUiState) -> Arc<dyn opengrok_tools::plugin_desk::PluginDesk> {
-    Arc::new(crate::plugin_desk::Tools {
-        state: state.clone(),
-        registry: crate::plugin_registry::registry(),
-    })
+    Arc::new(crate::plugin_desk::configured(
+        state,
+        crate::plugin_registry::registry(),
+    ))
 }
 
 /// The conversation of a run suspended on a user-form: it holds the screen whether or not the

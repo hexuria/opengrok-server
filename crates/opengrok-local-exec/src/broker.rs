@@ -32,6 +32,11 @@ pub struct ExecOutcome {
 }
 
 impl ExecOutcome {
+    /// Did the command run to a normal completion (exit 0)?
+    pub fn succeeded(&self) -> bool {
+        self.case == "success" && self.exit_code == Some(0)
+    }
+
     /// A stand-in outcome for a daemon reply the server could not read — a definite answer for the
     /// caller and a recordable case, never a panic.
     pub fn malformed(reason: &str) -> Self {
@@ -284,5 +289,5 @@ impl LocalExecBroker {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/local_exec_broker.rs"]
+#[path = "../tests/unit/local_exec_broker.rs"]
 mod tests;

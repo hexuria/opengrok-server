@@ -84,6 +84,11 @@ crates/
   opengrok-box      the coworker's computer — a trait; typed box.ascii.dev v1 client + local Docker
   opengrok-plugins  Agent Plugins: the bundle of skills + MCP servers a coworker is given
   opengrok-recipes  a taught tape into the box's recipe steps; the lint that keeps them runnable
+  opengrok-forms    the in-chat form schema and safe fill
+  opengrok-gateway-admin  the gateway's administrative key desk
+  opengrok-jev        the typed classifier client
+  opengrok-local-exec the approved command transport
+  opengrok-auth       access and refresh token primitives
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
   opengrok-integrations  the plugin registry adapter, account installs and their per-turn use; OAuth provider rules

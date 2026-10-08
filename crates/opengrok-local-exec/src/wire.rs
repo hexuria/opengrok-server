@@ -194,5 +194,5 @@ pub fn stream_action(message: &Value) -> Option<StreamAction> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/local_exec_wire.rs"]
+#[path = "../tests/unit/local_exec_wire.rs"]
 mod tests;

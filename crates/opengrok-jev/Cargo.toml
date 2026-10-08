@@ -1,0 +1,25 @@
+[package]
+name = "opengrok-jev"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+jev = ["dep:typesafe-sdk"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+cred-swap-core = { git = "https://github.com/hexuria/cred-swap", branch = "main" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+typesafe-sdk = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

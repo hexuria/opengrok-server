@@ -149,5 +149,5 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/auth_token.rs"]
+#[path = "../tests/unit/auth_token.rs"]
 mod tests;
