@@ -959,9 +959,14 @@ pub(crate) async fn saved_login_refusal(
     if !private {
         return Some(SHARED_BOT);
     }
-    let (_, _, _, _, mode) =
+    let (_, _, scope, _, mode) =
         super::provision::scope_of(agui, account_id, coworker_id.as_str()).await;
-    (mode != opengrok_core::coworker::BoxMode::Dedicated).then_some(SHARED_COMPUTER)
+    // The computer the person's own Bots share, once they share every login with every Bot of
+    // theirs (9 Oct 2026): a session left signed in there reaches only Bots that could fill
+    // that login anyway, so nothing is exposed and no Bot needs a fresh computer to sign in.
+    let all_bots =
+        scope == "account" && super::site_logins::shared_with_all_bots(agui, account_id).await;
+    (mode != opengrok_core::coworker::BoxMode::Dedicated && !all_bots).then_some(SHARED_COMPUTER)
 }
 
 fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {

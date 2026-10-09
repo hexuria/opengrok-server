@@ -2337,6 +2337,101 @@ async fn a_saved_login_fills_only_for_a_bot_it_is_shared_with() {
     assert_eq!(status, 404);
 }
 
+/// With the person's "share my logins with all my Bots" switch on, a saved login fills on the
+/// computer their own Bots share, for a Bot it was never shared with one by one: no Bot needs a
+/// fresh computer (and loses the page it had open) to sign in. Off, it is refused as before,
+/// and a Bot shown to an org is refused either way (9 Oct 2026).
+#[tokio::test]
+async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-all-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let call = |method: reqwest::Method, path: String, body: Option<Value>| {
+        let mut req = h
+            .client
+            .request(method, format!("{}{path}", h.base))
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        async move {
+            let res = req.send().await.expect("call");
+            let status = res.status().as_u16();
+            (status, res.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let check = || {
+        call(
+            reqwest::Method::GET,
+            format!("/coworkers/{agent}/saved-login"),
+            None,
+        )
+    };
+    let all_bots = |on: bool| {
+        call(
+            reqwest::Method::PUT,
+            "/site-logins/sharing".to_string(),
+            Some(json!({ "allBots": on })),
+        )
+    };
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    seed_login(&h.store, &h.account, &login, "password", None).await;
+
+    let (_, body) = call(reqwest::Method::GET, "/site-logins/sharing".into(), None).await;
+    assert_eq!(
+        body["allBots"], false,
+        "off until the person turns it on: {body}"
+    );
+    let (_, body) = check().await;
+    assert_eq!(body["reason"], "shared-computer", "{body}");
+    assert_eq!(
+        body["ownBotsOnly"], true,
+        "the switch would help here: {body}"
+    );
+
+    let (status, body) = all_bots(true).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, body) = check().await;
+    assert_eq!(body["usable"], true, "{body}");
+    assert_eq!(
+        body["ownComputer"], false,
+        "no computer of its own was made: {body}"
+    );
+    let (_, shared) = call(
+        reqwest::Method::GET,
+        format!("/coworkers/{agent}/site-logins"),
+        None,
+    )
+    .await;
+    assert_eq!(shared["logins"], json!([login]), "{shared}");
+
+    h.turn(&token, &agent, "sign in").await;
+    let card = h.wait_for_form(&agent).await;
+    let fill = json!({
+        "entryId": card["id"].as_str().expect("entry id"),
+        "agentId": agent,
+        "savedLogin": true,
+        "savedLoginId": login,
+        "values": { "email": EMAIL, "password": SECRET }
+    });
+    let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+
+    // Off again: back to the shares made one Bot at a time, of which this Bot has none.
+    assert_eq!(all_bots(false).await.0, 200);
+    let (_, body) = check().await;
+    assert_eq!(body["reason"], "shared-computer", "{body}");
+
+    // A Bot everyone in an org drives is never one a saved login fills for.
+    assert_eq!(all_bots(true).await.0, 200);
+    mark_org_visible(&h.store, &h.account, &agent).await;
+    let (_, body) = check().await;
+    assert_eq!(body["reason"], "shared-bot", "{body}");
+}
+
 /// A passkey card typed nothing and asked the box for its DevTools pipe. The stub box has
 /// none, so the card settles as Not filled with the reason, and the bot is told not to type
 /// a password; on a shared box the card is refused before anything is asked.
