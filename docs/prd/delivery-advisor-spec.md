@@ -3,14 +3,15 @@
 Status: draft for review  
 Branch: `auto-steer`  
 Parent PRD: [`docs/prd/auto-steer.md`](./auto-steer.md)  
-Proposed home: opengrok-server (server ingress crate; consumes [hexuria/pua](https://github.com/hexuria/pua) engine — see update below)  
+Proposed home: opengrok-server (server ingress crate; consumes the [hexuria/instinct](https://github.com/hexuria/instinct) engine, formerly PUA — see update below)  
 Toolchain: Rust 1.99.0 (workspace `rust-toolchain.toml` pin), edition 2024, `#![forbid(unsafe_code)]`  
 Default: **off** (config flag)
 
 > **Update 2026-10-05 (codebase analysis + owner decision).** Delivery advice is a **consumer of**
-> [PUA (Predictable Universal Advisor)](https://github.com/hexuria/pua/blob/main/docs/spec.md)
-> ("Predictable" = deterministic scores, no sampling). PUA is tier 0, below Jev. The pack left
-> `hexuria/pua` in Phase 2; the engine stays in PUA and consumers pin it by git tag or rev.
+> [Instinct](https://github.com/hexuria/instinct/blob/main/docs/spec.md) (formerly PUA, the
+> Predictable Universal Advisor; deterministic scores, no sampling). Instinct is tier 0, below Jev.
+> The pack left the engine repo in Phase 2 (hexuria/instinct#23); the engine stays in Instinct and
+> consumers pin it by git tag or rev.
 >
 > **Owner decision 2026-10-05:** the **authoritative** classify→apply gate for queue / steer /
 > interrupt lives on **opengrok-server ingress** (message intake / pending create), not on the
