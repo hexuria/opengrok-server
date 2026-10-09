@@ -56,6 +56,8 @@ struct FillStub {
     /// How long the guest takes to answer `/v1/info`, and how often it was asked.
     egress_takes: Mutex<std::time::Duration>,
     egress_asked: Mutex<u32>,
+    /// The page the box reports in front of its browser; `None` is a box that cannot say.
+    front: Mutex<Option<String>>,
 }
 
 impl FillStub {
@@ -139,6 +141,9 @@ impl Computer for FillStub {
     }
     async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
         Ok(Some("http://vnc.invalid".to_string()))
+    }
+    async fn active_tab_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+        Ok(self.front.lock().expect("front").clone())
     }
     async fn screenshot(&self, _box_id: &str) -> BoxResult<Screenshot> {
         *self.shots.lock().expect("shots") += 1;
@@ -2345,7 +2350,7 @@ async fn a_saved_login_fills_only_for_a_bot_it_is_shared_with() {
 async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
     let database_url = database_or_skip!();
     let email = format!("user-form-all-{}@og.local", uuid::Uuid::now_v7().simple());
-    let h = harness(&database_url, &email).await;
+    let h = harness_with_door(&database_url, &email, Arc::new(SiteLoginDoor)).await;
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Ada").await;
     let call = |method: reqwest::Method, path: String, body: Option<Value>| {
@@ -2416,9 +2421,30 @@ async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
         "savedLoginId": login,
         "values": { "email": EMAIL, "password": SECRET }
     });
+    // Another Bot on this computer brought its own page forward: nothing is typed into it.
+    *h.stub.front.lock().expect("front") = Some("https://www.youtube.com/".into());
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "wrong-page", "{body}");
+    assert!(
+        h.stub.acts().is_empty(),
+        "nothing typed into another Bot's page"
+    );
+    // A box that cannot say which page is in front is refused too, on a shared computer.
+    *h.stub.front.lock().expect("front") = None;
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing typed blind");
+    // The login's own site in front: the card, still open, fills.
+    *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
     let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["formResolution"], "submitted", "{body}");
+    assert!(!h.stub.acts().is_empty(), "typed into the login's own page");
 
     // Off again: back to the shares made one Bot at a time, of which this Bot has none.
     assert_eq!(all_bots(false).await.0, 200);
@@ -2430,6 +2456,44 @@ async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
     mark_org_visible(&h.store, &h.account, &agent).await;
     let (_, body) = check().await;
     assert_eq!(body["reason"], "shared-bot", "{body}");
+}
+
+/// Asks once for a facebook.com login that names its site, then answers.
+struct SiteLoginDoor;
+
+#[async_trait]
+impl ModelDoor for SiteLoginDoor {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let answered = request
+            .messages
+            .iter()
+            .any(|message| message.as_text().contains("[tool "));
+        let deltas = if answered {
+            vec![ModelDelta::Text("Signed in.".into())]
+        } else {
+            let id = format!("form-{}", uuid::Uuid::now_v7().simple());
+            vec![
+                ModelDelta::ToolCallStart {
+                    id: id.clone(),
+                    name: "request_user_form".into(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: id.clone(),
+                    delta: json!({
+                        "title": "Log in to Facebook",
+                        "fields": [
+                            {"id": "email", "label": "Email", "type": "email", "required": true},
+                            {"id": "password", "label": "Password", "type": "password", "required": true}
+                        ],
+                        "liveHost": "www.facebook.com"
+                    })
+                    .to_string(),
+                },
+                ModelDelta::ToolCallEnd { id },
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
+    }
 }
 
 /// A passkey card typed nothing and asked the box for its DevTools pipe. The stub box has

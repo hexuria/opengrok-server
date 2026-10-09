@@ -807,6 +807,18 @@ impl Computer for DockerComputer {
     /// The password is the box's own, read back from its environment like `BOX_TOKEN`, so a
     /// restart keeps it. A box without one has no screen here rather than a guessed password;
     /// boxes created before per-box passwords still carry theirs, and keep working.
+    async fn active_tab_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+        // A box with no screen, or an image from before the report (404), cannot say.
+        let Ok(guest) = self.guest(box_id).await else {
+            return Ok(None);
+        };
+        let Ok(body) = guest.active_tab().await else {
+            return Ok(None);
+        };
+        let url = body.get("url").and_then(serde_json::Value::as_str);
+        Ok(url.filter(|url| !url.is_empty()).map(str::to_string))
+    }
+
     async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
         let seen = match self.inspect(box_id).await {
             Ok(seen) => seen,

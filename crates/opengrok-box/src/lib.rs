@@ -424,6 +424,13 @@ pub trait Computer: Send + Sync {
         false
     }
 
+    /// The URL of the page in front of the box's browser, as the box's own extension reports it
+    /// (hexuria/box `GET /v1/chrome/active-tab`). `None` when the box cannot say: no screen, no
+    /// browser, or an image from before the report. Asked before a fill types into the page.
+    async fn active_tab_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+        Ok(None)
+    }
+
     /// A URL a person can open to SEE this box's screen (noVNC), or `None` when it has none — which
     /// is the default, because most of our computers are headless (shell + files, no desktop). A
     /// provider that can surface a graphical desktop (box.ascii.dev) overrides this; the client draws

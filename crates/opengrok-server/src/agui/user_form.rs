@@ -34,6 +34,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_core::run::{RunCommand, RunView};
+use opengrok_tools::user_form::front_page;
 use opengrok_tools::user_form::{
     FieldOutcome, FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, HANDOFF_DECLINED_TOOL_RESULT,
     HOLD_TIMED_OUT_TOOL_RESULT, audit_lengths, fill_into_focus, form_request_from,
@@ -266,7 +267,17 @@ pub async fn submit_user_form(
         let content = opengrok_tools::user_form::collection_tool_result(&form, &shared);
         (Vec::new(), FormResolution::Submitted, content)
     } else {
-        let outcomes = fill_on_box(state, account_id, &coworker_id, &form, &values).await;
+        let filled = fill_on_box(state, account_id, &coworker_id, &form, &values, saved_login);
+        let outcomes = match filled.await {
+            Ok(outcomes) => outcomes,
+            // The card stays open: the person can bring the page back to the front, or type.
+            Err(why) => {
+                return (
+                    403,
+                    json!({ "error": front_page::WRONG_PAGE, "message": why }),
+                );
+            }
+        };
         let resolution = overall_resolution(&outcomes);
         let content = tool_result_content(&form, resolution, &shared, false);
         (outcomes, resolution, content)
@@ -1208,8 +1219,9 @@ async fn fill_on_box(
     coworker_id: &CoworkerId,
     form: &FormRequest,
     values: &BTreeMap<String, String>,
-) -> Vec<FieldOutcome> {
-    let failed = || nothing_filled(form);
+    saved_login: bool,
+) -> Result<Vec<FieldOutcome>, String> {
+    let failed = || Ok(nothing_filled(form));
     let Some(runner) = crate::agui::routes::tools_for_coworker(
         &state.agui,
         account_id,
@@ -1240,7 +1252,16 @@ async fn fill_on_box(
     if runner.network_off_now().await {
         return failed();
     }
-    fill_into_focus(computer.as_ref(), &box_id, form, values).await
+    // It types into the page in front, which on a shared computer another Bot may have changed
+    // (9 Oct 2026). A box that cannot say is refused only for a saved login on a shared one.
+    let front = computer.active_tab_url(&box_id).await.ok().flatten();
+    let (_, _, _, _, mode) =
+        super::provision::scope_of(&state.agui, account_id, coworker_id.as_str()).await;
+    let unknown_refuses = saved_login && mode != opengrok_core::coworker::BoxMode::Dedicated;
+    if let Some(why) = front_page::front_page_refusal(form, front.as_deref(), unknown_refuses) {
+        return Err(why);
+    }
+    Ok(fill_into_focus(computer.as_ref(), &box_id, form, values).await)
 }
 
 /// Every field of the form, not typed.
