@@ -1,0 +1,8 @@
+{
+  "method": "PATCH",
+  "path": "/connections/attempts/attempt_0199bb4e000070008000000000000001",
+  "status": 404,
+  "body": {
+    "error": "no such sign-in"
+  }
+}

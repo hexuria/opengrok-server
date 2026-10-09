@@ -330,3 +330,29 @@ fn a_row_that_names_only_its_id_is_that_and_nothing_more() {
     assert_eq!(models_in(r#"{"data": [{"id": "bare"}]}"#), bare);
     assert!(models_in("not json").is_empty(), "never a guess");
 }
+
+/// Which upstream and which kind of credential a gateway row is served through, as open-ai-gateway
+/// lists them in `oag.provider` and `oag.channel` (`concrete_entry` and `virtual_entry` in its
+/// `crates/oag-server/src/gateway/models.rs`), go on the `GET /models` row as `provider` and
+/// `channel`, so a picker can group the gateway's models by where they come from. A row that names
+/// neither, as opencodex's never do, gains neither field.
+#[test]
+fn a_gateway_row_says_which_upstream_and_credential_serve_it() {
+    let listed = models(&json!({ "data": [
+        { "id": "anthropic/claude-opus-5-5@api", "owned_by": "anthropic",
+          "oag": { "provider": "anthropic", "channel": "api",
+                   "alias_of": "anthropic/claude-opus-5-5" } },
+        { "id": "oag/auto", "owned_by": "oag", "oag": { "provider": "oag", "channel": null } },
+        { "id": "gpt-6-luna", "owned_by": "openai" }
+    ]}));
+    let entry = |model: &Model| model.entry(Value::Null, SourceKind::Gateway, None);
+    assert_eq!(entry(&listed[0])["provider"], "anthropic");
+    assert_eq!(entry(&listed[0])["channel"], "api");
+    assert_eq!(entry(&listed[1])["provider"], "oag");
+    assert!(
+        entry(&listed[1]).get("channel").is_none(),
+        "a null channel is left out"
+    );
+    let plain = entry(&listed[2]);
+    assert!(plain.get("provider").is_none() && plain.get("channel").is_none());
+}

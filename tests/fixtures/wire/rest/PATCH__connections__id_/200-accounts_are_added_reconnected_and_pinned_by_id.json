@@ -1,0 +1,18 @@
+{
+  "method": "PATCH",
+  "path": "/connections/conn_gmail_acct_0199bb4e-0000-7000-8000-000000000001_0199bb4e000070008000000000000002",
+  "status": 200,
+  "body": {
+    "id": "conn_gmail_acct_0199bb4e-0000-7000-8000-000000000001_0199bb4e000070008000000000000002",
+    "connector": "gmail",
+    "owner": {
+      "scope": "user",
+      "id": "acct_0199bb4e-0000-7000-8000-000000000001"
+    },
+    "label": "Work",
+    "loans": [],
+    "updatedAtMs": 1790000000000,
+    "expiresAtMs": 1790000001000,
+    "kind": "oauth"
+  }
+}

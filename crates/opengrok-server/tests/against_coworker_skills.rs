@@ -953,7 +953,9 @@ async fn a_turn_lists_its_attached_skills_and_offers_use_skill_only_while_one_is
     assert_eq!(
         row,
         vec![
-            &json!({ "name": USE_SKILL, "kind": "builtin", "description": USE_SKILL_DESCRIPTION })
+            // Every listed tool carries this Bot's choice for it (#359).
+            &json!({ "name": USE_SKILL, "kind": "builtin", "description": USE_SKILL_DESCRIPTION,
+                "mode": "always" })
         ]
     );
 

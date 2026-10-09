@@ -176,6 +176,14 @@ fn each_unsupported_skill_says_which_rule_it_broke() {
     };
     assert_eq!(reason("Bad_Name"), "skill name is not a valid name");
     assert_eq!(reason("open"), "SKILL.md frontmatter has no closing fence");
-    assert_eq!(reason("long"), "skill body exceeds 8000 characters");
-    assert_eq!(reason("wordy"), "skill description exceeds 300 characters");
+    let cap = crate::skill::MAX_SKILL_BODY_CHARS;
+    assert_eq!(
+        reason("long"),
+        format!("skill body exceeds {cap} characters")
+    );
+    let cap = crate::skill::MAX_SKILL_DESCRIPTION_CHARS;
+    assert_eq!(
+        reason("wordy"),
+        format!("skill description exceeds {cap} characters")
+    );
 }

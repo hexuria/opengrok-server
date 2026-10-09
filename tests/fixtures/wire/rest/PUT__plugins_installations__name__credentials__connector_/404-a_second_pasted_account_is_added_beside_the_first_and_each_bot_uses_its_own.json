@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/plugins/installations/demo/credentials/demo",
+  "status": 404,
+  "body": {
+    "error": "no such installed connector"
+  }
+}

@@ -766,6 +766,170 @@ async fn plugin_tools_join_the_offered_set() {
     );
 }
 
+/// A Bot with no computer still has its plugins (#359): only they are offered, and a computer tool
+/// called anyway is refused in words, never sent to a box.
+#[tokio::test]
+async fn without_a_computer_only_the_plugins_are_offered() {
+    let executor = Executor::without_a_computer(permissive()).with_plugin_tools(
+        BTreeMap::new(),
+        vec![crate::mcp::McpTool {
+            qualified_name: "cloudflare.api.list_zones".to_string(),
+            remote_name: "list_zones".to_string(),
+            ..Default::default()
+        }],
+    );
+    assert!(!executor.has_computer());
+    assert_eq!(executor.tool_names(), ["cloudflare.api.list_zones"]);
+    let (account, coworker) = (
+        AccountId::from_stored("acct_1"),
+        CoworkerId::from_stored("cw_1"),
+    );
+    assert_eq!(executor.tool_schemas(&account, &coworker).len(), 1);
+    let result = executor
+        .execute(
+            &context_with_box("box_mine"),
+            &call("shell", json!({"command": "ls"})),
+        )
+        .await;
+    assert!(!result.ok);
+    assert!(result.content.contains(crate::NO_COMPUTER), "{result:?}");
+}
+
+/// A desk whose every ask-first answer is `card`, and that records what it carried out.
+struct StandInDesk {
+    card: Option<String>,
+    done: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl crate::plugin_desk::PluginDesk for StandInDesk {
+    async fn answer(&self, _: &ToolContext, ask: crate::plugin_desk::Ask) -> Result<Value, String> {
+        self.done.lock().unwrap().push(format!("{ask:?}"));
+        Ok(json!({"done": true}))
+    }
+    async fn ask_first(
+        &self,
+        _: &ToolContext,
+        _: &crate::plugin_desk::Ask,
+    ) -> Result<Option<String>, String> {
+        Ok(self.card.clone())
+    }
+}
+
+/// A plugin tool that asks first parks on the policy's card in the desk's words and does nothing;
+/// once that call is approved it runs. One that does not ask just runs (#359, the owner's rule).
+#[tokio::test]
+async fn a_plugin_tool_that_asks_first_runs_only_once_approved() {
+    let card = "Uninstall demo? Its account is removed with it.".to_string();
+    let desk = Arc::new(StandInDesk {
+        card: Some(card.clone()),
+        done: Mutex::new(Vec::new()),
+    });
+    let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_desk(desk.clone());
+    assert!(
+        executor
+            .tool_names()
+            .contains(&"uninstall_plugin".to_string())
+    );
+    let uninstall = call("uninstall_plugin", json!({"plugin": "demo"}));
+    let parked = executor
+        .execute(&context_with_box("box_mine"), &uninstall)
+        .await;
+    assert!(parked.awaiting_approval, "{parked:?}");
+    assert!(parked.content.contains(&card), "{parked:?}");
+    assert!(desk.done.lock().unwrap().is_empty());
+
+    let approved = allowing(Arc::new(SpyComputer::default()))
+        .with_plugin_desk(desk.clone())
+        .with_approved([uninstall.id.clone()]);
+    let ran = approved
+        .execute(&context_with_box("box_mine"), &uninstall)
+        .await;
+    assert!(ran.ok, "{ran:?}");
+    assert_eq!(desk.done.lock().unwrap().len(), 1);
+
+    let quiet = Arc::new(StandInDesk {
+        card: None,
+        done: Mutex::new(Vec::new()),
+    });
+    let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_desk(quiet.clone());
+    let list = call("list_plugins", json!({}));
+    assert!(
+        executor
+            .execute(&context_with_box("box_mine"), &list)
+            .await
+            .ok
+    );
+    assert_eq!(quiet.done.lock().unwrap().len(), 1);
+}
+
+/// The policy's tool groups are these crates' own groups, tool for tool, so a group's switch
+/// covers exactly the tools its page lists.
+#[test]
+fn the_policys_tool_groups_are_the_groups_tools_lists() {
+    let groups: Vec<(&str, Vec<&str>)> = opengrok_policy::TOOL_GROUPS
+        .iter()
+        .map(|(group, members)| (*group, members.to_vec()))
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            (routine::ROW, routine::TOOLS.to_vec()),
+            (plugin_desk::ROW, plugin_desk::TOOLS.to_vec()),
+            (computer_desk::ROW, computer_desk::TOOLS.to_vec())
+        ]
+    );
+}
+
+/// Every built-in tool, and each tool group's row, has a label and a sentence for people, so an
+/// app never has to show the model's words (written in its capitals) or make up its own (#359).
+#[test]
+fn every_built_in_has_words_for_people() {
+    for name in
+        Executor::every_builtin().chain([routine::ROW, plugin_desk::ROW, computer_desk::ROW])
+    {
+        let words = Executor::builtin_for_people(name);
+        assert!(words.is_some(), "{name} has no words for people");
+        let (label, summary) = words.unwrap_or_default();
+        assert!(!label.is_empty() && summary.ends_with('.'), "{name}");
+        assert_ne!(summary.to_uppercase(), summary, "{name}: not in capitals");
+    }
+    assert!(Executor::builtin_for_people("a_plugin_tool").is_none());
+}
+
+/// A plugin tool offered under its OpenAI-safe name is found again with its dotted name and its
+/// server's title, which is how the Bot's tools listing says which plugin a tool is from (#359).
+#[test]
+fn a_plugin_tool_is_named_by_its_wire_name() {
+    let executor = allowing(Arc::new(SpyComputer::default())).with_plugin_tools(
+        BTreeMap::new(),
+        vec![crate::mcp::McpTool {
+            qualified_name: "gmail.api.create_draft".to_string(),
+            remote_name: "create_draft".to_string(),
+            annotations: Some(json!({"title": "Create draft"})),
+            ..Default::default()
+        }],
+    );
+    let (account, coworker) = (
+        AccountId::from_stored("acct_1"),
+        CoworkerId::from_stored("cw_1"),
+    );
+    let wire = executor
+        .tool_schemas(&account, &coworker)
+        .iter()
+        .filter_map(|schema| schema["function"]["name"].as_str().map(str::to_string))
+        .find(|name| name.starts_with("gmail"))
+        .unwrap();
+    assert_eq!(
+        executor.plugin_tool_named(&wire),
+        Some((
+            "gmail.api.create_draft".to_string(),
+            Some("Create draft".to_string())
+        ))
+    );
+    assert_eq!(executor.plugin_tool_named("shell"), None);
+}
+
 fn openai_safe_wire(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name

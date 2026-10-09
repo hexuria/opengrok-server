@@ -401,7 +401,7 @@ async fn a_body_over_the_cap_is_refused_with_the_limit_and_the_size() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let ada = h.person(None).await;
-    let over = "x".repeat(8_001);
+    let over = "x".repeat(65_537);
 
     let (status, _, text) = h
         .call(
@@ -412,8 +412,8 @@ async fn a_body_over_the_cap_is_refused_with_the_limit_and_the_size() {
         )
         .await;
     assert_eq!(status, 413, "{text}");
-    assert!(text.contains("8000"), "the limit is named: {text}");
-    assert!(text.contains("8001"), "the size is named: {text}");
+    assert!(text.contains("65536"), "the limit is named: {text}");
+    assert!(text.contains("65537"), "the size is named: {text}");
 
     // And the row did not appear anyway.
     let (_, mine, _) = h.call(&ada, "GET", "/skills?filter=mine", None).await;
@@ -435,11 +435,11 @@ async fn a_body_over_the_cap_is_refused_with_the_limit_and_the_size() {
             &ada,
             "POST",
             &format!("/skills/{id}/versions"),
-            Some(json!({ "body": "y".repeat(9_000) })),
+            Some(json!({ "body": "y".repeat(66_536) })),
         )
         .await;
     assert_eq!(status, 413, "{text}");
-    assert!(text.contains("8000") && text.contains("9000"), "{text}");
+    assert!(text.contains("65536") && text.contains("66536"), "{text}");
     let (_, read, _) = h.call(&ada, "GET", &format!("/skills/{id}"), None).await;
     assert_eq!(read["version"], 1, "the refused version was not written");
     assert_eq!(read["body"], "fine");

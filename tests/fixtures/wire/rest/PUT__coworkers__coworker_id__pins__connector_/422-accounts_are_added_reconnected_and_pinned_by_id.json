@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/pins/gmail",
+  "status": 422,
+  "body": {
+    "error": "that account is not one this Bot can use for Gmail"
+  }
+}

@@ -793,8 +793,15 @@ async fn a_lesson_over_the_cap_is_refused_rather_than_cut() {
     ));
     let (status, _, text) = h.stop_recording(&ada, &bot, a_tape("invoice 41")).await;
     assert_eq!(status, 502, "{text}");
-    assert!(text.contains("8000"), "the limit is named: {text}");
-    assert!(text.contains("8001"), "and so is what arrived: {text}");
+    let cap = opengrok_server::skills::MAX_SKILL_BODY_CHARS;
+    assert!(
+        text.contains(&cap.to_string()),
+        "the limit is named: {text}"
+    );
+    assert!(
+        text.contains(&(cap + 1).to_string()),
+        "and so is what arrived: {text}"
+    );
     assert!(
         h.skills_of(&ada).await.is_empty(),
         "a body over the cap is not stored cut, and not stored whole"

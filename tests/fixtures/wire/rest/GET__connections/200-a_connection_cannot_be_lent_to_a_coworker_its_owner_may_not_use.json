@@ -13,7 +13,8 @@
       "label": "lender-0199bb4e000070008000000000000003@og.local",
       "loans": [],
       "updatedAtMs": 1790000000000,
-      "expiresAtMs": null
+      "expiresAtMs": null,
+      "kind": "oauth"
     }
   ]
 }

@@ -18,18 +18,22 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_policy::ToolSet;
-use opengrok_tools::{Executor, USER_MACHINE_SHELL, routine};
+use opengrok_tools::{Executor, USER_MACHINE_SHELL, computer_desk, plugin_desk, routine};
 use serde_json::{Value, json};
 
 use super::routes::{AgUiState, account_from_bearer, now_ms, owned_coworker};
 use crate::health::refusal;
 
-/// The built-ins' rows: one per built-in, and ONE for the four routine tools, which it switches
-/// together (#316, the owner's call): a person decides whether a Bot keeps routines, not which
-/// verb of it.
+/// The built-ins' rows: one per built-in, ONE for the routine tools, which it switches together
+/// (#316, the owner's call): a person decides whether a Bot keeps routines, not which verb of it;
+/// and one for the plugin tools, the same way (#359).
 fn builtin_rows() -> impl Iterator<Item = &'static str> {
-    let rows = Executor::every_builtin().filter(|name| !routine::is_routine_tool(name));
-    rows.chain([routine::ROW])
+    let rows = Executor::every_builtin().filter(|name| {
+        !routine::is_routine_tool(name)
+            && !plugin_desk::is_plugin_desk_tool(name)
+            && !computer_desk::is_computer_tool(name)
+    });
+    rows.chain([routine::ROW, plugin_desk::ROW, computer_desk::ROW])
 }
 
 /// The rows as `ceiling` sets them, plus one per plugin it still switches on that this server no
@@ -57,8 +61,10 @@ async fn rows(
     let mut rows: Vec<Value> = builtin_rows()
         .map(|name| {
             let description = Executor::builtin_description(name).unwrap_or_default();
+            // A group's switch is its own (7 Oct 2026): on unless the person switched the whole
+            // group off, whatever its tools' own choices are.
             let on = match name {
-                routine::ROW => routine::TOOLS.iter().all(|tool| ceiling.allows(tool)),
+                routine::ROW | plugin_desk::ROW | computer_desk::ROW => group_on(ceiling, name),
                 name => ceiling.allows(name),
             };
             let mut row = json!({ "name": name, "kind": "builtin",
@@ -66,8 +72,18 @@ async fn rows(
             if name == USER_MACHINE_SHELL {
                 row["available"] = json!(machine.is_some());
             }
+            // One sentence for people, beside the model's words in `description` (#359).
+            if let Some((_, summary)) = Executor::builtin_for_people(name) {
+                row["summary"] = json!(summary);
+            }
             if name == routine::ROW {
                 row["label"] = json!(routine::ROW_LABEL);
+            }
+            if name == plugin_desk::ROW {
+                row["label"] = json!(plugin_desk::ROW_LABEL);
+            }
+            if name == computer_desk::ROW {
+                row["label"] = json!(computer_desk::ROW_LABEL);
             }
             row
         })
@@ -188,49 +204,527 @@ pub(super) async fn put_ceiling(
             return refusal(422, &format!("send {{\"enabled\": [names]}}: {why}"));
         }
     };
+    match save(&state, &account_id, &coworker_id, enabled, version).await {
+        Ok((tools, version)) => reply(&state, &account_id, &tools, version).await,
+        Err(refused) => refused,
+    }
+}
+
+/// Whether a tool group's own switch is on in `ceiling`: not switched off as a whole, and at
+/// least one of its tools there by its own choice (a group left out entirely is off).
+fn group_on(ceiling: &ToolSet, group: &str) -> bool {
+    !ceiling.group_off(group)
+        && opengrok_policy::TOOL_GROUPS
+            .iter()
+            .find(|(g, _)| *g == group)
+            .is_some_and(|(_, members)| members.iter().any(|t| ceiling.allows_alone(t)))
+}
+
+/// Write `enabled`, named as the rows a GET shows, as `coworker`'s ceiling: the PUT's body, and
+/// what a Bot's `set_plugin_for_bot` sends (#359), so the two cannot store different things.
+async fn save(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    enabled: Vec<String>,
+    version: Option<i64>,
+) -> Result<(ToolSet, i64), Response> {
     // Named against the rows a GET shows now. A built-in is a row whether or not it is available,
     // so it can be switched on or off either way ON PURPOSE: the ceiling records the intent, and a
     // turn offers the tool only once it is there (the machine, once one is enrolled). A plugin
     // this server does not load has no row until it is switched on, so it may be kept, never
     // added. Nothing is written until every name is one.
-    let (now, _) = match state.auth.store.ceiling_at(&coworker_id).await {
+    let (now, _) = match state.auth.store.ceiling_at(coworker_id).await {
         Ok(found) => found,
-        Err(error) => return unavailable(&error),
+        Err(error) => return Err(unavailable(&error)),
     };
-    let shown = match rows(&state, &account_id, &now).await {
+    let shown = match rows(state, account_id, &now).await {
         Ok(rows) => rows,
-        Err(e) => return unavailable(&e),
+        Err(e) => return Err(unavailable(&e)),
     };
     let mut entries = BTreeSet::new();
+    let mut named_groups: BTreeSet<String> = BTreeSet::new();
     for name in enabled {
         match shown.iter().find(|row| row["name"] == name.as_str()) {
-            None => return refusal(422, &format!("no tool or plugin named {name}")),
+            None => return Err(refusal(422, &format!("no tool or plugin named {name}"))),
             Some(row) if row["kind"] == "plugin" => {
                 entries.insert(opengrok_policy::every_tool_of(&name))
             }
-            Some(_) if name == routine::ROW => {
-                entries.extend(routine::TOOLS.map(str::to_string));
+            // A group is switched by its own entry: its tools' choices are carried below.
+            Some(_)
+                if name == routine::ROW
+                    || name == plugin_desk::ROW
+                    || name == computer_desk::ROW =>
+            {
+                named_groups.insert(name);
                 true
             }
             Some(_) => entries.insert(name),
         };
     }
-    let tools = if entries.is_empty() {
+    // Each group keeps its tools' own choices, whichever way its switch goes: on is those choices
+    // (all of its tools when it has none yet), off is `-<group>` beside them (7 Oct 2026).
+    for (group, members) in opengrok_policy::TOOL_GROUPS {
+        let chosen: Vec<&str> = members
+            .iter()
+            .copied()
+            .filter(|tool| now.allows_alone(tool))
+            .collect();
+        let on = named_groups.contains(*group);
+        let custom = !chosen.is_empty() && chosen.len() < members.len();
+        if on && chosen.is_empty() {
+            entries.extend(members.iter().map(|t| t.to_string()));
+        } else if on || custom {
+            entries.extend(chosen.iter().map(|t| t.to_string()));
+        }
+        // Off with choices of its own kept beside `-<group>`; off with none (every tool at its
+        // default) is the group's tools left out, as before, and on gives them back whole.
+        if !on && custom {
+            entries.insert(opengrok_policy::excluding(group));
+        }
+    }
+    // A tool's own Never (`-<tool>`) and a lifted ask (`+<tool>`) are the person's choices, not
+    // switches on this page: a write of the switches keeps them.
+    if let ToolSet::Only(names) = &now {
+        let groups: Vec<String> = opengrok_policy::TOOL_GROUPS
+            .iter()
+            .map(|(g, _)| opengrok_policy::excluding(g))
+            .collect();
+        entries.extend(
+            names
+                .iter()
+                .filter(|e| (e.starts_with('-') || e.starts_with('+')) && !groups.contains(e))
+                .cloned(),
+        );
+    }
+    let tools = if entries.iter().all(|e| e.starts_with('-')) {
         ToolSet::None
     } else {
         ToolSet::Only(entries)
     };
-    let (store, who, whom) = (&state.auth.store, &account_id, &coworker_id);
+    let (store, who, whom) = (&state.auth.store, account_id, coworker_id);
     match store
         .set_ceiling(who, whom, &tools, version, now_ms())
         .await
     {
-        Ok(Some(version)) => reply(&state, &account_id, &tools, version).await,
+        Ok(Some(version)) => Ok((tools, version)),
         Ok(None) => {
             let changed = "the tools changed since you looked";
             let body = json!({ "error": changed, "code": "ceiling-changed" });
+            Err((StatusCode::CONFLICT, Json(body)).into_response())
+        }
+        Err(error) => Err(unavailable(&error)),
+    }
+}
+
+/// Switch `plugin` on or off for `coworker`, as its Tools card would: every other row stays as a
+/// GET shows it. `Ok(false)` when it already was. The caller has checked the Bot is the person's.
+pub(crate) async fn set_plugin(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    plugin: &str,
+    on: bool,
+) -> Result<bool, String> {
+    let said = |why: &str| why.to_string();
+    let (now, version) = state
+        .auth
+        .store
+        .ceiling_at(coworker_id)
+        .await
+        .map_err(|_| said("this Bot's tools could not be read now"))?;
+    let shown = rows(state, account_id, &now)
+        .await
+        .map_err(|_| said("this Bot's tools could not be read now"))?;
+    let row = shown
+        .iter()
+        .find(|row| row["kind"] == "plugin" && row["name"] == plugin);
+    let Some(row) = row else {
+        return Err(format!("{plugin} is not installed; call list_plugins."));
+    };
+    if row["enabled"] == on {
+        return Ok(false);
+    }
+    let mut enabled: Vec<String> = shown
+        .iter()
+        .filter(|row| row["enabled"] == true && row["name"] != plugin)
+        .filter_map(|row| row["name"].as_str().map(str::to_string))
+        .collect();
+    if on {
+        enabled.push(plugin.to_string());
+    }
+    match save(state, account_id, coworker_id, enabled, Some(version)).await {
+        Ok(_) => Ok(true),
+        Err(response) if response.status() == StatusCode::CONFLICT => {
+            Err(said("this Bot's tools changed just now; try again."))
+        }
+        Err(_) => Err(said("this Bot's tools could not be saved now")),
+    }
+}
+
+/// `PUT /coworkers/{id}/tool-mode` `{"tool", "mode"}`: one tool's choice for this Bot (#359).
+#[derive(serde::Deserialize)]
+pub(super) struct ToolMode {
+    /// A built-in's name, or a plugin tool's dotted `<plugin>.<server>.<tool>`.
+    tool: String,
+    /// `always`, `ask` or `never`.
+    mode: String,
+}
+
+/// Set one tool's choice for this Bot, as its page's chip does (#359).
+///
+/// - `never`: out of the Bot's ceiling. A plugin admitted whole keeps the rest of its tools:
+///   the tool gets an exclusion (`-<tool>`) beside `<plugin>.*`.
+/// - `ask`: in the ceiling and in the grant's ask-first list, so a card asks each time.
+/// - `always`: in the ceiling and out of the ask-first list. For a tool that asks by rule (a
+///   delete, an uninstall, a removal), `+<tool>` records that the person lifted that card.
+///
+/// Answers `{tool, mode}`. 422 for a mode or a tool this Bot has no row for, 409 when the
+/// ceiling is not a list of names (`all` or none) or changed meanwhile.
+pub(super) async fn put_tool_mode(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<ToolMode>, JsonRejection>,
+) -> Response {
+    let (account_id, coworker_id) = match owner(&state, &headers, id).await {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let Ok(Json(ToolMode { tool, mode })) = body else {
+        return refusal(422, "send {\"tool\", \"mode\"}");
+    };
+    if !matches!(mode.as_str(), "always" | "ask" | "never") {
+        return refusal(422, "mode is always, ask or never");
+    }
+    let store = &state.auth.store;
+    let (now, version) = match store.ceiling_at(&coworker_id).await {
+        Ok(found) => found,
+        Err(error) => return unavailable(&error),
+    };
+    let ToolSet::Only(mut names) = now else {
+        return refusal(
+            409,
+            "this Bot's tools are not chosen by name yet; switch them in its Tools first",
+        );
+    };
+    let plugin = tool.split_once('.').map(|(plugin, _)| plugin.to_string());
+    let whole = plugin
+        .as_ref()
+        .is_some_and(|plugin| names.contains(&opengrok_policy::every_tool_of(plugin)));
+    let builtin = Executor::every_builtin().any(|name| name == tool);
+    if !builtin
+        && !whole
+        && !names.contains(&tool)
+        && !names.contains(&opengrok_policy::excluding(&tool))
+    {
+        return refusal(422, &format!("this Bot has no tool named {tool}"));
+    }
+    let unasked = format!("+{tool}");
+    names.remove(&opengrok_policy::excluding(&tool));
+    names.remove(&unasked);
+    match mode.as_str() {
+        "never" => {
+            names.remove(&tool);
+            // A group's tool keeps its Never as an entry, so a group with every tool at Never
+            // is told apart from a group left out entirely (switched off, at its defaults).
+            if whole || opengrok_policy::group_of(&tool).is_some() {
+                names.insert(opengrok_policy::excluding(&tool));
+            }
+        }
+        _ => {
+            if !whole {
+                names.insert(tool.clone());
+            }
+            if mode == "always" && Executor::ASK_BY_RULE.contains(&tool.as_str()) {
+                names.insert(unasked);
+            }
+        }
+    }
+    let ceiling = if names.is_empty() {
+        ToolSet::None
+    } else {
+        ToolSet::Only(names)
+    };
+    match store
+        .set_ceiling(&account_id, &coworker_id, &ceiling, Some(version), now_ms())
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let body =
+                json!({ "error": "the tools changed since you looked", "code": "ceiling-changed" });
+            return (StatusCode::CONFLICT, Json(body)).into_response();
+        }
+        Err(error) => return unavailable(&error),
+    }
+    // The ask-first list is the grant's, beside the ceiling: the card for `ask`, none otherwise.
+    let policy = match store.policy_for(&account_id, &coworker_id).await {
+        Ok(policy) => policy,
+        Err(error) => return unavailable(&error),
+    };
+    let mut asks: BTreeSet<String> = match policy.grant.map(|grant| grant.needs_approval) {
+        Some(ToolSet::Only(names)) => names,
+        Some(ToolSet::All) => {
+            return refusal(
+                409,
+                "every tool of this Bot asks first; change that in its Tools",
+            );
+        }
+        _ => BTreeSet::new(),
+    };
+    if mode == "ask" && !Executor::ASK_BY_RULE.contains(&tool.as_str()) {
+        asks.insert(tool.clone());
+    } else {
+        asks.remove(&tool);
+    }
+    let asks = if asks.is_empty() {
+        ToolSet::None
+    } else {
+        ToolSet::Only(asks)
+    };
+    match store
+        .set_needs_approval(&account_id, &coworker_id, &asks, now_ms())
+        .await
+    {
+        Ok(true) => Json(json!({ "tool": tool, "mode": mode })).into_response(),
+        Ok(false) => refusal(403, "no grant to change"),
+        Err(error) => unavailable(&error),
+    }
+}
+
+/// One installed plugin skill and whether it is on for this Bot.
+async fn plugin_skill_rows(
+    state: &AgUiState,
+    account: &AccountId,
+    bot: &CoworkerId,
+) -> Result<Vec<Value>, Response> {
+    let store = &state.auth.store;
+    let installs = opengrok_integrations::installed::skills_for_turn(store, account, bot)
+        .await
+        .map_err(|error| unavailable(&error))?;
+    let policy = store
+        .policy_for(account, bot)
+        .await
+        .map_err(|error| unavailable(&error))?;
+    let mut rows = Vec::new();
+    for (plugin, _revision, skills) in installs {
+        for (skill, text) in skills {
+            let front = opengrok_plugins::split_frontmatter(&text);
+            rows.push(json!({
+                "plugin": plugin,
+                "skill": skill,
+                "description": front.description.unwrap_or_default(),
+                "on": !opengrok_policy::skill_switched_off(&policy, &plugin, &skill),
+                "body": front.body,
+            }));
+        }
+    }
+    Ok(rows)
+}
+
+/// `GET /coworkers/{id}/plugin-skills`: every installed plugin's skills with their switch for this
+/// Bot, so its Plugins page can switch one off without the rest of the plugin. `on` is the skill's
+/// own switch; the plugin's switch still gates them all.
+pub(super) async fn list_plugin_skills(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let (account, bot) = match owner(&state, &headers, id).await {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    match plugin_skill_rows(&state, &account, &bot).await {
+        Ok(mut rows) => {
+            for row in &mut rows {
+                if let Some(row) = row.as_object_mut() {
+                    row.remove("body");
+                }
+            }
+            Json(json!({ "skills": rows })).into_response()
+        }
+        Err(refused) => refused,
+    }
+}
+
+/// `GET /coworkers/{id}/plugin-skills/{plugin}/{skill}`: one plugin skill with its text, for its
+/// read-only page.
+pub(super) async fn get_plugin_skill(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path((id, plugin, skill)): Path<(String, String, String)>,
+) -> Response {
+    let (account, bot) = match owner(&state, &headers, id).await {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    match plugin_skill_rows(&state, &account, &bot).await {
+        Ok(rows) => rows
+            .into_iter()
+            .find(|row| row["plugin"] == plugin.as_str() && row["skill"] == skill.as_str())
+            .map_or_else(
+                || refusal(404, "no such plugin skill"),
+                |row| Json(row).into_response(),
+            ),
+        Err(refused) => refused,
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct PluginSkillSwitch {
+    plugin: String,
+    skill: String,
+    on: bool,
+}
+
+/// `PUT /coworkers/{id}/plugin-skills` `{plugin, skill, on}`: one plugin skill on or off for this
+/// Bot. Off is a `-skill:<plugin>.<skill>` ceiling entry, kept across ceiling saves like a tool's
+/// Never, so the plugin's own switch never forgets it.
+pub(super) async fn put_plugin_skill(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<PluginSkillSwitch>, JsonRejection>,
+) -> Response {
+    let (account_id, coworker_id) = match owner(&state, &headers, id).await {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let Ok(Json(PluginSkillSwitch { plugin, skill, on })) = body else {
+        return refusal(422, "send {\"plugin\", \"skill\", \"on\"}");
+    };
+    let known = match plugin_skill_rows(&state, &account_id, &coworker_id).await {
+        Ok(rows) => rows
+            .iter()
+            .any(|row| row["plugin"] == plugin.as_str() && row["skill"] == skill.as_str()),
+        Err(refused) => return refused,
+    };
+    if !known {
+        return refusal(422, &format!("no installed plugin skill {plugin}.{skill}"));
+    }
+    let store = &state.auth.store;
+    let (now, version) = match store.ceiling_at(&coworker_id).await {
+        Ok(found) => found,
+        Err(error) => return unavailable(&error),
+    };
+    let ToolSet::Only(mut names) = now else {
+        return refusal(
+            409,
+            "this Bot's tools are not chosen by name yet; switch them in its Tools first",
+        );
+    };
+    let entry = opengrok_policy::excluding(&opengrok_policy::skill_entry(&plugin, &skill));
+    if on {
+        names.remove(&entry);
+    } else {
+        names.insert(entry);
+    }
+    match store
+        .set_ceiling(
+            &account_id,
+            &coworker_id,
+            &ToolSet::Only(names),
+            Some(version),
+            now_ms(),
+        )
+        .await
+    {
+        Ok(Some(_)) => Json(json!({ "plugin": plugin, "skill": skill, "on": on })).into_response(),
+        Ok(None) => {
+            let body =
+                json!({ "error": "the tools changed since you looked", "code": "ceiling-changed" });
             (StatusCode::CONFLICT, Json(body)).into_response()
         }
         Err(error) => unavailable(&error),
     }
+}
+
+/// `GET /coworkers/{id}/saved-login`: whether a saved login can be filled for this Bot, asked by
+/// the app BEFORE Touch ID so a refusal never follows a fingerprint (8 Oct 2026).
+/// `{usable, reason, ownComputer}`; reason is `shared-computer` or `shared-bot`, or null.
+pub(super) async fn get_saved_login(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let (account, bot) = match owner(&state, &headers, id).await {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let reason = super::user_form::saved_login_refusal(&state, &account, &bot).await;
+    let (_, _, _, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
+    Json(json!({
+        "usable": reason.is_none(),
+        "reason": reason,
+        "ownComputer": mode == opengrok_core::coworker::BoxMode::Dedicated,
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct OwnComputer {
+    on: bool,
+}
+
+/// `PUT /coworkers/{id}/own-computer` `{on}`: this Bot gets a computer of its own while the
+/// account's other Bots keep sharing theirs, or goes back to the account's setting. It starts
+/// on a fresh computer; what it left on the shared one stays there. A group always has its own.
+pub(super) async fn put_own_computer(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<OwnComputer>, JsonRejection>,
+) -> Response {
+    let (account, bot) = match owner(&state, &headers, id).await {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let Ok(Json(OwnComputer { on })) = body else {
+        return refusal(422, "send {\"on\"}");
+    };
+    let store = &state.auth.store;
+    if store
+        .load_coworker(&bot)
+        .await
+        .is_ok_and(|(coworker, _)| coworker.is_group())
+    {
+        return refusal(422, "a group already has a computer of its own");
+    }
+    let saved = if on {
+        store
+            .set_sharing_mode("bot", bot.as_str(), "per-bot", now_ms())
+            .await
+    } else {
+        store.clear_sharing_mode("bot", bot.as_str()).await
+    };
+    if let Err(error) = saved {
+        return unavailable(&error);
+    }
+    // Its own computer is made now, as the pane's Start makes one: a turn finds a Bot's computer
+    // by its scope and does not make one, so without this the Bot had no computer at all.
+    if on {
+        let Ok((mut coworker, seq)) = store.load_coworker(&bot).await else {
+            return unavailable(&"this Bot could not be read");
+        };
+        let at_ms = now_ms();
+        let provisioned =
+            super::provision::ensure_computer_for(&state, &account, &bot, &mut coworker, at_ms)
+                .await;
+        if let Some(why) = provisioned.error.as_ref() {
+            tracing::warn!(?why, bot = %bot, "a Bot's own computer could not be made now");
+        }
+        if !provisioned.events.is_empty() {
+            let view = opengrok_core::coworker::CoworkerView::of(bot.clone(), &coworker, at_ms);
+            if let Err(error) = store
+                .append_coworker(&bot, &account, seq, &provisioned.events, &view)
+                .await
+            {
+                return unavailable(&error);
+            }
+        }
+    }
+    let (_, _, _, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
+    Json(json!({ "ownComputer": mode == opengrok_core::coworker::BoxMode::Dedicated }))
+        .into_response()
 }

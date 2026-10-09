@@ -2235,6 +2235,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengrok-auth"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "jsonwebtoken",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+]
+
+[[package]]
 name = "opengrok-box"
 version = "0.1.0"
 dependencies = [
@@ -2283,6 +2297,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "opengrok-forms"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "opengrok-box",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "opengrok-gateway-admin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "opengrok-harness"
 version = "0.1.0"
 dependencies = [
@@ -2310,6 +2348,7 @@ dependencies = [
 name = "opengrok-integrations"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "futures",
  "opengrok-core",
@@ -2326,6 +2365,29 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "opengrok-jev"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "cred-swap-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "typesafe-sdk",
+]
+
+[[package]]
+name = "opengrok-local-exec"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2370,6 +2432,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -2388,11 +2451,15 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "lopdf",
+ "opengrok-auth",
  "opengrok-box",
  "opengrok-core",
  "opengrok-events",
+ "opengrok-gateway-admin",
  "opengrok-harness",
  "opengrok-integrations",
+ "opengrok-jev",
+ "opengrok-local-exec",
  "opengrok-plugin-api",
  "opengrok-plugins",
  "opengrok-policy",
@@ -2417,7 +2484,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "typesafe-sdk",
  "uuid",
 ]
 
@@ -2432,6 +2498,7 @@ dependencies = [
  "opengrok-events",
  "opengrok-policy",
  "opengrok-testdb",
+ "opengrok-tools",
  "opengrok-wire",
  "rand 0.10.2",
  "serde",
@@ -2460,6 +2527,7 @@ dependencies = [
  "futures",
  "opengrok-box",
  "opengrok-core",
+ "opengrok-forms",
  "opengrok-plugins",
  "opengrok-policy",
  "opengrok-recipes",

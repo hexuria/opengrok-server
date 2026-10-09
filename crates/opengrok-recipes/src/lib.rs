@@ -9,6 +9,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod observe;
+pub use observe::{Observe, Seen};
+
 /// What a recipe needs from whoever runs it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

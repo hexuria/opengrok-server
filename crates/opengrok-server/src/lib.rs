@@ -14,7 +14,7 @@ pub mod cards;
 pub mod computers;
 pub mod connections;
 pub mod domain_proof;
-pub mod gateway_admin;
+pub use opengrok_gateway_admin as gateway_admin;
 pub mod health;
 pub mod hooks;
 pub mod host_state;
@@ -38,11 +38,13 @@ pub mod jev {
         None
     }
 }
+pub mod computer_desk;
 pub mod local_exec;
 pub mod mcp_door;
 pub mod models;
 pub mod pairs;
 pub mod persona;
+pub mod plugin_desk;
 pub mod plugin_registry;
 pub mod points;
 pub mod recipes;
@@ -60,6 +62,18 @@ pub use agui::AgUiState;
 pub use auth::{AuthState, TokenMinter};
 // The one clock every module stamps its events and rows with.
 pub(crate) use agui::routes::now_ms;
+
+/// Test builds only: record a router a test serves beside [`router`] (the plugin registry tests
+/// serve a fixture registry at the real paths), as `router` records its own, while `OG_RECORD_WIRE`
+/// is set.
+#[cfg(feature = "record-wire")]
+pub fn recorded(app: Router) -> Router {
+    if wire_record::directory().is_some() {
+        app.layer(axum::middleware::from_fn(wire_record::record))
+    } else {
+        app
+    }
+}
 
 /// Everything the server serves today.
 pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {

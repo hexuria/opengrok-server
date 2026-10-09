@@ -203,6 +203,75 @@ pub fn preferred_tools_line(preferred: &[String]) -> String {
     )
 }
 
+/// The plugins the person tagged in THIS message (`@cloudflare`): `usable` are those this turn
+/// was given (`turn::mentioned`), `asked` everything the message named.
+///
+/// SAID BECAUSE A TAG IS AN INSTRUCTION. Without it a Bot handed a plugin it is not usually given
+/// still answers from habit, or opens a browser and tries to sign in to the service itself, which
+/// is what a person saw before mentions gave access (6 Oct 2026). A tag this turn could not honour
+/// is named too, so the reply says so instead of quietly going without.
+pub fn mentioned_plugins_line(usable: &[String], asked: &[String]) -> String {
+    let quoted = |names: &[&String]| {
+        names
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let given: Vec<&String> = usable.iter().collect();
+    let refused: Vec<&String> = asked.iter().filter(|name| !usable.contains(name)).collect();
+    let mut line = String::new();
+    if !given.is_empty() {
+        let (it, its) = if given.len() == 1 {
+            ("it", "its")
+        } else {
+            ("them", "their")
+        };
+        line.push_str(&format!(
+            " The person tagged {} in THIS message, so you have {its} tools for this message. \
+             Use {it} for the request. {} already signed in here: never sign in to {it} through \
+             your computer or ask for a password or key in chat.",
+            quoted(&given),
+            if given.len() == 1 {
+                "It is"
+            } else {
+                "They are"
+            },
+        ));
+    }
+    if !refused.is_empty() {
+        line.push_str(&format!(
+            " The person also tagged {}, which you cannot use here: say so in one sentence, and \
+             that it is added in Plugins.",
+            quoted(&refused),
+        ));
+    }
+    line
+}
+
+/// The installed plugins that are off for this Bot this turn (`turn::switched_off`), or nothing.
+///
+/// OFF IS THE PERSON'S CHOICE, NOT A PROBLEM TO WORK AROUND. A Bot that knew nothing of them
+/// asked for a Cloudflare key through a password form, and another switched Cloudflare on for
+/// itself to finish a job (6 Oct 2026). Naming them, with the one way in, ends both.
+pub fn plugins_off_line(off: &[String]) -> String {
+    if off.is_empty() {
+        return String::new();
+    }
+    let named = off
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        " Installed but off for you: {named}. You cannot use them in this message. If the request \
+         needs one, say so in one sentence and that the person can tag it (for example \
+         `@{}`) to let you use it for one message. Never ask for its key, token or password, never \
+         sign in to it through your computer or a form, and never switch it on yourself.",
+        off[0]
+    )
+}
+
 /// The recipe the person picked in the composer, and what they typed into its fields.
 ///
 /// THE TOOL ALREADY HAS THE VALUES; THE MODEL DOES NOT. `run_recipe` is handed the person's

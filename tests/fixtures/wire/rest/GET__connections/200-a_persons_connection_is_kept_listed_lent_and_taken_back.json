@@ -15,7 +15,8 @@
         "cw_0199bb4e-0000-7000-8000-000000000004"
       ],
       "updatedAtMs": 1790000000000,
-      "expiresAtMs": null
+      "expiresAtMs": null,
+      "kind": "oauth"
     }
   ]
 }

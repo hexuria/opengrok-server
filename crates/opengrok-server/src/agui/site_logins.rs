@@ -33,6 +33,13 @@ pub fn agui_router(state: HostState) -> Router {
         .route("/site-logins", get(list).post(save))
         .route("/site-logins/{id}", delete(remove).patch(update))
         .route("/site-logins/{id}/reveal", post(reveal))
+        // Which Bots may use a login, and one Bot's switch for it (8 Oct 2026).
+        .route("/site-logins/{id}/bots", get(login_bots))
+        .route(
+            "/site-logins/{id}/bots/{coworker_id}",
+            axum::routing::put(share_with_bot),
+        )
+        .route("/coworkers/{coworker_id}/site-logins", get(shared_with_bot))
         .route("/site-logins/icon/{origin}", get(icon))
         .with_state(state)
 }
@@ -693,3 +700,92 @@ fn same_site_url(host: &str, href: &str) -> Option<String> {
 #[cfg(test)]
 #[path = "../../tests/unit/site_logins.rs"]
 mod tests;
+
+/// Whether `coworker` is one of the person's own Bots. Another account's Bot reads as "no such
+/// Bot", never as a refused one.
+async fn their_bot(state: &HostState, account_id: &AccountId, coworker: &str) -> bool {
+    let coworker = opengrok_core::id::CoworkerId::from_stored(coworker.to_string());
+    super::routes::owned_coworker(&state.agui, account_id, &coworker)
+        .await
+        .unwrap_or(false)
+}
+
+/// `GET /site-logins/{id}/bots` → `{bots: [coworkerId]}`: the Bots this login is shared with.
+async fn login_bots(
+    State(state): State<HostState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(account_id) = signed_in(&state, &headers) else {
+        return sign_in_first();
+    };
+    let store = &state.agui.auth.store;
+    match store.site_logins(&account_id).await {
+        Ok(rows) if rows.iter().any(|row| row.id == id) => {}
+        Ok(_) => return reply(404, json!({ "error": "no such site login" })),
+        Err(error) => return store_unavailable(&error, "could not read site logins"),
+    }
+    match store.site_login_bots(&account_id, &id).await {
+        Ok(bots) => reply(200, json!({ "bots": bots })),
+        Err(error) => store_unavailable(&error, "could not read a login's Bots"),
+    }
+}
+
+/// `PUT /site-logins/{id}/bots/{coworkerId}` `{shared}`: one Bot may use this login, or no longer.
+/// A share is a permission: the secret stays sealed once, under the login.
+async fn share_with_bot(
+    State(state): State<HostState>,
+    headers: HeaderMap,
+    Path((id, coworker)): Path<(String, String)>,
+    axum::Json(args): axum::Json<Value>,
+) -> Response {
+    let Some(account_id) = signed_in(&state, &headers) else {
+        return sign_in_first();
+    };
+    let Some(shared) = args.get("shared").and_then(Value::as_bool) else {
+        return reply(422, json!({ "error": "send {\"shared\": true|false}" }));
+    };
+    if !their_bot(&state, &account_id, &coworker).await {
+        return reply(404, json!({ "error": "no such Bot" }));
+    }
+    let at_ms = chrono::Utc::now().timestamp_millis();
+    match state
+        .agui
+        .auth
+        .store
+        .set_site_login_shared(&account_id, &id, &coworker, shared, at_ms)
+        .await
+    {
+        Ok(true) => reply(
+            200,
+            json!({ "id": id, "coworkerId": coworker, "shared": shared }),
+        ),
+        Ok(false) => reply(404, json!({ "error": "no such site login" })),
+        Err(error) => store_unavailable(&error, "could not share a site login"),
+    }
+}
+
+/// `GET /coworkers/{id}/site-logins` → `{logins: [loginId]}`: the person's logins this Bot may
+/// use, for its login cards.
+async fn shared_with_bot(
+    State(state): State<HostState>,
+    headers: HeaderMap,
+    Path(coworker): Path<String>,
+) -> Response {
+    let Some(account_id) = signed_in(&state, &headers) else {
+        return sign_in_first();
+    };
+    if !their_bot(&state, &account_id, &coworker).await {
+        return reply(404, json!({ "error": "no such Bot" }));
+    }
+    match state
+        .agui
+        .auth
+        .store
+        .logins_shared_with(&account_id, &coworker)
+        .await
+    {
+        Ok(logins) => reply(200, json!({ "logins": logins })),
+        Err(error) => store_unavailable(&error, "could not read a Bot's logins"),
+    }
+}

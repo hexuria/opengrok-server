@@ -369,6 +369,12 @@ pub async fn purge_accounts_except(
         &coworkers,
         &accounts
     );
+    delete!(
+        "site_login_share",
+        "delete from site_login_share where account_id = any($1) or coworker_id = any($2)",
+        &accounts,
+        &coworkers
+    );
     // The sealed passwords go with the secret_store sweep below: their ids carry the account.
     delete!(
         "site_login",
@@ -404,9 +410,26 @@ pub async fn purge_accounts_except(
         &connections
     );
     delete!(
+        "bot_connection_pin",
+        "delete from bot_connection_pin where coworker_id = any($1) or connection_id = any($2)",
+        &coworkers,
+        &connections
+    );
+    delete!(
+        "mcp_oauth_grant",
+        "delete from mcp_oauth_grant where connection_id = any($1)",
+        &connections
+    );
+    delete!(
         "connection_view",
         "delete from connection_view where id = any($1)",
         &connections
+    );
+    delete!(
+        "connection_attempt",
+        "delete from connection_attempt where account_id = any($1) or coworker_id = any($2)",
+        &accounts,
+        &coworkers
     );
     delete!(
         "seamb_profile",

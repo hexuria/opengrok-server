@@ -10,7 +10,7 @@ license.workspace = true
 # cargo does not invent a feature named typesafe-sdk. Off, the binary carries one reqwest and
 # one hyper.
 default = ["jev"]
-jev = ["dep:typesafe-sdk"]
+jev = ["opengrok-jev/jev"]
 # Records the wire NativeChat reads while `OG_RECORD_WIRE` is set (#255, `tests/support/wire_record.rs`).
 # Only this crate's own tests turn it on, through the dev-dependency on itself below; the
 # shipped binary never carries it.
@@ -34,6 +34,10 @@ workspace = true
 [dependencies]
 opengrok-plugin-api = { path = "../opengrok-plugin-api" }
 opengrok-integrations = { path = "../opengrok-integrations" }
+opengrok-gateway-admin = { path = "../opengrok-gateway-admin" }
+opengrok-jev = { path = "../opengrok-jev" }
+opengrok-local-exec = { path = "../opengrok-local-exec" }
+opengrok-auth = { path = "../opengrok-auth" }
 # Reversible scrubbing of what leaves for the provider. A hand-rolled version
 # would have to re-solve check-digit-preserving substitution and stand-ins that
 # arrive split across stream fragments; both are already tested there.
@@ -72,7 +76,6 @@ tracing.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 thiserror.workspace = true
-typesafe-sdk = { workspace = true, optional = true }
 # A PDF a person attaches reaches the model as its text (#229). Used only by the
 # `opengrok-pdf-text` binary: the server never parses an untrusted PDF in its own process.
 pdf-extract = "0.12"

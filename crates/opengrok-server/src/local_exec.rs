@@ -5,9 +5,8 @@
 //! THE GATE every command passes first is `opengrok_policy::local_exec`, re-exported here: pure
 //! decision logic with no transport, closed by default, beside the shell reader it judges with.
 
-pub mod broker;
-mod wire;
 pub use broker::LocalExecBroker;
+pub use opengrok_local_exec::{broker, wire};
 pub use opengrok_policy::local_exec::{
     DENIED_BY_A_RULE, LocalExecDecision, LocalExecMode, LocalExecPolicy, MAX_JUDGED_BYTES, decide,
     simple_commands, standing_rule_refusal,

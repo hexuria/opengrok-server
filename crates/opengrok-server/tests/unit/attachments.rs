@@ -3,15 +3,28 @@
 //! as a sentence for the model, never in this process (review of #261).
 
 use super::*;
-use std::os::unix::fs::PermissionsExt;
 
 /// A reader that is this shell script, with this time limit.
 fn reader(script: &str, timeout_ms: u64) -> PdfReader {
     let dir = std::env::temp_dir().join(format!("og-pdf-{}", uuid::Uuid::now_v7().simple()));
     std::fs::create_dir_all(&dir).unwrap();
     let bin = dir.join("reader.sh");
-    std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A script written here can be exec'd while a sibling test's fork still holds its write fd;
+    // writing from a child keeps that fd out of this process and avoids ETXTBSY.
+    let status = std::process::Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"",
+            "sh",
+        ])
+        .arg(&bin)
+        .arg(format!("#!/bin/sh\n{script}\n"))
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the test reader script could not be written"
+    );
     PdfReader {
         bin: Some(bin),
         timeout: std::time::Duration::from_millis(timeout_ms),

@@ -974,6 +974,18 @@ alter table site_login add column if not exists passkey_user_handle text;
 alter table site_login drop constraint if exists site_login_account_id_origin_username_key;
 create unique index if not exists site_login_owner_site_name_kind
     on site_login (account_id, origin, username, kind);
+-- Which of the person's Bots may use which of their saved logins (8 Oct 2026). A row is a
+-- permission, not a copy: the secret stays sealed once under the login, so a changed password
+-- reaches every Bot it is shared with, and deleting the row takes the permission away. None
+-- at first: a Bot is given a login from its card or the login's Bots page.
+create table if not exists site_login_share (
+    login_id      text   not null references site_login (id) on delete cascade,
+    coworker_id   text   not null,
+    account_id    text   not null,
+    shared_at_ms  bigint not null,
+    primary key (login_id, coworker_id)
+);
+create index if not exists site_login_share_coworker on site_login_share (account_id, coworker_id);
 
 -- SKILLS. A named, versioned bundle of instructions a person invokes for one turn by typing
 -- `/name`: a SKILL.md body, plus whatever small files sit beside it. Owned by an account, visible
@@ -1310,3 +1322,152 @@ delete from secret_store
 delete from plugin_installation
  where not exists (select 1 from schema_migrations where name = 'installs-before-the-mcp-field-rules');
 insert into schema_migrations (name) values ('installs-before-the-mcp-field-rules') on conflict do nothing;
+-- Several accounts for one service, and the one each Bot uses (#359). `kind` is how a connection
+-- was made: `oauth`, a provider's sign-in, as every connection before this was; or `token`, pasted
+-- by a person for a plugin they installed, which serves only their own Bots and is never lent (the
+-- rule above `plugin_installation` holds for it as a connection too). Its binding names it in
+-- `plugin_credential.connection_id`. GUARDED, like `secret_store.key_id` above.
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'connection_view'
+           and column_name = 'kind'
+    ) then
+        alter table connection_view add column kind text not null default 'oauth';
+    end if;
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema()
+           and table_name = 'plugin_credential'
+           and column_name = 'connection_id'
+    ) then
+        alter table plugin_credential add column connection_id text;
+    end if;
+end $do$;
+-- Which account a Bot uses for a service. No row means the only one it may use, or a choice for
+-- the person when it may use several (`connection::resolve`). Removing an account deletes the rows
+-- naming it in the same transaction (`PgStore::append_connection_in`).
+create table if not exists bot_connection_pin (
+    coworker_id   text not null,
+    connector     text not null,
+    connection_id text not null,
+    primary key (coworker_id, connector)
+);
+create index if not exists bot_connection_pin_connection_idx on bot_connection_pin (connection_id);
+-- Every token pasted before #359 becomes an account: a `connection-connected` event of kind token
+-- in a stream of its own, its `connection_view` row, and its binding naming it. The secret stays
+-- where it was sealed, because its id is the seal's associated data; a token connection finds it
+-- through its binding's `secret_id`. Guarded by its own predicate, a binding naming no connection
+-- yet, so a replay finds nothing to do and nothing is dropped. Labels are `default_label`'s,
+-- numbered after the person's live accounts for that service, from `label_of`'s table as it stood.
+with numbered as (
+    select c.account_id, c.plugin_name, c.connector,
+           row_number() over (partition by c.account_id, c.connector order by c.plugin_name)
+             + (select count(*) from connection_view v
+                 where v.scope = 'user' and v.owner_id = c.account_id
+                   and v.connector = c.connector and not v.disconnected) as n
+      from plugin_credential c
+     where c.connection_id is null
+), moved as (
+    select account_id, plugin_name, connector,
+           'conn_' || connector || '_' || account_id || '_'
+             || replace(gen_random_uuid()::text, '-', '') as id,
+           case connector
+             when 'gmail' then 'Gmail' when 'gdrive' then 'Google Drive'
+             when 'gcal' then 'Google Calendar' when 'gdocs' then 'Google Docs'
+             when 'gsheets' then 'Google Sheets' when 'github' then 'GitHub'
+             when 'gitlab' then 'GitLab' when 'onedrive' then 'OneDrive'
+             else upper(left(connector, 1)) || substr(connector, 2)
+           end || case when n = 1 then '' else ' ' || n end as label,
+           (extract(epoch from now()) * 1000)::bigint as at_ms
+      from numbered
+), logged as (
+    insert into events (stream_id, stream_seq, event_type, payload)
+    select 'connection/' || id, 1, 'connection-connected',
+           jsonb_build_object('type', 'connected', 'connector', connector,
+             'owner', jsonb_build_object('scope', 'user', 'id', account_id),
+             'label', label, 'at_ms', at_ms, 'kind', 'token')
+      from moved
+), listed as (
+    insert into connection_view
+      (id, connector, scope, owner_id, label, disconnected, updated_at_ms, kind)
+    select id, connector, 'user', account_id, label, false, at_ms, 'token' from moved
+)
+update plugin_credential c set connection_id = m.id
+  from moved m
+ where c.account_id = m.account_id and c.plugin_name = m.plugin_name
+   and c.connector = m.connector;
+-- One binding per pasted account, so a token connection finds exactly one secret through it.
+create unique index if not exists plugin_credential_connection_idx
+    on plugin_credential (connection_id);
+-- A sign-in that has not finished (#359): an account a person asked to add, waiting on the
+-- provider or refused by it, so an app can say "Needs Auth" and reopen THE SAME sign-in rather than
+-- start another. Not a connection: it holds no token, serves no turn and is never lent. The callback
+-- deletes it once its account is connected, marks it failed when the provider refuses or the code
+-- cannot be exchanged, and leaves it pending when nobody comes back (a closed browser says nothing).
+create table if not exists connection_attempt (
+    id            text primary key,
+    account_id    text not null,
+    connector     text not null,
+    coworker_id   text,
+    label         text not null,
+    status        text not null check (status in ('pending', 'failed')),
+    error         text,
+    updated_at_ms bigint not null
+);
+create index if not exists connection_attempt_account_idx on connection_attempt (account_id);
+-- Several pasted accounts for one installed plugin's service (#359): a binding is one account's
+-- token, so its key is the secret it names, which was already unique. The key it had, one binding
+-- per install and service, made adding a second account replace the first. GUARDED by the key's
+-- width, so a boot over the current schema alters nothing.
+do $do$ begin
+    if (select array_length(conkey, 1) from pg_constraint
+         where conrelid = 'plugin_credential'::regclass and contype = 'p') = 3 then
+        alter table plugin_credential drop constraint plugin_credential_pkey;
+        alter table plugin_credential add primary key (secret_id);
+    end if;
+end $do$;
+-- Sign-ins at an installed plugin's own MCP server (#364). The client this deployment registered
+-- with each authorization server (RFC 7591), by issuer and the callback it registered, so one
+-- registration serves every person; a confidential client's secret is sealed in `secret_store`
+-- under `secret_id`.
+create table if not exists mcp_oauth_client (
+    issuer           text not null,
+    redirect_uri     text not null,
+    client_id        text not null,
+    secret_id        text,
+    registered_at_ms bigint not null,
+    primary key (issuer, redirect_uri)
+);
+-- Where an MCP account's token is refreshed: its authorization server's token endpoint, the
+-- client, and the MCP server it is for (RFC 8707 `resource`). The refresh token itself is sealed
+-- as `<connection id>_refresh`, as a sign-in's always was.
+create table if not exists mcp_oauth_grant (
+    connection_id  text primary key,
+    issuer         text not null,
+    token_endpoint text not null,
+    client_id      text not null,
+    resource       text not null,
+    redirect_uri   text not null
+);
+-- An MCP sign-in in flight is an unfinished sign-in like any other, and carries what its callback
+-- needs: the plugin, the PKCE verifier (never sent to a browser), the token endpoint, the client,
+-- the resource, and the account a reconnect refreshes. GUARDED, so a boot over the current schema
+-- alters nothing.
+do $do$ begin
+    if not exists (
+        select 1 from information_schema.columns
+         where table_schema = current_schema() and table_name = 'connection_attempt'
+           and column_name = 'plugin_name'
+    ) then
+        alter table connection_attempt
+            add column plugin_name text,
+            add column pkce_verifier text,
+            add column issuer text,
+            add column token_endpoint text,
+            add column client_id text,
+            add column resource text,
+            add column target_connection text;
+    end if;
+end $do$;

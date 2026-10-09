@@ -1,0 +1,8 @@
+{
+  "method": "PATCH",
+  "path": "/connections/conn_gmail_acct_0199bb4e-0000-7000-8000-000000000001_0199bb4e000070008000000000000002",
+  "status": 422,
+  "body": {
+    "error": "a label is 1 to 80 characters"
+  }
+}

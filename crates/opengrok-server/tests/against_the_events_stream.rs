@@ -700,8 +700,12 @@ async fn a_card_the_person_settles_is_told_without_a_run_and_the_run_goes_on_und
     assert_eq!(status, 200, "{answered}");
 
     let told = sse.until(finished(&turn)).await;
-    let settled = told.first().unwrap();
-    assert_eq!(settled.event, "thread.changed");
+    // Live reads coalesce this thread's changes at the last change's position. The routine's
+    // change may precede that merged note, but the person's answer must still name no run.
+    let settled = told
+        .iter()
+        .find(|block| block.event == "thread.changed" && block.data["runId"].is_null())
+        .expect("the person's answer invalidates the thread without naming a run");
     assert_eq!(
         settled.data,
         json!({ "threadId": started.data["threadId"], "coworkerId": luna, "runId": null }),

@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/plugins/installations/demo/credentials/demo",
+  "status": 409,
+  "body": {
+    "error": "this plugin has several accounts for that service; send connectionId to name one"
+  }
+}

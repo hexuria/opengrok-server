@@ -1,0 +1,8 @@
+{
+  "method": "GET",
+  "path": "/connections/conn_gmail_acct_0199bb4e-0000-7000-8000-000000000001_0199bb4e000070008000000000000002/reconnect",
+  "status": 404,
+  "body": {
+    "error": "no such connection"
+  }
+}

@@ -193,6 +193,20 @@ impl Bundle {
         }
         names.into_iter().collect()
     }
+
+    /// Whether `connector` is named by a `${<CONNECTOR>_TOKEN}` placeholder, so its server cannot
+    /// be reached without an account. A connector named after a server that declares no auth may
+    /// be keyless, or sign in at the server itself; only asking the server tells.
+    pub fn needs_a_token(&self, connector: &str) -> bool {
+        self.mcp.servers.values().any(|server| match server {
+            McpServer::StreamableHttp { headers, .. } => headers
+                .values()
+                .flat_map(|value| placeholders(value))
+                .flatten()
+                .any(|named| named == connector),
+            _ => false,
+        })
+    }
 }
 
 /// Neither an auth header nor a placeholder: the server may be keyless, or take a bearer its
@@ -219,7 +233,9 @@ fn placeholders(value: &str) -> impl Iterator<Item = Option<String>> + '_ {
 /// The fields a hosted entry may carry. Anything else is somebody's instruction we would drop:
 /// `disabled`, an `oauth` block, a tool allow-list. Dialling the server as though it were not
 /// there turned on servers their author switched off.
-const HOSTED_FIELDS: [&str; 3] = ["type", "url", "headers"];
+/// An `oauth` block says the server signs its people in; this server reads how from the server
+/// itself (the MCP authorization spec, #364), so the block's own settings are not needed.
+const HOSTED_FIELDS: [&str; 4] = ["type", "url", "headers", "oauth"];
 
 fn hosted_refusal(
     name: &str,
@@ -240,8 +256,6 @@ fn hosted_refusal(
         Some("remote MCP must name a public host".into())
     } else if raw["disabled"] == true || raw["enabled"] == false {
         Some("its author switched this server off".into())
-    } else if raw.get("oauth").is_some() {
-        Some("this server needs OAuth, which an installed plugin cannot do yet (#364)".into())
     } else if let Some(field) = extra {
         Some(format!(
             "MCP field `{}` is not supported",

@@ -135,6 +135,7 @@ impl ModelDoor for ReadPluginSkill {
 
 struct Harness {
     base: String,
+    fixture: String,
     agui: AgUiState,
     store: PgStore,
     client: reqwest::Client,
@@ -187,19 +188,26 @@ async fn harness_with_computer(
         host_settings: None,
     };
     let gateway = HostState::new(agui.clone(), None);
-    let app = opengrok_server::router(agui.clone(), gateway).nest(
-        "/fixture",
+    let app = opengrok_server::router(agui.clone(), gateway);
+    // The fixture registry is served at the real paths on a listener of its own, recorded as the
+    // server's routes are, so the wire corpus has `/plugins/*` as NativeChat calls them. A test
+    // names it `/fixture/...`.
+    let fixture = opengrok_server::recorded(
         opengrok_server::plugin_registry::router_with_registry(agui.clone(), Some(registry)),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
+    let serve = |app: axum::Router| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        format!("http://127.0.0.1:{}", addr.port())
+    };
     Harness {
-        base: format!("http://127.0.0.1:{}", addr.port()),
+        base: serve(app).await,
+        fixture: serve(fixture).await,
         agui,
         store,
         client: reqwest::Client::new(),
@@ -231,7 +239,10 @@ impl Harness {
         path: &str,
         body: Option<Value>,
     ) -> (u16, Value, String) {
-        let url = format!("{}{path}", self.base);
+        let url = match path.strip_prefix("/fixture") {
+            Some(path) => format!("{}{path}", self.fixture),
+            None => format!("{}{path}", self.base),
+        };
         let request = match method {
             "GET" => self.client.get(url),
             "POST" => self.client.post(url),
@@ -257,6 +268,32 @@ const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const FORK: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
+async fn credential_bot(h: &Harness, account: &AccountId) -> opengrok_core::id::CoworkerId {
+    let token = h
+        .agui
+        .auth
+        .minter
+        .mint_access(
+            account.as_str(),
+            "sess-test",
+            "fixture@og.local",
+            "ultra",
+            chrono::Utc::now().timestamp(),
+            3600,
+        )
+        .unwrap();
+    let (status, hired, text) = h
+        .call(
+            &token,
+            "POST",
+            "/coworkers",
+            Some(json!({"name":"Credential bot"})),
+        )
+        .await;
+    assert_eq!(status, 201, "{text}");
+    opengrok_core::id::CoworkerId::from_stored(hired["id"].as_str().unwrap())
+}
+
 /// The credentials a turn reading the current install would get.
 async fn current_values(h: &Harness, account: &AccountId, name: &str) -> BTreeMap<String, String> {
     let installs = opengrok_integrations::installed::list(&h.store, account)
@@ -270,10 +307,12 @@ async fn current_values(h: &Harness, account: &AccountId, name: &str) -> BTreeMa
         &h.store,
         vault,
         account,
+        &credential_bot(h, account).await,
         &installation,
     )
     .await
     .unwrap()
+    .values
 }
 
 async fn registry_fixture() -> (
@@ -319,7 +358,7 @@ async fn registry_fixture() -> (
                 ]}));
             }
             if path.ends_with("/.grok-plugin/marketplace.json") {
-                return json(json!({"name":"fixture", "plugins":[{"name":"demo","description":"Demo","source":{"type":"local","path":"./plugins/demo"}}, {"name":"external","source":{"source":"url","url":"https://github.com/fixture/upstream.git","sha":OLD,"path":"bundle"}}]}));
+                return json(json!({"name":"fixture", "plugins":[{"name":"demo","description":"Demo","category":"development","homepage":"https://demo.example","source":{"type":"local","path":"./plugins/demo"}}, {"name":"external","source":{"source":"url","url":"https://github.com/fixture/upstream.git","sha":OLD,"path":"bundle"}}]}));
             }
             if path.ends_with("plugins/demo/.grok-plugin/plugin.json") {
                 return json(json!({"name":"demo", "description":if path.contains(OLD) {"old bundle"} else {"new bundle"}, "hooks":{}}));
@@ -369,6 +408,14 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
     let (status, catalog, _) = h.call(&a, "GET", catalog_path, None).await;
     assert_eq!(status, 200);
     assert_eq!(catalog["revision"], OLD);
+    let demo = catalog["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "demo")
+        .unwrap();
+    assert_eq!(demo["category"], "development");
+    assert_eq!(demo["homepage"], "https://demo.example");
     let (status, detail, _) = h
         .call(
             &a,
@@ -378,6 +425,7 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
         )
         .await;
     assert_eq!(status, 200, "{detail}");
+    assert!(detail["manifest"]["name"].is_string(), "{detail}");
     assert!(
         detail["parts"]
             .as_array()
@@ -440,6 +488,22 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
     );
     let values = current_values(&h, &aid, "demo").await;
     assert_eq!(values["DEMO_TOKEN"], token);
+    // A different installation with the same connector cannot supply this plugin's token.
+    sqlx::query("insert into plugin_installation(account_id,name,registry,registry_revision,repository,revision,bundle,installed_at_ms) select account_id,'another-plugin',registry,registry_revision,repository,revision,bundle,installed_at_ms from plugin_installation where account_id = $1 and name = 'demo'")
+        .bind(aid.as_str()).execute(h.store.pool()).await.unwrap();
+    sqlx::query("update plugin_credential set plugin_name = 'another-plugin' where account_id = $1 and plugin_name = 'demo'")
+        .bind(aid.as_str()).execute(h.store.pool()).await.unwrap();
+    assert!(current_values(&h, &aid, "demo").await.is_empty());
+    sqlx::query("update plugin_credential set plugin_name = 'demo' where account_id = $1 and plugin_name = 'another-plugin'")
+        .bind(aid.as_str()).execute(h.store.pool()).await.unwrap();
+    sqlx::query(
+        "delete from plugin_installation where account_id = $1 and name = 'another-plugin'",
+    )
+    .bind(aid.as_str())
+    .execute(h.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(current_values(&h, &aid, "demo").await["DEMO_TOKEN"], token);
     assert!(current_values(&h, &bid, "demo").await.is_empty());
     let cipher: Vec<u8> = sqlx::query_scalar("select ciphertext from secret_store where id = $1")
         .bind(format!("plugin/{aid}/demo/demo"))
@@ -595,6 +659,42 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
         sse.contains("files are not on your computer")
             || sse.contains("this coworker has no computer")
     );
+    // ONE SKILL OFF FOR THIS BOT, the plugin still on: it is no longer offered, and a ceiling
+    // save of the plugin's switch keeps that choice.
+    let skills_path = format!("/coworkers/{bot}/plugin-skills");
+    let (status, listed, _) = h.call(&a, "GET", &skills_path, None).await;
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["skills"][0]["skill"], "triage", "{listed}");
+    assert_eq!(listed["skills"][0]["on"], true, "{listed}");
+    let (status, page, _) = h
+        .call(&a, "GET", &format!("{skills_path}/demo/triage"), None)
+        .await;
+    assert_eq!(status, 200, "{page}");
+    assert!(
+        page["body"]
+            .as_str()
+            .unwrap()
+            .contains("Read the reference first.")
+    );
+    let off = json!({"plugin":"demo","skill":"triage","on":false});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(off)).await.0, 200);
+    let (_, current, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    let again = json!({"enabled":["demo"],"version":current["version"]});
+    assert_eq!(h.call(&a, "PUT", &ceiling_path, Some(again)).await.0, 200);
+    let (_, listed, _) = h.call(&a, "GET", &skills_path, None).await;
+    assert_eq!(listed["skills"][0]["on"], false, "{listed}");
+    let (_, tools, _) = h
+        .call(&a, "GET", &format!("/coworkers/{bot}/tools"), None)
+        .await;
+    assert!(!tools.to_string().contains("use_skill"), "{tools}");
+    let on = json!({"plugin":"demo","skill":"triage","on":true});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(on)).await.0, 200);
+    let (_, tools, _) = h
+        .call(&a, "GET", &format!("/coworkers/{bot}/tools"), None)
+        .await;
+    assert!(tools.to_string().contains("use_skill"), "{tools}");
+    let unknown = json!({"plugin":"demo","skill":"nope","on":false});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(unknown)).await.0, 422);
     assert_eq!(
         h.call(
             &a,
@@ -1036,16 +1136,18 @@ async fn an_old_installation_snapshot_cannot_receive_a_replacement_token() {
         .0,
         204
     );
+    let bot = credential_bot(&h, &account).await;
     let old_values = opengrok_integrations::installed::values_for_installation(
         &h.store,
         h.agui.vault.as_ref().unwrap(),
         &account,
+        &bot,
         &snapshot,
     )
     .await
     .unwrap();
     assert!(
-        old_values.is_empty(),
+        old_values.values.is_empty(),
         "a snapshot captured before uninstall must not receive the replacement credential"
     );
     let current = opengrok_integrations::installed::list(&h.store, &account)
@@ -1056,11 +1158,754 @@ async fn an_old_installation_snapshot_cannot_receive_a_replacement_token() {
         &h.store,
         h.agui.vault.as_ref().unwrap(),
         &account,
+        &bot,
         &current,
     )
     .await
     .unwrap();
-    assert_eq!(current_values["DEMO_TOKEN"], "replacement-secret");
+    assert_eq!(current_values.values["DEMO_TOKEN"], "replacement-secret");
+}
+
+#[tokio::test]
+async fn a_second_pasted_account_is_added_beside_the_first_and_each_bot_uses_its_own() {
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness(&url, registry).await;
+    let owner = h.person(None).await;
+    let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let install = Some(json!({"name":"demo","registryRevision":OLD}));
+    let installed = h.call(&owner, "POST", "/fixture/plugins/installations", install);
+    assert_eq!(installed.await.0, 201);
+    let path = "/fixture/plugins/installations/demo/credentials/demo";
+
+    // Adding always adds: two accounts, numbered, each with its own token.
+    let (status, first, text) = h
+        .call(&owner, "POST", path, Some(json!({"token":"first-secret"})))
+        .await;
+    assert_eq!(status, 201, "{text}");
+    let (status, second, text) = h
+        .call(&owner, "POST", path, Some(json!({"token":"second-secret"})))
+        .await;
+    assert_eq!(status, 201, "{text}");
+    let (first, second) = (
+        first["connectionId"].as_str().unwrap(),
+        second["connectionId"].as_str().unwrap(),
+    );
+    assert_ne!(first, second);
+    let (_, listed, _) = h.call(&owner, "GET", "/connections", None).await;
+    let label = |id: &str| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap()["label"]
+            .clone()
+    };
+    assert_eq!(label(first), "Demo");
+    assert_eq!(label(second), "Demo 2");
+    assert_eq!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["kind"] == "token")
+            .count(),
+        2
+    );
+
+    // Replacing without naming one cannot tell which is meant; naming one replaces only it.
+    let unnamed = Some(json!({"token":"which-one"}));
+    assert_eq!(h.call(&owner, "PUT", path, unnamed).await.0, 409);
+    let stranger = Some(json!({"token":"x","connectionId":"conn_somebody_else"}));
+    assert_eq!(h.call(&owner, "PUT", path, stranger).await.0, 404);
+    let named = Some(json!({"token":"second-renewed","connectionId":second}));
+    assert_eq!(h.call(&owner, "PUT", path, named).await.0, 204);
+
+    // The installs list says which pasted accounts are this install's, and for which service.
+    let (status, installs, _) = h
+        .call(&owner, "GET", "/fixture/plugins/installations", None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(installs[0]["connectors"], json!(["demo"]));
+    assert_eq!(
+        installs[0]["accounts"],
+        json!([{"connector":"demo","connectionId":first}, {"connector":"demo","connectionId":second}])
+    );
+
+    // With two and no pin, the Bot's turn gets neither and the person is asked (#360); pinned,
+    // it gets that account's token and only that one.
+    let bot = credential_bot(&h, &account).await;
+    let install = opengrok_integrations::installed::list(&h.store, &account)
+        .await
+        .unwrap()
+        .remove(0);
+    let vault = h.agui.vault.as_ref().unwrap();
+    let turn = opengrok_integrations::installed::values_for_installation(
+        &h.store, vault, &account, &bot, &install,
+    )
+    .await
+    .unwrap();
+    assert!(turn.values.is_empty(), "{:?}", turn.values);
+    assert_eq!(turn.needs_choice, vec!["demo".to_string()]);
+    let pin = format!("/coworkers/{bot}/pins/demo");
+    let (status, _, text) = h
+        .call(&owner, "PUT", &pin, Some(json!({"connectionId":second})))
+        .await;
+    assert_eq!(status, 200, "{text}");
+    let turn = opengrok_integrations::installed::values_for_installation(
+        &h.store, vault, &account, &bot, &install,
+    )
+    .await
+    .unwrap();
+    assert_eq!(turn.values["DEMO_TOKEN"], "second-renewed");
+    let (status, _, text) = h
+        .call(&owner, "PUT", &pin, Some(json!({"connectionId":first})))
+        .await;
+    assert_eq!(status, 200, "{text}");
+    let turn = opengrok_integrations::installed::values_for_installation(
+        &h.store, vault, &account, &bot, &install,
+    )
+    .await
+    .unwrap();
+    assert_eq!(turn.values["DEMO_TOKEN"], "first-secret");
+
+    // Uninstalling takes every pasted account with it, and their secrets out of the vault: the
+    // dialog says the keys go, so the ciphertext must not outlive the accounts.
+    let sealed: Vec<String> = sqlx::query_scalar(
+        "select c.secret_id from plugin_credential c join connection_view v on v.id = c.connection_id
+          where c.account_id = $1 and c.plugin_name = 'demo'",
+    )
+    .bind(account.as_str())
+    .fetch_all(h.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(sealed.len(), 2, "{sealed:?}");
+    let gone = h.call(
+        &owner,
+        "DELETE",
+        "/fixture/plugins/installations/demo",
+        None,
+    );
+    assert_eq!(gone.await.0, 204);
+    let (_, listed, _) = h.call(&owner, "GET", "/connections", None).await;
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["kind"] != "token"),
+        "{listed}"
+    );
+    let kept: i64 = sqlx::query_scalar("select count(*) from secret_store where id = any($1)")
+        .bind(&sealed)
+        .fetch_one(h.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(kept, 0, "an uninstalled plugin's keys stayed in the vault");
+}
+
+/// `@demo` in a message is the owner switching demo on for that turn (#359): its server is dialled
+/// and its tools pass the gate although the Bot's switch is off, nothing is stored, and nobody but
+/// the Bot's owner can widen it that way, not even with an install of their own by that name.
+#[tokio::test]
+async fn a_tagged_plugin_is_that_turns_alone_and_only_its_owners_tag_counts() {
+    use opengrok_integrations::turn;
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness(&url, registry).await;
+    let owner = h.person(None).await;
+    let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let install = Some(json!({"name":"demo","registryRevision":OLD}));
+    let installed = h.call(&owner, "POST", "/fixture/plugins/installations", install);
+    assert_eq!(installed.await.0, 201);
+    let path = "/fixture/plugins/installations/demo/credentials/demo";
+    let pasted = h.call(&owner, "POST", path, Some(json!({"token":"demo-secret"})));
+    assert_eq!(pasted.await.0, 201);
+    let bot = credential_bot(&h, &account).await;
+    let (store, vault) = (&h.store, h.agui.vault.as_deref());
+    let policy = store.policy_to_use(&account, &bot).await.unwrap();
+    let no_operator = |_: &str| false;
+    let tool = "demo.hosted.list_zones";
+    let runs = |policy: &opengrok_policy::Context| {
+        let action = opengrok_policy::Action::RunTool(tool);
+        opengrok_policy::decide(&account, &bot, action, policy).is_allowed()
+    };
+
+    // Switched off: no server, no tool.
+    assert!(!turn::switched_on(&account, &bot, "demo", &policy));
+    let plain = turn::TurnPlugins::default();
+    let off = turn::endpoints(store, vault, &account, &bot, &policy, &plain, no_operator).await;
+    assert!(
+        off.is_empty(),
+        "{:?}",
+        off.iter().map(|e| e.key()).collect::<Vec<_>>()
+    );
+    assert!(!runs(&policy));
+
+    // The turn is told it is installed and off, so it asks for a tag rather than for a key; a
+    // tagged turn is not told so.
+    assert_eq!(
+        turn::switched_off(store, &account, &bot, &[]).await,
+        ["demo"]
+    );
+    let tagged_demo = ["demo".to_string()];
+    let off = turn::switched_off(store, &account, &bot, &tagged_demo).await;
+    assert!(off.is_empty(), "{off:?}");
+
+    // Tagged by its owner: what is installed is kept, a name nobody installed is not.
+    let asked = ["demo".to_string(), "nope".to_string()];
+    let tagged = turn::mentioned(store, &account, &bot, &asked).await;
+    assert_eq!(tagged, ["demo"]);
+    let this_turn = opengrok_policy::with_mentioned(policy.clone(), &tagged);
+    let tags = turn::TurnPlugins {
+        mentioned: tagged.clone(),
+        ..Default::default()
+    };
+    let on = turn::endpoints(store, vault, &account, &bot, &this_turn, &tags, no_operator).await;
+    assert_eq!(
+        on.iter().map(|e| e.key()).collect::<Vec<_>>(),
+        ["demo.hosted"]
+    );
+    assert!(runs(&this_turn));
+
+    // Nothing stored: the next turn reads the switch as it was.
+    let next = store.policy_to_use(&account, &bot).await.unwrap();
+    assert!(!turn::switched_on(&account, &bot, "demo", &next));
+    assert!(!runs(&next));
+
+    // On a Bot whose tools are "all", which never switches an install on, the tag still does.
+    use opengrok_policy::ToolSet;
+    let at = chrono::Utc::now().timestamp_millis();
+    let (all, none) = (&ToolSet::All, &ToolSet::None);
+    store
+        .grant_access(&account, &bot, all, all, none, at)
+        .await
+        .unwrap();
+    let everything = store.policy_to_use(&account, &bot).await.unwrap();
+    let off = turn::endpoints(
+        store,
+        vault,
+        &account,
+        &bot,
+        &everything,
+        &plain,
+        no_operator,
+    )
+    .await;
+    assert!(off.is_empty());
+    let this_turn = opengrok_policy::with_mentioned(everything, &tagged);
+    let on = turn::endpoints(store, vault, &account, &bot, &this_turn, &tags, no_operator).await;
+    assert_eq!(on.len(), 1);
+
+    // Somebody else's tag on this Bot widens nothing, though they installed a demo of their own.
+    let stranger = h.person(None).await;
+    let theirs = AccountId::from_stored(h.agui.auth.minter.verify_access(&stranger).unwrap().sub);
+    let install = Some(json!({"name":"demo","registryRevision":OLD}));
+    let installed = h.call(&stranger, "POST", "/fixture/plugins/installations", install);
+    assert_eq!(installed.await.0, 201);
+    assert!(
+        turn::mentioned(store, &theirs, &bot, &asked)
+            .await
+            .is_empty()
+    );
+    // Nor is anyone else's turn told of the owner's installs.
+    let told = turn::switched_off(store, &theirs, &bot, &[]).await;
+    assert!(told.is_empty(), "{told:?}");
+}
+
+/// A tagged plugin the Bot cannot use yet is asked about before any model call (#360): two
+/// accounts and no pin answer with a "Which account?" card listing both, a name nobody installed
+/// with an install card, and no model is asked. The card's pick, sent with the same message, is
+/// used for that turn only; a stranger's tag on the Bot asks nothing.
+#[tokio::test]
+async fn a_tagged_plugin_with_two_accounts_asks_which_before_the_model_is_asked() {
+    use opengrok_integrations::{installed, turn};
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness(&url, registry).await;
+    let owner = h.person(None).await;
+    let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let install = Some(json!({"name":"demo","registryRevision":OLD}));
+    let installed = h.call(&owner, "POST", "/fixture/plugins/installations", install);
+    assert_eq!(installed.await.0, 201);
+    let path = "/fixture/plugins/installations/demo/credentials/demo";
+    let mut ids = Vec::new();
+    for token in ["first-secret", "second-secret"] {
+        let (status, added, text) = h
+            .call(&owner, "POST", path, Some(json!({"token":token})))
+            .await;
+        assert_eq!(status, 201, "{text}");
+        ids.push(added["connectionId"].as_str().unwrap().to_string());
+    }
+    let bot = credential_bot(&h, &account).await;
+    let send = |token: String, props: Value| {
+        let h = &h;
+        async move {
+            let body = json!({
+                "threadId": format!("thr_{}", uuid::Uuid::now_v7()),
+                "runId": uuid::Uuid::now_v7().to_string(),
+                "messages": [{"id":"m1","role":"user","content":"list my zones"}],
+                "forwardedProps": props,
+            });
+            let (status, _, sse) = h.call(&token, "POST", "/ag-ui", Some(body)).await;
+            assert_eq!(status, 200, "{sse}");
+            sse
+        }
+    };
+
+    let tagged = json!({"coworkerId": bot.as_str(), "mentionedPlugins": ["demo", "nope"]});
+    let sse = send(owner.clone(), tagged).await;
+    assert!(sse.contains("RUN_FINISHED"), "{sse}");
+    // No model: the stand-in door's first move is a tool call.
+    assert!(!sse.contains("TOOL_CALL_START"), "{sse}");
+    let frame = sse
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|event| event["name"] == turn::PLUGIN_NEEDS)
+        .unwrap_or_else(|| panic!("no needs card: {sse}"));
+    let needs = frame["value"]["needs"].as_array().unwrap();
+    assert_eq!(needs.len(), 2, "{needs:?}");
+    assert_eq!(needs[0], json!({"plugin":"nope","need":"install"}));
+    assert_eq!(needs[1]["need"], "choose");
+    assert_eq!(
+        (needs[1]["plugin"].as_str(), needs[1]["connector"].as_str()),
+        (Some("demo"), Some("demo"))
+    );
+    let listed: Vec<&str> = needs[1]["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, ids.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(!frame.to_string().contains("secret"), "{frame}");
+
+    // The pick, for this turn: that account and only that one, and nothing more to ask.
+    let picked = turn::TurnPlugins {
+        mentioned: vec!["demo".into()],
+        chosen: [(
+            "demo".to_string(),
+            [("demo".to_string(), ids[1].clone())].into(),
+        )]
+        .into(),
+    };
+    let (store, vault) = (&h.store, h.agui.vault.as_deref());
+    let asked = ["demo".to_string()];
+    assert!(
+        turn::needs(store, vault, &account, &bot, &asked, &picked)
+            .await
+            .is_empty()
+    );
+    let install = installed::list(store, &account).await.unwrap().remove(0);
+    let chosen = picked.chosen["demo"].clone();
+    let values =
+        installed::values_choosing(store, vault.unwrap(), &account, &bot, &install, &chosen);
+    assert_eq!(values.await.unwrap().values["DEMO_TOKEN"], "second-secret");
+    // Not stored: without the pick the Bot is still asked.
+    let unpicked = turn::TurnPlugins {
+        mentioned: vec!["demo".into()],
+        ..Default::default()
+    };
+    assert_eq!(
+        turn::needs(store, vault, &account, &bot, &asked, &unpicked)
+            .await
+            .len(),
+        1
+    );
+    // A pick that is not one of the person's accounts picks nothing.
+    let forged: BTreeMap<String, String> = [("demo".to_string(), "conn_nobody".to_string())].into();
+    let values =
+        installed::values_choosing(store, vault.unwrap(), &account, &bot, &install, &forged);
+    assert!(values.await.unwrap().values.is_empty());
+
+    // Somebody else tagging it on this Bot is asked nothing and given nothing.
+    let stranger = h.person(None).await;
+    let theirs = AccountId::from_stored(h.agui.auth.minter.verify_access(&stranger).unwrap().sub);
+    assert!(
+        turn::needs(store, vault, &theirs, &bot, &asked, &unpicked)
+            .await
+            .is_empty()
+    );
+}
+
+/// A Bot manages its person's plugins in chat (#359) through the Plugins routes' own functions:
+/// it installs (on for no Bot), lists, adds an account by card, renames, switches the plugin on for
+/// itself, and pins. Uninstalling, removing an account, and anything aimed at another of the
+/// person's Bots asks first, naming what it acts on as stored; a Bot that is not the person's is
+/// refused like one that does not exist.
+#[tokio::test]
+async fn a_bot_manages_its_persons_plugins_and_asks_first_where_it_cannot_be_undone() {
+    use opengrok_tools::plugin_desk::{Ask, Filter, PluginDesk};
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness(&url, registry.clone()).await;
+    let owner = h.person(None).await;
+    let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let bot = credential_bot(&h, &account).await;
+    let other = credential_bot(&h, &account).await;
+    let desk = opengrok_server::plugin_desk::configured(&h.agui, Some(registry));
+    let context = opengrok_tools::ToolContext {
+        account_id: account.clone(),
+        coworker_id: bot.clone(),
+        box_id: None,
+        group_box: None,
+        screen_hold: false,
+        screen_held_in: None,
+    };
+    let (desk, context) = (&desk, &context);
+    let answer = move |ask: Ask| desk.answer(context, ask);
+    let asks = move |ask: Ask| async move { desk.ask_first(context, &ask).await };
+    let demo = || "demo".to_string();
+
+    // Installed, on for nobody, and listed so.
+    let installed = answer(Ask::Install { plugin: demo() }).await.unwrap();
+    assert_eq!(installed["installed"], "demo");
+    let again = answer(Ask::Install { plugin: demo() }).await;
+    assert_eq!(again.unwrap_err(), "demo is already installed.");
+    let list = Ask::List {
+        filter: Filter::Installed,
+        query: None,
+        category: None,
+    };
+    let listed = answer(list).await.unwrap();
+    assert_eq!(listed["plugins"][0]["name"], "demo");
+    assert_eq!(listed["plugins"][0]["onForThisBot"], false);
+
+    // Adding an account is a card for the person; the model is handed no secret and no field.
+    let add = Ask::AddAccount {
+        plugin: demo(),
+        connector: None,
+    };
+    assert_eq!(asks(add.clone()).await.unwrap(), None);
+    let card = answer(add).await.unwrap();
+    assert_eq!(
+        (card["plugin"].as_str(), card["connector"].as_str()),
+        (Some("demo"), Some("demo"))
+    );
+    let path = "/fixture/plugins/installations/demo/credentials/demo";
+    let (_, pasted, _) = h
+        .call(&owner, "POST", path, Some(json!({"token":"demo-secret"})))
+        .await;
+    let id = pasted["connectionId"].as_str().unwrap().to_string();
+    let rename = Ask::Rename {
+        account: id.clone(),
+        label: "Work".into(),
+    };
+    assert_eq!(answer(rename).await.unwrap()["label"], "Work");
+    let rows = answer(Ask::Accounts { plugin: None }).await.unwrap();
+    assert_eq!(rows["accounts"][0]["label"], "Work");
+    assert!(!rows.to_string().contains("demo-secret"), "{rows}");
+
+    // On for itself without asking; for another Bot only after asking, by its stored name.
+    let mine = Ask::SetForBot {
+        plugin: demo(),
+        on: true,
+        bot: None,
+    };
+    assert_eq!(asks(mine.clone()).await.unwrap(), None);
+    assert_eq!(answer(mine).await.unwrap()["changed"], true);
+    let policy = h.store.policy_to_use(&account, &bot).await.unwrap();
+    assert!(opengrok_integrations::turn::switched_on(
+        &account, &bot, "demo", &policy
+    ));
+    let theirs = Ask::SetForBot {
+        plugin: demo(),
+        on: true,
+        bot: Some(other.to_string()),
+    };
+    let card = asks(theirs).await.unwrap().unwrap();
+    assert_eq!(card, "Turn demo on for Credential bot?");
+    let pick = Ask::Pick {
+        plugin: demo(),
+        connector: None,
+        account: Some(id.clone()),
+        bot: Some(other.to_string()),
+    };
+    let card = asks(pick).await.unwrap().unwrap();
+    assert_eq!(card, "Make \"Work\" the demo account Credential bot uses?");
+    let pick = Ask::Pick {
+        plugin: demo(),
+        connector: None,
+        account: Some(id.clone()),
+        bot: None,
+    };
+    assert_eq!(asks(pick.clone()).await.unwrap(), None);
+    assert_eq!(answer(pick).await.unwrap()["account"], id.as_str());
+
+    // A Bot that is not the person's is the same refusal as one that does not exist.
+    let stranger = h.person(None).await;
+    let theirs = AccountId::from_stored(h.agui.auth.minter.verify_access(&stranger).unwrap().sub);
+    let foreign = credential_bot(&h, &theirs).await;
+    let aimed = Ask::SetForBot {
+        plugin: demo(),
+        on: true,
+        bot: Some(foreign.to_string()),
+    };
+    let refused = asks(aimed).await.unwrap_err();
+    assert_eq!(
+        refused,
+        format!("no Bot called {foreign} is your person's.")
+    );
+    let nobody = Ask::SetForBot {
+        plugin: demo(),
+        on: true,
+        bot: Some("cw_nobody".into()),
+    };
+    assert_eq!(
+        asks(nobody).await.unwrap_err(),
+        "no Bot called cw_nobody is your person's."
+    );
+
+    // What cannot be undone asks first, naming it as stored; then it happens.
+    let remove = Ask::Remove {
+        account: id.clone(),
+    };
+    let card = asks(remove.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        card,
+        "Remove the demo account \"Work\"? Credential bot will stop using it."
+    );
+    assert_eq!(
+        answer(remove).await.unwrap()["botsThatLostIt"],
+        json!(["Credential bot"])
+    );
+    let rows = answer(Ask::Accounts { plugin: None }).await.unwrap();
+    assert_eq!(rows["accounts"], json!([]));
+    let uninstall = Ask::Uninstall { plugin: demo() };
+    assert_eq!(
+        asks(uninstall.clone()).await.unwrap().unwrap(),
+        "Uninstall demo?"
+    );
+    assert_eq!(answer(uninstall).await.unwrap()["uninstalled"], "demo");
+    let gone = Ask::Uninstall { plugin: demo() };
+    assert_eq!(
+        asks(gone).await.unwrap_err(),
+        "demo is not installed; call list_plugins."
+    );
+}
+
+/// A stand-in MCP server and its authorization server, as the MCP authorization spec has them:
+/// the MCP endpoint refuses with 401 naming its resource metadata, which names the authorization
+/// server, whose metadata names where to register, consent and trade codes. The token endpoint
+/// checks PKCE against the challenge the consent page carried, and the resource.
+async fn stand_in_mcp_provider() -> (String, Arc<std::sync::Mutex<BTreeMap<String, String>>>) {
+    use axum::{
+        Form, Json, Router,
+        http::StatusCode,
+        response::IntoResponse,
+        routing::{get, post},
+    };
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let seen: Arc<std::sync::Mutex<BTreeMap<String, String>>> = Default::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let (b1, b2, b3) = (base.clone(), base.clone(), base.clone());
+    let (s1, s2) = (seen.clone(), seen.clone());
+    let app = Router::new()
+        .route("/mcp", post(move || {
+            let b = b1.clone();
+            async move {
+                let hint = format!(r#"Bearer resource_metadata="{b}/.well-known/oauth-protected-resource/mcp""#);
+                (StatusCode::UNAUTHORIZED, [("www-authenticate", hint)], "").into_response()
+            }
+        }))
+        .route("/.well-known/oauth-protected-resource/mcp", get(move || {
+            let b = b2.clone();
+            async move { Json(json!({"resource": format!("{b}/mcp"), "authorization_servers": [b], "scopes_supported": ["mcp"]})) }
+        }))
+        .route("/.well-known/oauth-authorization-server", get(move || {
+            let b = b3.clone();
+            async move { Json(json!({"issuer": b, "authorization_endpoint": format!("{b}/authorize"),
+                "token_endpoint": format!("{b}/token"), "registration_endpoint": format!("{b}/register"),
+                "code_challenge_methods_supported": ["S256"]})) }
+        }))
+        .route("/register", post(move |Json(body): Json<Value>| {
+            let seen = s1.clone();
+            async move {
+                let mut seen = seen.lock().unwrap();
+                let n = seen.get("registrations").map_or(0, |n| n.parse::<u32>().unwrap()) + 1;
+                seen.insert("registrations".into(), n.to_string());
+                assert_eq!(body["token_endpoint_auth_method"], "none");
+                Json(json!({"client_id": "client-1"}))
+            }
+        }))
+        .route("/token", post(move |Form(form): Form<BTreeMap<String, String>>| {
+            let seen = s2.clone();
+            async move {
+                let seen = seen.lock().unwrap();
+                match form["grant_type"].as_str() {
+                    "authorization_code" => {
+                        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .encode(sha2::Sha256::digest(form["code_verifier"].as_bytes()));
+                        if Some(&challenge) != seen.get("challenge") || form["code"] != "code-1"
+                            || form["client_id"] != "client-1" || !form["resource"].ends_with("/mcp")
+                        {
+                            return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))).into_response();
+                        }
+                        Json(json!({"access_token": "at-1", "refresh_token": "rt-1", "expires_in": 1})).into_response()
+                    }
+                    "refresh_token" if form["refresh_token"] == "rt-1" => {
+                        Json(json!({"access_token": "at-2", "expires_in": 3600})).into_response()
+                    }
+                    _ => (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))).into_response(),
+                }
+            }
+        }));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, seen)
+}
+
+#[tokio::test]
+async fn a_plugin_account_is_signed_in_at_its_own_server_refreshed_and_used_by_its_bot() {
+    use opengrok_integrations::{attempts, installed, mcp_oauth};
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness(&url, registry).await;
+    let owner = h.person(None).await;
+    let account = AccountId::from_stored(h.agui.auth.minter.verify_access(&owner).unwrap().sub);
+    let install = Some(json!({"name":"demo","registryRevision":OLD}));
+    assert_eq!(
+        h.call(&owner, "POST", "/fixture/plugins/installations", install)
+            .await
+            .0,
+        201
+    );
+    let (base, seen) = stand_in_mcp_provider().await;
+    // Loopback is the stand-in's; deployments allow public HTTPS only (`mcp_oauth::PUBLIC`).
+    let guard: mcp_oauth::Guard = |url| url.starts_with("http://127.0.0.1:");
+    let http = reqwest::Client::new();
+    let (store, vault) = (&h.store, h.agui.vault.as_deref().unwrap());
+    let redirect = "https://og.example/connections/callback";
+
+    // Discovery follows the server's own 401 to its authorization server.
+    let metadata = mcp_oauth::discover(&http, guard, &format!("{base}/mcp"))
+        .await
+        .unwrap();
+    assert_eq!(metadata.issuer, base);
+    assert_eq!(metadata.token_endpoint, format!("{base}/token"));
+    assert_eq!(metadata.scopes, ["mcp"]);
+    // A public-only rule refuses a loopback server outright.
+    assert!(matches!(
+        mcp_oauth::discover(&http, mcp_oauth::PUBLIC, &format!("{base}/mcp")).await,
+        Err(mcp_oauth::McpAuthError::NoSignIn(_))
+    ));
+
+    // Registered once, then the same client for every sign-in after.
+    let client = mcp_oauth::client(&http, guard, store, vault, &metadata, redirect, 1)
+        .await
+        .unwrap();
+    assert_eq!(client.client_id, "client-1");
+    let again = mcp_oauth::client(&http, guard, store, vault, &metadata, redirect, 2)
+        .await
+        .unwrap();
+    assert_eq!(again.client_id, "client-1");
+    assert_eq!(seen.lock().unwrap()["registrations"], "1");
+
+    // The consent page carries the challenge; the provider holds the code to it.
+    let pkce = mcp_oauth::pkce();
+    let waiting = attempts::start_mcp(
+        store,
+        &account,
+        "demo",
+        "demo",
+        None,
+        &pkce.verifier,
+        &metadata,
+        &client.client_id,
+        3,
+    )
+    .await
+    .unwrap();
+    assert_eq!(waiting.plugin.as_deref(), Some("demo"));
+    assert_eq!(waiting.status, "pending");
+    let page = mcp_oauth::authorize_url(&metadata, &client, redirect, "state", &pkce.challenge);
+    assert!(page.starts_with(&format!("{base}/authorize?")));
+    seen.lock()
+        .unwrap()
+        .insert("challenge".into(), pkce.challenge.clone());
+    let pending = attempts::mcp_pending(store, &account, &waiting.id, redirect)
+        .await
+        .unwrap()
+        .unwrap();
+    // A wrong code is the provider's refusal, never an account.
+    assert!(
+        mcp_oauth::exchange(&http, guard, store, vault, &pending, "wrong")
+            .await
+            .is_err()
+    );
+    let token = mcp_oauth::exchange(&http, guard, store, vault, &pending, "code-1")
+        .await
+        .unwrap();
+    assert_eq!(token.access_token, "at-1");
+    let id = mcp_oauth::connect(store, vault, &account, &pending, &token, 4)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // An `mcp` account of the person's, under the label the sign-in had, never lent.
+    let (_, listed, _) = h.call(&owner, "GET", "/connections", None).await;
+    let row = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(row["kind"], "mcp");
+    assert_eq!(row["label"], "Demo");
+    let bot = credential_bot(&h, &account).await;
+    let lend = h
+        .call(
+            &owner,
+            "POST",
+            &format!("/connections/{id}/lend"),
+            Some(json!({"coworker_id": bot.as_str()})),
+        )
+        .await;
+    assert_ne!(lend.0, 200, "{}", lend.2);
+
+    // The Bot's turn gets its token through the install's binding, as a pasted one's.
+    let installation = installed::list(store, &account).await.unwrap().remove(0);
+    let turn = installed::values_for_installation(store, vault, &account, &bot, &installation)
+        .await
+        .unwrap();
+    assert_eq!(turn.values["DEMO_TOKEN"], "at-1");
+
+    // Lapsing within the minute, it is refreshed before the turn reads it.
+    mcp_oauth::refresh_due(&http, guard, store, vault, &account, "demo", 5).await;
+    let turn = installed::values_for_installation(store, vault, &account, &bot, &installation)
+        .await
+        .unwrap();
+    assert_eq!(turn.values["DEMO_TOKEN"], "at-2");
+
+    // A reconnect refreshes the same account: still one, under the same id.
+    let reconnect = mcp_oauth::Pending {
+        target: Some(id.clone()),
+        ..pending.clone()
+    };
+    let again = mcp_oauth::connect(store, vault, &account, &reconnect, &token, 6)
+        .await
+        .unwrap();
+    assert_eq!(again.as_deref(), Some(id.as_str()));
+    let (_, listed, _) = h.call(&owner, "GET", "/connections", None).await;
+    assert_eq!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == "mcp")
+            .count(),
+        1
+    );
+
+    // How an account is added: a stranger's or an unknown install is the same 404.
+    let path = "/plugins/installations/nope/connectors/demo/sign-in";
+    assert_eq!(h.call(&owner, "GET", path, None).await.0, 404);
+    let path = "/plugins/installations/demo/connectors/demo/authorize?format=json&connection_id=conn_nobody";
+    assert_eq!(h.call(&owner, "GET", path, None).await.0, 404);
 }
 
 /// A registry whose entries and bundles each break one rule `docs/plugin-registry.md` states.
@@ -1091,7 +1936,8 @@ async fn hostile_registry() -> opengrok_integrations::registry::Registry {
                     blob("plugins/huge/skills/x/big.txt"),
                     blob("plugins/many/plugin.json"),
                 ];
-                tree.extend((0..129).map(|i| blob(&format!("plugins/many/skills/s/{i}.md"))));
+                // The cap is on the files a plugin needs (a skill's reference files are best effort).
+                tree.extend((0..129).map(|i| blob(&format!("plugins/many/skills/s{i}/SKILL.md"))));
                 return json(json!({"truncated": false, "tree": tree}));
             }
             "repos/fixture/truncated/git/trees/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" => {
@@ -1201,7 +2047,10 @@ async fn one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds()
         let part = good.parts.iter().find(|p| p.kind == kind && p.name == name);
         part.and_then(|p| p.reason.clone()).unwrap_or_default()
     };
-    assert_eq!(good.mcp.servers.keys().collect::<Vec<_>>(), ["fine"]);
+    assert_eq!(
+        good.mcp.servers.keys().collect::<Vec<_>>(),
+        ["fine", "needs-oauth"]
+    );
     assert_eq!(reason("mcp", "insecure"), "remote MCP requires HTTPS");
     assert_eq!(
         reason("mcp", "private"),
@@ -1212,7 +2061,9 @@ async fn one_bad_entry_is_one_unavailable_entry_and_every_stated_refusal_holds()
         "remote MCP must name a public host"
     );
     assert_eq!(reason("mcp", "off"), "its author switched this server off");
-    assert!(reason("mcp", "needs-oauth").contains("OAuth"));
+    // A server that signs its people in is kept: this server signs them in itself (#364).
+    assert_eq!(reason("mcp", "needs-oauth"), "");
+    assert!(good.mcp.servers.contains_key("needs-oauth"));
     assert_eq!(
         reason("mcp", "extra"),
         "MCP field `timeout` is not supported"
@@ -1305,6 +2156,8 @@ async fn installs_by_one_account_at_once_never_deadlock() {
             let entry = opengrok_integrations::registry::Entry {
                 name: plugin.into(),
                 description: String::new(),
+                category: None,
+                homepage: None,
                 repository: "fixture/marketplace".into(),
                 revision: OLD.into(),
                 path: String::new(),

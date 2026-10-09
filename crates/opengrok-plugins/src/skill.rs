@@ -27,21 +27,26 @@ pub enum SkillAuthor {
     Colleague,
 }
 
-/// The most a skill body may be. See the server's `skills` module note: the body shares one
-/// system message with the coworker's identity and its standing role, and 8000 characters is
-/// already eight times the role. Characters rather than bytes, because that is the unit the person
-/// writing it counts in. Here rather than in the server so a registry bundle's skills are held to
-/// the same number as a person's, not to a copy of it.
-pub const MAX_SKILL_BODY_CHARS: usize = 8000;
+/// The most a skill body may be, in characters: 64 KiB.
+///
+/// Sized to the skills people actually publish. Of the 384 `SKILL.md` files in the xAI plugin
+/// marketplace's plugins (6 Oct 2026), the median is 9.6 KB, 95% are under 32 KB and all but one
+/// under 64 KB; 8000, the cap before, refused 218 of them, among them most of Cloudflare's. The
+/// Agent Skills spec sets no hard limit on the body (it recommends under ~5000 tokens and loads the
+/// whole file when a skill is activated), so the cap is a bound on what one skill can put in front
+/// of a model, not a style rule. A chosen skill's body still shares the system message with the
+/// role (`skills` module note): this is the most it may weigh there. Characters rather than bytes,
+/// because that is the unit the person writing it counts in. Here rather than in the server so a
+/// registry bundle's skills are held to the same number as a person's.
+pub const MAX_SKILL_BODY_CHARS: usize = 64 * 1024;
 
-/// The most a description may be.
+/// The most a description may be: the Agent Skills spec's own limit (agentskills.io, 1024).
 ///
 /// It is not decoration: a description is what a coworker reads to decide whether a skill is
-/// relevant (`crate::Skill::description`), so it reaches the same system message the body cap
-/// above is an argument about — and unlike the body it is ALSO in every row of every listing.
-/// Uncapped, it was the way around the body cap: 8000 characters of "body" plus as many again of
-/// "description". A line or two, which is what it is for.
-pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 300;
+/// relevant (`crate::Skill::description`), and unlike the body it is in every row of every
+/// listing and every turn's offer. Held to the spec's number so a skill valid anywhere is valid
+/// here, and no larger, so it cannot become a second body.
+pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 
 /// How long a skill marker is, in hex characters. 64 bits of it.
 pub const SKILL_MARKER_CHARS: usize = 16;
@@ -53,7 +58,7 @@ pub const SKILL_MARKER_CHARS: usize = 16;
 /// model reads; if the fence were a constant we published in this file, a body could print the
 /// closing fence itself, and every word after that would be read as ours. This one cannot be
 /// closed early, because the body was written and stored before the marker existed and 64 bits is
-/// not guessable inside 8000 characters. The marker is the only part of this segment an attacker
+/// not guessable inside a body of any length this cap admits. The marker is the only part of this segment an attacker
 /// cannot reproduce: the framing sentences are constants and the skill NAME is checked (see
 /// `fenced_skill`), but neither of those can bound the END of the quote.
 ///
@@ -91,7 +96,7 @@ pub fn end_skill(marker: &str) -> String {
 ///
 /// The framing before a body bounds where it starts; only this bounds where it ends, and without
 /// it the last word in the whole message belongs to whoever wrote the skill — the strongest slot
-/// there is, with up to 8000 characters of theirs sitting between our tie-break sentence and the
+/// there is, with up to `MAX_SKILL_BODY_CHARS` of theirs sitting between our tie-break sentence and the
 /// model's first thought.
 ///
 /// It restates the denials rather than assuming the opening sentence survived the body, and it

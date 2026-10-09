@@ -156,7 +156,7 @@ fn an_over_long_body_is_refused_with_both_numbers() {
     let body = "x".repeat(MAX_SKILL_BODY_CHARS + 7);
     let (status, why) = check_body(&body).expect_err("over the cap");
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(why.contains("8000"), "{why}");
+    assert!(why.contains(&MAX_SKILL_BODY_CHARS.to_string()), "{why}");
     assert!(
         why.contains(&(MAX_SKILL_BODY_CHARS + 7).to_string()),
         "{why}"
@@ -164,7 +164,8 @@ fn an_over_long_body_is_refused_with_both_numbers() {
     assert!(check_body(&"x".repeat(MAX_SKILL_BODY_CHARS)).is_ok());
 }
 
-/// Characters, not bytes: a body of 8000 emoji is 8000 characters the person counted.
+/// Characters, not bytes: a body of accented letters at the cap is the cap's characters the person
+/// counted.
 #[test]
 fn the_body_cap_counts_characters() {
     assert!(check_body(&"é".repeat(MAX_SKILL_BODY_CHARS)).is_ok());
@@ -176,7 +177,11 @@ fn a_description_is_a_line_not_a_second_body() {
     assert!(check_description(&"x".repeat(MAX_SKILL_DESCRIPTION_CHARS)).is_ok());
     let (_, why) =
         check_description(&"x".repeat(MAX_SKILL_DESCRIPTION_CHARS + 1)).expect_err("over the cap");
-    assert!(why.contains("300") && why.contains("301"), "{why}");
+    let (cap, over) = (MAX_SKILL_DESCRIPTION_CHARS, MAX_SKILL_DESCRIPTION_CHARS + 1);
+    assert!(
+        why.contains(&cap.to_string()) && why.contains(&over.to_string()),
+        "{why}"
+    );
 }
 
 #[test]

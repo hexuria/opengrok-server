@@ -209,6 +209,31 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 }
 
 /// `visibility = org` through the aggregate, as the PATCH route would have stored it.
+/// A saved login row for `owner`, written straight to the store: this harness runs without a
+/// vault, and a fill's values come from the card, so no sealed secret is needed. Shared with
+/// `bot` when one is named.
+async fn seed_login(store: &PgStore, owner: &AccountId, id: &str, kind: &str, bot: Option<&str>) {
+    sqlx::query(
+        "insert into site_login (id, account_id, origin, username, kind, created_at_ms, updated_at_ms)
+         values ($1, $2, 'example.com', $3, $4, 1, 1)",
+    )
+    .bind(id)
+    .bind(owner.as_str())
+    .bind(format!("{id}@example.com"))
+    .bind(kind)
+    .execute(store.pool())
+    .await
+    .expect("seed a login");
+    if let Some(bot) = bot {
+        assert!(
+            store
+                .set_site_login_shared(owner, id, bot, true, 1)
+                .await
+                .expect("share")
+        );
+    }
+}
+
 async fn mark_org_visible(store: &PgStore, owner: &AccountId, id: &str) {
     use opengrok_core::coworker::{CoworkerCommand, CoworkerView, Visibility};
     let coworker_id = opengrok_core::id::CoworkerId::from_stored(id.to_string());
@@ -2131,6 +2156,187 @@ async fn a_saved_login_fills_only_a_dedicated_box() {
     );
 }
 
+/// The app asks before Touch ID whether a saved login can be used for this Bot at all, so the
+/// person is never asked for their fingerprint only to be refused; and one Bot can be given its
+/// own computer while the account's others keep sharing, after which the same card fills
+/// (8 Oct 2026: the refusal came after Touch ID, with no way forward).
+#[tokio::test]
+async fn a_saved_login_is_checked_before_touch_id_and_one_bot_can_get_its_own_computer() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-own-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let other = h.hire(&token, "Bo").await;
+    let call = |method: reqwest::Method, path: String, body: Option<Value>| {
+        let mut req = h
+            .client
+            .request(method, format!("{}{path}", h.base))
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        async move {
+            let res = req.send().await.expect("call");
+            let status = res.status().as_u16();
+            (status, res.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let check = |bot: String| {
+        call(
+            reqwest::Method::GET,
+            format!("/coworkers/{bot}/saved-login"),
+            None,
+        )
+    };
+
+    let (status, body) = check(agent.clone()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["usable"], false, "{body}");
+    assert_eq!(body["reason"], "shared-computer", "{body}");
+    assert_eq!(body["ownComputer"], false, "{body}");
+
+    let (status, body) = call(
+        reqwest::Method::PUT,
+        format!("/coworkers/{agent}/own-computer"),
+        Some(json!({ "on": true })),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, body) = check(agent.clone()).await;
+    assert_eq!(body["usable"], true, "{body}");
+    assert_eq!(body["ownComputer"], true, "{body}");
+    let (_, body) = check(other.clone()).await;
+    assert_eq!(
+        body["usable"], false,
+        "the account's other Bots still share: {body}"
+    );
+
+    h.turn(&token, &agent, "sign in").await;
+    let card = h.wait_for_form(&agent).await;
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({
+                "entryId": card["id"].as_str().expect("entry id"),
+                "agentId": agent,
+                "savedLogin": true,
+                "values": { "email": EMAIL, "password": SECRET }
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+
+    // An org-visible Bot is driven by everyone in it: never usable, whatever its computer.
+    mark_org_visible(&h.store, &h.account, &agent).await;
+    let (_, body) = check(agent.clone()).await;
+    assert_eq!(body["usable"], false, "{body}");
+    assert_eq!(body["reason"], "shared-bot", "{body}");
+}
+
+/// A saved login fills only for a Bot it is shared with: a Bot starts with none, the share is
+/// one switch the person sets, and taking it back stops the next fill (8 Oct 2026).
+#[tokio::test]
+async fn a_saved_login_fills_only_for_a_bot_it_is_shared_with() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-share-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness(&database_url, &email).await;
+    let token = h.access_token(&email);
+    h.store
+        .set_sharing_mode("account", h.account.as_str(), "per-bot", 1)
+        .await
+        .expect("per-bot");
+    let agent = h.hire(&token, "Ada").await;
+    let call = |method: reqwest::Method, path: String, body: Option<Value>| {
+        let mut req = h
+            .client
+            .request(method, format!("{}{path}", h.base))
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        async move {
+            let res = req.send().await.expect("call");
+            let status = res.status().as_u16();
+            (status, res.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    seed_login(&h.store, &h.account, &login, "password", None).await;
+    let (_, shared) = call(
+        reqwest::Method::GET,
+        format!("/coworkers/{agent}/site-logins"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        shared["logins"],
+        json!([]),
+        "a Bot starts with no logins: {shared}"
+    );
+
+    let fill = |card: Value| {
+        json!({
+            "entryId": card["id"].as_str().expect("entry id"),
+            "agentId": agent,
+            "savedLogin": true,
+            "savedLoginId": login,
+            "values": { "email": EMAIL, "password": SECRET }
+        })
+    };
+    h.turn(&token, &agent, "sign in").await;
+    let card = h.wait_for_form(&agent).await;
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill(card.clone()))
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "not-shared", "{body}");
+    assert!(
+        h.stub.acts.lock().expect("acts").is_empty(),
+        "nothing typed"
+    );
+
+    let share = |on: bool| {
+        call(
+            reqwest::Method::PUT,
+            format!("/site-logins/{login}/bots/{agent}"),
+            Some(json!({ "shared": on })),
+        )
+    };
+    // Shared and taken back: the still-open card's fill is refused again.
+    assert_eq!(share(true).await.0, 200);
+    assert_eq!(share(false).await.0, 200);
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill(card.clone()))
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "not-shared", "{body}");
+
+    let (status, body) = share(true).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, bots) = call(
+        reqwest::Method::GET,
+        format!("/site-logins/{login}/bots"),
+        None,
+    )
+    .await;
+    assert_eq!(bots["bots"], json!([agent]), "{bots}");
+    let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill(card)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+
+    // Another account's Bot is not one to share with.
+    let (status, _) = call(
+        reqwest::Method::PUT,
+        format!("/site-logins/{login}/bots/cw_not_theirs"),
+        Some(json!({ "shared": true })),
+    )
+    .await;
+    assert_eq!(status, 404);
+}
+
 /// A passkey card typed nothing and asked the box for its DevTools pipe. The stub box has
 /// none, so the card settles as Not filled with the reason, and the bot is told not to type
 /// a password; on a shared box the card is refused before anything is asked.
@@ -2186,13 +2392,24 @@ async fn a_passkey_card_asks_the_box_for_its_pipe_and_settles_honestly_without_o
         .await
         .expect("per-bot");
     let own = h.hire(&token, "Bea").await;
+    // The passkey is one the person shared with this Bot; its key is not in this harness's
+    // vault, which is the honest failure below.
+    let passkey = format!("sl_pk_{}", uuid::Uuid::now_v7().simple());
+    seed_login(
+        &h.store,
+        &h.account,
+        &passkey,
+        "passkey",
+        Some(own.as_str()),
+    )
+    .await;
     h.turn(&token, &own, "sign in").await;
     let card = h.wait_for_form(&own).await;
     let (status, body) = h
         .agui(
             &token,
             "/ag-ui/user-form/submit",
-            json!({ "entryId": card["id"].as_str().expect("id"), "agentId": own, "savedLoginId": "sl_missing", "values": {} }),
+            json!({ "entryId": card["id"].as_str().expect("id"), "agentId": own, "savedLoginId": passkey, "values": {} }),
         )
         .await;
     assert_eq!(status, 200, "{body}");

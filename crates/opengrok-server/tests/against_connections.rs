@@ -480,10 +480,11 @@ async fn a_disconnected_connection_can_be_connected_again() {
     let email = format!("again-{}@og.local", uuid::Uuid::now_v7().simple());
     let account = seed_account(&h.store, &email).await;
     let token = h.token(&account, &email);
-    let id = format!("conn_gmail_{}", account.as_str());
-
     let first = h.connect_through_the_browser(&token, "first").await;
     assert_eq!(first.status().as_u16(), 200);
+    let first_list = h.list(&token).await;
+    assert_eq!(first_list.as_array().unwrap().len(), 1);
+    let id = first_list[0]["id"].as_str().unwrap().to_string();
     let coworker = h.hire(&token).await;
     let lent = h
         .post(
@@ -501,7 +502,13 @@ async fn a_disconnected_connection_can_be_connected_again() {
     let said = again.text().await.expect("callback text");
     assert!(said.starts_with("gmail is connected"), "{said}");
     let listed = h.list(&token).await;
-    let kept = row(&listed, &id);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let new_id = listed[0]["id"].as_str().unwrap();
+    assert_ne!(
+        new_id, id,
+        "a new sign-in does not revive a removed account"
+    );
+    let kept = row(&listed, new_id);
     assert_eq!(
         kept["owner"],
         json!({ "scope": "user", "id": account.as_str() }),
@@ -511,7 +518,7 @@ async fn a_disconnected_connection_can_be_connected_again() {
     assert_eq!(kept["loans"], json!([]), "{kept}");
     assert_eq!(
         h.store
-            .open_credential(&h.vault, &id)
+            .open_credential(&h.vault, new_id)
             .await
             .expect("open the credential")
             .as_deref(),
@@ -621,8 +628,9 @@ async fn an_app_is_handed_the_sign_in_link_and_when_it_lapses() {
     assert_eq!(back.status().as_u16(), 200);
     let said = back.text().await.expect("callback text");
     assert!(said.starts_with("gmail is connected"), "{said}");
-    let id = format!("conn_gmail_{}", account.as_str());
     let listed = h.list(&token).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let id = listed[0]["id"].as_str().unwrap().to_string();
     assert_eq!(
         row(&listed, &id)["owner"],
         json!({ "scope": "user", "id": account.as_str() })
@@ -637,9 +645,331 @@ async fn an_app_is_handed_the_sign_in_link_and_when_it_lapses() {
     );
 }
 
+/// #359's public boundary: adding does not overwrite, reconnecting names one account, and
+/// disconnecting clears the Bot's pin rather than handing it a different account silently.
+#[tokio::test]
+async fn accounts_are_added_reconnected_and_pinned_by_id() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let email = format!("multiple-{}@og.local", uuid::Uuid::now_v7().simple());
+    let account = seed_account(&h.store, &email).await;
+    let token = h.token(&account, &email);
+    assert_eq!(
+        h.connect_through_the_browser(&token, "one").await.status(),
+        200
+    );
+    let first = h.list(&token).await[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        h.connect_through_the_browser(&token, "two").await.status(),
+        200
+    );
+    let listed = h.list(&token).await;
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    let second = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] != first)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(row(&listed, &first)["label"], "Gmail");
+    assert_eq!(row(&listed, &second)["label"], "Gmail 2");
+    let renamed = h
+        .client
+        .patch(format!("{}/connections/{first}", h.base))
+        .bearer_auth(&token)
+        .json(&json!({"label":" Work "}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(renamed.status(), 200);
+    assert_eq!(renamed.json::<Value>().await.unwrap()["label"], "Work");
+    let reconnect = h
+        .get(
+            &token,
+            &format!("/connections/{first}/reconnect?format=json"),
+        )
+        .await;
+    assert_eq!(reconnect.status(), 200);
+    let link = reconnect.json::<Value>().await.unwrap();
+    assert_eq!(
+        h.callback("renewed", &state_in(link["url"].as_str().unwrap()))
+            .await
+            .status(),
+        200
+    );
+    let listed = h.list(&token).await;
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    assert_eq!(row(&listed, &first)["label"], "Work");
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &second)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("token-for-two")
+    );
+    let bot = h.hire(&token).await;
+    let pin = h
+        .client
+        .put(format!("{}/coworkers/{bot}/pins/gmail", h.base))
+        .bearer_auth(&token)
+        .json(&json!({"connectionId":second}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        pin.status(),
+        422,
+        "an OAuth account cannot be pinned before it is lent"
+    );
+    let lent = h
+        .post(
+            &token,
+            &format!("/connections/{second}/lend"),
+            json!({"coworker_id":bot}),
+        )
+        .await;
+    assert_eq!(lent.status(), 200);
+    let pin = h
+        .client
+        .put(format!("{}/coworkers/{bot}/pins/gmail", h.base))
+        .bearer_auth(&token)
+        .json(&json!({"connectionId":second}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pin.status(), 200);
+    assert_eq!(pin.json::<Value>().await.unwrap()["connectionId"], second);
+    let pins = h
+        .get(&token, "/connections/pins")
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(
+        pins,
+        json!([{"coworkerId":bot,"connector":"gmail","connectionId":second}])
+    );
+    let (_, stranger) = h.account("stranger").await;
+    assert_eq!(
+        h.get(&stranger, "/connections/pins")
+            .await
+            .json::<Value>()
+            .await
+            .unwrap(),
+        json!([])
+    );
+    let denied = h
+        .client
+        .put(format!("{}/coworkers/{bot}/pins/gmail", h.base))
+        .bearer_auth(&stranger)
+        .json(&json!({"connectionId":second}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        denied.status(),
+        404,
+        "only the Bot owner may change its pin"
+    );
+    let denied = h
+        .client
+        .patch(format!("{}/connections/{first}", h.base))
+        .bearer_auth(&stranger)
+        .json(&json!({"label":"stolen"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 404);
+    assert_eq!(
+        h.get(
+            &stranger,
+            &format!("/connections/{first}/reconnect?format=json")
+        )
+        .await
+        .status(),
+        404
+    );
+    let invalid = h
+        .client
+        .put(format!("{}/coworkers/{bot}/pins/github", h.base))
+        .bearer_auth(&token)
+        .json(&json!({"connectionId":second}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), 422, "a pin cannot cross connectors");
+    let invalid = h
+        .client
+        .patch(format!("{}/connections/{first}", h.base))
+        .bearer_auth(&token)
+        .json(&json!({"label":"  "}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), 422);
+    let unpinned = h
+        .client
+        .delete(format!("{}/coworkers/{bot}/pins/gmail", h.base))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unpinned.status(), 204);
+    assert_eq!(
+        h.get(&token, "/connections/pins")
+            .await
+            .json::<Value>()
+            .await
+            .unwrap(),
+        json!([])
+    );
+    let pin = h
+        .client
+        .put(format!("{}/coworkers/{bot}/pins/gmail", h.base))
+        .bearer_auth(&token)
+        .json(&json!({"connectionId":second}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pin.status(), 200);
+    // A choice racing removal must not put the removed account back on the Bot. Either the
+    // choice commits first and removal clears it, or removal wins and the choice is unusable.
+    let choosing = h
+        .client
+        .put(format!("{}/coworkers/{bot}/pins/gmail", h.base))
+        .bearer_auth(&token)
+        .json(&json!({"connectionId":second}))
+        .send();
+    let (chosen, removed) = tokio::join!(choosing, h.disconnect(&token, &second));
+    assert!(matches!(chosen.unwrap().status().as_u16(), 200 | 422));
+    assert_eq!(removed.status(), 204);
+    assert_eq!(
+        h.get(&token, "/connections/pins")
+            .await
+            .json::<Value>()
+            .await
+            .unwrap(),
+        json!([])
+    );
+    assert_eq!(h.list(&token).await.as_array().unwrap().len(), 1);
+}
+
 /// Without `format=json` a browser is still sent on with a 307, to the place an app is handed:
 /// the same endpoint and parameters, and a state of its own (each attempt signs a fresh nonce)
 /// for the same person, connector and scope.
+#[tokio::test]
+async fn a_refused_sign_in_needs_auth_and_reopens_as_the_same_account() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let (_, token) = h.account("needs-auth").await;
+    let (_, stranger) = h.account("needs-auth-stranger").await;
+    let attempts = |token: String| {
+        let h = &h;
+        async move {
+            let res = h.get(&token, "/connections/attempts").await;
+            assert_eq!(res.status(), 200);
+            res.json::<Value>().await.unwrap()
+        }
+    };
+
+    // Adding an account starts a sign-in the person can see waiting, under its label.
+    let link = h
+        .get(&token, "/connections/gmail/authorize?format=json")
+        .await;
+    assert_eq!(link.status(), 200);
+    let first_state = state_in(link.json::<Value>().await.unwrap()["url"].as_str().unwrap());
+    let waiting = attempts(token.clone()).await;
+    assert_eq!(waiting.as_array().unwrap().len(), 1, "{waiting}");
+    let id = waiting[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(waiting[0]["status"], "pending");
+    assert_eq!(waiting[0]["label"], "Gmail");
+    assert_eq!(waiting[0]["connector"], "gmail");
+    assert_eq!(attempts(stranger.clone()).await, json!([]));
+
+    // The provider refuses: Needs Auth, saying why, and no account.
+    let refused = h
+        .client
+        .get(format!("{}/connections/callback", h.base))
+        .query(&[("error", "access_denied"), ("state", first_state.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 200);
+    let failed = attempts(token.clone()).await;
+    assert_eq!(failed[0]["id"], id.as_str());
+    assert_eq!(failed[0]["status"], "failed");
+    assert!(
+        failed[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("access_denied")
+    );
+    assert_eq!(h.list(&token).await, json!([]));
+
+    // Renamed while waiting, by the rule an account is renamed by.
+    let rename = |token: &str, label: &str| {
+        h.client
+            .patch(format!("{}/connections/attempts/{id}", h.base))
+            .bearer_auth(token)
+            .json(&json!({ "label": label }))
+            .send()
+    };
+    assert_eq!(rename(&stranger, "Mine").await.unwrap().status(), 404);
+    assert_eq!(rename(&token, "   ").await.unwrap().status(), 422);
+    let renamed = rename(&token, " Work ").await.unwrap();
+    assert_eq!(renamed.status(), 200);
+    assert_eq!(renamed.json::<Value>().await.unwrap()["label"], "Work");
+
+    // Reopen resumes THE SAME sign-in: pending again, one row, and a stranger cannot.
+    let reopen = format!("/connections/attempts/{id}/reopen?format=json");
+    assert_eq!(h.get(&stranger, &reopen).await.status(), 404);
+    let reopened = h.get(&token, &reopen).await;
+    assert_eq!(reopened.status(), 200);
+    let state = state_in(
+        reopened.json::<Value>().await.unwrap()["url"]
+            .as_str()
+            .unwrap(),
+    );
+    let waiting = attempts(token.clone()).await;
+    assert_eq!(waiting.as_array().unwrap().len(), 1, "{waiting}");
+    assert_eq!(waiting[0]["id"], id.as_str());
+    assert_eq!(waiting[0]["status"], "pending");
+    assert!(waiting[0]["error"].is_null());
+
+    // Signing in this time adds the account under the label the person gave it, and it no longer
+    // needs auth.
+    assert_eq!(h.callback("reopened", &state).await.status(), 200);
+    assert_eq!(attempts(token.clone()).await, json!([]));
+    let listed = h.list(&token).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["label"], "Work");
+
+    // A sign-in given up on is gone, and only its owner can give it up.
+    let link = h
+        .get(&token, "/connections/gmail/authorize?format=json")
+        .await;
+    assert_eq!(link.status(), 200);
+    let waiting = attempts(token.clone()).await;
+    let next = waiting[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        waiting[0]["label"], "Gmail",
+        "numbered past the live accounts' labels"
+    );
+    let dismiss = |token: &str| {
+        h.client
+            .delete(format!("{}/connections/attempts/{next}", h.base))
+            .bearer_auth(token)
+            .send()
+    };
+    assert_eq!(dismiss(&stranger).await.unwrap().status(), 404);
+    assert_eq!(dismiss(&token).await.unwrap().status(), 204);
+    assert_eq!(attempts(token.clone()).await, json!([]));
+}
+
 #[tokio::test]
 async fn without_format_json_a_browser_is_still_redirected_to_the_same_place() {
     let database_url = database_or_skip!();
