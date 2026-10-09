@@ -26,6 +26,12 @@ pub struct Model {
     /// `oag.alias_of`: the canonical id an `@sub`/`@api` entry is a channel of.
     pub alias_of: Option<String>,
     pub levels: Levels,
+    /// `oag.provider`: the upstream the gateway serves the row from (`anthropic`, `xai`, an
+    /// operator's endpoint, or `oag` for a virtual name). None on every opencodex row.
+    pub provider: Option<String>,
+    /// `oag.channel`: the kind of credential a pinned row is reached through, `api` or `sub`, and
+    /// None where the row pins none.
+    pub channel: Option<String>,
 }
 
 /// The levels a row publishes that a write takes (`Levels::of`), both `None` with none.
@@ -55,6 +61,8 @@ pub fn models(body: &Value) -> Vec<Model> {
             context_window: row.pointer("/oag/context_window").and_then(Value::as_u64),
             alias_of: alias_of.map(str::to_string),
             levels: Levels::of(row),
+            provider: word_at(row, "/oag/provider"),
+            channel: word_at(row, "/oag/channel"),
         })
     };
     rows.flatten().filter_map(row).collect()
@@ -102,6 +110,12 @@ impl Levels {
     }
 }
 
+/// The trimmed word at `pointer`, None when it is absent, not a string, or blank.
+fn word_at(row: &Value, pointer: &str) -> Option<String> {
+    let word = row.pointer(pointer)?.as_str()?.trim();
+    (!word.is_empty()).then(|| word.to_string())
+}
+
 fn word<'a>(object: &'a Value, key: &str) -> Option<&'a str> {
     let word = object.get(key)?.as_str()?.trim();
     (!word.is_empty()).then_some(word)
@@ -114,7 +128,7 @@ fn is_level(word: &str) -> bool {
 }
 
 impl Model {
-    /// This model as `GET /models` lists it, the wire agreed with NativeChat (3 Oct 2026): its
+    /// This model as `GET /models` lists it, the wire agreed with NativeChat (3 Oct 2026; `provider` and `channel` 9 Oct 2026): its
     /// `points`, the door that lists it and, on a person's own plan, the way it is reached; and its
     /// `efforts` and `ownEffort`, both null when its listing publishes none.
     pub fn entry(&self, points: Value, source: SourceKind, via: Option<Via>) -> Value {
@@ -123,6 +137,15 @@ impl Model {
                                 "efforts": efforts, "ownEffort": own });
         if let Some(via) = via {
             entry["via"] = Value::from(via.as_str());
+        }
+        // Where the gateway gets the model from, so a picker can group its rows by upstream and
+        // credential (open-ai-gateway's `oag.provider` and `oag.channel`). Left out, not null,
+        // where the listing names none, as the rows of a person's own plan never do.
+        if let Some(provider) = &self.provider {
+            entry["provider"] = Value::from(provider.as_str());
+        }
+        if let Some(channel) = &self.channel {
+            entry["channel"] = Value::from(channel.as_str());
         }
         entry
     }

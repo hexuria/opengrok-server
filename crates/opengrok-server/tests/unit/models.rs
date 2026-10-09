@@ -103,7 +103,7 @@ fn a_pin_finds_its_window_through_aliases_and_channels() {
         id: id.to_string(),
         context_window: window,
         alias_of: alias.map(str::to_string),
-        levels: Default::default(),
+        ..Default::default()
     };
     let models = vec![
         model("oag/auto", None, None),
