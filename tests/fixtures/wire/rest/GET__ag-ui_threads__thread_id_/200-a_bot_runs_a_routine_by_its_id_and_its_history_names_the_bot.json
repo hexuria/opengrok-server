@@ -78,7 +78,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "{\"runId\":\"run_0199bb4e-0000-7000-8000-000000000006\",\"threadId\":\"sched_0199bb4e-0000-7000-8000-000000000005\"}",
             "timestamp": 100,
-            "durationMs": 816,
+            "durationMs": 134,
             "toolCallId": "call-routine"
           },
           {
@@ -120,8 +120,8 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  7006,
-                  7073
+                  7216,
+                  7283
                 ]
               },
               "model_ms": [

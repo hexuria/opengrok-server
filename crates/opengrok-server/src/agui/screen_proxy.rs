@@ -33,18 +33,17 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::agui::AgUiState;
 use crate::auth::TokenMinter;
 pub use crate::seams::screen_tickets_due;
+use opengrok_box::viewer::{Dialled, loopback_port, socket_path, with_storage_shim};
 
 /// What a ticket is for; an access token (same key) never verifies as one, nor this as that.
 const PURPOSE: &str = "screen";
 /// A ticket lives between one and two of these.
 const WINDOW_SECONDS: i64 = 6 * 60 * 60;
-/// The most of the box's handshake reply that is read before giving up on it.
-const HEAD_LIMIT: usize = 16 * 1024;
 
 /// Each ticket's box, its noVNC port, the box's `Computer::generation` it was learned under and
 /// when, until the ticket expires: asking on each of a page's ~80 files and its websocket was 160
@@ -52,7 +51,9 @@ const HEAD_LIMIT: usize = 16 * 1024;
 /// is the box's only in that generation: a stop, start, rebuild or removal frees it for anything
 /// to take. Stamped once the check that found it has finished, never before, so one cut short
 /// leaves the next request to make its own.
-type Upstream = (String, u16, i64, Instant, u64);
+/// The last field is the websocket path on that port: a Bot's own screen is reached by its token
+/// (#376), the shared screen by the bare path.
+type Upstream = (String, u16, i64, Instant, u64, String);
 pub(crate) static UPSTREAMS: LazyLock<Mutex<HashMap<String, Upstream>>> =
     LazyLock::new(Mutex::default);
 
@@ -60,11 +61,18 @@ pub(crate) static UPSTREAMS: LazyLock<Mutex<HashMap<String, Upstream>>> =
 /// five queries) between checks; past it, the place and the port are both asked again.
 const PLACE_FOR: Duration = Duration::from_secs(5);
 
-fn remember(ticket: &str, box_id: &str, port: u16, until: i64, generation: u64) {
+fn remember(ticket: &str, box_id: &str, (port, path): (u16, &str), until: i64, generation: u64) {
     let now = chrono::Utc::now().timestamp();
     if let Ok(mut known) = UPSTREAMS.lock() {
         known.retain(|_, upstream| upstream.2 > now);
-        let upstream = (box_id.into(), port, until, Instant::now(), generation);
+        let upstream = (
+            box_id.into(),
+            port,
+            until,
+            Instant::now(),
+            generation,
+            path.into(),
+        );
         known.insert(ticket.into(), upstream);
     }
 }
@@ -155,18 +163,11 @@ pub fn proxied_page(
     ))
 }
 
-/// The loopback port a box's noVNC page is on. Anything that is not `http://127.0.0.1:<port>/…`
-/// is refused: this proxy only ever dials this host's own loopback.
-fn loopback_port(page: &str) -> Option<u16> {
-    let rest = page.strip_prefix("http://127.0.0.1:")?;
-    rest.split(['/', '?']).next()?.parse().ok()
-}
-
 /// The box behind a ticket, and its noVNC port — re-authorised now, not at mint time. The port
 /// is the remembered one while the box is in the generation it was learned in and its place was
 /// checked within `PLACE_FOR`; otherwise the place and the port are both asked again, the
 /// generation read first, so a stop or removal during the asking is seen by the next request.
-async fn upstream_for(state: &AgUiState, cw: &str, ticket: &str) -> Option<(u16, String)> {
+async fn upstream_for(state: &AgUiState, cw: &str, ticket: &str) -> Option<(u16, String, String)> {
     let claims: Ticket = state.auth.minter.verify_claims(ticket).ok()?;
     if claims.purpose != PURPOSE || claims.cw != cw {
         return None;
@@ -179,21 +180,24 @@ async fn upstream_for(state: &AgUiState, cw: &str, ticket: &str) -> Option<(u16,
     let docker = crate::agui::provision::provider_for(state, None, "local-docker").await?;
     let generation = docker.generation(&claims.bx);
     if let Ok(known) = UPSTREAMS.lock()
-        && let Some((_, port, _, checked, of)) = known.get(ticket)
+        && let Some((_, port, _, checked, of, path)) = known.get(ticket)
         && *of == generation
         && checked.elapsed() < PLACE_FOR
     {
-        return Some((*port, claims.bx));
+        return Some((*port, claims.bx, path.clone()));
     }
     let row = crate::agui::provision::scoped_box_row_for(state, &account, &coworker).await;
     let Some(row) = row.filter(|row| row.box_id == claims.bx && row.kind == "local-docker") else {
         forget_box(&claims.bx);
         return None;
     };
-    let page = docker.screen_url(&row.box_id).await.ok()??;
+    // The Bot's own screen when it was told to use one (#376), else the shared one.
+    let which = crate::agui::provision::screen_for(state, &account, coworker.as_str()).await;
+    let page = docker.screen_url(&row.box_id, &which).await.ok()??;
     let port = loopback_port(&page)?;
-    remember(ticket, &row.box_id, port, claims.exp, generation);
-    Some((port, row.box_id))
+    let path = socket_path(&page);
+    remember(ticket, &row.box_id, (port, &path), claims.exp, generation);
+    Some((port, row.box_id, path))
 }
 
 /// `GET /coworkers/{id}/computer/vnc/{ticket}/{*rest}` — noVNC's files, and its websocket.
@@ -209,11 +213,11 @@ pub async fn serve(
         .get(header::UPGRADE)
         .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"websocket"));
     for _ in 0..2 {
-        let Some((port, box_id)) = upstream_for(&state, &coworker_id, &ticket).await else {
+        let Some((port, box_id, path)) = upstream_for(&state, &coworker_id, &ticket).await else {
             return confined((StatusCode::NOT_FOUND, "no such screen").into_response());
         };
         if upgrade {
-            match tunnel(port, request).await {
+            match tunnel(port, &path, request).await {
                 Ok(response) => return response,
                 Err(unsent) => request = *unsent,
             }
@@ -290,40 +294,6 @@ async fn fetch(port: u16, rest: &str) -> Option<Response> {
     Some(response)
 }
 
-/// Put first in every page the box serves, because `confined` takes its storage away. noVNC
-/// before 1.5 (1.3.0 and 1.4.0 were tried) reads `localStorage` unguarded, and in an opaque origin
-/// that read throws: the page died before it dialled, and the pane stayed blank. An in-memory
-/// store stands in ONLY when the real one throws; settings then last as long as the page, which
-/// is all the pane needs, since `vncUrl` carries them. It widens nothing: the page could define
-/// the same object itself.
-const STORAGE_SHIM: &[u8] = b"<script>try{window.localStorage}catch(_){var m=new Map;\
-Object.defineProperty(window,'localStorage',{configurable:true,value:{\
-getItem:function(k){k=String(k);return m.has(k)?m.get(k):null},\
-setItem:function(k,v){m.set(String(k),String(v))},removeItem:function(k){m.delete(String(k))},\
-clear:function(){m.clear()},key:function(i){var a=Array.from(m.keys());return i<a.length?a[i]:null},\
-get length(){return m.size}}})}</script>";
-
-/// `page` with `STORAGE_SHIM` straight after its `<head>` tag, so it runs before any of the page's
-/// own scripts (noVNC's are modules, which wait for the parse anyway). No `<head>` at all: first.
-fn with_storage_shim(page: &[u8]) -> Vec<u8> {
-    let lower = page.to_ascii_lowercase();
-    let after_head = lower
-        .windows(6)
-        .position(|window| {
-            window.starts_with(b"<head")
-                && window
-                    .get(5)
-                    .is_some_and(|&byte| byte == b'>' || byte.is_ascii_whitespace())
-        })
-        .and_then(|start| {
-            let close = lower.get(start..)?.iter().position(|&byte| byte == b'>')?;
-            Some(start + close + 1)
-        })
-        .unwrap_or(0);
-    let (before, after) = page.split_at(after_head.min(page.len()));
-    [before, STORAGE_SHIM, after].concat()
-}
-
 /// Every answer on the proxy's path, the box's files included, as a page that cannot act as the
 /// person. Without this a box that replaced its noVNC (a shell command, a colleague's skill
 /// script, a prompt injection) ran script on THIS origin: `fetch('/coworkers', {credentials:
@@ -362,7 +332,7 @@ fn confined(mut response: Response) -> Response {
 /// REMADE: the box answers the key the browser sent, so its `Sec-WebSocket-Accept` is the one the
 /// browser checks, and the frames pass through untouched in both directions. `Err` hands the
 /// request back when nothing on `port` took the connection.
-async fn tunnel(port: u16, mut request: Request) -> Result<Response, Box<Request>> {
+async fn tunnel(port: u16, path: &str, mut request: Request) -> Result<Response, Box<Request>> {
     let refused = |why: &'static str| Ok((StatusCode::BAD_GATEWAY, why).into_response());
     let [key, protocol] = ["sec-websocket-key", "sec-websocket-protocol"].map(|name| {
         let value = request.headers().get(name)?.to_str().ok()?;
@@ -371,38 +341,12 @@ async fn tunnel(port: u16, mut request: Request) -> Result<Response, Box<Request
     let Some(key) = key else {
         return Ok((StatusCode::BAD_REQUEST, "not a websocket handshake").into_response());
     };
-    let Ok(mut upstream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
-        return Err(Box::new(request));
+    let opened = opengrok_box::viewer::open_socket(port, path, &key, protocol.as_deref()).await;
+    let (mut upstream, early, accept, chosen) = match opened {
+        Dialled::NoAnswer => return Err(Box::new(request)),
+        Dialled::Refused(why) => return refused(why),
+        Dialled::Open(open) => (open.upstream, open.early, open.accept, open.protocol),
     };
-    let mut hello = format!(
-        "GET /websockify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n\
-         Connection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n"
-    );
-    if let Some(protocol) = &protocol {
-        hello.push_str(&format!("Sec-WebSocket-Protocol: {protocol}\r\n"));
-    }
-    hello.push_str("\r\n");
-    if upstream.write_all(hello.as_bytes()).await.is_err() {
-        return refused(SILENT);
-    }
-    let Some((head, early)) = read_head(&mut upstream).await else {
-        return refused("the computer's screen did not answer the handshake");
-    };
-    if !head.starts_with("HTTP/1.1 101") {
-        return refused("the computer's screen refused the handshake");
-    }
-    let answered = |name: &str| {
-        head.lines().find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            key.trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| value.trim().to_string())
-        })
-    };
-    let Some(accept) = answered("sec-websocket-accept") else {
-        return refused("the computer's screen refused the handshake");
-    };
-    let chosen = answered("sec-websocket-protocol");
     let upgraded = hyper::upgrade::on(&mut request);
     tokio::spawn(async move {
         let Ok(upgraded) = upgraded.await else {
@@ -427,27 +371,6 @@ async fn tunnel(port: u16, mut request: Request) -> Result<Response, Box<Request
         |_| refused("the computer's screen refused the handshake"),
         Ok,
     )
-}
-
-/// The box's reply head, and whatever arrived after it in the same reads.
-async fn read_head(upstream: &mut tokio::net::TcpStream) -> Option<(String, Vec<u8>)> {
-    let mut seen = Vec::new();
-    let mut chunk = [0u8; 2048];
-    loop {
-        let waited = tokio::time::timeout(Duration::from_secs(10), upstream.read(&mut chunk));
-        let read = waited.await.ok()?.ok()?;
-        if read == 0 {
-            return None;
-        }
-        seen.extend_from_slice(chunk.get(..read)?);
-        if let Some(end) = seen.windows(4).position(|window| window == b"\r\n\r\n") {
-            let early = seen.split_off(end + 4);
-            return Some((String::from_utf8_lossy(&seen).into_owned(), early));
-        }
-        if seen.len() > HEAD_LIMIT {
-            return None;
-        }
-    }
 }
 
 #[cfg(test)]

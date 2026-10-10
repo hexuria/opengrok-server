@@ -169,7 +169,9 @@ async fn run_lifecycle(computer: &DockerComputer, box_id: &str) -> Result<(), St
             "a stop and a start must each move the generation: {generations:?}"
         ));
     }
-    let screen = computer.screen_url(box_id).await;
+    let screen = computer
+        .screen_url(box_id, &opengrok_box::Screen::Shared)
+        .await;
     if !matches!(screen, Ok(None)) || computer.offers_a_screen(box_id).await {
         return Err(format!("a headless box has no screen: {screen:?}"));
     }

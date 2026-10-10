@@ -536,7 +536,11 @@ fn with_offers(
     runner: ToolRunner,
     offers: Vec<SkillOffer>,
 ) -> ToolRunner {
-    let (state, who, target) = (state.clone(), account.clone(), runner.fill_target());
+    // A skill's files are read from the computer, whichever screen the Bot is on.
+    let target = runner
+        .fill_target()
+        .map(|(computer, box_id, _)| (computer, box_id));
+    let (state, who) = (state.clone(), account.clone());
     runner.with_skills(offers, Arc::new(Reader { state, who, target }))
 }
 

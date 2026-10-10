@@ -185,14 +185,12 @@ impl ToolRunner {
         }
     }
 
-    /// The live box to type into outside `computer_use`. `None` when this runner has no computer.
+    /// The live box to type into outside `computer_use`, on this Bot's screen; `None` without one.
     #[must_use]
-    pub fn fill_target(&self) -> Option<(std::sync::Arc<dyn opengrok_box::Computer>, String)> {
+    pub fn fill_target(&self) -> Option<opengrok_box::Target> {
         let (executor, context) = self.executor.as_ref()?;
-        Some((
-            executor.computer(),
-            context.box_id.as_ref()?.as_str().to_string(),
-        ))
+        let box_id = context.box_id.as_ref()?.as_str().to_string();
+        Some((executor.computer(), box_id, context.screen()))
     }
 
     /// Carry through what the person chose in the composer: a recipe, and the values they typed.

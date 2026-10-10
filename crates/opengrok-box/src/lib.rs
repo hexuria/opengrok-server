@@ -20,6 +20,7 @@ pub mod ascii;
 pub mod bundle;
 pub mod devtools;
 pub mod docker;
+pub mod viewer;
 
 pub use ascii::{AsciiBoxes, Client as AsciiClient};
 pub use docker::DockerComputer;
@@ -184,6 +185,41 @@ pub fn is_starting(state: &str) -> bool {
     )
 }
 
+/// Which of a computer's screens a call is for. Bots that share a computer share its one screen,
+/// browser and keyboard (`Shared`), unless one was told to use its own (#376): then it has a
+/// screen of its own on the same computer, with its own browser and profile (hexuria/box
+/// `box-screen`), named here by the Bot's id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum Screen {
+    #[default]
+    Shared,
+    Own(String),
+}
+
+impl Screen {
+    /// Its word on the wire (`GET /coworkers/{id}/computer`'s `screen`): `own` or `shared`.
+    #[must_use]
+    pub fn word(&self) -> &'static str {
+        if self.bot().is_some() {
+            "own"
+        } else {
+            "shared"
+        }
+    }
+
+    /// The Bot whose own screen this is; `None` for the shared one.
+    #[must_use]
+    pub fn bot(&self) -> Option<&str> {
+        match self {
+            Screen::Shared => None,
+            Screen::Own(bot) => Some(bot),
+        }
+    }
+}
+
+/// A computer, the box on it a Bot works in, and the screen of it the Bot uses: where a fill types.
+pub type Target = (std::sync::Arc<dyn Computer>, String, Screen);
+
 /// What kind of box has focus on the page in front of a computer's browser.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Focus {
@@ -317,7 +353,12 @@ pub trait Computer: Send + Sync {
 
     /// Chromium on a DevTools pipe this process holds (see [`devtools`]). Only a provider that
     /// can run the box's `box-chromium-pipe` offers it; the rest have no passkeys.
-    async fn devtools(&self, _box_id: &str, _url: &str) -> BoxResult<devtools::DevTools> {
+    async fn devtools(
+        &self,
+        _box_id: &str,
+        _screen: &Screen,
+        _url: &str,
+    ) -> BoxResult<devtools::DevTools> {
         Err(BoxError::Refused {
             status: 501,
             body: "this computer has no DevTools pipe".to_string(),
@@ -440,7 +481,7 @@ pub trait Computer: Send + Sync {
     /// `Ok(None)` when the box answered that no browser page is open, which is a fact a fill
     /// acts on; an error when it cannot say at all: no screen, or an image from before the
     /// report, which is the default.
-    async fn active_tab_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+    async fn active_tab_url(&self, _box_id: &str, _screen: &Screen) -> BoxResult<Option<String>> {
         Err(BoxError::Unreachable(
             "this computer does not say which page is in front".to_string(),
         ))
@@ -449,7 +490,7 @@ pub trait Computer: Send + Sync {
     /// What kind of box has focus on the page in front (hexuria/box `GET /v1/chrome/active-tab`,
     /// its `focus` and `seq`), asked before each value of a fill is typed. An error when the
     /// computer cannot say, which is the default.
-    async fn focused_field(&self, _box_id: &str) -> BoxResult<Focus> {
+    async fn focused_field(&self, _box_id: &str, _screen: &Screen) -> BoxResult<Focus> {
         Err(BoxError::Unreachable(
             "this computer does not say which box has focus".to_string(),
         ))
@@ -459,26 +500,37 @@ pub trait Computer: Send + Sync {
     /// is the default, because most of our computers are headless (shell + files, no desktop). A
     /// provider that can surface a graphical desktop (box.ascii.dev) overrides this; the client draws
     /// the screen when it is `Some`, and says "no screen" when it is `None`, so we never invent one.
-    async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+    async fn screen_url(&self, _box_id: &str, _screen: &Screen) -> BoxResult<Option<String>> {
         Ok(None)
     }
 
     /// The display as a PNG. Default: no screen, so a refusal the model can read.
-    async fn screenshot(&self, _box_id: &str) -> BoxResult<Screenshot> {
+    async fn screenshot(&self, _box_id: &str, _screen: &Screen) -> BoxResult<Screenshot> {
         Err(no_screen())
     }
 
     /// Click, type, press, scroll or drag on the display. Default: no screen.
-    async fn act(&self, _box_id: &str, _action: &CuaAction) -> BoxResult<()> {
+    async fn act(&self, _box_id: &str, _screen: &Screen, _action: &CuaAction) -> BoxResult<()> {
         Err(no_screen())
     }
 
     /// Open a page in the box's own browser. The desktop image ships `box-chromium`, which
     /// joins the running Chromium's profile; `start` is the detached exec every provider has.
-    async fn open_url(&self, box_id: &str, url: &str) -> BoxResult<()> {
+    /// A Bot's own screen is a provider's to start (the docker box's `box-screen`); one that
+    /// cannot says so.
+    async fn open_url(&self, box_id: &str, screen: &Screen, url: &str) -> BoxResult<()> {
+        if screen.bot().is_some() {
+            return Err(not_supported("give a Bot a screen of its own"));
+        }
         let quoted = url.replace('\'', "'\\''");
         self.start(box_id, &format!("box-chromium '{quoted}'"))
             .await?;
+        Ok(())
+    }
+
+    /// Stop a Bot's own screen (its browser, its display), keeping its profile for the next
+    /// time: it went back to the shared screen. Default: nothing to stop.
+    async fn close_screen(&self, _box_id: &str, _bot: &str) -> BoxResult<()> {
         Ok(())
     }
 
@@ -512,6 +564,7 @@ pub trait Computer: Send + Sync {
     async fn run_recipe(
         &self,
         _box_id: &str,
+        _screen: &Screen,
         _request: &serde_json::Value,
     ) -> BoxResult<serde_json::Value> {
         Err(no_screen())

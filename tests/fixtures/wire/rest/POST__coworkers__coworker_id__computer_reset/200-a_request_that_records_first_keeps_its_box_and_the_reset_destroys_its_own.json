@@ -9,6 +9,7 @@
     "boxId": "bx_gate_0199bb4e000070008000000000000002",
     "update": null,
     "image": null,
+    "screen": "shared",
     "isEgressTunnelAvailable": false,
     "shareScope": "user",
     "egressPolicy": "ask"

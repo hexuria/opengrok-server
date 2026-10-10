@@ -502,10 +502,12 @@ async fn run(
     {
         return refusal;
     }
+    let screen = crate::agui::provision::screen_for(&state, &account, coworker.as_str()).await;
     let walking = tokio::spawn(walk(Walked {
         store,
         provider,
         box_id,
+        screen,
         workflow_id: id.clone(),
         run_id: run_id.clone(),
         version: version.version,
@@ -529,6 +531,7 @@ struct Walked {
     store: opengrok_store::PgStore,
     provider: std::sync::Arc<dyn opengrok_box::Computer>,
     box_id: String,
+    screen: opengrok_box::Screen,
     workflow_id: String,
     run_id: String,
     version: i32,
@@ -550,6 +553,7 @@ async fn walk(walked: Walked) -> Response {
         store,
         provider,
         box_id,
+        screen,
         workflow_id: id,
         run_id,
         version,
@@ -574,6 +578,7 @@ async fn walk(walked: Walked) -> Response {
     let walker = Walker {
         computer: provider.as_ref(),
         box_id: &box_id,
+        screen: &screen,
         recipes: &recipes,
         coworker: &coworker,
         allowed: &allowed,

@@ -1344,7 +1344,8 @@ async fn play(run: Played) -> Response {
     let source = StoreRecipes {
         store: state.auth.store.clone(),
     };
-    let receipt = match provider.run_recipe(&box_id, &body).await {
+    let screen = crate::agui::provision::screen_for(&state, &account, coworker.as_str()).await;
+    let receipt = match provider.run_recipe(&box_id, &screen, &body).await {
         Ok(raw) => RecipeReceipt::from_value(raw),
         Err(error) => {
             // A box that would not answer still ends the row, as a failed run that says why,

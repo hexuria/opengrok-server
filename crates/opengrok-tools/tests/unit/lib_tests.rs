@@ -88,7 +88,12 @@ impl Computer for SpyComputer {
             timed_out: false,
         })
     }
-    async fn run_recipe(&self, box_id: &str, request: &Value) -> BoxResult<Value> {
+    async fn run_recipe(
+        &self,
+        box_id: &str,
+        _screen: &opengrok_box::Screen,
+        request: &Value,
+    ) -> BoxResult<Value> {
         if let Ok(mut calls) = self.ran_on.lock() {
             calls.push((box_id.to_string(), format!("recipe:{request}")));
         }
@@ -651,6 +656,7 @@ fn without_a_computer_the_models_box_id_is_removed_not_kept() {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        screen: Default::default(),
     };
     let overwritten = overwrite_identity(&json!({"box_id": "box_elsewhere"}), &context);
     assert!(
@@ -669,6 +675,7 @@ async fn a_coworker_without_a_computer_is_refused_not_crashed() {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        screen: Default::default(),
     };
     let result = executor
         .execute(&context, &call("shell", json!({"command": "ls"})))
@@ -1345,6 +1352,7 @@ fn no_box_context() -> ToolContext {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        screen: Default::default(),
     }
 }
 

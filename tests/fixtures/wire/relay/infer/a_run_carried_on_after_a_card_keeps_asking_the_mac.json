@@ -603,6 +603,25 @@
       {
         "type": "function",
         "function": {
+          "name": "use_own_screen",
+          "description": "Switch THIS BOT to a screen of its own on the computer it shares with the person's other Bots (own: true), or back to the shared screen (own: false). On its own screen it has its own browser, signed in to nothing until it signs in, and what it does there is not on the other Bots' screen. The choice stays until it is switched back. A Bot with a computer of its own already has its own screen.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "own": {
+                "type": "boolean",
+                "description": "true: its own screen; false: back to the shared screen."
+              }
+            },
+            "required": [
+              "own"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
           "name": "reset_computer",
           "description": "Reset THIS BOT'S OWN computer to a fresh one: everything on it is deleted for good. It always asks the person first.",
           "parameters": {

@@ -100,6 +100,7 @@ pub const TOOL_GROUPS: &[(&str, &[&str])] = &[
             "start_computer",
             "shutdown_computer",
             "restart_computer",
+            "use_own_screen",
             "reset_computer",
             "update_computer",
             "set_network",

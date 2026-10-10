@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/computer/screen",
+  "status": 409,
+  "body": {
+    "error": "this Bot has a computer of its own, so its screen is already its own"
+  }
+}
