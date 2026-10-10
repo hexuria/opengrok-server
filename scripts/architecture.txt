@@ -23,6 +23,8 @@ opengrok-recipes:
     | tokio axum sqlx reqwest hyper
 opengrok-forms: opengrok-box
     | axum sqlx
+opengrok-office:
+    | tokio axum sqlx reqwest hyper
 opengrok-gateway-admin:
     | axum sqlx
 opengrok-jev:
