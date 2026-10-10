@@ -194,12 +194,22 @@ pub async fn submit_user_form(
     // an empty holder is, for a site that offers to make one), and the bot is told to click.
     let passkey_card = form.challenge_kind.as_deref() == Some("passkey");
     if (saved_login || passkey_card)
-        && !fills_a_dedicated_box(state, account_id, &coworker_id).await
+        && !fills_a_dedicated_box(state, account_id, &coworker_id, passkey_card).await
     {
         // The card stays open: the person may still type by hand, or dismiss.
         return (
             403,
             json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
+        );
+    }
+    // A saved login names the login its values came from: its shares and the site it was saved
+    // for are read from it. NativeChat always names it; a fill that does not is refused, as
+    // neither could be checked.
+    let named_login = args.get("savedLoginId").and_then(Value::as_str);
+    if saved_login && !passkey_card && named_login.is_none_or(str::is_empty) {
+        return (
+            400,
+            json!({ "error": "bad_request", "message": "a saved login names the login it is" }),
         );
     }
     // A saved login fills only for a Bot it is shared with (8 Oct 2026). The fill names its
@@ -267,7 +277,7 @@ pub async fn submit_user_form(
         let content = opengrok_tools::user_form::collection_tool_result(&form, &shared);
         (Vec::new(), FormResolution::Submitted, content)
     } else {
-        let filled = fill_on_box(state, account_id, &coworker_id, &form, &values, saved_login);
+        let filled = fill_on_box(state, account_id, &coworker_id, &form, &values, named_login);
         let outcomes = match filled.await {
             Ok(outcomes) => outcomes,
             // The card stays open: the person can bring the page back to the front, or type.
@@ -947,10 +957,37 @@ async fn fills_a_dedicated_box(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
+    passkey: bool,
 ) -> bool {
-    saved_login_refusal(&state.agui, account_id, coworker_id)
+    let refused = if passkey {
+        passkey_refusal(&state.agui, account_id, coworker_id).await
+    } else {
+        saved_login_refusal(&state.agui, account_id, coworker_id).await
+    };
+    refused.is_none()
+}
+
+/// A passkey card lands only on a computer that is one Bot's own, whatever the "share my
+/// logins with all my Bots" switch says. Readying one with no DevTools pipe restarts the
+/// computer's browser (`passkeys`), which on a computer the person's Bots share closes every
+/// other Bot's tabs, and a passkey made there would be the shared browser's.
+async fn passkey_refusal(
+    agui: &super::routes::AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+) -> Option<&'static str> {
+    let private = agui
+        .auth
+        .store
+        .coworker_is_private_and_owned_by(account_id, coworker_id)
         .await
-        .is_none()
+        .unwrap_or(false);
+    if !private {
+        return Some(SHARED_BOT);
+    }
+    let (_, _, _, _, mode) =
+        super::provision::scope_of(agui, account_id, coworker_id.as_str()).await;
+    (mode != opengrok_core::coworker::BoxMode::Dedicated).then_some(SHARED_COMPUTER)
 }
 
 /// Why a saved login cannot be used for this coworker, or `None` when it can: `shared-computer`
@@ -1219,7 +1256,7 @@ async fn fill_on_box(
     coworker_id: &CoworkerId,
     form: &FormRequest,
     values: &BTreeMap<String, String>,
-    saved_login: bool,
+    saved_login: Option<&str>,
 ) -> Result<Vec<FieldOutcome>, String> {
     let failed = || Ok(nothing_filled(form));
     let Some(runner) = crate::agui::routes::tools_for_coworker(
@@ -1254,14 +1291,49 @@ async fn fill_on_box(
     }
     // It types into the page in front, which on a shared computer another Bot may have changed
     // (9 Oct 2026). A box that cannot say is refused only for a saved login on a shared one.
-    let front = computer.active_tab_url(&box_id).await.ok().flatten();
+    let front = computer.active_tab_url(&box_id).await;
+    let front = match &front {
+        Ok(Some(url)) => front_page::Front::Page(url),
+        Ok(None) => front_page::Front::NoBrowser,
+        Err(_) => front_page::Front::Unknown,
+    };
+    // A saved login is checked against the site it was saved for. The card's `liveHost` and
+    // `domain` are the model's words, and a card that named a look-alike page would otherwise
+    // pass it, and type the person's password into it.
+    let site = match saved_login {
+        Some(login_id) => match saved_login_site(state, account_id, login_id).await {
+            Ok(site) => site,
+            Err(why) => return Err(why),
+        },
+        None => front_page::card_site(form),
+    };
     let (_, _, _, _, mode) =
         super::provision::scope_of(&state.agui, account_id, coworker_id.as_str()).await;
-    let unknown_refuses = saved_login && mode != opengrok_core::coworker::BoxMode::Dedicated;
-    if let Some(why) = front_page::front_page_refusal(form, front.as_deref(), unknown_refuses) {
+    let unknown_refuses =
+        saved_login.is_some() && mode != opengrok_core::coworker::BoxMode::Dedicated;
+    if let Some(why) = front_page::front_page_refusal(site.as_deref(), front, unknown_refuses) {
         return Err(why);
     }
     Ok(fill_into_focus(computer.as_ref(), &box_id, form, values).await)
+}
+
+/// The site the person's saved login `login_id` was saved for, as a host; `None` when its origin
+/// names none. A login of another account's, or one that is gone, is refused.
+async fn saved_login_site(
+    state: &HostState,
+    account_id: &AccountId,
+    login_id: &str,
+) -> Result<Option<String>, String> {
+    let logins = state.agui.auth.store.site_logins(account_id).await;
+    let logins = logins.map_err(|error| {
+        tracing::error!(%error, "a saved login's site could not be read");
+        "Your saved login could not be read, so nothing was typed; try again in a moment."
+            .to_string()
+    })?;
+    let login = logins.into_iter().find(|login| login.id == login_id);
+    let login =
+        login.ok_or_else(|| "That saved login is gone, so nothing was typed.".to_string())?;
+    Ok(front_page::origin_site(&login.origin))
 }
 
 /// Every field of the form, not typed.

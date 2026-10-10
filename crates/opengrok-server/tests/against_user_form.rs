@@ -56,7 +56,8 @@ struct FillStub {
     /// How long the guest takes to answer `/v1/info`, and how often it was asked.
     egress_takes: Mutex<std::time::Duration>,
     egress_asked: Mutex<u32>,
-    /// The page the box reports in front of its browser; `None` is a box that cannot say.
+    /// The page the box reports in front of its browser; `None` is a box that cannot say, and
+    /// an empty page one that says no browser page is open.
     front: Mutex<Option<String>>,
 }
 
@@ -143,7 +144,11 @@ impl Computer for FillStub {
         Ok(Some("http://vnc.invalid".to_string()))
     }
     async fn active_tab_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
-        Ok(self.front.lock().expect("front").clone())
+        match self.front.lock().expect("front").clone() {
+            None => Err(opengrok_box::BoxError::Unreachable("cannot say".into())),
+            Some(url) if url.is_empty() => Ok(None),
+            Some(url) => Ok(Some(url)),
+        }
     }
     async fn screenshot(&self, _box_id: &str) -> BoxResult<Screenshot> {
         *self.shots.lock().expect("shots") += 1;
@@ -218,14 +223,27 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 /// vault, and a fill's values come from the card, so no sealed secret is needed. Shared with
 /// `bot` when one is named.
 async fn seed_login(store: &PgStore, owner: &AccountId, id: &str, kind: &str, bot: Option<&str>) {
+    seed_login_at(store, owner, id, kind, bot, "example.com").await;
+}
+
+/// A saved login kept for `origin`, the site a fill of it must be on.
+async fn seed_login_at(
+    store: &PgStore,
+    owner: &AccountId,
+    id: &str,
+    kind: &str,
+    bot: Option<&str>,
+    origin: &str,
+) {
     sqlx::query(
         "insert into site_login (id, account_id, origin, username, kind, created_at_ms, updated_at_ms)
-         values ($1, $2, 'example.com', $3, $4, 1, 1)",
+         values ($1, $2, $5, $3, $4, 1, 1)",
     )
     .bind(id)
     .bind(owner.as_str())
     .bind(format!("{id}@example.com"))
     .bind(kind)
+    .bind(origin)
     .execute(store.pool())
     .await
     .expect("seed a login");
@@ -2085,6 +2103,9 @@ async fn a_saved_login_fills_only_a_dedicated_box() {
         .await
         .expect("per-bot");
     let own = h.hire(&token, "Bea").await;
+    // NativeChat names the saved login it fills from; this one is shared with Bea.
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    seed_login(&h.store, &h.account, &login, "password", Some(own.as_str())).await;
     h.turn(&token, &own, "sign in").await;
     let card = h.wait_for_form(&own).await;
     let (status, body) = h
@@ -2095,6 +2116,7 @@ async fn a_saved_login_fills_only_a_dedicated_box() {
                 "entryId": card["id"].as_str().expect("entry id"),
                 "agentId": own,
                 "savedLogin": true,
+                "savedLoginId": login,
                 "values": { "email": EMAIL, "password": SECRET }
             }),
         )
@@ -2217,6 +2239,16 @@ async fn a_saved_login_is_checked_before_touch_id_and_one_bot_can_get_its_own_co
         "the account's other Bots still share: {body}"
     );
 
+    // NativeChat names the saved login it fills from; this one is shared with Ada.
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    seed_login(
+        &h.store,
+        &h.account,
+        &login,
+        "password",
+        Some(agent.as_str()),
+    )
+    .await;
     h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let (status, body) = h
@@ -2227,6 +2259,7 @@ async fn a_saved_login_is_checked_before_touch_id_and_one_bot_can_get_its_own_co
                 "entryId": card["id"].as_str().expect("entry id"),
                 "agentId": agent,
                 "savedLogin": true,
+                "savedLoginId": login,
                 "values": { "email": EMAIL, "password": SECRET }
             }),
         )
@@ -2350,7 +2383,12 @@ async fn a_saved_login_fills_only_for_a_bot_it_is_shared_with() {
 async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
     let database_url = database_or_skip!();
     let email = format!("user-form-all-{}@og.local", uuid::Uuid::now_v7().simple());
-    let h = harness_with_door(&database_url, &email, Arc::new(SiteLoginDoor)).await;
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(SiteLoginDoor("www.facebook.com")),
+    )
+    .await;
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Ada").await;
     let call = |method: reqwest::Method, path: String, body: Option<Value>| {
@@ -2382,7 +2420,8 @@ async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
         )
     };
     let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
-    seed_login(&h.store, &h.account, &login, "password", None).await;
+    let origin = "https://www.facebook.com";
+    seed_login_at(&h.store, &h.account, &login, "password", None, origin).await;
 
     let (_, body) = call(reqwest::Method::GET, "/site-logins/sharing".into(), None).await;
     assert_eq!(
@@ -2438,7 +2477,29 @@ async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
         .agui(&token, "/ag-ui/user-form/submit", fill.clone())
         .await;
     assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "wrong-page", "{body}");
     assert!(h.stub.acts().is_empty(), "nothing typed blind");
+    // No browser page open: the keys would go to whatever else has focus.
+    *h.stub.front.lock().expect("front") = Some(String::new());
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "wrong-page", "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing typed into a terminal");
+    // A saved login fill that does not name its login is refused: its site cannot be read.
+    let mut unnamed = fill.clone();
+    unnamed
+        .as_object_mut()
+        .expect("a body")
+        .remove("savedLoginId");
+    *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
+    let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", unnamed).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        h.stub.acts().is_empty(),
+        "nothing typed for an unnamed login"
+    );
     // The login's own site in front: the card, still open, fills.
     *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
     let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
@@ -2458,8 +2519,70 @@ async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
     assert_eq!(body["reason"], "shared-bot", "{body}");
 }
 
-/// Asks once for a facebook.com login that names its site, then answers.
-struct SiteLoginDoor;
+/// A saved login is typed only on the site it was saved for. The card's `liveHost` is the
+/// model's word: a card for a Facebook login that names a look-alike page, with that page in
+/// front, used to pass the check and get the person's Facebook password typed into it.
+#[tokio::test]
+async fn a_saved_login_is_typed_only_on_the_site_it_was_saved_for() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-site-{}@og.local", uuid::Uuid::now_v7().simple());
+    let door = Arc::new(SiteLoginDoor("fb.evil.example"));
+    let h = harness_with_door(&database_url, &email, door).await;
+    let token = h.access_token(&email);
+    h.store
+        .set_sharing_mode("account", h.account.as_str(), "per-bot", 1)
+        .await
+        .expect("per-bot");
+    let agent = h.hire(&token, "Ada").await;
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    let origin = "https://www.facebook.com";
+    seed_login_at(
+        &h.store,
+        &h.account,
+        &login,
+        "password",
+        Some(agent.as_str()),
+        origin,
+    )
+    .await;
+    h.turn(&token, &agent, "sign in").await;
+    let card = h.wait_for_form(&agent).await;
+    let fill = json!({
+        "entryId": card["id"].as_str().expect("entry id"),
+        "agentId": agent,
+        "savedLogin": true,
+        "savedLoginId": login,
+        "values": { "email": EMAIL, "password": SECRET }
+    });
+
+    *h.stub.front.lock().expect("front") = Some("https://fb.evil.example/login".into());
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "wrong-page", "{body}");
+    assert!(
+        h.stub.acts().is_empty(),
+        "nothing typed into the look-alike"
+    );
+
+    // No browser page open, on the Bot's own computer: the keys would go to a terminal.
+    *h.stub.front.lock().expect("front") = Some(String::new());
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing typed with no page open");
+
+    // The login's own site in front: it fills, whatever host the card named.
+    *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
+    let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+}
+
+/// Asks once for a login whose card names `.0` as its site, then answers.
+struct SiteLoginDoor(&'static str);
 
 #[async_trait]
 impl ModelDoor for SiteLoginDoor {
@@ -2485,7 +2608,7 @@ impl ModelDoor for SiteLoginDoor {
                             {"id": "email", "label": "Email", "type": "email", "required": true},
                             {"id": "password", "label": "Password", "type": "password", "required": true}
                         ],
-                        "liveHost": "www.facebook.com"
+                        "liveHost": self.0
                     })
                     .to_string(),
                 },
@@ -2544,6 +2667,27 @@ async fn a_passkey_card_asks_the_box_for_its_pipe_and_settles_honestly_without_o
         )
         .await;
     assert_eq!(status, 403, "{body}");
+    // Sharing logins with all the person's Bots does not bring passkeys to that computer:
+    // readying one there restarts the browser every Bot on it is using.
+    let res = h
+        .client
+        .put(format!("{}/site-logins/sharing", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "allBots": true }))
+        .send()
+        .await
+        .expect("switch");
+    assert_eq!(res.status().as_u16(), 200);
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({ "entryId": card["id"].as_str().expect("id"), "agentId": shared, "savedLoginId": "sl_x", "values": {} }),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "shared-computer", "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing done for the passkey");
 
     // Own box: the pipe is asked for; the stub has none; the card says so.
     h.store
@@ -2662,6 +2806,16 @@ async fn collect_saved_login_never_reaches_first_resumed_model_request() {
         .expect("per-bot");
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Collect").await;
+    // NativeChat names the saved login it fills from; this one is shared with the Bot.
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    seed_login(
+        &h.store,
+        &h.account,
+        &login,
+        "password",
+        Some(agent.as_str()),
+    )
+    .await;
     h.turn(&token, &agent, "collect answers").await;
     let card = h.wait_for_form(&agent).await;
     let (status, body) = h
@@ -2670,6 +2824,7 @@ async fn collect_saved_login_never_reaches_first_resumed_model_request() {
             "/ag-ui/user-form/submit",
             json!({
                 "entryId": card["id"], "agentId": agent, "savedLogin": true,
+                "savedLoginId": login,
                 "values": {"email": EMAIL, "password": SECRET}
             }),
         )

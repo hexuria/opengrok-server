@@ -425,10 +425,14 @@ pub trait Computer: Send + Sync {
     }
 
     /// The URL of the page in front of the box's browser, as the box's own extension reports it
-    /// (hexuria/box `GET /v1/chrome/active-tab`). `None` when the box cannot say: no screen, no
-    /// browser, or an image from before the report. Asked before a fill types into the page.
+    /// (hexuria/box `GET /v1/chrome/active-tab`), asked before a fill types into the page.
+    /// `Ok(None)` when the box answered that no browser page is open, which is a fact a fill
+    /// acts on; an error when it cannot say at all: no screen, or an image from before the
+    /// report, which is the default.
     async fn active_tab_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
-        Ok(None)
+        Err(BoxError::Unreachable(
+            "this computer does not say which page is in front".to_string(),
+        ))
     }
 
     /// A URL a person can open to SEE this box's screen (noVNC), or `None` when it has none — which
