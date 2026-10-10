@@ -285,14 +285,11 @@ impl Client {
         bytes: &[u8],
     ) -> BoxResult<FileWritten> {
         use base64::Engine;
-        self.send(
-            self.put(&format!("/boxes/{box_id}/files"))
-                .json(&json!({
-                    "path": path,
-                    "content": base64::engine::general_purpose::STANDARD.encode(bytes),
-                    "encoding": "base64",
-                })),
-        )
+        self.send(self.put(&format!("/boxes/{box_id}/files")).json(&json!({
+            "path": path,
+            "content": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "encoding": "base64",
+        })))
         .await
     }
 

@@ -87,6 +87,19 @@ impl ToolRunner {
         self
     }
 
+    /// Stamp the turn's thread and run onto the context, so a tool that leaves an artifact
+    /// (`office_export`) attaches it where this thread's reply will draw it. The run door is
+    /// where those ids exist; a runner built elsewhere (a listing, a form) leaves them `None`
+    /// and the artifact is simply unattached.
+    #[must_use]
+    pub fn with_turn(mut self, thread_id: &str, run_id: &str) -> Self {
+        if let Some((_, context)) = self.executor.as_mut() {
+            context.thread_id = Some(thread_id.to_string());
+            context.run_id = Some(run_id.to_string());
+        }
+        self
+    }
+
     /// The skills `use_skill` reads this turn, as a run captures them: its resumes offer these.
     pub fn offered_skills(&self) -> Vec<opengrok_core::run::OfferedSkill> {
         let offers = self.skills.iter().flat_map(|(offers, _)| offers);
@@ -292,6 +305,7 @@ impl ToolRunner {
                 awaiting_approval: false,
                 awaiting_reason: None,
                 stopped_part_way: false,
+                customs: Vec::new(),
             },
         }
     }

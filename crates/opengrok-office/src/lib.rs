@@ -10,11 +10,22 @@
 //! itself (opengrok-tools' executor). Keeping the engine I/O-free is what lets a render run
 //! under the executor without touching the network.
 
+mod create;
+mod edit;
 mod error;
 mod fonts;
 mod kind;
+mod ops;
+mod proposals;
 mod session;
 
+pub use create::{
+    DocxCreate, DocxParagraph, DocxStyle, PptxCreate, PptxSlide, XlsxCreate, create_bytes,
+};
+pub use edit::{CellEditInput, MAX_CHANGES, TextEditInput};
 pub use error::Error;
 pub use kind::Kind;
+pub use proposals::{
+    Change, Proposal, ProposalStatus, decode_match, encode_match, utf16_len, utf16_slice,
+};
 pub use session::{RenderedImage, Session};

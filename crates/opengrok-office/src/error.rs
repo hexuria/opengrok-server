@@ -27,4 +27,9 @@ pub enum Error {
     /// can reason about rather than killing the call.
     #[error("refused: {0}")]
     Refused(String),
+
+    /// A proposal apply found targets that no longer read their staged `old` text. Its own
+    /// variant because the answer is specific — re-grep and re-propose — not generic failure.
+    #[error("stale targets, re-read and re-propose: {}", .0.join(", "))]
+    StaleTargets(Vec<String>),
 }

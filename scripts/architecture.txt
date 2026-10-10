@@ -49,7 +49,7 @@ opengrok-integrations: opengrok-core opengrok-plugins opengrok-policy opengrok-s
     | axum
 opengrok-plugin-api: opengrok-core opengrok-integrations opengrok-store
     |
-opengrok-server: opengrok-plugin-api opengrok-integrations opengrok-box opengrok-core opengrok-auth opengrok-gateway-admin opengrok-harness opengrok-jev opengrok-local-exec opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
+opengrok-server: opengrok-plugin-api opengrok-integrations opengrok-box opengrok-core opengrok-auth opengrok-gateway-admin opengrok-harness opengrok-jev opengrok-local-exec opengrok-office opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
     |
 opengrok: opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-server opengrok-store
     |

@@ -42,6 +42,8 @@ pub mod computer_desk;
 pub mod local_exec;
 pub mod mcp_door;
 pub mod models;
+pub mod office_desk;
+pub mod office_routes;
 pub mod pairs;
 pub mod persona;
 pub mod plugin_desk;
@@ -98,6 +100,7 @@ pub fn router(mut state: AgUiState, host: host_state::HostState) -> Router {
         .merge(workflows::router(state.clone()))
         .merge(skills::router(state.clone()))
         .merge(artifacts::router(state.clone()))
+        .merge(office_routes::router(state.clone()))
         .merge(plugin_registry::router(state.clone()));
     #[cfg(feature = "jev")]
     let app = app.merge(jev::routes::router(state.clone()));

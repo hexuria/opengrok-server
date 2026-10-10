@@ -33,6 +33,7 @@ pub use mcp::{Endpoint, McpError, McpTool, openai_safe_tool_name};
 pub use opengrok_recipes::observe;
 pub use opengrok_recipes::{Observe, Seen};
 pub mod computer_desk;
+pub mod office_desk;
 pub mod plugin_desk;
 pub mod routine;
 pub mod skill;
@@ -77,6 +78,12 @@ pub struct ToolContext {
     /// was told to use one. One cell for every copy of the context a turn makes, so a switch
     /// (`use_own_screen`) is where the turn's next screen action lands.
     pub screen: Arc<std::sync::Mutex<Screen>>,
+    /// The thread this turn is spoken in — an office export's artifact is attached under it so
+    /// the transcript can draw the file the bot delivered. `None` where no thread scopes the
+    /// call (a desk answering a route, a test).
+    pub thread_id: Option<String>,
+    /// The run this turn is, for the artifact's `run_id`. Same caveat as `thread_id`.
+    pub run_id: Option<String>,
 }
 
 /// The shared computer of the group a turn is spoken in.
@@ -99,6 +106,8 @@ impl ToolContext {
             screen_hold: false,
             screen_held_in: None,
             screen: Arc::default(),
+            thread_id: None,
+            run_id: None,
         }
     }
 
@@ -163,6 +172,11 @@ pub struct ToolResult {
     /// the wire's: never serialized.
     #[serde(skip)]
     pub stopped_part_way: bool,
+    /// CUSTOM frames a tool's answer should put on the stream beside the result — the office
+    /// tools' `opengrok.officeDoc` document-changed notices. The loop's, not the model's: never
+    /// serialized into the result the model reads.
+    #[serde(skip)]
+    pub customs: Vec<(String, Value)>,
 }
 
 /// Where a tool-result image may be shown. Rides `TOOL_CALL_RESULT.image.visibility`.
@@ -233,6 +247,7 @@ impl ToolResult {
             awaiting_reason: None,
             image: None,
             stopped_part_way: false,
+            customs: Vec::new(),
         }
     }
 
@@ -253,6 +268,7 @@ impl ToolResult {
             awaiting_reason: Some(reason),
             image: None,
             stopped_part_way: false,
+            customs: Vec::new(),
         }
     }
 
@@ -266,6 +282,7 @@ impl ToolResult {
             awaiting_reason: None,
             image: None,
             stopped_part_way: false,
+            customs: Vec::new(),
         }
     }
 
@@ -678,7 +695,7 @@ fn needs_the_box(tool_name: &str) -> bool {
     matches!(
         tool_name,
         RUN_RECIPE | "shell" | "read_file" | "write_file" | "open_url" | "computer"
-    )
+    ) || (office_desk::is_office_tool(tool_name) && tool_name != office_desk::OFFICE_CLOSE)
 }
 
 /// Which box a call targets: the room's shared one when `machine` is `group`, else the
@@ -781,6 +798,9 @@ pub struct Executor {
     /// This Bot's own computer (7 Oct 2026), through the desk the Computer pane's routes use.
     /// `None` offers none.
     computer_desk: Option<Arc<dyn computer_desk::ComputerDesk>>,
+    /// The office documents on it, through the desk `doc_session` rows and box bytes answer.
+    /// `None` offers none.
+    office_desk: Option<Arc<dyn office_desk::OfficeDesk>>,
     /// A switched-on plugin's tools the person switched off for this Bot (`with_switched_off`).
     switched_off: Vec<crate::mcp::McpTool>,
     /// A Bot with no computer that still has plugin tools (`without_a_computer`): no built-in is
@@ -974,6 +994,7 @@ impl Executor {
             routines: None,
             plugin_desk: None,
             computer_desk: None,
+            office_desk: None,
             switched_off: Vec::new(),
             boxless: false,
         }
@@ -1023,6 +1044,24 @@ impl Executor {
         self
     }
 
+    /// Offer the office tools over `desk` — only ever attached where a box is, since every
+    /// verb but `office_close` reads or writes box bytes.
+    #[must_use]
+    pub fn with_office_desk(mut self, desk: Arc<dyn office_desk::OfficeDesk>) -> Self {
+        self.office_desk = Some(desk);
+        self
+    }
+
+    /// The office tools this run is offered: all of them with a desk, none without.
+    fn office_desk_tools(&self) -> impl Iterator<Item = &'static str> + '_ {
+        let take = if self.office_desk.is_some() {
+            office_desk::TOOLS.len()
+        } else {
+            0
+        };
+        office_desk::TOOLS.into_iter().take(take)
+    }
+
     /// The computer tools this run is offered: all of them with a desk, none without.
     fn computer_desk_tools(&self) -> impl Iterator<Item = &'static str> + '_ {
         let take = if self.computer_desk.is_some() {
@@ -1052,6 +1091,7 @@ impl Executor {
         self.plugin_desk = None;
         // Nor a computer tool: nobody is watching to answer a reset's card.
         self.computer_desk = None;
+        self.office_desk = None;
         self
     }
 
@@ -1641,6 +1681,7 @@ impl Executor {
             .chain(self.routine_tools().map(str::to_string))
             .chain(self.plugin_desk_tools().map(str::to_string))
             .chain(self.computer_desk_tools().map(str::to_string))
+            .chain(self.office_desk_tools().map(str::to_string))
             .chain(
                 self.plugin_tools
                     .iter()
@@ -1668,6 +1709,7 @@ impl Executor {
             .chain(routine::TOOLS)
             .chain(plugin_desk::TOOLS)
             .chain(computer_desk::TOOLS)
+            .chain(office_desk::TOOLS)
     }
 
     /// What a person reads about a built-in tool or tool group, beside what the model reads
@@ -1741,6 +1783,50 @@ impl Executor {
                 "Set network",
                 "Sets what the Bot's computer may reach on your network.",
             ),
+            office_desk::ROW => (office_desk::ROW_LABEL, office_desk::ROW_DESCRIPTION),
+            office_desk::OFFICE_FILES => (
+                "Browse documents",
+                "Lists the .docx, .xlsx and .pptx files on the Bot's computer.",
+            ),
+            office_desk::OFFICE_OPEN => (
+                "Open document",
+                "Opens an Office file and keeps a session you can watch live.",
+            ),
+            office_desk::OFFICE_CREATE => (
+                "Create document",
+                "Makes a new .docx, .xlsx or .pptx file on the Bot's computer.",
+            ),
+            office_desk::OFFICE_OUTLINE => (
+                "Document outline",
+                "Reads a document's headings, sheets or slides.",
+            ),
+            office_desk::OFFICE_GREP => ("Search document", "Finds text inside an open document."),
+            office_desk::OFFICE_READ => ("Read document", "Reads a span of an open document's text."),
+            office_desk::OFFICE_CELLS => ("Read cells", "Reads a range of a spreadsheet's cells."),
+            office_desk::OFFICE_RENDER => (
+                "Render page",
+                "Rasterizes one page, slide or sheet to an image.",
+            ),
+            office_desk::OFFICE_VERIFY => (
+                "Verify document",
+                "Saves and reopens a document to prove the file is still valid.",
+            ),
+            office_desk::OFFICE_CLOSE => ("Close document", "Ends an open document's session."),
+            office_desk::OFFICE_PROPOSE => (
+                "Propose edits",
+                "Stages text edits you can review before they are written.",
+            ),
+            office_desk::OFFICE_PROPOSE_CELLS => (
+                "Propose cell edits",
+                "Stages spreadsheet edits you can review before they are written.",
+            ),
+            office_desk::OFFICE_REVIEW => ("Review proposals", "Shows what a staged edit would change."),
+            office_desk::OFFICE_ACCEPT => ("Accept edits", "Writes a reviewed proposal to the document."),
+            office_desk::OFFICE_REJECT => ("Reject edits", "Discards a staged proposal without writing."),
+            office_desk::OFFICE_EXPORT => (
+                "Export document",
+                "Saves the document to a new file and attaches it to the reply.",
+            ),
             plugin_desk::ROW => (
                 plugin_desk::ROW_LABEL,
                 "Finds, installs and removes plugins and manages their accounts.",
@@ -1787,6 +1873,7 @@ impl Executor {
         routine::description(name)
             .or(plugin_desk::description(name))
             .or(computer_desk::description(name))
+            .or(office_desk::description(name))
             .or(builtin_tool_spec(name).map(|(description, _)| description))
     }
 
@@ -1999,6 +2086,8 @@ impl Executor {
         schemas.extend(plugin_desk.filter_map(plugin_desk::schema));
         let computer = self.computer_desk_tools().filter(|name| permitted(name));
         schemas.extend(computer.filter_map(computer_desk::schema));
+        let office = self.office_desk_tools().filter(|name| permitted(name));
+        schemas.extend(office.filter_map(office_desk::schema));
         let plugin_wires = self.plugin_wire_names();
         let mut schema_budget = crate::mcp::MAX_ADVERTISED_SCHEMAS_BYTES;
         for tool in &self.plugin_tools {
@@ -2061,6 +2150,21 @@ impl Executor {
                     Err(why) => return ToolResult::refused(&call.id, why),
                 }
             }
+        };
+        // An office call's arguments are read BEFORE any gate the same way — its `document`
+        // handle is just a string until the desk answers it.
+        let office_call = match (
+            office_desk::is_office_tool(&tool_name),
+            self.office_desk.as_ref(),
+        ) {
+            (false, _) => None,
+            (true, None) => {
+                return ToolResult::refused(&call.id, "office documents are not on offer here");
+            }
+            (true, Some(desk)) => match office_desk::admit((tool_name.as_str(), &arguments)) {
+                Ok(admitted) => Some((desk.clone(), admitted)),
+                Err(why) => return ToolResult::refused(&call.id, why),
+            },
         };
         // A plugin tool's arguments, and for one that asks first what it acts on, as stored, are
         // asked BEFORE any gate too (#359).
@@ -2309,6 +2413,11 @@ impl Executor {
         if let Some((desk, (ask, _))) = computer_call {
             return computer_desk::run(desk.as_ref(), context, &call.id, ask).await;
         }
+        // `office_close` only ends a session row — no box bytes — so it answers with the
+        // server's own desks, and a sleeping box can never keep a document stuck open.
+        if let Some((desk, office_desk::Ask::Close { document })) = &office_call {
+            return office_desk::run_close(desk.as_ref(), context, &call.id, document).await;
+        }
 
         // `machine: "group"` aims the call at the room's shared computer; anything else is the
         // coworker's own box. The model chooses this one, so it is read from the arguments
@@ -2372,6 +2481,21 @@ impl Executor {
                 AwaitingReason::AutoReview,
                 review::EGRESS_TUNNEL_ASK_REASON,
             );
+        }
+
+        // Every other office verb runs here, box awake: reads, edits and exports are bytes on
+        // it. The session row — not a live object — is what `document` names, so a proposal
+        // staged last turn is still what `office_accept` is offered now.
+        if let Some((desk, ask)) = office_call {
+            return office_desk::run(
+                desk.as_ref(),
+                context,
+                self.computer.as_ref(),
+                box_id.as_str(),
+                &call.id,
+                ask,
+            )
+            .await;
         }
 
         match tool_name.as_str() {

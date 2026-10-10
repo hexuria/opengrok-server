@@ -689,6 +689,7 @@ pub(crate) async fn resume_interrupted_run(
     )
     .await
     .map(|runner| runner.with_judge_failures(opengrok_harness::judge_failure_streak(&run.emitted)))
+    .map(|runner| runner.with_turn(&run.thread_id, run_id.as_str()))
     .map(|runner| match run.fired_by_routine(&run_id) {
         true => runner.with_routines_listing_only(),
         false => runner,
@@ -793,7 +794,8 @@ pub(crate) async fn carry_out_answer(
     let failures = opengrok_harness::judge_failure_streak(&run.emitted);
     let runner = runner
         .with_egress_consented(consented)
-        .with_judge_failures(failures);
+        .with_judge_failures(failures)
+        .with_turn(&run.thread_id, run_id.as_str());
     // A routine's run lists routines and makes none, after a card as before it (#316).
     let runner = match run.fired_by_routine(run_id) {
         true => runner.with_routines_listing_only(),

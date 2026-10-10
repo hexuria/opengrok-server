@@ -251,6 +251,12 @@ impl Projection {
             );
         }
         events.push(event);
+        // A tool's own CUSTOM frames ride right after its result — the office tools'
+        // `opengrok.officeDoc` notices so a watching client sees the change where it happened
+        // in the turn, not on a poll after it.
+        for (name, value) in &result.customs {
+            events.push(self.custom(name, value.clone()));
+        }
         events
     }
 

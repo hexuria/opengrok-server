@@ -17,6 +17,7 @@ use opengrok_core::id::AccountId;
 
 pub mod auto_review;
 pub mod autonomy;
+pub mod doc_sessions;
 pub mod gateway;
 pub mod identity;
 pub mod migrations;
@@ -32,6 +33,7 @@ pub mod vault;
 pub mod vault_rows;
 
 pub use autonomy::{DueSchedule, FiredBy, HookRow, LogEvent};
+pub use doc_sessions::DocSessionRow;
 pub use gateway::{
     CoworkerKeyView, KeyRefusal, McpCallView, NewGatewayKey, NewMcpCall, OAuthClient, RefreshClaim,
     RefreshTokenRow,

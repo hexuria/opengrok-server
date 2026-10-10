@@ -728,6 +728,8 @@ async fn call_through(executor: &Executor, name: &str) -> opengrok_tools::ToolRe
         screen_hold: false,
         screen_held_in: None,
         screen: Default::default(),
+        thread_id: None,
+        run_id: None,
     };
     let call = opengrok_tools::ToolCall {
         id: "call_1".to_string(),

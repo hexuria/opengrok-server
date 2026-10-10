@@ -14,4 +14,13 @@ workspace = true
 betteroffice-docx = { version = "=0.3.0", features = ["raster"] }
 betteroffice-xlsx = "=0.2.0"
 betteroffice-pptx = { version = "=0.3.0", features = ["raster"] }
+# create.rs rezips a generated DOCX package; opc is the crates' own package writer, already in
+# the tree through the facades.
+betteroffice-opc = "=0.2.0"
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+# Match handles are self-describing base64url so they survive a session reopen between grep
+# and propose; the workspace's one codec.
+base64.workspace = true

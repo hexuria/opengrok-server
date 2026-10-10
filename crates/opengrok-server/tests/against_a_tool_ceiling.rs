@@ -200,15 +200,21 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 /// the one row of the plugin tools (#359) in place of all ten, and the one row of the computer
 /// tools (7 Oct 2026) in place of all seven.
 fn builtins() -> Vec<&'static str> {
-    use opengrok_tools::{computer_desk, plugin_desk, routine};
+    use opengrok_tools::{computer_desk, office_desk, plugin_desk, routine};
     let grouped = |name: &&str| {
         routine::is_routine_tool(name)
             || plugin_desk::is_plugin_desk_tool(name)
             || computer_desk::is_computer_tool(name)
+            || office_desk::is_office_tool(name)
     };
     let rows = Executor::every_builtin().filter(|name| !grouped(name));
-    rows.chain([routine::ROW, plugin_desk::ROW, computer_desk::ROW])
-        .collect()
+    rows.chain([
+        routine::ROW,
+        plugin_desk::ROW,
+        computer_desk::ROW,
+        office_desk::ROW,
+    ])
+    .collect()
 }
 
 struct Harness {

@@ -383,12 +383,7 @@ pub trait Computer: Send + Sync {
     /// Write a file's bytes without UTF-8 conversion — the mirror of `read_file_bytes`. A
     /// binary file (a .docx zip, a rendered PNG) sent through `write_file` is lossy-decoded
     /// before it is ever sent. Defaulted so the trait's many test stubs stay text-only.
-    async fn write_file_bytes(
-        &self,
-        _box_id: &str,
-        _path: &str,
-        _bytes: &[u8],
-    ) -> BoxResult<()> {
+    async fn write_file_bytes(&self, _box_id: &str, _path: &str, _bytes: &[u8]) -> BoxResult<()> {
         Err(not_supported("write binary files"))
     }
 

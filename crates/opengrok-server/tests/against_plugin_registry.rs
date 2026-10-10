@@ -1554,6 +1554,8 @@ async fn a_bot_manages_its_persons_plugins_and_asks_first_where_it_cannot_be_und
         screen_hold: false,
         screen_held_in: None,
         screen: Default::default(),
+        thread_id: None,
+        run_id: None,
     };
     let (desk, context) = (&desk, &context);
     let answer = move |ask: Ask| desk.answer(context, ask);

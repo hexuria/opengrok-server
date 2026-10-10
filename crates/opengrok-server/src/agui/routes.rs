@@ -747,7 +747,10 @@ pub(crate) async fn tools_for_turn(
         // This Bot's own computer (7 Oct 2026), through the desk the Computer pane's routes use.
         .with_computer_desk(Arc::new(crate::computer_desk::Tools {
             state: state.clone(),
-        }));
+        }))
+        // Its office documents on that same computer — attached only here, on the path that
+        // HAS a box, so a boxless coworker is never offered tools that cannot run.
+        .with_office_desk(crate::office_desk::desk(state.clone()));
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin. The executor offers it only where the
@@ -3247,6 +3250,10 @@ async fn start_claimed_turn(
             let gates: (&[String], &[String]) = (&[], &[]);
             let runner =
                 tools_for_turn(&state, account, coworker, gates, patience, &turn_plugins).await;
+            // The turn's ids onto the context now — an office export's artifact attaches under
+            // them, so the reply that reports the file can hand it over.
+            let runner =
+                runner.map(|r| r.with_turn(input.thread_id.as_str(), input.run_id.as_str()));
             match (runner, chosen.clone()) {
                 (Some(runner), Some((recipe, values))) => {
                     Some(runner.with_chosen_recipe(recipe, values))
