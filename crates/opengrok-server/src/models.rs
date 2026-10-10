@@ -24,6 +24,12 @@ const FRESH_FOR: Duration = Duration::from_secs(60);
 /// seconds is far more than a person clicking Test needs and far less than a script wants.
 const PROBE_EVERY: Duration = Duration::from_secs(3);
 
+/// The least time between two of one account's fault triages (`ModelCatalogue::may_triage`).
+const TRIAGE_EVERY: Duration = Duration::from_secs(5);
+
+/// The most fault triages one account may run in an hour.
+const TRIAGES_PER_HOUR: usize = 20;
+
 /// The longest gateway sentence worth passing on. Long enough for a real explanation, short enough
 /// that a gateway echoing a whole request cannot dump it into a browser.
 const DETAIL_CLIP: usize = 300;
@@ -142,6 +148,8 @@ pub struct ModelCatalogue {
     looked_up: Mutex<Option<Instant>>,
     /// When each account last spent the deployment's money on a probe.
     probed: Mutex<HashMap<String, Instant>>,
+    /// When each account's recent fault triages ran (`crate::triage`), oldest first.
+    triaged: Mutex<HashMap<String, Vec<Instant>>>,
 }
 
 impl std::fmt::Debug for ModelCatalogue {
@@ -165,7 +173,78 @@ impl ModelCatalogue {
             cached: Mutex::new(None),
             looked_up: Mutex::new(None),
             probed: Mutex::new(HashMap::new()),
+            triaged: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// May this account triage a fault right now? A triage is a real completion on the
+    /// deployment's key, asked for by a person pressing Report, so a few a minute is generous and
+    /// a loop is somebody else's money: at most one every [`TRIAGE_EVERY`] and
+    /// [`TRIAGES_PER_HOUR`] an hour. Records the attempt when it may.
+    pub fn may_triage(&self, account: &str) -> bool {
+        let mut triaged = match self.triaged.lock() {
+            Ok(triaged) => triaged,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let times = triaged.entry(account.to_string()).or_default();
+        times.retain(|at| at.elapsed() < Duration::from_secs(3600));
+        let too_soon = times
+            .last()
+            .is_some_and(|last| last.elapsed() < TRIAGE_EVERY);
+        if too_soon || times.len() >= TRIAGES_PER_HOUR {
+            return false;
+        }
+        times.push(Instant::now());
+        true
+    }
+
+    /// One plain completion on `model`: `system` and `user` in, the assistant's text out, with no
+    /// tools offered. For a judgement the server asks a model for on its own account (a fault's
+    /// triage), never for a coworker's turn, which goes through its door. The gateway's refusal
+    /// comes back in its own words, scrubbed, as [`Self::probe`]'s does.
+    pub async fn complete(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let response = self
+            .http
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .bearer_auth(&self.key)
+            .timeout(timeout)
+            .json(&serde_json::json!({
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "max_tokens": max_tokens,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                redact_secrets(&format!("the gateway could not be reached: {error}"))
+            })?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        if !status.is_success() {
+            let detail = parsed
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(|message| message.as_str())
+                .map_or_else(|| format!("the gateway answered {status}"), redact_secrets);
+            return Err(detail);
+        }
+        parsed
+            .pointer("/choices/0/message/content")
+            .and_then(|content| content.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "the gateway's answer had no text in it".to_string())
     }
 
     /// May this account probe right now? Records the attempt when it may.

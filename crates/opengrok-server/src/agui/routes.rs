@@ -1070,6 +1070,8 @@ pub fn router(state: AgUiState) -> Router {
         // (`account_api.rs`, `/admin/templates`).
         .route("/templates", get(list_templates))
         .route("/models/probe", post(probe_model))
+        // A fault the desktop app is about to report, weighed first (`crate::triage`).
+        .route("/triage", post(crate::triage::triage_fault))
         .route(
             "/coworkers/{coworker_id}",
             axum::routing::patch(repin_coworker).delete(delete_coworker),
