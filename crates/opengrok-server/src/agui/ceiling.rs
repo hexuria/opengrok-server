@@ -642,7 +642,7 @@ pub(super) async fn put_plugin_skill(
 
 /// `GET /coworkers/{id}/saved-login`: whether a saved login can be filled for this Bot, asked by
 /// the app BEFORE Touch ID so a refusal never follows a fingerprint (8 Oct 2026).
-/// `{usable, reason, ownComputer}`; reason is `shared-computer` or `shared-bot`, or null.
+/// `{usable, reason, ownComputer, ownBotsOnly}`; reason is `shared-computer` or `shared-bot`, or null.
 pub(super) async fn get_saved_login(
     State(state): State<AgUiState>,
     headers: HeaderMap,
@@ -652,12 +652,15 @@ pub(super) async fn get_saved_login(
         Ok(found) => found,
         Err(refused) => return refused,
     };
-    let reason = super::user_form::saved_login_refusal(&state, &account, &bot).await;
-    let (_, _, _, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
+    let reason = super::user_form::saved_login_refusal(&state, &account, &bot, true).await;
+    let (_, _, scope, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
     Json(json!({
         "usable": reason.is_none(),
         "reason": reason,
         "ownComputer": mode == opengrok_core::coworker::BoxMode::Dedicated,
+        // Only the person's own Bots use this computer, so "share my logins with all my Bots"
+        // would let a saved login fill here (9 Oct 2026).
+        "ownBotsOnly": scope == "account",
     }))
     .into_response()
 }

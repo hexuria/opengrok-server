@@ -1849,14 +1849,16 @@ impl PgStore {
             .collect()
     }
 
-    /// The person's logins shared with one of their Bots.
+    /// The person's logins shared with one of their Bots: all of them under the all-Bots switch.
     pub async fn logins_shared_with(
         &self,
         account_id: &AccountId,
         coworker_id: &str,
     ) -> StoreResult<Vec<String>> {
         let rows = sqlx::query(
-            "select login_id from site_login_share where account_id = $1 and coworker_id = $2",
+            "select login_id from site_login_share where account_id = $1 and coworker_id = $2
+             union select id from site_login where account_id = $1
+               and exists (select 1 from login_sharing where account_id = $1)",
         )
         .bind(account_id.as_str())
         .bind(coworker_id)
@@ -1865,6 +1867,26 @@ impl PgStore {
         rows.iter()
             .map(|row| row.try_get::<String, _>("login_id").map_err(Into::into))
             .collect()
+    }
+
+    /// The person's all-Bots login switch (9 Oct 2026), set first when `set` is `(on, at_ms)`.
+    pub async fn logins_for_all_bots(
+        &self,
+        account: &AccountId,
+        set: Option<(bool, i64)>,
+    ) -> StoreResult<bool> {
+        let account = account.as_str();
+        if let Some((all, at_ms)) = set {
+            let sql = match all {
+                true => "insert into login_sharing values ($1, $2) on conflict do nothing",
+                false => "delete from login_sharing where account_id = $1 and shared_at_ms <= $2",
+            };
+            let query = sqlx::query(sql).bind(account).bind(at_ms);
+            query.execute(&self.pool).await?;
+        }
+        let query =
+            sqlx::query_scalar("select exists (select 1 from login_sharing where account_id = $1)");
+        Ok(query.bind(account).fetch_one(&self.pool).await?)
     }
 
     /// The secrets of one of the person's own site logins, opened for their app alone.

@@ -40,6 +40,8 @@ pub fn agui_router(state: HostState) -> Router {
             axum::routing::put(share_with_bot),
         )
         .route("/coworkers/{coworker_id}/site-logins", get(shared_with_bot))
+        // The one switch that shares every login with every Bot of theirs (9 Oct 2026).
+        .route("/site-logins/sharing", get(sharing).put(set_sharing))
         .route("/site-logins/icon/{origin}", get(icon))
         .with_state(state)
 }
@@ -787,5 +789,48 @@ async fn shared_with_bot(
     {
         Ok(logins) => reply(200, json!({ "logins": logins })),
         Err(error) => store_unavailable(&error, "could not read a Bot's logins"),
+    }
+}
+
+/// Whether the person shares every saved login with every one of their Bots, the way their
+/// Bots share one computer. A store that cannot answer reads as no: the narrower rule.
+pub(crate) async fn shared_with_all_bots(
+    agui: &super::routes::AgUiState,
+    account_id: &AccountId,
+) -> bool {
+    let store = &agui.auth.store;
+    store
+        .logins_for_all_bots(account_id, None)
+        .await
+        .unwrap_or(false)
+}
+
+/// `GET /site-logins/sharing` — `{ "allBots": bool }`.
+async fn sharing(State(state): State<HostState>, headers: HeaderMap) -> Response {
+    let Some(account_id) = signed_in(&state, &headers) else {
+        return sign_in_first();
+    };
+    let all = shared_with_all_bots(&state.agui, &account_id).await;
+    reply(200, json!({ "allBots": all }))
+}
+
+/// `PUT /site-logins/sharing` with `{ "allBots": bool }`. Off leaves the shares made one Bot at
+/// a time as they were.
+async fn set_sharing(
+    State(state): State<HostState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> Response {
+    let Some(account_id) = signed_in(&state, &headers) else {
+        return sign_in_first();
+    };
+    let Some(all) = body.get("allBots").and_then(Value::as_bool) else {
+        return reply(422, json!({ "error": "allBots must be true or false" }));
+    };
+    let set = Some((all, super::routes::now_ms()));
+    let store = &state.agui.auth.store;
+    match store.logins_for_all_bots(&account_id, set).await {
+        Ok(all) => reply(200, json!({ "allBots": all })),
+        Err(error) => store_unavailable(&error, "could not set login sharing"),
     }
 }

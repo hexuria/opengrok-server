@@ -34,6 +34,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_core::run::{RunCommand, RunView};
+use opengrok_tools::user_form::front_page;
 use opengrok_tools::user_form::{
     FieldOutcome, FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, HANDOFF_DECLINED_TOOL_RESULT,
     HOLD_TIMED_OUT_TOOL_RESULT, audit_lengths, fill_into_focus, form_request_from,
@@ -192,13 +193,25 @@ pub async fn submit_user_form(
     // A passkey card has no fields to type: the person's passkey is loaded into the page (or
     // an empty holder is, for a site that offers to make one), and the bot is told to click.
     let passkey_card = form.challenge_kind.as_deref() == Some("passkey");
+    // A saved login lands only on a computer that is one private Bot's own, decided here at
+    // fill time from the box's scope and the Bot's record, not from what the app believes.
     if (saved_login || passkey_card)
-        && !fills_a_dedicated_box(state, account_id, &coworker_id).await
+        && saved_login_refusal(&state.agui, account_id, &coworker_id, !passkey_card)
+            .await
+            .is_some()
     {
         // The card stays open: the person may still type by hand, or dismiss.
         return (
             403,
             json!({ "error": SHARED_COMPUTER, "message": SHARED_COMPUTER_MESSAGE }),
+        );
+    }
+    // A saved login names its login (NativeChat always does): its shares and site are its own.
+    let named_login = args.get("savedLoginId").and_then(Value::as_str);
+    if saved_login && !passkey_card && named_login.is_none_or(str::is_empty) {
+        return (
+            400,
+            json!({ "error": "bad_request", "message": front_page::UNNAMED_LOGIN }),
         );
     }
     // A saved login fills only for a Bot it is shared with (8 Oct 2026). The fill names its
@@ -266,7 +279,17 @@ pub async fn submit_user_form(
         let content = opengrok_tools::user_form::collection_tool_result(&form, &shared);
         (Vec::new(), FormResolution::Submitted, content)
     } else {
-        let outcomes = fill_on_box(state, account_id, &coworker_id, &form, &values).await;
+        let filled = fill_on_box(state, account_id, &coworker_id, &form, &values, named_login);
+        let outcomes = match filled.await {
+            Ok(outcomes) => outcomes,
+            // The card stays open: the person can bring the page back to the front, or type.
+            Err(why) => {
+                return (
+                    403,
+                    json!({ "error": front_page::WRONG_PAGE, "message": why }),
+                );
+            }
+        };
         let resolution = overall_resolution(&outcomes);
         let content = tool_result_content(&form, resolution, &shared, false);
         (outcomes, resolution, content)
@@ -927,28 +950,15 @@ fn is_saved_login(args: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// A saved login is the person's own; it lands only on a box that is one bot's own, and only
-/// when that bot is theirs and shown to nobody else. A box shared by the account, a group or
-/// an org never receives it, and neither does an org-visible bot's (every member drives it,
-/// so a session left there would be theirs too). Decided here, at fill time, from the box's
-/// scope and the bot's record — not from what the app believes.
-async fn fills_a_dedicated_box(
-    state: &HostState,
-    account_id: &AccountId,
-    coworker_id: &CoworkerId,
-) -> bool {
-    saved_login_refusal(&state.agui, account_id, coworker_id)
-        .await
-        .is_none()
-}
-
 /// Why a saved login cannot be used for this coworker, or `None` when it can: `shared-computer`
 /// when its box is shared, `shared-bot` when the coworker is shown to an org or is not the
 /// person's. One rule for the app's check before Touch ID and for the fill itself.
+/// `switch_counts` is false for a passkey: readying one can restart a shared computer's browser.
 pub(crate) async fn saved_login_refusal(
     agui: &super::routes::AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
+    switch_counts: bool,
 ) -> Option<&'static str> {
     let private = agui
         .auth
@@ -959,9 +969,15 @@ pub(crate) async fn saved_login_refusal(
     if !private {
         return Some(SHARED_BOT);
     }
-    let (_, _, _, _, mode) =
+    let (_, _, scope, _, mode) =
         super::provision::scope_of(agui, account_id, coworker_id.as_str()).await;
-    (mode != opengrok_core::coworker::BoxMode::Dedicated).then_some(SHARED_COMPUTER)
+    // The computer the person's own Bots share, once they share every login with every Bot of
+    // theirs (9 Oct 2026): a session left signed in there reaches only Bots that could fill
+    // that login anyway, so nothing is exposed and no Bot needs a fresh computer to sign in.
+    let all_bots = switch_counts
+        && scope == "account"
+        && super::site_logins::shared_with_all_bots(agui, account_id).await;
+    (mode != opengrok_core::coworker::BoxMode::Dedicated && !all_bots).then_some(SHARED_COMPUTER)
 }
 
 fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {
@@ -1203,8 +1219,9 @@ async fn fill_on_box(
     coworker_id: &CoworkerId,
     form: &FormRequest,
     values: &BTreeMap<String, String>,
-) -> Vec<FieldOutcome> {
-    let failed = || nothing_filled(form);
+    saved_login: Option<&str>,
+) -> Result<Vec<FieldOutcome>, String> {
+    let failed = || Ok(nothing_filled(form));
     let Some(runner) = crate::agui::routes::tools_for_coworker(
         &state.agui,
         account_id,
@@ -1235,7 +1252,28 @@ async fn fill_on_box(
     if runner.network_off_now().await {
         return failed();
     }
-    fill_into_focus(computer.as_ref(), &box_id, form, values).await
+    // It types into the page in front, which on a shared computer another Bot may have changed
+    // (9 Oct 2026). A box that cannot say is refused only for a saved login on a shared one.
+    let answer = computer.active_tab_url(&box_id).await;
+    // A saved login is checked against the site it was saved for, never the card's words
+    // (`front_page::origin_site`). One that cannot be read is refused.
+    let site = match saved_login {
+        None => front_page::card_site(form),
+        Some(id) => {
+            let logins = state.agui.auth.store.site_logins(account_id).await;
+            let login = logins.unwrap_or_default().into_iter().find(|l| l.id == id);
+            front_page::origin_site(&login.ok_or(front_page::UNREADABLE_LOGIN)?.origin)
+        }
+    };
+    let (_, _, _, _, mode) =
+        super::provision::scope_of(&state.agui, account_id, coworker_id.as_str()).await;
+    let unknown_refuses =
+        saved_login.is_some() && mode != opengrok_core::coworker::BoxMode::Dedicated;
+    let front = front_page::Front::of(&answer);
+    if let Some(why) = front_page::front_page_refusal(site.as_deref(), front, unknown_refuses) {
+        return Err(why);
+    }
+    Ok(fill_into_focus(computer.as_ref(), &box_id, form, values).await)
 }
 
 /// Every field of the form, not typed.

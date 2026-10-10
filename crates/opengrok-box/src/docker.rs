@@ -804,6 +804,20 @@ impl Computer for DockerComputer {
         }
     }
 
+    async fn active_tab_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+        // A box with no screen, or an image from before the report (404), cannot say: an
+        // error. One that answers with no url has no browser page open: `None`, and nothing
+        // is typed, as there is no page to type into, only whatever else has focus.
+        let body = self
+            .guest(box_id)
+            .await?
+            .active_tab()
+            .await
+            .map_err(guest_error)?;
+        let url = body.get("url").and_then(serde_json::Value::as_str);
+        Ok(url.filter(|url| !url.is_empty()).map(str::to_string))
+    }
+
     /// The password is the box's own, read back from its environment like `BOX_TOKEN`, so a
     /// restart keeps it. A box without one has no screen here rather than a guessed password;
     /// boxes created before per-box passwords still carry theirs, and keep working.

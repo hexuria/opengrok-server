@@ -5,6 +5,7 @@
   "body": {
     "usable": false,
     "reason": "shared-computer",
-    "ownComputer": false
+    "ownComputer": false,
+    "ownBotsOnly": true
   }
 }

@@ -375,6 +375,11 @@ pub async fn purge_accounts_except(
         &accounts,
         &coworkers
     );
+    delete!(
+        "login_sharing",
+        "delete from login_sharing where account_id = any($1)",
+        &accounts
+    );
     // The sealed passwords go with the secret_store sweep below: their ids carry the account.
     delete!(
         "site_login",
