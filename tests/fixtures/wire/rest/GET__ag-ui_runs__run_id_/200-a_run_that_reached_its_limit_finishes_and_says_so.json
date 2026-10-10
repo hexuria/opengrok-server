@@ -167,7 +167,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
-        "durationMs": 1,
+        "durationMs": 0,
         "toolCallId": "c9"
       },
       {
@@ -217,7 +217,7 @@
         "type": "TOOL_CALL_RESULT",
         "content": "ran",
         "timestamp": 100,
-        "durationMs": 1,
+        "durationMs": 0,
         "toolCallId": "c13"
       },
       {
@@ -312,15 +312,15 @@
             "limit": 128000,
             "left_out": 0,
             "estimated": [
-              6976,
-              6994,
-              7012,
-              7030,
-              7048,
-              7066,
-              7084,
-              7102,
-              1333
+              6977,
+              6995,
+              7013,
+              7031,
+              7049,
+              7067,
+              7085,
+              7103,
+              1334
             ]
           },
           "model_ms": [

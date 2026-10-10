@@ -1,5 +1,5 @@
 {
-  "server_sha": "3c41244684a9c6e45f7395a4573ef61cfe212044",
+  "server_sha": "077954a1d8d0a2b3257817daf7565abbe4d189e0",
   "recorded_by": "opengrok-server recorder",
   "emits": {
     "agui_types": [
@@ -905,15 +905,15 @@
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_fired_routine_reports_its_last_run_on_its_row (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac-2.json",
-      "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_held_send_waits_out_the_turn_in_flight_when_the_mac_connects.json",
+      "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_held_send_waits_out_the_turn_in_flight_when_the_mac_connects (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__ag-ui_threads__thread_id_/200-a_member_sees_only_their_own_conversation_and_pays_for_it.json",
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_member_sees_only_their_own_conversation_and_pays_for_it (crates/opengrok-server/tests/against_visibility.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac-3.json",
+      "file": "rest/GET__ag-ui_threads__thread_id_/200-a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac-2.json",
       "source": "GET /ag-ui/threads/{thread_id}, recorded from the test a_coworkers_own_door_holds_its_queued_send_for_an_absent_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
@@ -1219,6 +1219,10 @@
     {
       "file": "rest/GET__coworkers__coworker_id__computer/200-a_coworker_that_cannot_be_read_shows_no_screen.json",
       "source": "GET /coworkers/{coworker_id}/computer, recorded from the test a_coworker_that_cannot_be_read_shows_no_screen (crates/opengrok-server/tests/against_a_proxied_screen.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/GET__coworkers__coworker_id__computer/200-an_update_drops_the_old_boxs_port_at_once.json",
+      "source": "GET /coworkers/{coworker_id}/computer, recorded from the test an_update_drops_the_old_boxs_port_at_once (crates/opengrok-server/tests/against_a_proxied_screen.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__coworkers__coworker_id__computer/200-a_failed_rebuild_drops_the_port_its_box_came_back_without.json",
@@ -1605,8 +1609,8 @@
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_plan_on_this_servers_own_machine_is_never_relay_off.json",
-      "source": "GET /schedules, recorded from the test a_plan_on_this_servers_own_machine_is_never_relay_off (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
+      "file": "rest/GET__schedules/200-a_due_routine_on_a_plan_bot_runs_through_the_mac.json",
+      "source": "GET /schedules, recorded from the test a_due_routine_on_a_plan_bot_runs_through_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
       "file": "rest/GET__schedules/200-a_routine_for_a_coworker_on_its_own_plan_runs_on_the_persons_proxy-2.json",
@@ -1617,7 +1621,7 @@
       "source": "GET /schedules, recorded from the test a_paused_routine_runs_now_and_stays_paused (crates/opengrok-server/tests/against_routines.rs); ids and times are placeholders"
     },
     {
-      "file": "rest/GET__schedules/200-a_due_routine_on_a_plan_bot_runs_through_the_mac.json",
+      "file": "rest/GET__schedules/200-a_due_routine_on_a_plan_bot_runs_through_the_mac-2.json",
       "source": "GET /schedules, recorded from the test a_due_routine_on_a_plan_bot_runs_through_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
     {
@@ -2123,6 +2127,10 @@
     {
       "file": "rest/POST__ag-ui_user-form_submit/200-collect_retry_heals_legacy_settled_card_and_filters_ambiguous_answers.json",
       "source": "POST /ag-ui/user-form/submit, recorded from the test collect_retry_heals_legacy_settled_card_and_filters_ambiguous_answers (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_submit/400-sharing_logins_with_all_bots_fills_on_the_computer_they_share.json",
+      "source": "POST /ag-ui/user-form/submit, recorded from the test sharing_logins_with_all_bots_fills_on_the_computer_they_share (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
       "file": "rest/POST__ag-ui_user-form_submit/403-a_passkey_card_asks_the_box_for_its_pipe_and_settles_honestly_without_one.json",
