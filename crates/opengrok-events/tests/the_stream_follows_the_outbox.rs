@@ -470,6 +470,41 @@ async fn a_stream_that_cannot_keep_up_is_told_to_reset() {
     assert_eq!((next.id, next.event.as_str()), (6, "thread.changed"));
 }
 
+/// WAKES THAT COME LATE FOR NOTES A STREAM ALREADY HAS ARE NOT A FALL BEHIND. Postgres may hand
+/// the listener a burst of wakes after the stream has read what they announce (a reset covered
+/// them, or a poll did). They overflowed the room, and the stream was told `reset` again for
+/// nothing: every note it had not read was still in the outbox, one note away. Seen in CI as the
+/// stream above resetting twice (10 Oct 2026).
+#[tokio::test]
+async fn late_wakes_for_notes_already_read_do_not_reset_the_stream() {
+    let Some(pool) = pool().await else { return };
+    let (hub, ada) = (hub(&pool), account());
+    hub.tune(Tuning {
+        ping: Duration::from_secs(60),
+        poll: Duration::from_secs(60),
+        window: Duration::from_millis(10),
+        room: 2,
+    });
+    let mut frames = hub.follow(&ada, None).await.unwrap();
+    must(&mut frames).await;
+    note(&pool, &ada, changed("t0")).await;
+    assert_eq!(must(&mut frames).await.id, 1);
+
+    // Five wakes for the note already read, more than the room holds, heard while the stream is
+    // not read.
+    for _ in 0..5 {
+        let late = "select pg_notify($1, $2)";
+        let wake = format!("{ada}:1");
+        let send = sqlx::query(late).bind(opengrok_events::CHANNEL).bind(wake);
+        send.execute(&pool).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    note(&pool, &ada, changed("after")).await;
+    let next = must(&mut frames).await;
+    assert_eq!((next.id, next.event.as_str()), (2, "thread.changed"));
+}
+
 /// A LOST WAKE COSTS LATENCY, NOT A NOTE. This one is written with no NOTIFY at all; the stream's
 /// own poll finds it.
 #[tokio::test]
