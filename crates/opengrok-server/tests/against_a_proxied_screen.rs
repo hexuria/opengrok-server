@@ -92,7 +92,11 @@ impl Computer for ScreenBox {
         }
         self.create(None).await
     }
-    async fn screenshot(&self, box_id: &str) -> BoxResult<opengrok_box::Screenshot> {
+    async fn screenshot(
+        &self,
+        box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<opengrok_box::Screenshot> {
         Ok(opengrok_box::Screenshot {
             mime: "image/png".to_string(),
             png_base64: box_id.to_string(),
@@ -144,7 +148,11 @@ impl Computer for ScreenBox {
     async fn state(&self, _box_id: &str) -> BoxResult<String> {
         Ok("running".to_string())
     }
-    async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+    async fn screen_url(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<Option<String>> {
         self.asked.fetch_add(1, Ordering::SeqCst);
         Ok(Some(format!(
             "http://127.0.0.1:{}/vnc.html?autoconnect=true&resize=scale&reconnect=true&password=pw4boxA1",
@@ -825,7 +833,7 @@ async fn the_screen_is_served_through_the_server_to_its_owner_only() {
         .computer
         .as_ref()
         .expect("provider")
-        .screen_url("any")
+        .screen_url("any", &opengrok_box::Screen::Shared)
         .await
         .expect("page")
         .expect("page");

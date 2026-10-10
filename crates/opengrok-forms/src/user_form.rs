@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use opengrok_box::{Computer, CuaAction};
+use opengrok_box::{Computer, CuaAction, Screen};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -743,6 +743,7 @@ pub fn should_press_return(form: &FormRequest, typed_count: usize) -> bool {
 pub async fn fill_into_focus(
     computer: &dyn Computer,
     box_id: &str,
+    screen: &Screen,
     form: &FormRequest,
     values: &BTreeMap<String, String>,
 ) -> Vec<FieldOutcome> {
@@ -772,6 +773,7 @@ pub async fn fill_into_focus(
                 && let Err(error) = computer
                     .act(
                         box_id,
+                        screen,
                         &CuaAction::Key {
                             key: "Tab".to_string(),
                         },
@@ -791,17 +793,18 @@ pub async fn fill_into_focus(
         // What the computer last said of the focused box, so a report made after the field is
         // reached can be told from one made before.
         let before = computer
-            .focused_field(box_id)
+            .focused_field(box_id, screen)
             .await
             .ok()
             .map(|focus| focus.seq);
         let reaches = field.at.is_some() || tab_here;
         // Reach the field: by its position when the model gave one, else by Tab.
         let reach = match field.at {
-            Some(at) => aim_at(computer, box_id, at).await,
+            Some(at) => aim_at(computer, box_id, screen, at).await,
             None if tab_here => computer
                 .act(
                     box_id,
+                    screen,
                     &CuaAction::Key {
                         key: "Tab".to_string(),
                     },
@@ -826,7 +829,7 @@ pub async fn fill_into_focus(
         }
         // A password is typed only into a password box. A click that missed, or focus a page
         // moved, typed one into Facebook's email box and pressed Log in (10 Oct 2026).
-        if let Err(why) = lands_in_its_box(computer, box_id, field, before, reaches).await {
+        if let Err(why) = lands_in_its_box(computer, box_id, screen, field, before, reaches).await {
             tracing::warn!(field = %field.label, why, "user-form: the focused box is not this field's; it and the rest will not be typed");
             outcomes.push(FieldOutcome {
                 id: field.id.clone(),
@@ -836,7 +839,10 @@ pub async fn fill_into_focus(
             give_up = true;
             continue;
         }
-        match computer.act(box_id, &CuaAction::Type { text: value }).await {
+        match computer
+            .act(box_id, screen, &CuaAction::Type { text: value })
+            .await
+        {
             Ok(()) => {
                 outcomes.push(FieldOutcome {
                     id: field.id.clone(),
@@ -868,6 +874,7 @@ pub async fn fill_into_focus(
         && let Err(error) = computer
             .act(
                 box_id,
+                screen,
                 &CuaAction::Key {
                     key: "Return".to_string(),
                 },
@@ -893,6 +900,7 @@ fn wants_a_password_box(field: &FormField) -> bool {
 async fn lands_in_its_box(
     computer: &dyn Computer,
     box_id: &str,
+    screen: &Screen,
     field: &FormField,
     before: Option<u64>,
     reached: bool,
@@ -902,7 +910,7 @@ async fn lands_in_its_box(
     }
     let started = tokio::time::Instant::now();
     let focus = loop {
-        let focus = computer.focused_field(box_id).await.ok();
+        let focus = computer.focused_field(box_id, screen).await.ok();
         let fresh = focus
             .as_ref()
             .is_some_and(|f| !reached || Some(f.seq) != before);
@@ -924,10 +932,16 @@ const FOCUS_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Click the field and select what is in it, so the typed value replaces rather than appends
 /// (Facebook keeps the email typed on the previous attempt).
-async fn aim_at(computer: &dyn Computer, box_id: &str, at: FieldAt) -> Result<(), String> {
+async fn aim_at(
+    computer: &dyn Computer,
+    box_id: &str,
+    screen: &Screen,
+    at: FieldAt,
+) -> Result<(), String> {
     computer
         .act(
             box_id,
+            screen,
             &CuaAction::Click {
                 x: at.x,
                 y: at.y,
@@ -942,6 +956,7 @@ async fn aim_at(computer: &dyn Computer, box_id: &str, at: FieldAt) -> Result<()
     computer
         .act(
             box_id,
+            screen,
             &CuaAction::Key {
                 key: "ctrl+a".to_string(),
             },

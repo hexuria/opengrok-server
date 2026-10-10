@@ -963,6 +963,8 @@ impl Walk {
 pub struct Walker<'a> {
     pub computer: &'a dyn Computer,
     pub box_id: &'a str,
+    /// The screen of that computer the walk's recipes play on (#376).
+    pub screen: &'a opengrok_box::Screen,
     /// Where a recipe's runnable steps come from, and where its run is written down. The same seam
     /// the agent's `run_recipe` uses, so a recipe played by a tree is recorded exactly like one
     /// played by a bot.
@@ -1146,7 +1148,11 @@ impl Walker<'_> {
                         };
                     let level = observe.unwrap_or(self.observe);
                     crate::observe::ask(&mut request, level);
-                    let raw = match self.computer.run_recipe(self.box_id, &request).await {
+                    let raw = match self
+                        .computer
+                        .run_recipe(self.box_id, self.screen, &request)
+                        .await
+                    {
                         Ok(raw) => raw,
                         Err(error) => {
                             // A BOX THAT WOULD NOT ANSWER IS NOT A RECIPE THAT FAILED. `otherwise`

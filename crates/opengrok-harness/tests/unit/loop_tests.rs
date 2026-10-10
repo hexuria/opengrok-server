@@ -4232,10 +4232,18 @@ impl opengrok_box::Computer for ScreenComputer {
     async fn offers_a_screen(&self, _box_id: &str) -> bool {
         true
     }
-    async fn screen_url(&self, _b: &str) -> opengrok_box::BoxResult<Option<String>> {
+    async fn screen_url(
+        &self,
+        _b: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> opengrok_box::BoxResult<Option<String>> {
         Ok(Some("http://127.0.0.1:1/vnc.html".into()))
     }
-    async fn screenshot(&self, _b: &str) -> opengrok_box::BoxResult<opengrok_box::Screenshot> {
+    async fn screenshot(
+        &self,
+        _b: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> opengrok_box::BoxResult<opengrok_box::Screenshot> {
         let n = {
             let mut looks = self.looks.lock().unwrap();
             *looks += 1;
@@ -4252,7 +4260,12 @@ impl opengrok_box::Computer for ScreenComputer {
             height: 800,
         })
     }
-    async fn act(&self, _b: &str, _a: &opengrok_box::CuaAction) -> opengrok_box::BoxResult<()> {
+    async fn act(
+        &self,
+        _b: &str,
+        _screen: &opengrok_box::Screen,
+        _a: &opengrok_box::CuaAction,
+    ) -> opengrok_box::BoxResult<()> {
         Ok(())
     }
 }

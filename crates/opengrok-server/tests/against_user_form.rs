@@ -59,6 +59,9 @@ struct FillStub {
     /// The page the box reports in front of its browser; `None` is a box that cannot say, and
     /// an empty page one that says no browser page is open.
     front: Mutex<Option<String>>,
+    /// The screen each action went to (#376), and the Bots whose own screens were stopped.
+    screens: Mutex<Vec<opengrok_box::Screen>>,
+    closed: Mutex<Vec<String>>,
 }
 
 impl FillStub {
@@ -140,27 +143,47 @@ impl Computer for FillStub {
     async fn offers_a_screen(&self, _box_id: &str) -> bool {
         true
     }
-    async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+    async fn screen_url(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<Option<String>> {
         Ok(Some("http://vnc.invalid".to_string()))
     }
     /// Every box a fill reaches is a password box, reported anew after each action: these
     /// tests are about who may fill and where; which box has focus is `fill_into_focus`'s own
     /// (opengrok-forms `tests/unit/user_form.rs`).
-    async fn focused_field(&self, _box_id: &str) -> BoxResult<opengrok_box::Focus> {
+    async fn focused_field(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<opengrok_box::Focus> {
         let seq = self.acts.lock().expect("acts").len() as u64;
         Ok(opengrok_box::Focus {
             kind: Some("password".to_string()),
             seq,
         })
     }
-    async fn active_tab_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+    async fn close_screen(&self, _box_id: &str, bot: &str) -> BoxResult<()> {
+        self.closed.lock().expect("closed").push(bot.to_string());
+        Ok(())
+    }
+    async fn active_tab_url(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<Option<String>> {
         match self.front.lock().expect("front").clone() {
             None => Err(opengrok_box::BoxError::Unreachable("cannot say".into())),
             Some(url) if url.is_empty() => Ok(None),
             Some(url) => Ok(Some(url)),
         }
     }
-    async fn screenshot(&self, _box_id: &str) -> BoxResult<Screenshot> {
+    async fn screenshot(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<Screenshot> {
         *self.shots.lock().expect("shots") += 1;
         Ok(Screenshot {
             mime: "image/png".to_string(),
@@ -169,8 +192,14 @@ impl Computer for FillStub {
             height: 800,
         })
     }
-    async fn act(&self, _box_id: &str, action: &CuaAction) -> BoxResult<()> {
+    async fn act(
+        &self,
+        _box_id: &str,
+        screen: &opengrok_box::Screen,
+        action: &CuaAction,
+    ) -> BoxResult<()> {
         self.acts.lock().expect("acts").push(action.clone());
+        self.screens.lock().expect("screens").push(screen.clone());
         Ok(())
     }
     async fn egress_tunnel(&self, box_id: &str) -> Option<EgressTunnel> {
@@ -2589,6 +2618,112 @@ async fn a_saved_login_is_typed_only_on_the_site_it_was_saved_for() {
     let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["formResolution"], "submitted", "{body}");
+}
+
+/// A BOT TOLD TO USE ITS OWN SCREEN WORKS THERE (#376). Bots that share a computer share its one
+/// screen: Bot A opened Facebook and Bot B's screen showed it (10 Oct 2026). Bea is switched to
+/// a screen of her own: her clicks and keys land there while Ada's stay on the shared screen,
+/// each Bot's computer says which screen it is on, and back on the shared screen her own one is
+/// stopped. A Bot with a computer of its own already has its own screen, and says so.
+#[tokio::test]
+async fn a_bot_on_its_own_screen_works_there_while_the_others_stay_on_the_shared_one() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-screen-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let door = Arc::new(SiteLoginDoor("www.facebook.com"));
+    let h = harness_with_door(&database_url, &email, door).await;
+    let token = h.access_token(&email);
+    let (ada, bea) = (h.hire(&token, "Ada").await, h.hire(&token, "Bea").await);
+    let call = |method: reqwest::Method, path: String, body: Option<Value>| {
+        let mut req = h
+            .client
+            .request(method, format!("{}{path}", h.base))
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        async move {
+            let res = req.send().await.expect("call");
+            let status = res.status().as_u16();
+            (status, res.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let own_screen = |bot: String, own: bool| {
+        call(
+            reqwest::Method::PUT,
+            format!("/coworkers/{bot}/computer/screen"),
+            Some(json!({ "own": own })),
+        )
+    };
+    let (status, body) = own_screen(bea.clone(), true).await;
+    assert_eq!(
+        (status, body["screen"].as_str()),
+        (200, Some("own")),
+        "{body}"
+    );
+
+    // Each Bot fills a card by hand on the page in front; the actions say whose screen.
+    *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
+    for bot in [&bea, &ada] {
+        h.turn(&token, bot, "sign in").await;
+        let card = h.wait_for_form(bot).await;
+        let fill = json!({
+            "entryId": card["id"].as_str().expect("entry id"),
+            "agentId": bot,
+            "values": { "email": EMAIL, "password": "typed-by-hand" }
+        });
+        let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    let screens = h.stub.screens.lock().expect("screens").clone();
+    let on_own = screens
+        .iter()
+        .take_while(|s| **s == opengrok_box::Screen::Own(bea.to_string()))
+        .count();
+    assert!(on_own > 0, "Bea's fill is on her own screen: {screens:?}");
+    assert!(
+        screens[on_own..]
+            .iter()
+            .all(|s| *s == opengrok_box::Screen::Shared),
+        "Ada's fill stays on the shared screen: {screens:?}"
+    );
+
+    let (_, body) = call(
+        reqwest::Method::GET,
+        format!("/coworkers/{bea}/computer"),
+        None,
+    )
+    .await;
+    assert_eq!(body["screen"], "own", "{body}");
+    let (_, body) = call(
+        reqwest::Method::GET,
+        format!("/coworkers/{ada}/computer"),
+        None,
+    )
+    .await;
+    assert_eq!(body["screen"], "shared", "{body}");
+
+    // Back on the shared screen: her own screen is stopped.
+    let (status, body) = own_screen(bea.clone(), false).await;
+    assert_eq!(
+        (status, body["screen"].as_str()),
+        (200, Some("shared")),
+        "{body}"
+    );
+    assert_eq!(
+        *h.stub.closed.lock().expect("closed"),
+        vec![bea.to_string()]
+    );
+
+    // A computer of its own is already its own screen.
+    h.store
+        .set_sharing_mode("account", h.account.as_str(), "per-bot", 1)
+        .await
+        .expect("per-bot");
+    let (status, body) = own_screen(ada.clone(), true).await;
+    assert_eq!(status, 409, "{body}");
 }
 
 /// Asks once for a login whose card names `.0` as its site, then answers.

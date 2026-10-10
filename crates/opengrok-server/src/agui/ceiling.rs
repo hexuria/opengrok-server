@@ -699,7 +699,14 @@ pub(super) async fn put_own_computer(
             .set_sharing_mode("bot", bot.as_str(), "per-bot", now_ms())
             .await
     } else {
-        store.clear_sharing_mode("bot", bot.as_str()).await
+        // Only its own computer is undone: a Bot on a screen of its own keeps that (#376).
+        match store.sharing_mode("bot", bot.as_str()).await {
+            Ok(Some(row)) if row == "per-bot" => {
+                store.clear_sharing_mode("bot", bot.as_str()).await
+            }
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        }
     };
     if let Err(error) = saved {
         return unavailable(&error);
@@ -730,4 +737,31 @@ pub(super) async fn put_own_computer(
     let (_, _, _, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
     Json(json!({ "ownComputer": mode == opengrok_core::coworker::BoxMode::Dedicated }))
         .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct OwnScreen {
+    own: bool,
+}
+
+/// `PUT /coworkers/{id}/computer/screen` `{own}`: the Computer pane's switch between a screen of
+/// its own on the computer it shares and the shared screen (#376; `provision::set_own_screen`).
+/// Answers `{screen: "own" | "shared"}`.
+pub(super) async fn put_own_screen(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Result<Json<OwnScreen>, JsonRejection>,
+) -> Response {
+    let (account, bot) = match owner(&state, &headers, id).await {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let Ok(Json(OwnScreen { own })) = body else {
+        return refusal(422, "send {\"own\"}");
+    };
+    match super::provision::set_own_screen(&state, &account, &bot, own).await {
+        Ok(screen) => Json(json!({ "screen": screen.word() })).into_response(),
+        Err((status, message)) => refusal(status.as_u16(), &message),
+    }
 }

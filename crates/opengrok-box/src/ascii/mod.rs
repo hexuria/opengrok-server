@@ -228,7 +228,11 @@ impl Computer for AsciiBoxes {
         }
     }
 
-    async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+    /// box.ascii.dev has one screen per box: a Bot's own screen is not something it can show.
+    async fn screen_url(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<Option<String>> {
+        if screen.bot().is_some() {
+            return Ok(None);
+        }
         // POST /boxes/{id}/desktop?vnc=1 provisions (first call) then returns a noVNC URL
         // (`desktopUrl`) once ready — confirmed live. Idempotent: polling returns the same URL, so a
         // status poll can call it. While it is still provisioning there is no URL yet ⇒ `None`, and

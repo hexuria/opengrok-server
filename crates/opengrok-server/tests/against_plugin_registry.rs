@@ -1553,6 +1553,7 @@ async fn a_bot_manages_its_persons_plugins_and_asks_first_where_it_cannot_be_und
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        screen: Default::default(),
     };
     let (desk, context) = (&desk, &context);
     let answer = move |ask: Ask| desk.answer(context, ask);

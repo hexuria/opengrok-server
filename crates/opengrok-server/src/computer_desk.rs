@@ -121,6 +121,13 @@ impl ComputerDesk for Tools {
                 Ok(json!({ "updating": true,
                     "note": "the computer is being rebuilt on the newest image; its files are kept" }))
             }
+            Ask::UseOwnScreen { own } => {
+                let screen = provision::set_own_screen(state, account, coworker, own)
+                    .await
+                    .map_err(|(_, message)| message)?;
+                context.set_screen(screen.clone()); // the turn's next screen action lands there
+                Ok(json!({ "screen": screen.word() }))
+            }
             Ask::SetNetwork { mode } => {
                 let Some(stored) = egress_mode(&mode) else {
                     return Err("mode is always, ask or never".into());

@@ -392,6 +392,72 @@ pub async fn resolve_mode_for(
     }
 }
 
+/// The `bot` row's word for a screen of its own (#376); one row, so never also `per-bot`.
+pub const OWN_SCREEN: &str = "own-screen";
+
+/// Which screen a coworker works on: its own when told to and its computer is shared, else shared.
+pub async fn screen_for(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &str,
+) -> opengrok_box::Screen {
+    let (_, _, _, _, mode) = scope_of(state, account_id, coworker_id).await;
+    if mode == BoxMode::Dedicated {
+        return opengrok_box::Screen::Shared;
+    }
+    match state.auth.store.sharing_mode("bot", coworker_id).await {
+        Ok(Some(own)) if own == OWN_SCREEN => opengrok_box::Screen::Own(coworker_id.to_string()),
+        _ => opengrok_box::Screen::Shared,
+    }
+}
+
+/// A screen of its own on the computer it shares (`own`), or the shared one (#376): the pane's
+/// switch and `use_own_screen`. Back on the shared screen its own one stops (its profile stays).
+pub async fn set_own_screen(
+    state: &AgUiState,
+    account_id: &AccountId,
+    coworker_id: &CoworkerId,
+    own: bool,
+) -> Result<opengrok_box::Screen, (axum::http::StatusCode, String)> {
+    let (_, _, scope, _, mode) = scope_of(state, account_id, coworker_id.as_str()).await;
+    if mode == BoxMode::Dedicated {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "this Bot has a computer of its own, so its screen is already its own".into(),
+        ));
+    }
+    if scope == "group" {
+        return Err((
+            axum::http::StatusCode::CONFLICT,
+            "a group's computer is its members' shared desk; it has one screen".into(),
+        ));
+    }
+    let store = &state.auth.store;
+    let saved = if own {
+        store
+            .set_sharing_mode("bot", coworker_id.as_str(), OWN_SCREEN, crate::now_ms())
+            .await
+    } else {
+        store.clear_sharing_mode("bot", coworker_id.as_str()).await
+    };
+    saved.map_err(|_| {
+        let why = "the screen setting could not be saved now; try again in a moment";
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, why.to_string())
+    })?;
+    if let Some(row) = scoped_box_row_for(state, account_id, coworker_id).await {
+        super::screen_proxy::forget_box(&row.box_id);
+        if !own
+            && let Some(provider) = provider_for(state, row.org_id.as_deref(), &row.kind).await
+            && let Err(error) = provider
+                .close_screen(&row.box_id, coworker_id.as_str())
+                .await
+        {
+            tracing::warn!(%error, "a Bot's own screen was not stopped; it stops with the computer");
+        }
+    }
+    Ok(screen_for(state, account_id, coworker_id.as_str()).await)
+}
+
 /// The (scope, scope_id, box mode) a mode maps to: per-org shares one org box, per-account one box
 /// per member, per-bot a dedicated box each. An account with no org falls back to account scope.
 pub fn scope_for(
@@ -942,9 +1008,10 @@ pub async fn coworker_screen(
     let probe = opengrok_box::shown_egress(provider.as_ref(), &box_id);
     let (live_state, cap) = tokio::join!(provider.state(&box_id), probe);
     let live_state = live_state.unwrap_or_else(|_| "unknown".to_string());
+    let which = screen_for(state, account_id, coworker_id.as_str()).await;
     let (mut vnc_url, image) = if live_state == "running" {
         (
-            provider.screen_url(&box_id).await.ok().flatten(),
+            provider.screen_url(&box_id, &which).await.ok().flatten(),
             provider.image_status(&box_id).await.ok(),
         )
     } else {
@@ -981,6 +1048,7 @@ pub async fn coworker_screen(
             "latest": image.latest,
             "stale": image.stale(),
         })),
+        "screen": which.word(), // which screen of the computer it works on (#376)
     });
     // A Local VM with a TAKEOVER stamp beside it is a takeover's box: the stamp says the box
     // changed and why. Only that stamp — the account's error row also holds other scopes' failed
@@ -1018,7 +1086,8 @@ pub async fn coworker_screenshot(
     let Some(provider) = lookup.computer else {
         return Err((StatusCode::SERVICE_UNAVAILABLE, NO_PROVIDER.into()));
     };
-    let shot = provider.screenshot(&row.box_id).await;
+    let which = screen_for(state, account_id, coworker_id.as_str()).await;
+    let shot = provider.screenshot(&row.box_id, &which).await;
     shot.map_err(|error| match error {
         opengrok_box::BoxError::Refused { status: 501, .. } => {
             (StatusCode::NOT_FOUND, "this computer has no screen".into())
@@ -1057,7 +1126,10 @@ async fn updating(state: &AgUiState, scope: &str, scope_id: &str) -> bool {
 pub async fn wait_for_screen(provider: &dyn Computer, box_id: &str, patience: std::time::Duration) {
     let started = std::time::Instant::now();
     loop {
-        if let Ok(Some(_)) = provider.screen_url(box_id).await {
+        if let Ok(Some(_)) = provider
+            .screen_url(box_id, &opengrok_box::Screen::Shared)
+            .await
+        {
             return;
         }
         if started.elapsed() >= patience {

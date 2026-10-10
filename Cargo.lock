@@ -1220,7 +1220,7 @@ dependencies = [
 [[package]]
 name = "grok-box"
 version = "0.1.0"
-source = "git+https://github.com/hexuria/box?rev=d2ed43f#d2ed43f4f8b54dbeb9312c96190f832f3ca7c3d2"
+source = "git+https://github.com/hexuria/box?rev=c8ba740#c8ba740e1c2650a1a514e77bb8e3caf3923e6bb5"
 dependencies = [
  "anyhow",
  "bytes",

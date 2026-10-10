@@ -395,7 +395,9 @@ async fn skill_segment(
     // the fence places them, as it does for a skill read with `use_skill`.
     let quoted = match crate::persona::skill_marker(&skill.body) {
         Some(marker) => {
-            let target = tools.and_then(ToolRunner::fill_target);
+            let target = tools
+                .and_then(ToolRunner::fill_target)
+                .map(|(computer, box_id, _)| (computer, box_id));
             let files = crate::skills::files_line_for_turn(state, &skill, target).await;
             let (door, author) = (crate::persona::SkillDoor::Chosen, skill.author);
             let files = files.unwrap_or_default();
@@ -697,6 +699,7 @@ pub(crate) async fn tools_for_turn(
     let (egress_policy, egress_unconfirmed) =
         provision::egress_policy_for_turn(state, scope, &scope_id).await;
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
+    context.set_screen(provision::screen_for(state, account_id, coworker_id.as_str()).await);
     let transcript_hold = match state
         .auth
         .store
@@ -1123,6 +1126,11 @@ pub fn router(state: AgUiState) -> Router {
         .route(
             "/coworkers/{coworker_id}/own-computer",
             axum::routing::put(super::ceiling::put_own_computer),
+        )
+        // A screen of its own on the computer it shares, or the shared screen again (#376).
+        .route(
+            "/coworkers/{coworker_id}/computer/screen",
+            axum::routing::put(super::ceiling::put_own_screen),
         )
         // One plugin skill on or off for this Bot, and its text for its page (`ceiling.rs`).
         .route(

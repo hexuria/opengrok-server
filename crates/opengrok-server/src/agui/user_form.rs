@@ -1239,7 +1239,7 @@ async fn fill_on_box(
     if runner.network_off() {
         return failed();
     }
-    let Some((computer, box_id)) = runner.fill_target() else {
+    let Some((computer, box_id, screen)) = runner.fill_target() else {
         return failed();
     };
     // The person may press Submit long after the box went to sleep; this path types straight
@@ -1254,7 +1254,7 @@ async fn fill_on_box(
     }
     // It types into the page in front, which on a shared computer another Bot may have changed
     // (9 Oct 2026). A box that cannot say is refused only for a saved login on a shared one.
-    let answer = computer.active_tab_url(&box_id).await;
+    let answer = computer.active_tab_url(&box_id, &screen).await;
     // A saved login is checked against the site it was saved for, never the card's words
     // (`front_page::origin_site`). One that cannot be read is refused.
     let site = match saved_login {
@@ -1273,7 +1273,7 @@ async fn fill_on_box(
     if let Some(why) = front_page::front_page_refusal(site.as_deref(), front, unknown_refuses) {
         return Err(why);
     }
-    Ok(fill_into_focus(computer.as_ref(), &box_id, form, values).await)
+    Ok(fill_into_focus(computer.as_ref(), &box_id, &screen, form, values).await)
 }
 
 /// Every field of the form, not typed.

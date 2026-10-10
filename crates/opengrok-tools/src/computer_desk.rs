@@ -22,14 +22,16 @@ pub const RESTART_COMPUTER: &str = "restart_computer";
 pub const RESET_COMPUTER: &str = "reset_computer";
 pub const UPDATE_COMPUTER: &str = "update_computer";
 pub const SET_NETWORK: &str = "set_network";
+pub const USE_OWN_SCREEN: &str = "use_own_screen";
 
 /// Every computer tool, in the order they are offered: reading first, then the switches, then
 /// what cannot be undone.
-pub const TOOLS: [&str; 7] = [
+pub const TOOLS: [&str; 8] = [
     COMPUTER_STATUS,
     START_COMPUTER,
     SHUTDOWN_COMPUTER,
     RESTART_COMPUTER,
+    USE_OWN_SCREEN,
     RESET_COMPUTER,
     UPDATE_COMPUTER,
     SET_NETWORK,
@@ -40,8 +42,9 @@ pub const TOOLS: [&str; 7] = [
 pub const ROW: &str = "manage_computer";
 pub const ROW_LABEL: &str = "Manage computer";
 pub const ROW_DESCRIPTION: &str = "Check, start, shut down, restart, reset and update this Bot's own \
-     computer, and set what it may reach on the network, when you ask in chat. Resetting, updating \
-     and the network setting always ask you first.";
+     computer, switch it to a screen of its own or back to the shared one, and set what it may \
+     reach on the network, when you ask in chat. Resetting, updating and the network setting \
+     always ask you first.";
 
 pub fn is_computer_tool(name: &str) -> bool {
     TOOLS.contains(&name)
@@ -60,7 +63,14 @@ pub enum Ask {
     Restart,
     Reset,
     Update,
-    SetNetwork { mode: String },
+    SetNetwork {
+        mode: String,
+    },
+    /// Its own screen on the computer it shares with the person's other Bots (`own`), or the
+    /// shared screen again (#376).
+    UseOwnScreen {
+        own: bool,
+    },
 }
 
 /// This Bot's computer, as the server keeps it. Every call is answered as `context`'s account and
@@ -112,6 +122,10 @@ fn read(name: &str, arguments: &Value) -> Result<Ask, String> {
             }),
             _ => Err("bad arguments: mode is always, ask or never".to_string()),
         },
+        USE_OWN_SCREEN => match arguments.get("own").and_then(Value::as_bool) {
+            Some(own) => Ok(Ask::UseOwnScreen { own }),
+            None => Err("bad arguments: own is true or false".to_string()),
+        },
         other => Err(format!("there is no computer tool called {other}")),
     }
 }
@@ -144,6 +158,13 @@ pub fn description(name: &str) -> Option<&'static str> {
             "Set what THIS BOT'S OWN computer may reach through the person's network: always, ask \
              each time, or never. It always asks the person first."
         }
+        USE_OWN_SCREEN => {
+            "Switch THIS BOT to a screen of its own on the computer it shares with the person's \
+             other Bots (own: true), or back to the shared screen (own: false). On its own screen \
+             it has its own browser, signed in to nothing until it signs in, and what it does \
+             there is not on the other Bots' screen. The choice stays until it is switched back. \
+             A Bot with a computer of its own already has its own screen."
+        }
         ROW => ROW_DESCRIPTION,
         _ => return None,
     })
@@ -157,6 +178,11 @@ pub fn schema(name: &str) -> Option<Value> {
             json!({ "mode": { "type": "string", "enum": NETWORK_MODES,
                 "description": "always, ask (each time) or never." } }),
             json!(["mode"]),
+        ),
+        USE_OWN_SCREEN => (
+            json!({ "own": { "type": "boolean",
+                "description": "true: its own screen; false: back to the shared screen." } }),
+            json!(["own"]),
         ),
         n if is_computer_tool(n) => (json!({}), json!([])),
         _ => return None,
@@ -185,5 +211,10 @@ mod tests {
         assert!(read(SET_NETWORK, &json!({ "mode": "sometimes" })).is_err());
         assert!(read(SET_NETWORK, &json!({})).is_err());
         assert_eq!(read(RESET_COMPUTER, &json!({})), Ok(Ask::Reset));
+        assert_eq!(
+            read(USE_OWN_SCREEN, &json!({ "own": true })),
+            Ok(Ask::UseOwnScreen { own: true })
+        );
+        assert!(read(USE_OWN_SCREEN, &json!({ "own": "yes" })).is_err());
     }
 }

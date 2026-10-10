@@ -460,11 +460,19 @@ impl Computer for FillSpy {
     async fn state(&self, _b: &str) -> BoxResult<String> {
         Ok("running".into())
     }
-    async fn screenshot(&self, _b: &str) -> BoxResult<opengrok_box::Screenshot> {
+    async fn screenshot(
+        &self,
+        _b: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<opengrok_box::Screenshot> {
         *self.shots.lock().unwrap() += 1;
         Err(opengrok_box::no_screen())
     }
-    async fn focused_field(&self, _b: &str) -> BoxResult<opengrok_box::Focus> {
+    async fn focused_field(
+        &self,
+        _b: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<opengrok_box::Focus> {
         if self.page.is_empty() {
             return Err(opengrok_box::BoxError::Unreachable("cannot say".into()));
         }
@@ -475,7 +483,12 @@ impl Computer for FillSpy {
             seq,
         })
     }
-    async fn act(&self, _b: &str, action: &CuaAction) -> BoxResult<()> {
+    async fn act(
+        &self,
+        _b: &str,
+        _screen: &opengrok_box::Screen,
+        action: &CuaAction,
+    ) -> BoxResult<()> {
         self.acts.lock().unwrap().push(action.clone());
         let mut focused = self.focused.lock().unwrap();
         match action {
@@ -534,7 +547,8 @@ async fn positioned_fields_are_clicked_before_they_are_typed() {
         ("email".into(), "ada@example.com".into()),
         ("password".into(), "s3cret-pass".into()),
     ]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert!(
         outcomes.iter().all(|o| o.filled && !o.fill_failed),
         "{outcomes:?}"
@@ -602,7 +616,8 @@ async fn a_positioned_form_types_every_field_without_same_page_but_does_not_retu
         ("email".into(), "ada@example.com".into()),
         ("password".into(), "s3cret-pass".into()),
     ]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert!(
         outcomes.iter().all(|o| o.filled && !o.fill_failed),
         "{outcomes:?}"
@@ -671,7 +686,8 @@ async fn a_skipped_field_on_a_same_page_form_is_still_tabbed_past() {
         ("email".into(), "ada@example.com".into()),
         ("password".into(), "s3cret-pass".into()),
     ]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert!(
         outcomes.iter().all(|o| o.filled && !o.fill_failed),
         "{outcomes:?}"
@@ -745,7 +761,8 @@ async fn fill_types_only_the_first_field_by_default() {
         ("email".into(), "ada@example.com".into()),
         ("password".into(), "s3cret-pass".into()),
     ]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert_eq!(outcomes.len(), 2);
     assert!(outcomes[0].filled && !outcomes[0].fill_failed);
     assert!(
@@ -787,7 +804,8 @@ async fn a_single_password_field_may_press_return() {
         submit: false,
     };
     let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert_eq!(overall_resolution(&outcomes), FormResolution::Submitted);
     let acts = spy.acts.lock().unwrap().clone();
     assert_eq!(
@@ -839,7 +857,8 @@ async fn same_page_with_submit_tabs_and_returns() {
         ("email".into(), "ada@example.com".into()),
         ("password".into(), "s3cret-pass".into()),
     ]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert!(outcomes.iter().all(|o| o.filled && !o.fill_failed));
     let acts = spy.acts.lock().unwrap().clone();
     assert_eq!(
@@ -1029,7 +1048,8 @@ async fn a_failed_type_is_fill_failed_and_does_not_press_return() {
         submit: false,
     };
     let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
     assert_eq!(outcomes[0].id, "password");
     assert!(outcomes[0].fill_failed);
@@ -1094,7 +1114,8 @@ async fn a_password_whose_click_lands_on_the_email_box_is_not_typed() {
         ("email".into(), "ada@example.com".into()),
         ("password".into(), "s3cret-pass".into()),
     ]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
     assert!(outcomes[0].filled, "the email is typed: {outcomes:?}");
     assert!(outcomes[1].fill_failed, "{outcomes:?}");
@@ -1121,7 +1142,8 @@ async fn a_computer_that_cannot_say_which_box_has_focus_types_no_password() {
         ("email".into(), "ada@example.com".into()),
         ("password".into(), "s3cret-pass".into()),
     ]);
-    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    let outcomes =
+        fill_into_focus(&spy, "box_1", &opengrok_box::Screen::Shared, &form, &values).await;
     assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
     let acts = spy.acts.lock().unwrap().clone();
     assert!(
