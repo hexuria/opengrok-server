@@ -1801,7 +1801,9 @@ impl Executor {
                 "Reads a document's headings, sheets or slides.",
             ),
             office_desk::OFFICE_GREP => ("Search document", "Finds text inside an open document."),
-            office_desk::OFFICE_READ => ("Read document", "Reads a span of an open document's text."),
+            office_desk::OFFICE_READ => {
+                ("Read document", "Reads a span of an open document's text.")
+            }
             office_desk::OFFICE_CELLS => ("Read cells", "Reads a range of a spreadsheet's cells."),
             office_desk::OFFICE_RENDER => (
                 "Render page",
@@ -1820,9 +1822,17 @@ impl Executor {
                 "Propose cell edits",
                 "Stages spreadsheet edits you can review before they are written.",
             ),
-            office_desk::OFFICE_REVIEW => ("Review proposals", "Shows what a staged edit would change."),
-            office_desk::OFFICE_ACCEPT => ("Accept edits", "Writes a reviewed proposal to the document."),
-            office_desk::OFFICE_REJECT => ("Reject edits", "Discards a staged proposal without writing."),
+            office_desk::OFFICE_REVIEW => {
+                ("Review proposals", "Shows what a staged edit would change.")
+            }
+            office_desk::OFFICE_ACCEPT => (
+                "Accept edits",
+                "Writes a reviewed proposal to the document.",
+            ),
+            office_desk::OFFICE_REJECT => (
+                "Reject edits",
+                "Discards a staged proposal without writing.",
+            ),
             office_desk::OFFICE_EXPORT => (
                 "Export document",
                 "Saves the document to a new file and attaches it to the reply.",

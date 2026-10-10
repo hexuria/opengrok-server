@@ -264,7 +264,14 @@ pub async fn run_close(
     document: &str,
 ) -> ToolResult {
     match desk.close(context, document).await {
-        Ok(reply) => ToolResult::ok(call_id, reply.result.to_string()),
+        // A closed document is a change the watching client must hear as much as an edit is.
+        Ok(reply) => {
+            let mut result = ToolResult::ok(call_id, reply.result.to_string());
+            for frame in reply.customs {
+                result.customs.push((OFFICE_DOC_EVENT.to_string(), frame));
+            }
+            result
+        }
         Err(why) => ToolResult::refused(call_id, why),
     }
 }

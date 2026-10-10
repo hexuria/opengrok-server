@@ -896,9 +896,12 @@ fn the_policys_tool_groups_are_the_groups_tools_lists() {
 /// app never has to show the model's words (written in its capitals) or make up its own (#359).
 #[test]
 fn every_built_in_has_words_for_people() {
-    for name in
-        Executor::every_builtin().chain([routine::ROW, plugin_desk::ROW, computer_desk::ROW, crate::office_desk::ROW])
-    {
+    for name in Executor::every_builtin().chain([
+        routine::ROW,
+        plugin_desk::ROW,
+        computer_desk::ROW,
+        crate::office_desk::ROW,
+    ]) {
         let words = Executor::builtin_for_people(name);
         assert!(words.is_some(), "{name} has no words for people");
         let (label, summary) = words.unwrap_or_default();
