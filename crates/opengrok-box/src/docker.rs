@@ -818,6 +818,11 @@ impl Computer for DockerComputer {
         Ok(url.filter(|url| !url.is_empty()).map(str::to_string))
     }
 
+    async fn focused_field(&self, box_id: &str) -> BoxResult<crate::Focus> {
+        let guest = self.guest(box_id).await?;
+        focus_in(&guest.active_tab().await.map_err(guest_error)?)
+    }
+
     /// The password is the box's own, read back from its environment like `BOX_TOKEN`, so a
     /// restart keeps it. A box without one has no screen here rather than a guessed password;
     /// boxes created before per-box passwords still carry theirs, and keep working.
@@ -1050,6 +1055,18 @@ impl DockerComputer {
 }
 
 /// The guest's refusal, kept readable for the model: "HTTP 400: x=5000 exceeds width 1280".
+/// The focused box in the box's active-tab report. An image from before the report has no
+/// `seq`: it cannot say.
+fn focus_in(body: &serde_json::Value) -> BoxResult<crate::Focus> {
+    let seq = body.get("seq").and_then(serde_json::Value::as_u64);
+    let seq = seq.ok_or_else(|| BoxError::Unreachable("no focus report".to_string()))?;
+    let kind = body.get("focus").and_then(serde_json::Value::as_str);
+    Ok(crate::Focus {
+        kind: kind.map(str::to_string),
+        seq,
+    })
+}
+
 fn guest_error(error: grok_box::Error) -> BoxError {
     match error {
         grok_box::Error::Http {
@@ -1516,5 +1533,25 @@ mod tests {
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    /// The report as a box from hexuria/box `gol/focused-field` answered it live, Tab by Tab,
+    /// and one from an image before the report.
+    #[test]
+    fn the_focused_box_is_read_from_the_active_tab_report() {
+        let live = serde_json::json!({
+            "url": "http://127.0.0.1:8000/login.html", "atMs": 1_791_609_991_048_u64,
+            "focus": "password", "seq": 7
+        });
+        let focus = focus_in(&live).unwrap();
+        assert_eq!((focus.kind.as_deref(), focus.seq), (Some("password"), 7));
+        let unsaid = serde_json::json!({ "url": "https://www.facebook.com/", "seq": 2 });
+        assert_eq!(
+            focus_in(&unsaid).unwrap().kind,
+            None,
+            "the page has not said"
+        );
+        let old_image = serde_json::json!({ "url": "https://www.facebook.com/" });
+        assert!(focus_in(&old_image).is_err(), "cannot say");
     }
 }

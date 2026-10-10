@@ -788,6 +788,14 @@ pub async fn fill_into_focus(
             });
             continue;
         }
+        // What the computer last said of the focused box, so a report made after the field is
+        // reached can be told from one made before.
+        let before = computer
+            .focused_field(box_id)
+            .await
+            .ok()
+            .map(|focus| focus.seq);
+        let reaches = field.at.is_some() || tab_here;
         // Reach the field: by its position when the model gave one, else by Tab.
         let reach = match field.at {
             Some(at) => aim_at(computer, box_id, at).await,
@@ -808,6 +816,18 @@ pub async fn fill_into_focus(
                 error,
                 "user-form: could not reach the field; it and the rest will not be typed"
             );
+            outcomes.push(FieldOutcome {
+                id: field.id.clone(),
+                filled: false,
+                fill_failed: true,
+            });
+            give_up = true;
+            continue;
+        }
+        // A password is typed only into a password box. A click that missed, or focus a page
+        // moved, typed one into Facebook's email box and pressed Log in (10 Oct 2026).
+        if let Err(why) = lands_in_its_box(computer, box_id, field, before, reaches).await {
+            tracing::warn!(field = %field.label, why, "user-form: the focused box is not this field's; it and the rest will not be typed");
             outcomes.push(FieldOutcome {
                 id: field.id.clone(),
                 filled: false,
@@ -858,6 +878,49 @@ pub async fn fill_into_focus(
     }
     outcomes
 }
+
+/// Whether `field` needs a password box: a password, by its type or by the model marking it
+/// secret. A one-time code is secret too, but sites take it in an ordinary box.
+fn wants_a_password_box(field: &FormField) -> bool {
+    !field.r#type.eq_ignore_ascii_case("otp")
+        && (field.r#type.eq_ignore_ascii_case("password") || field.secret)
+}
+
+/// Whether the box that has focus now is one `field`'s value may be typed into. A password goes
+/// only into a box the page says is a password box, so a computer that cannot say types none;
+/// anything else is typed as before. After a click or a Tab (`reached`), the page's report of
+/// the new focus is waited for: one made before the move (`before`) describes the old box.
+async fn lands_in_its_box(
+    computer: &dyn Computer,
+    box_id: &str,
+    field: &FormField,
+    before: Option<u64>,
+    reached: bool,
+) -> Result<(), &'static str> {
+    if !wants_a_password_box(field) {
+        return Ok(());
+    }
+    let started = tokio::time::Instant::now();
+    let focus = loop {
+        let focus = computer.focused_field(box_id).await.ok();
+        let fresh = focus
+            .as_ref()
+            .is_some_and(|f| !reached || Some(f.seq) != before);
+        if fresh || started.elapsed() >= FOCUS_WAIT {
+            break focus;
+        }
+        tokio::time::sleep(FOCUS_POLL).await;
+    };
+    match focus.and_then(|focus| focus.kind).as_deref() {
+        Some("password") => Ok(()),
+        Some(_) => Err("a password would go into a box that is not a password box"),
+        None => Err("the computer cannot say which box has focus, and this is a password"),
+    }
+}
+
+/// How long a fill waits for the page to report the box it just reached, and how often it asks.
+const FOCUS_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+const FOCUS_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Click the field and select what is in it, so the typed value replaces rather than appends
 /// (Facebook keeps the email typed on the previous attempt).
