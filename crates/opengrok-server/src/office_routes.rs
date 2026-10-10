@@ -24,7 +24,7 @@ pub fn router(state: AgUiState) -> Router {
     Router::new()
         .route("/office/docs/{id}", get(detail))
         .route("/office/docs/{id}/bytes", get(bytes))
-        .route("/office/docs/{id}/pages/{page}.png", get(page_png))
+        .route("/office/docs/{id}/pages/{*page}", get(page_png))
         .with_state(state)
 }
 
@@ -190,8 +190,15 @@ async fn bytes(
 async fn page_png(
     State(state): State<AgUiState>,
     headers: HeaderMap,
-    Path((id, page)): Path<(String, u32)>,
+    Path((id, page)): Path<(String, String)>,
 ) -> Response {
+    // `…/pages/12.png`: a segment that is a number AND its extension cannot be one Axum
+    // parameter, so the whole `12.png` arrives as the wildcard and is split here. A segment
+    // that is not `N.png` is simply not this route's page.
+    let Some(page) = page.strip_suffix(".png").and_then(|n| n.parse().ok()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let page: u32 = page;
     let row = match row_for(&state, &headers, &id).await {
         Ok(row) => row,
         Err(response) => return response,

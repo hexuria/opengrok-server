@@ -3400,10 +3400,15 @@ async fn start_claimed_turn(
     // The thread's own log, with this turn's new messages at the end — or the client's copy, on
     // a thread the log cannot tell whole (`history`'s module note).
     // This turn's files, read and marked as sent before the turn is asked (#229).
-    let attached = match &account_id {
-        Some(account) => super::attachments::resolve(&state, account, &input).await,
+    let mut attached = match &account_id {
+        Some(account) => {
+            super::attachments::resolve(&state, account, &input, run_coworker.as_ref()).await
+        }
         None => super::attachments::Attached::default(),
     };
+    // A staged Office file announces itself with the run's opening, not with a tool call: the
+    // frames ride the request into the harness.
+    let staged = std::mem::take(&mut attached.customs);
     let asked = super::history::for_turn(&state, account_id.as_ref(), &input, &attached).await;
     let mut messages = asked.messages;
     // ONE system message. A client-supplied `system` in the AG-UI body would be a second claim
@@ -3433,7 +3438,8 @@ async fn start_claimed_turn(
     let source = route.source();
     let who = (run_coworker.as_ref(), account_id.as_ref());
     let thinks = (route, model, effort);
-    let request = turn_request(&state, who, thinks, system.clone(), messages).await;
+    let mut request = turn_request(&state, who, thinks, system.clone(), messages).await;
+    request.customs = staged;
 
     // The journal writes each round to Postgres before the next model call, and stamps the run's
     // owner so only they can read it back. A run that cannot be recorded fails inside the loop
@@ -3545,6 +3551,7 @@ pub(crate) async fn turn_request(
         tools: Vec::new(),
         endpoint,
         fallback_for,
+        customs: Vec::new(),
     }
 }
 

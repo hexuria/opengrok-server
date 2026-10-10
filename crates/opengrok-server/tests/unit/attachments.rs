@@ -111,3 +111,19 @@ async fn with_no_reader_installed_the_model_is_told_so() {
     .await;
     assert_eq!(why(read), "this server has no PDF reader installed");
 }
+
+/// A staged file's name is a path component, so a name is kept to characters that can never
+/// leave `~/office/inbox`: `..` goes to underscores, a slash too, and only a name that is
+/// nothing at all earns a default.
+#[test]
+fn a_staged_name_stays_inside_the_inbox() {
+    assert_eq!(staged_name("report.docx"), "report.docx");
+    // Every `/` is flattened to `_`, so a `..` can only ever sit inside one safe component —
+    // and leading dots are trimmed so the name cannot hide as a dotfile either.
+    assert_eq!(staged_name("../escape.docx"), "_escape.docx");
+    assert_eq!(staged_name("a/b/../../c.pptx"), "a_b_.._.._c.pptx");
+    assert_eq!(staged_name("q3 plan (final).xlsx"), "q3_plan__final_.xlsx");
+    assert_eq!(staged_name("..."), "document");
+    assert_eq!(staged_name(""), "document");
+    assert!(staged_name(&"é".repeat(200)).len() <= 80);
+}

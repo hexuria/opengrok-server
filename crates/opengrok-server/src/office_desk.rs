@@ -55,7 +55,7 @@ fn mime_of(kind: Kind) -> &'static str {
 }
 
 /// sha256 of the bytes, lowercase hex — the `content_sha256` every session row carries.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = sha2::Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {
@@ -90,7 +90,11 @@ fn describe_box(error: &opengrok_box::BoxError) -> String {
 
 /// Expand a leading `~` on a path the way the person's shell would — asking the box for its
 /// `$HOME` once. Any other path is used as it was written; office paths are absolute.
-async fn expand_home(box_io: &dyn Computer, box_id: &str, path: &str) -> Result<String, String> {
+pub(crate) async fn expand_home(
+    box_io: &dyn Computer,
+    box_id: &str,
+    path: &str,
+) -> Result<String, String> {
     if !path.starts_with('~') {
         return Ok(path.to_string());
     }
@@ -176,7 +180,7 @@ fn proposals_value(proposals: &[Proposal]) -> Result<Value, String> {
 
 /// The `opengrok.officeDoc` frame a mutation emits: thin — who, what changed, where the bytes
 /// are; the client fetches anything bigger through the fetch routes.
-fn frame(
+pub(crate) fn frame(
     row: &opengrok_store::DocSessionRow,
     kind: Kind,
     changed: Value,

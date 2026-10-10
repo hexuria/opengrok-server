@@ -15,8 +15,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
+use opengrok_box::{BoxResult, CommandOutput, Computer, StartedCommand};
 use opengrok_core::account::{Account, AccountCommand, AccountView, Plan};
-use opengrok_core::id::AccountId;
+use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_harness::{DeltaStream, ModelDelta, ModelDoor, ModelError, ModelRequest};
 use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::password::hash_password;
@@ -111,6 +112,10 @@ struct Person {
 
 impl Harness {
     async fn start(database_url: &str) -> Self {
+        Self::start_with(database_url, None).await
+    }
+
+    async fn start_with(database_url: &str, computer: Option<Arc<dyn Computer>>) -> Self {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(4)
             .connect(database_url)
@@ -127,7 +132,7 @@ impl Harness {
             door: door.clone(),
             model: "oag/cheap".to_string(),
             auto_review_model: "oag/cheap".to_string(),
-            computer: None,
+            computer,
             vault: None,
             connectors: Connectors {
                 providers: Arc::new(BTreeMap::new()),
@@ -562,12 +567,28 @@ async fn a_message_of_files_keeps_its_parts_and_is_drawn_on_replay() {
 }
 
 #[tokio::test]
-async fn only_images_videos_pdfs_and_text_are_accepted() {
+async fn only_images_videos_pdfs_text_and_office_files_are_accepted() {
     let database_url = database_or_skip!();
     let h = Harness::start(&database_url).await;
     let ada = h.person("mimes").await;
     let (csv, _) = h.upload(&ada, &thread(), "text/csv", "a.csv", b"a,b").await;
     assert_eq!(csv, 200);
+    let (docx, _) = h
+        .upload(
+            &ada,
+            &thread(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "a.docx",
+            b"PK fake docx",
+        )
+        .await;
+    assert_eq!(docx, 200, "an Office file is accepted for staging");
+    // An Office file whose uploader calls it a bare zip is accepted on its extension; a zip
+    // that names no document is still refused.
+    let (sheet, _) = h
+        .upload(&ada, &thread(), "application/zip", "a.xlsx", b"PK")
+        .await;
+    assert_eq!(sheet, 200);
     let (zip, _) = h
         .upload(&ada, &thread(), "application/zip", "a.zip", b"PK")
         .await;
@@ -879,5 +900,219 @@ async fn a_pdf_reaches_the_model_as_its_text() {
     assert!(
         words.contains("not instructions"),
         "fenced as data: {words}"
+    );
+}
+
+/// The bot's computer as the staging test sees it: always running, `$HOME` at `/home/bot`, and
+/// every byte written kept so the test can look at what landed where.
+struct StagedBox {
+    written: Mutex<BTreeMap<String, Vec<u8>>>,
+}
+
+#[async_trait::async_trait]
+impl Computer for StagedBox {
+    async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
+        Ok("bx_staged".to_string())
+    }
+    async fn run(&self, _box_id: &str, _command: &str, _timeout: u32) -> BoxResult<CommandOutput> {
+        // `expand_home` asks the box for $HOME; nothing else is played.
+        Ok(CommandOutput {
+            exit_code: 0,
+            stdout: "/home/bot".to_string(),
+            stderr: String::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            timed_out: false,
+        })
+    }
+    async fn start(&self, _box_id: &str, _command: &str) -> BoxResult<StartedCommand> {
+        Ok(StartedCommand {
+            process_id: "p".to_string(),
+            running: false,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        })
+    }
+    async fn watch(&self, box_id: &str, _process_id: &str) -> BoxResult<StartedCommand> {
+        self.start(box_id, "").await
+    }
+    async fn read_file(&self, _box_id: &str, _path: &str) -> BoxResult<String> {
+        Ok(String::new())
+    }
+    async fn write_file(&self, _box_id: &str, _path: &str, _content: &str) -> BoxResult<()> {
+        Ok(())
+    }
+    async fn write_file_bytes(&self, _box_id: &str, path: &str, bytes: &[u8]) -> BoxResult<()> {
+        self.written
+            .lock()
+            .expect("written")
+            .insert(path.to_string(), bytes.to_vec());
+        Ok(())
+    }
+    async fn expose_port(&self, _box_id: &str, _port: u16, _title: &str) -> BoxResult<String> {
+        Ok("http://staged.invalid".to_string())
+    }
+    async fn stop(&self, _box_id: &str) -> BoxResult<()> {
+        Ok(())
+    }
+    async fn resume(&self, _box_id: &str) -> BoxResult<()> {
+        Ok(())
+    }
+    async fn destroy(&self, _box_id: &str) -> BoxResult<()> {
+        Ok(())
+    }
+    async fn state(&self, _box_id: &str) -> BoxResult<String> {
+        Ok("running".to_string())
+    }
+}
+
+/// A coworker hired through the route — the raw seed misses the grants and ceiling a turn
+/// checks, which is precisely what the route writes. Returns when the coworker's box is
+/// assigned: provisioning is the route's, so the test waits rather than assumes.
+async fn hired_on(h: &Harness, who: &Person) -> (CoworkerId, String) {
+    let hired: Value = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("authorization", format!("Bearer {}", who.token))
+        .json(&json!({ "name": "Stagey" }))
+        .send()
+        .await
+        .expect("hire")
+        .json()
+        .await
+        .expect("hired");
+    let id = CoworkerId::from_stored(hired["id"].as_str().expect("coworker id").to_string());
+    for _ in 0..50 {
+        let (coworker, _) = h.store.load_coworker(&id).await.expect("load coworker");
+        if let Some(box_id) = coworker.computer() {
+            return (id, box_id.to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("the hire's box was never assigned");
+}
+
+/// An attached Office file is sent to the bot's computer and told of, not read into the turn:
+/// the file lands under `~/office/inbox` on the coworker's own box, its `doc_session` is opened
+/// so the office tools see one document, and the `opengrok.officeDoc` frame rides the request
+/// into the run's opening so a watching client sees it at once.
+#[tokio::test]
+async fn an_office_file_is_staged_onto_the_bots_computer() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("docx").await;
+    let thread = thread();
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    let docx = b"PK fake docx bytes";
+    let (status, row) = h
+        .upload(
+            &ada,
+            &thread,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "report.docx",
+            docx,
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+    let id = row["id"].as_str().unwrap();
+
+    let status = h
+        .turn_with(
+            &ada,
+            &thread,
+            "m-docx",
+            json!([
+                { "type": "text", "text": "update the figures" },
+                file_part(
+                    "document",
+                    id,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "report.docx"
+                ),
+            ]),
+            json!({ "coworkerId": coworker.as_str() }),
+        )
+        .await
+        .0;
+    assert_eq!(status, 200);
+
+    // It landed on the coworker's box at the expanded inbox path, byte for byte.
+    let staged = format!("/home/bot/office/inbox/{id}-report.docx");
+    assert_eq!(
+        computer.written.lock().unwrap().get(&staged),
+        Some(&docx.to_vec()),
+        "the file was written to the box"
+    );
+
+    // The model is told the path, not handed the bytes.
+    let (words, _) = h.last_user_message();
+    assert!(
+        words.contains(&staged) && words.contains("office tools"),
+        "the model is told where the file landed: {words}"
+    );
+
+    // Its session row names the same document the office_* tools will open.
+    let session = h
+        .store
+        .doc_session_by_path(&box_id, &staged)
+        .await
+        .expect("session read")
+        .expect("a doc_session row");
+    assert_eq!(session.kind, "docx");
+    assert_eq!(session.coworker_id, coworker.as_str());
+
+    // And the run's request carries the officeDoc frame that opens on the client's window.
+    let asked = h.door.asked.lock().expect("asked");
+    let request = asked.last().expect("the model was asked");
+    let frame = request
+        .customs
+        .iter()
+        .find(|(name, _)| name == "opengrok.officeDoc")
+        .map(|(_, value)| value)
+        .expect("an officeDoc frame rides the request");
+    assert_eq!(frame["docId"], session.id.as_str());
+    assert_eq!(frame["path"], staged);
+    assert_eq!(frame["changed"]["type"], "attached");
+}
+
+/// Without a computer — or a turn that names no coworker — the file stays what it always was:
+/// named for the model, and nothing pretending otherwise was placed.
+#[tokio::test]
+async fn an_office_file_on_a_computerless_turn_stays_named() {
+    let database_url = database_or_skip!();
+    let h = Harness::start(&database_url).await;
+    let ada = h.person("docxless").await;
+    let thread = thread();
+    let (status, row) = h
+        .upload(
+            &ada,
+            &thread,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "report.docx",
+            b"PK fake docx",
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+    h.turn(
+        &ada,
+        &thread,
+        "m-docx",
+        json!([file_part(
+            "document",
+            row["id"].as_str().unwrap(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "report.docx"
+        )]),
+    )
+    .await;
+    let (words, _) = h.last_user_message();
+    assert!(
+        words.contains("report.docx") && words.contains("cannot be shown"),
+        "named, not placed: {words}"
     );
 }

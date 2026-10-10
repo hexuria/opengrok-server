@@ -1251,6 +1251,12 @@ async fn converse_raw(
             said["fallbackFor"] = why.into();
         }
         opening.push(projection.custom(INFERENCE_SOURCE_NAME, said));
+        // Whatever the turn staged before the model was asked — a file placed on the bot's
+        // computer announces itself in the opening, so a watching client sees it before the
+        // first tool call rather than on a poll after it.
+        for (name, value) in &request.customs {
+            opening.push(projection.custom(name, value.clone()));
+        }
     }
     let opened_ok = journal.record(run_id, &opening).await;
     emit_live(sink, &opening).await;

@@ -1,6 +1,6 @@
 # <crate> <ceiling>, one per line, sorted by crate name.
 # A crate not listed uses the default of 8000.
-opengrok-harness 8020
-opengrok-server 40093
+opengrok-harness 8029
+opengrok-server 40332
 opengrok-store 8325
-opengrok-tools 8405
+opengrok-tools 8504

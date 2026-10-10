@@ -193,6 +193,11 @@ pub struct ModelRequest {
     /// Why a gateway turn is the person's fallback for their plan (`"relay_disabled"`, #332):
     /// its `opengrok.inferenceSource` frame says it as `fallbackFor`.
     pub fallback_for: Option<&'static str>,
+    /// CUSTOM frames the run opens with, right after the inference-source badge — a file the
+    /// turn staged onto the bot's computer announcing itself, so a watching client sees the
+    /// document before the first tool call. Journaled with the opening, so a replay paints
+    /// them too.
+    pub customs: Vec<(String, serde_json::Value)>,
 }
 
 /// One message of a conversation, in the OpenAI chat dialect the gateway speaks.
