@@ -7,7 +7,7 @@
       "id": "rcp_0199bb4e-0000-7000-8000-000000000001",
       "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
       "orgId": "org_two_hands_0199bb4e000070008000000000000003",
-      "name": "Export the ledger",
+      "name": "Close the month",
       "description": "",
       "screen": {
         "width": 1280,
@@ -61,7 +61,16 @@
         "atMs": 1790000002000,
         "leaseUntilMs": 1790000003000,
         "state": "running",
-        "artifacts": []
+        "artifacts": [
+          {
+            "id": "art_0199bb4e-0000-7000-8000-000000000006",
+            "kind": "screenshot",
+            "mime": "image/png",
+            "stepIndex": 0,
+            "sizeBytes": 8,
+            "meta": {}
+          }
+        ]
       }
     ],
     "myBots": [

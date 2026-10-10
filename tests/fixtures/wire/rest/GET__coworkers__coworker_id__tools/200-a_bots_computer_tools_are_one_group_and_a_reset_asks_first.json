@@ -178,7 +178,7 @@
       },
       {
         "name": "manage_computer",
-        "description": "Check, start, shut down, restart, reset and update this Bot's own computer, and set what it may reach on the network, when you ask in chat. Resetting, updating and the network setting always ask you first.",
+        "description": "Check, start, shut down, restart, reset and update this Bot's own computer, switch it to a screen of its own or back to the shared one, and set what it may reach on the network, when you ask in chat. Resetting, updating and the network setting always ask you first.",
         "kind": "builtin",
         "tools": [
           {
@@ -214,6 +214,14 @@
             "summary": "Restarts the Bot's computer."
           },
           {
+            "name": "use_own_screen",
+            "description": "Switch THIS BOT to a screen of its own on the computer it shares with the person's other Bots (own: true), or back to the shared screen (own: false). On its own screen it has its own browser, signed in to nothing until it signs in, and what it does there is not on the other Bots' screen. The choice stays until it is switched back. A Bot with a computer of its own already has its own screen.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Use its own screen",
+            "summary": "Moves the Bot to a screen of its own on a shared computer, or back to the shared one."
+          },
+          {
             "name": "reset_computer",
             "description": "Reset THIS BOT'S OWN computer to a fresh one: everything on it is deleted for good. It always asks the person first.",
             "kind": "builtin",
@@ -240,7 +248,7 @@
         ],
         "enabled": true,
         "label": "Manage computer",
-        "summary": "Checks, starts, stops, restarts, resets and updates the Bot's own computer."
+        "summary": "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and moves it to a screen of its own."
       }
     ]
   }

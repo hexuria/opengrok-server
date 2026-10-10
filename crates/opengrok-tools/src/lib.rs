@@ -1712,7 +1712,8 @@ impl Executor {
             routine::RUN_ROUTINE => ("Run routine", "Runs one of this Bot's routines now."),
             computer_desk::ROW => (
                 computer_desk::ROW_LABEL,
-                "Checks, starts, stops, restarts, resets and updates the Bot's own computer.",
+                "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and \
+                 moves it to a screen of its own.",
             ),
             computer_desk::COMPUTER_STATUS => (
                 "Computer status",
@@ -1724,6 +1725,10 @@ impl Executor {
                 "Shuts the Bot's computer down, keeping its files.",
             ),
             computer_desk::RESTART_COMPUTER => ("Restart computer", "Restarts the Bot's computer."),
+            computer_desk::USE_OWN_SCREEN => (
+                "Use its own screen",
+                "Moves the Bot to a screen of its own on a shared computer, or back to the shared one.",
+            ),
             computer_desk::RESET_COMPUTER => (
                 "Reset computer",
                 "Deletes everything on the Bot's computer for good.",

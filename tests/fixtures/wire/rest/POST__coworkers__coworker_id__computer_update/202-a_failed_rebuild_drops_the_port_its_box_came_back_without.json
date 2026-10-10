@@ -14,6 +14,7 @@
       "error": null
     },
     "image": null,
+    "screen": "shared",
     "isEgressTunnelAvailable": false,
     "shareScope": "user",
     "egressPolicy": "ask"
