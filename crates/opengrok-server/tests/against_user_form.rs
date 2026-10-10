@@ -143,6 +143,16 @@ impl Computer for FillStub {
     async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
         Ok(Some("http://vnc.invalid".to_string()))
     }
+    /// Every box a fill reaches is a password box, reported anew after each action: these
+    /// tests are about who may fill and where; which box has focus is `fill_into_focus`'s own
+    /// (opengrok-forms `tests/unit/user_form.rs`).
+    async fn focused_field(&self, _box_id: &str) -> BoxResult<opengrok_box::Focus> {
+        let seq = self.acts.lock().expect("acts").len() as u64;
+        Ok(opengrok_box::Focus {
+            kind: Some("password".to_string()),
+            seq,
+        })
+    }
     async fn active_tab_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
         match self.front.lock().expect("front").clone() {
             None => Err(opengrok_box::BoxError::Unreachable("cannot say".into())),

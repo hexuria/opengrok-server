@@ -184,6 +184,17 @@ pub fn is_starting(state: &str) -> bool {
     )
 }
 
+/// What kind of box has focus on the page in front of a computer's browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Focus {
+    /// `password`, `text` (another place to type text), `other` or `none`; `None` while the
+    /// page has not said.
+    pub kind: Option<String>,
+    /// How many reports the browser has made: it moves when focus does, so a fill that clicked
+    /// a field waits for it before trusting `kind`.
+    pub seq: u64,
+}
+
 /// What the box's screen looks like right now: the whole display as a PNG, base64 so it can
 /// ride a JSON frame and a model message without decoding on the way.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -432,6 +443,15 @@ pub trait Computer: Send + Sync {
     async fn active_tab_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
         Err(BoxError::Unreachable(
             "this computer does not say which page is in front".to_string(),
+        ))
+    }
+
+    /// What kind of box has focus on the page in front (hexuria/box `GET /v1/chrome/active-tab`,
+    /// its `focus` and `seq`), asked before each value of a fill is typed. An error when the
+    /// computer cannot say, which is the default.
+    async fn focused_field(&self, _box_id: &str) -> BoxResult<Focus> {
+        Err(BoxError::Unreachable(
+            "this computer does not say which box has focus".to_string(),
         ))
     }
 

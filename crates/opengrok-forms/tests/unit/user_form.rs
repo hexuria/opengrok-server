@@ -407,6 +407,22 @@ struct FillSpy {
     acts: Mutex<Vec<CuaAction>>,
     shots: Mutex<u32>,
     fail_type: bool,
+    /// The page's boxes, in Tab order: where a click lands on each (if anywhere) and its kind.
+    /// Empty is a computer that cannot say which box has focus.
+    page: Vec<(Option<(i32, i32)>, &'static str)>,
+    /// Which box has focus (the first, at the start), and how many times focus has moved.
+    focused: Mutex<(Option<usize>, u64)>,
+}
+
+impl FillSpy {
+    /// A page whose first box has focus.
+    fn on(page: Vec<(Option<(i32, i32)>, &'static str)>) -> Self {
+        Self {
+            page,
+            focused: Mutex::new((Some(0), 0)),
+            ..Self::default()
+        }
+    }
 }
 
 #[async_trait]
@@ -448,8 +464,32 @@ impl Computer for FillSpy {
         *self.shots.lock().unwrap() += 1;
         Err(opengrok_box::no_screen())
     }
+    async fn focused_field(&self, _b: &str) -> BoxResult<opengrok_box::Focus> {
+        if self.page.is_empty() {
+            return Err(opengrok_box::BoxError::Unreachable("cannot say".into()));
+        }
+        let (at, seq) = *self.focused.lock().unwrap();
+        let kind = at.map_or("none", |i| self.page[i].1);
+        Ok(opengrok_box::Focus {
+            kind: Some(kind.to_string()),
+            seq,
+        })
+    }
     async fn act(&self, _b: &str, action: &CuaAction) -> BoxResult<()> {
         self.acts.lock().unwrap().push(action.clone());
+        let mut focused = self.focused.lock().unwrap();
+        match action {
+            CuaAction::Click { x, y, .. } => {
+                let hit = self.page.iter().position(|(at, _)| *at == Some((*x, *y)));
+                *focused = (hit, focused.1 + 1);
+            }
+            CuaAction::Key { key } if key == "Tab" => {
+                let next = focused.0.map(|i| i + 1).filter(|i| *i < self.page.len());
+                *focused = (next, focused.1 + 1);
+            }
+            _ => {}
+        }
+        drop(focused);
         if self.fail_type && matches!(action, CuaAction::Type { .. }) {
             return Err(opengrok_box::BoxError::NoSuchBox);
         }
@@ -472,7 +512,10 @@ fn field(id: &str, kind: &str, at: Option<(i32, i32)>) -> FormField {
 /// password box whatever the browser had focused (the Facebook mistype of 21 Sep 2026).
 #[tokio::test]
 async fn positioned_fields_are_clicked_before_they_are_typed() {
-    let spy = FillSpy::default();
+    let spy = FillSpy::on(vec![
+        (Some((640, 512)), "text"),
+        (Some((640, 560)), "password"),
+    ]);
     let form = FormRequest {
         title: "Log in".into(),
         instruction: String::new(),
@@ -536,7 +579,10 @@ async fn positioned_fields_are_clicked_before_they_are_typed() {
 /// so a position gone stale while the person typed cannot post a password as a username.
 #[tokio::test]
 async fn a_positioned_form_types_every_field_without_same_page_but_does_not_return() {
-    let spy = FillSpy::default();
+    let spy = FillSpy::on(vec![
+        (Some((640, 512)), "text"),
+        (Some((640, 560)), "password"),
+    ]);
     let form = FormRequest {
         title: "Log in".into(),
         instruction: String::new(),
@@ -603,7 +649,7 @@ fn float_positions_are_points_and_absurd_ones_are_not() {
 /// value does not land in the blank field's box (a pre-existing miss).
 #[tokio::test]
 async fn a_skipped_field_on_a_same_page_form_is_still_tabbed_past() {
-    let spy = FillSpy::default();
+    let spy = FillSpy::on(vec![(None, "text"), (None, "text"), (None, "password")]);
     let mut optional = field("nickname", "text", None);
     optional.required = false;
     let form = FormRequest {
@@ -721,7 +767,7 @@ async fn fill_types_only_the_first_field_by_default() {
 
 #[tokio::test]
 async fn a_single_password_field_may_press_return() {
-    let spy = FillSpy::default();
+    let spy = FillSpy::on(vec![(None, "password")]);
     let form = FormRequest {
         title: "Password".into(),
         instruction: String::new(),
@@ -760,7 +806,7 @@ async fn a_single_password_field_may_press_return() {
 
 #[tokio::test]
 async fn same_page_with_submit_tabs_and_returns() {
-    let spy = FillSpy::default();
+    let spy = FillSpy::on(vec![(None, "text"), (None, "password")]);
     let form = FormRequest {
         title: "Sign in".into(),
         instruction: String::new(),
@@ -1014,4 +1060,74 @@ fn timed_out_dismiss_short_circuits() {
     });
     let history = history_line(&settled).expect("timed out history");
     assert_eq!(history, HOLD_TIMED_OUT_TOOL_RESULT);
+}
+
+fn facebook_login(password_at: (i32, i32)) -> FormRequest {
+    FormRequest {
+        title: "Log in to Facebook".into(),
+        instruction: String::new(),
+        fields: vec![
+            field("email", "email", Some((640, 512))),
+            field("password", "password", Some(password_at)),
+        ],
+        domain: None,
+        live_host: Some("www.facebook.com".into()),
+        challenge_kind: None,
+        passkey_mode: None,
+        same_page: true,
+        submit: true,
+    }
+}
+
+/// THE PASSWORD IS TYPED ONLY INTO A PASSWORD BOX. On 10 Oct 2026 the password's click landed
+/// on Facebook's email box; the password was typed over the email, in plain sight, and Log in
+/// was pressed, sending it as the username. Here the card's password position is the email
+/// box's: the email is typed, the password is not, and nothing is submitted.
+#[tokio::test]
+async fn a_password_whose_click_lands_on_the_email_box_is_not_typed() {
+    let spy = FillSpy::on(vec![
+        (Some((640, 512)), "text"),
+        (Some((640, 560)), "password"),
+    ]);
+    let form = facebook_login((640, 512));
+    let values = BTreeMap::from([
+        ("email".into(), "ada@example.com".into()),
+        ("password".into(), "s3cret-pass".into()),
+    ]);
+    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
+    assert!(outcomes[0].filled, "the email is typed: {outcomes:?}");
+    assert!(outcomes[1].fill_failed, "{outcomes:?}");
+    let acts = spy.acts.lock().unwrap().clone();
+    let password = CuaAction::Type {
+        text: "s3cret-pass".into(),
+    };
+    assert!(
+        !acts.contains(&password),
+        "the password is never typed: {acts:?}"
+    );
+    let enter = CuaAction::Key {
+        key: "Return".into(),
+    };
+    assert!(!acts.contains(&enter), "nothing is submitted: {acts:?}");
+}
+
+/// A computer that cannot say which box has focus types no password: it would be typed blind.
+#[tokio::test]
+async fn a_computer_that_cannot_say_which_box_has_focus_types_no_password() {
+    let spy = FillSpy::default();
+    let form = facebook_login((640, 560));
+    let values = BTreeMap::from([
+        ("email".into(), "ada@example.com".into()),
+        ("password".into(), "s3cret-pass".into()),
+    ]);
+    let outcomes = fill_into_focus(&spy, "box_1", &form, &values).await;
+    assert_eq!(overall_resolution(&outcomes), FormResolution::FillFailed);
+    let acts = spy.acts.lock().unwrap().clone();
+    assert!(
+        !acts.contains(&CuaAction::Type {
+            text: "s3cret-pass".into()
+        }),
+        "{acts:?}"
+    );
 }
