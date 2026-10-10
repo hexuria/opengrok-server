@@ -738,30 +738,3 @@ pub(super) async fn put_own_computer(
     Json(json!({ "ownComputer": mode == opengrok_core::coworker::BoxMode::Dedicated }))
         .into_response()
 }
-
-#[derive(serde::Deserialize)]
-pub(super) struct OwnScreen {
-    own: bool,
-}
-
-/// `PUT /coworkers/{id}/computer/screen` `{own}`: the Computer pane's switch between a screen of
-/// its own on the computer it shares and the shared screen (#376; `provision::set_own_screen`).
-/// Answers `{screen: "own" | "shared"}`.
-pub(super) async fn put_own_screen(
-    State(state): State<AgUiState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    body: Result<Json<OwnScreen>, JsonRejection>,
-) -> Response {
-    let (account, bot) = match owner(&state, &headers, id).await {
-        Ok(found) => found,
-        Err(refused) => return refused,
-    };
-    let Ok(Json(OwnScreen { own })) = body else {
-        return refusal(422, "send {\"own\"}");
-    };
-    match super::provision::set_own_screen(&state, &account, &bot, own).await {
-        Ok(screen) => Json(json!({ "screen": screen.word() })).into_response(),
-        Err((status, message)) => refusal(status.as_u16(), &message),
-    }
-}

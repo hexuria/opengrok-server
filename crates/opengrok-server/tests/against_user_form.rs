@@ -62,6 +62,8 @@ struct FillStub {
     /// The screen each action went to (#376), and the Bots whose own screens were stopped.
     screens: Mutex<Vec<opengrok_box::Screen>>,
     closed: Mutex<Vec<String>>,
+    /// The screen each screenshot was taken of.
+    shot_screens: Mutex<Vec<opengrok_box::Screen>>,
 }
 
 impl FillStub {
@@ -182,9 +184,13 @@ impl Computer for FillStub {
     async fn screenshot(
         &self,
         _box_id: &str,
-        _screen: &opengrok_box::Screen,
+        screen: &opengrok_box::Screen,
     ) -> BoxResult<Screenshot> {
         *self.shots.lock().expect("shots") += 1;
+        self.shot_screens
+            .lock()
+            .expect("shot screens")
+            .push(screen.clone());
         Ok(Screenshot {
             mime: "image/png".to_string(),
             png_base64: "iVBORw0KGgo=".to_string(),
@@ -2620,13 +2626,11 @@ async fn a_saved_login_is_typed_only_on_the_site_it_was_saved_for() {
     assert_eq!(body["formResolution"], "submitted", "{body}");
 }
 
-/// A BOT TOLD TO USE ITS OWN SCREEN WORKS THERE (#376). Bots that share a computer share its one
-/// screen: Bot A opened Facebook and Bot B's screen showed it (10 Oct 2026). Bea is switched to
-/// a screen of her own: her clicks and keys land there while Ada's stay on the shared screen,
-/// each Bot's computer says which screen it is on, and back on the shared screen her own one is
-/// stopped. A Bot with a computer of its own already has its own screen, and says so.
+/// Bots that share a computer each work on a screen of their own, with no switch to flip (#376,
+/// the owner's call on 11 Oct 2026): one Bot's fill lands on its screen and the other's on its
+/// own, and each Bot's computer says so.
 #[tokio::test]
-async fn a_bot_on_its_own_screen_works_there_while_the_others_stay_on_the_shared_one() {
+async fn bots_that_share_a_computer_each_work_on_a_screen_of_their_own() {
     let database_url = database_or_skip!();
     let email = format!(
         "user-form-screen-{}@og.local",
@@ -2636,33 +2640,20 @@ async fn a_bot_on_its_own_screen_works_there_while_the_others_stay_on_the_shared
     let h = harness_with_door(&database_url, &email, door).await;
     let token = h.access_token(&email);
     let (ada, bea) = (h.hire(&token, "Ada").await, h.hire(&token, "Bea").await);
-    let call = |method: reqwest::Method, path: String, body: Option<Value>| {
-        let mut req = h
+    let status_of = |bot: String| {
+        let req = h
             .client
-            .request(method, format!("{}{path}", h.base))
+            .get(format!("{}/coworkers/{bot}/computer", h.base))
             .header("authorization", format!("Bearer {token}"));
-        if let Some(body) = body {
-            req = req.json(&body);
-        }
         async move {
-            let res = req.send().await.expect("call");
-            let status = res.status().as_u16();
-            (status, res.json::<Value>().await.unwrap_or(Value::Null))
+            req.send()
+                .await
+                .expect("call")
+                .json::<Value>()
+                .await
+                .expect("json")
         }
     };
-    let own_screen = |bot: String, own: bool| {
-        call(
-            reqwest::Method::PUT,
-            format!("/coworkers/{bot}/computer/screen"),
-            Some(json!({ "own": own })),
-        )
-    };
-    let (status, body) = own_screen(bea.clone(), true).await;
-    assert_eq!(
-        (status, body["screen"].as_str()),
-        (200, Some("own")),
-        "{body}"
-    );
 
     // Each Bot fills a card by hand on the page in front; the actions say whose screen.
     *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
@@ -2678,52 +2669,99 @@ async fn a_bot_on_its_own_screen_works_there_while_the_others_stay_on_the_shared
         assert_eq!(status, 200, "{body}");
     }
     let screens = h.stub.screens.lock().expect("screens").clone();
-    let on_own = screens
+    let on_bea = screens
         .iter()
         .take_while(|s| **s == opengrok_box::Screen::Own(bea.to_string()))
         .count();
-    assert!(on_own > 0, "Bea's fill is on her own screen: {screens:?}");
+    assert!(on_bea > 0, "Bea's fill is on her own screen: {screens:?}");
     assert!(
-        screens[on_own..]
+        on_bea < screens.len()
+            && screens[on_bea..]
+                .iter()
+                .all(|s| *s == opengrok_box::Screen::Own(ada.to_string())),
+        "Ada's fill is on her own screen, not Bea's or a shared one: {screens:?}"
+    );
+    for bot in [&ada, &bea] {
+        let body = status_of(bot.to_string()).await;
+        assert_eq!(body["screen"], "own", "{body}");
+    }
+}
+
+/// A BOT CAN LOOK AT ANOTHER BOT'S SCREEN (11 Oct 2026): with every Bot on its own screen, Ada
+/// asks to see Bea's, by her name, and is shown a picture taken of Bea's own screen, said to be
+/// look-only. A name none of the person's Bots has is refused with the names they do have.
+#[tokio::test]
+async fn a_bot_looks_at_another_bots_screen_by_its_name() {
+    let database_url = database_or_skip!();
+    let email = format!("look-screen-{}@og.local", uuid::Uuid::now_v7().simple());
+    let door = Arc::new(LookDoor);
+    let h = harness_with_door(&database_url, &email, door).await;
+    let token = h.access_token(&email);
+    let (ada, bea) = (h.hire(&token, "Ada").await, h.hire(&token, "Bea").await);
+
+    let sse = h.turn(&token, &ada, "look at bea").await;
+    let shots = h.stub.shot_screens.lock().expect("shot screens").clone();
+    assert_eq!(
+        shots.last(),
+        Some(&opengrok_box::Screen::Own(bea.to_string())),
+        "the picture is of Bea's own screen: {shots:?}"
+    );
+    assert!(sse.contains("cannot click or type there"), "{sse}");
+    assert!(
+        sse.contains("iVBORw0KGgo="),
+        "the picture rides the result: {sse}"
+    );
+
+    let before = h.stub.shot_screens.lock().expect("shot screens").len();
+    let sse = h.turn_on(&token, &ada, "look-zed", "look at zed").await;
+    assert!(sse.contains("no Bot called Zed"), "{sse}");
+    assert!(sse.contains("Ada") && sse.contains("Bea"), "{sse}");
+    assert_eq!(
+        h.stub.shot_screens.lock().expect("shot screens").len(),
+        before,
+        "no picture is taken for a Bot that is not there"
+    );
+}
+
+/// Calls `look_at_screen` on the Bot named in the person's message ("look at bea"), then answers.
+struct LookDoor;
+
+#[async_trait]
+impl ModelDoor for LookDoor {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let answered = request
+            .messages
             .iter()
-            .all(|s| *s == opengrok_box::Screen::Shared),
-        "Ada's fill stays on the shared screen: {screens:?}"
-    );
-
-    let (_, body) = call(
-        reqwest::Method::GET,
-        format!("/coworkers/{bea}/computer"),
-        None,
-    )
-    .await;
-    assert_eq!(body["screen"], "own", "{body}");
-    let (_, body) = call(
-        reqwest::Method::GET,
-        format!("/coworkers/{ada}/computer"),
-        None,
-    )
-    .await;
-    assert_eq!(body["screen"], "shared", "{body}");
-
-    // Back on the shared screen: her own screen is stopped.
-    let (status, body) = own_screen(bea.clone(), false).await;
-    assert_eq!(
-        (status, body["screen"].as_str()),
-        (200, Some("shared")),
-        "{body}"
-    );
-    assert_eq!(
-        *h.stub.closed.lock().expect("closed"),
-        vec![bea.to_string()]
-    );
-
-    // A computer of its own is already its own screen.
-    h.store
-        .set_sharing_mode("account", h.account.as_str(), "per-bot", 1)
-        .await
-        .expect("per-bot");
-    let (status, body) = own_screen(ada.clone(), true).await;
-    assert_eq!(status, 409, "{body}");
+            .any(|message| message.as_text().contains("[tool "));
+        let asked = request
+            .messages
+            .iter()
+            .rev()
+            .map(|message| message.as_text())
+            .find_map(|text| text.strip_prefix("look at ").map(str::to_string))
+            .unwrap_or_default();
+        let deltas = if answered {
+            vec![ModelDelta::Text("Looked.".into())]
+        } else {
+            let id = format!("look-{}", uuid::Uuid::now_v7().simple());
+            let mut bot = asked.trim().to_string();
+            if let Some(first) = bot.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            vec![
+                ModelDelta::ToolCallStart {
+                    id: id.clone(),
+                    name: "look_at_screen".into(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: id.clone(),
+                    delta: json!({ "bot": bot }).to_string(),
+                },
+                ModelDelta::ToolCallEnd { id },
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
+    }
 }
 
 /// Asks once for a login whose card names `.0` as its site, then answers.

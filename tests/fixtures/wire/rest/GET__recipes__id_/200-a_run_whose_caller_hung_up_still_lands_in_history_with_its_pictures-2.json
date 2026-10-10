@@ -7,7 +7,7 @@
       "id": "rcp_0199bb4e-0000-7000-8000-000000000001",
       "ownerId": "acct_0199bb4e-0000-7000-8000-000000000002",
       "orgId": "org_two_hands_0199bb4e000070008000000000000003",
-      "name": "Close the month",
+      "name": "Export the ledger",
       "description": "",
       "screen": {
         "width": 1280,

@@ -548,6 +548,25 @@
       {
         "type": "function",
         "function": {
+          "name": "look_at_screen",
+          "description": "See a picture of ANOTHER of the person's Bots' screens, named by its name or id (bot). Each Bot on a shared computer works on a screen of its own; use this to see what another Bot has open or how far it got. It only looks: it cannot click or type on that screen.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "bot": {
+                "type": "string",
+                "description": "The name or id of the person's Bot whose screen to see."
+              }
+            },
+            "required": [
+              "bot"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
           "name": "start_computer",
           "description": "Start THIS BOT'S OWN computer when it is stopped. Its files are kept.",
           "parameters": {
@@ -578,25 +597,6 @@
             "type": "object",
             "properties": {},
             "required": []
-          }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "use_own_screen",
-          "description": "Switch THIS BOT to a screen of its own on the computer it shares with the person's other Bots (own: true), or back to the shared screen (own: false). On its own screen it has its own browser, signed in to nothing until it signs in, and what it does there is not on the other Bots' screen. The choice stays until it is switched back. A Bot with a computer of its own already has its own screen.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "own": {
-                "type": "boolean",
-                "description": "true: its own screen; false: back to the shared screen."
-              }
-            },
-            "required": [
-              "own"
-            ]
           }
         }
       },

@@ -1127,11 +1127,6 @@ pub fn router(state: AgUiState) -> Router {
             "/coworkers/{coworker_id}/own-computer",
             axum::routing::put(super::ceiling::put_own_computer),
         )
-        // A screen of its own on the computer it shares, or the shared screen again (#376).
-        .route(
-            "/coworkers/{coworker_id}/computer/screen",
-            axum::routing::put(super::ceiling::put_own_screen),
-        )
         // One plugin skill on or off for this Bot, and its text for its page (`ceiling.rs`).
         .route(
             "/coworkers/{coworker_id}/plugin-skills",

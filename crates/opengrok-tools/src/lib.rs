@@ -73,9 +73,9 @@ pub struct ToolContext {
     /// The conversation whose form or handoff holds the screen, when the hold is tied to a run.
     /// Named in the refusal: a turn held by another conversation cannot see why otherwise.
     pub screen_held_in: Option<String>,
-    /// Which of its computer's screens this Bot uses (#376): the shared one, or its own when it
-    /// was told to use one. One cell for every copy of the context a turn makes, so a switch
-    /// (`use_own_screen`) is where the turn's next screen action lands.
+    /// Which of its computer's screens this Bot uses (#376): its own on a computer it shares, the
+    /// one screen on a computer of its own or a group's. One cell for every copy of the context a
+    /// turn makes.
     pub screen: Arc<std::sync::Mutex<Screen>>,
 }
 
@@ -1725,9 +1725,9 @@ impl Executor {
                 "Shuts the Bot's computer down, keeping its files.",
             ),
             computer_desk::RESTART_COMPUTER => ("Restart computer", "Restarts the Bot's computer."),
-            computer_desk::USE_OWN_SCREEN => (
-                "Use its own screen",
-                "Moves the Bot to a screen of its own on a shared computer, or back to the shared one.",
+            computer_desk::LOOK_AT_SCREEN => (
+                "Look at another Bot's screen",
+                "Shows the Bot a picture of another of your Bots' screens, without touching it.",
             ),
             computer_desk::RESET_COMPUTER => (
                 "Reset computer",

@@ -14,7 +14,7 @@
       "error": "could not rebuild the computer: the box refused: 500 the copy failed"
     },
     "image": null,
-    "screen": "shared",
+    "screen": "own",
     "isEgressTunnelAvailable": false,
     "shareScope": "user",
     "egressPolicy": "ask"
