@@ -652,7 +652,7 @@ pub(super) async fn get_saved_login(
         Ok(found) => found,
         Err(refused) => return refused,
     };
-    let reason = super::user_form::saved_login_refusal(&state, &account, &bot).await;
+    let reason = super::user_form::saved_login_refusal(&state, &account, &bot, true).await;
     let (_, _, scope, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
     Json(json!({
         "usable": reason.is_none(),

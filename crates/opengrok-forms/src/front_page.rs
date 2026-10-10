@@ -26,6 +26,25 @@ pub enum Front<'a> {
     Unknown,
 }
 
+impl<'a> Front<'a> {
+    /// The box's answer (`active_tab_url`): a page, `None` for no browser page open, and an
+    /// error for a box that cannot say.
+    #[must_use]
+    pub fn of<E>(answer: &'a Result<Option<String>, E>) -> Self {
+        match answer {
+            Ok(Some(url)) => Front::Page(url),
+            Ok(None) => Front::NoBrowser,
+            Err(_) => Front::Unknown,
+        }
+    }
+}
+
+/// A saved-login fill that does not name its login: neither its shares nor its site can be read.
+pub const UNNAMED_LOGIN: &str = "a saved login names the login it is";
+
+/// A saved login whose site could not be read: nothing is typed rather than guessing a site.
+pub const UNREADABLE_LOGIN: &str = "Your saved login could not be read, so nothing was typed.";
+
 /// The site a card names, as the model wrote it: its `liveHost`, else its `domain`, each only
 /// when it names a host. For a card filled by hand. A saved login is checked against the site
 /// it was saved for instead, which the model cannot write.
@@ -35,7 +54,9 @@ pub fn card_site(form: &FormRequest) -> Option<String> {
     named(&form.live_host).or_else(|| named(&form.domain))
 }
 
-/// The site a saved login was saved for (its stored `origin`), as a host.
+/// The site a saved login was saved for (its stored `origin`), as a host. A saved login is
+/// checked against this, never the card's `liveHost` or `domain`: those are the model's words,
+/// and a card naming a look-alike page with that page in front would pass a check against them.
 #[must_use]
 pub fn origin_site(origin: &str) -> Option<String> {
     Some(host_of(origin)).filter(|h| !h.is_empty())
