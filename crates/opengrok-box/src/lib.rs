@@ -380,6 +380,18 @@ pub trait Computer: Send + Sync {
 
     async fn write_file(&self, box_id: &str, path: &str, content: &str) -> BoxResult<()>;
 
+    /// Write a file's bytes without UTF-8 conversion — the mirror of `read_file_bytes`. A
+    /// binary file (a .docx zip, a rendered PNG) sent through `write_file` is lossy-decoded
+    /// before it is ever sent. Defaulted so the trait's many test stubs stay text-only.
+    async fn write_file_bytes(
+        &self,
+        _box_id: &str,
+        _path: &str,
+        _bytes: &[u8],
+    ) -> BoxResult<()> {
+        Err(not_supported("write binary files"))
+    }
+
     /// Publish a port and get a URL a person can open.
     async fn expose_port(&self, box_id: &str, port: u16, title: &str) -> BoxResult<String>;
 

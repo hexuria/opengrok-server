@@ -24,5 +24,8 @@ thiserror.workspace = true
 tracing.workspace = true
 grok-box.workspace = true
 getrandom = "0.2"
+# The box file route takes binary content as base64 (`write_file_bytes`); already the
+# workspace's one base64 stack, so no second codec enters the tree.
+base64.workspace = true
 # The digest a placed bundle is remembered by (`bundle`).
 sha2.workspace = true

@@ -276,6 +276,26 @@ impl Client {
         .await
     }
 
+    /// `PUT /boxes/{id}/files` with `encoding: "base64"` — the wire shape the file route takes
+    /// for bytes that are not text (docs/box openapi: `encoding` is `utf8 | base64`).
+    pub async fn write_file_bytes(
+        &self,
+        box_id: &str,
+        path: &str,
+        bytes: &[u8],
+    ) -> BoxResult<FileWritten> {
+        use base64::Engine;
+        self.send(
+            self.put(&format!("/boxes/{box_id}/files"))
+                .json(&json!({
+                    "path": path,
+                    "content": base64::engine::general_purpose::STANDARD.encode(bytes),
+                    "encoding": "base64",
+                })),
+        )
+        .await
+    }
+
     /// `POST /boxes/{id}/host`.
     pub async fn host_port(&self, box_id: &str, port: u16, title: &str) -> BoxResult<HostedPort> {
         self.send(
