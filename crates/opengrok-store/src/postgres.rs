@@ -3715,6 +3715,63 @@ impl PgStore {
         .transpose()
     }
 
+    /// One row per kept version of a doc session, newest first — the chain the document
+    /// window's version picker lists and `/office/docs/{id}/…?version=` resolves through.
+    /// A version's bytes are the artifact's: `snapshot` writes them under `via`
+    /// `office_open`/`office_accept`/`external`, and an attached file's session marks its
+    /// upload as v0. Export artifacts carry the same meta keys but are derivatives — a
+    /// proposal's would-be bytes or a copy of a version already listed — never a version
+    /// themselves, which is why the `via` filter keeps them out. Two artifacts on one
+    /// version keep the earliest: the first snapshot is the canonical one.
+    pub async fn doc_version_artifacts(
+        &self,
+        doc_session_id: &str,
+    ) -> StoreResult<Vec<ArtifactRow>> {
+        let rows = sqlx::query(
+            "select distinct on ((meta->>'version')::bigint)
+                    id, account_id, kind, mime, filename, size_bytes, recipe_id, run_id,
+                    step_index, thread_id, meta, created_at_ms, deleted_at_ms
+               from artifact
+              where meta->>'docSessionId' = $1
+                and meta ? 'version'
+                and meta->>'via' in ('office_open', 'office_accept', 'external')
+                and deleted_at_ms is null
+              order by (meta->>'version')::bigint desc, created_at_ms asc",
+        )
+        .bind(doc_session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(artifact_row).collect()
+    }
+
+    /// Record that an artifact IS a version of a doc session — the upload an attached
+    /// Office file's session started on, which was written before the session existed and
+    /// so never went through `snapshot`. A merge, not a set: `messageId` and any later
+    /// keys survive.
+    pub async fn mark_artifact_doc_version(
+        &self,
+        id: &str,
+        doc_session_id: &str,
+        version: i64,
+        via: &str,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update artifact
+                set meta = coalesce(meta, '{}'::jsonb)
+                         || jsonb_build_object('docSessionId', to_jsonb($2::text),
+                                               'version', to_jsonb($3::bigint),
+                                               'via', to_jsonb($4::text))
+              where id = $1 and deleted_at_ms is null",
+        )
+        .bind(id)
+        .bind(doc_session_id)
+        .bind(version)
+        .bind(via)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Every artifact produced by a recipe run, ordered by step then creation time.
     /// Ignores rows whose deleted_at_ms is set.
     pub async fn artifacts_for_run(

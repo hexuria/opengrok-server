@@ -252,6 +252,20 @@ impl Harness {
             .as_u16()
     }
 
+    /// A GET answered as raw bytes — the page renders and version downloads are not JSON.
+    async fn get_bytes(&self, who: &Person, path: &str) -> (u16, Vec<u8>) {
+        let response = self
+            .client
+            .get(format!("{}{path}", self.base))
+            .header("authorization", format!("Bearer {}", who.token))
+            .send()
+            .await
+            .expect("get");
+        let status = response.status().as_u16();
+        let body = response.bytes().await.expect("body").to_vec();
+        (status, body)
+    }
+
     async fn get(&self, who: &Person, path: &str) -> Value {
         self.client
             .get(format!("{}{path}", self.base))
@@ -1078,6 +1092,99 @@ async fn an_office_file_is_staged_onto_the_bots_computer() {
     assert_eq!(frame["docId"], session.id.as_str());
     assert_eq!(frame["path"], staged);
     assert_eq!(frame["changed"]["type"], "attached");
+}
+
+/// The staged file's upload artifact IS its session's first version: `GET /office/docs`
+/// lists it, `?version=0` serves and renders the bytes the person attached — while the
+/// head keeps answering with what the box has now. A version no snapshot covers is a 404,
+/// never a quiet render of the wrong bytes.
+#[tokio::test]
+async fn a_staged_files_first_version_stays_viewable() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("pptx").await;
+    let thread = thread();
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    let pptx = include_bytes!("../../opengrok-office/tests/fixtures/betteroffice-demo.pptx");
+    let (status, row) = h
+        .upload(
+            &ada,
+            &thread,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "deck.pptx",
+            pptx,
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+    let artifact_id = row["id"].as_str().unwrap().to_string();
+
+    let status = h
+        .turn_with(
+            &ada,
+            &thread,
+            "m-pptx",
+            json!([
+                { "type": "text", "text": "make this better" },
+                file_part(
+                    "document",
+                    &artifact_id,
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "deck.pptx"
+                ),
+            ]),
+            json!({ "coworkerId": coworker.as_str() }),
+        )
+        .await
+        .0;
+    assert_eq!(status, 200);
+
+    let staged = format!("/home/bot/office/inbox/{artifact_id}-deck.pptx");
+    let session = h
+        .store
+        .doc_session_by_path(&box_id, &staged)
+        .await
+        .expect("session read")
+        .expect("a doc_session row");
+
+    // The upload is v0 of the session's chain — the same row, marked, not a second copy.
+    let detail = h.get(&ada, &format!("/office/docs/{}", session.id)).await;
+    assert_eq!(
+        detail["versions"],
+        json!([{ "version": 0, "artifactId": artifact_id, "at": detail["versions"][0]["at"] }]),
+        "v0 is the attached file: {}",
+        detail["versions"]
+    );
+
+    // Its bytes are the upload's, and its pages render — the picker's promise to a person.
+    let (status, bytes) = h
+        .get_bytes(
+            &ada,
+            &format!("/office/docs/{}/bytes?version=0", session.id),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(bytes, pptx, "v0 serves the attached bytes");
+    let (status, png) = h
+        .get_bytes(
+            &ada,
+            &format!("/office/docs/{}/pages/1.png?version=0", session.id),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(&png[..4], b"\x89PNG", "v0 renders");
+
+    // A version nothing kept names its absence rather than serving other bytes.
+    let (status, _) = h
+        .get_bytes(
+            &ada,
+            &format!("/office/docs/{}/bytes?version=9", session.id),
+        )
+        .await;
+    assert_eq!(status, 404);
 }
 
 /// Without a computer — or a turn that names no coworker — the file stays what it always was:

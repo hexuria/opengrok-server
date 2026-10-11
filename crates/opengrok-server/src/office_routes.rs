@@ -7,13 +7,14 @@
 //! underneath it (the stored `box_id` is no longer the scope's) answers 404 — the document it
 //! named is gone, and pretending the stale copy is live would be worse.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use opengrok_core::id::CoworkerId;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
@@ -114,8 +115,61 @@ async fn bytes_for(
         .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response())
 }
 
+/// `?version=` on the bytes and page routes: which version's bytes to serve. Absent or the
+/// live head means the box's current file; anything older resolves to the version's kept
+/// snapshot — a version no snapshot survived is a 404, not a quiet render of the wrong
+/// bytes.
+#[derive(Deserialize)]
+struct VersionQuery {
+    version: Option<i64>,
+}
+
+/// The bytes a `?version=` names: the live head off the box, an older version off its
+/// snapshot artifact. `bytes_for` is only for the head — anything else comes from the
+/// version chain the desk's snapshots write.
+async fn versioned_bytes(
+    state: &AgUiState,
+    row: &opengrok_store::DocSessionRow,
+    version: Option<i64>,
+) -> Result<Vec<u8>, Response> {
+    let Some(version) = version.filter(|v| *v != row.version) else {
+        return bytes_for(state, row).await;
+    };
+    let chain = state
+        .auth
+        .store
+        .doc_version_artifacts(&row.id)
+        .await
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response())?;
+    let Some(artifact) = chain
+        .iter()
+        .find(|a| a.meta["version"].as_i64() == Some(version))
+    else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("version {version} of this document was not kept"),
+        )
+            .into_response());
+    };
+    match state
+        .auth
+        .store
+        .artifact_bytes(&artifact.id)
+        .await
+        .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response())?
+    {
+        Some((_, bytes)) => Ok(bytes),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            format!("version {version} of this document was not kept"),
+        )
+            .into_response()),
+    }
+}
+
 /// `GET /office/docs/{id}` — the session as the document window wants it: identity, kind,
-/// version, and the proposals still pending so the window can draw their diffs.
+/// version, the version chain the picker lists, and the proposals still pending so the
+/// window can draw their diffs.
 async fn detail(
     State(state): State<AgUiState>,
     headers: HeaderMap,
@@ -142,6 +196,30 @@ async fn detail(
                 .collect()
         })
         .unwrap_or_default();
+    let mut versions: Vec<Value> = match state.auth.store.doc_version_artifacts(&row.id).await {
+        Ok(chain) => chain
+            .iter()
+            .map(|artifact| {
+                json!({
+                    "version": artifact.meta["version"],
+                    "artifactId": artifact.id,
+                    "at": artifact.created_at_ms,
+                })
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    // The live head is always viewable through the box even when no snapshot carries it —
+    // a session minted before the chain existed, or the snapshot that failed.
+    if !versions
+        .iter()
+        .any(|v| v["version"].as_i64() == Some(row.version))
+    {
+        versions.insert(
+            0,
+            json!({"version": row.version, "artifactId": null, "at": row.updated_at_ms}),
+        );
+    }
     Json(json!({
         "docId": row.id,
         "path": row.path,
@@ -149,24 +227,27 @@ async fn detail(
         "version": row.version,
         "contentSha256": row.content_sha256,
         "proposals": proposals,
+        "versions": versions,
         "createdAt": row.created_at_ms,
         "updatedAt": row.updated_at_ms,
     }))
     .into_response()
 }
 
-/// `GET /office/docs/{id}/bytes` — the document's bytes as the box has them now.
+/// `GET /office/docs/{id}/bytes` — the document's bytes: the box's current file, or the
+/// kept copy of the version `?version=` names.
 async fn bytes(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(version): Query<VersionQuery>,
 ) -> Response {
     let row = match row_for(&state, &headers, &id).await {
         Ok(row) => row,
         Err(response) => return response,
     };
     let kind = opengrok_office::Kind::from_filename(&row.path);
-    let bytes = match bytes_for(&state, &row).await {
+    let bytes = match versioned_bytes(&state, &row, version.version).await {
         Ok(bytes) => bytes,
         Err(response) => return response,
     };
@@ -186,11 +267,13 @@ async fn bytes(
 }
 
 /// `GET /office/docs/{id}/pages/{page}.png` — one rendered page/slide/used-range, one-based
-/// like the `office_render` tool's `page`.
+/// like the `office_render` tool's `page`. `?version=` renders a kept version's bytes, so
+/// the window can show what the document was, not only what it is.
 async fn page_png(
     State(state): State<AgUiState>,
     headers: HeaderMap,
     Path((id, page)): Path<(String, String)>,
+    Query(version): Query<VersionQuery>,
 ) -> Response {
     // `…/pages/12.png`: a segment that is a number AND its extension cannot be one Axum
     // parameter, so the whole `12.png` arrives as the wildcard and is split here. A segment
@@ -209,7 +292,7 @@ async fn page_png(
             return (StatusCode::UNPROCESSABLE_ENTITY, "not an office document").into_response();
         }
     };
-    let bytes = match bytes_for(&state, &row).await {
+    let bytes = match versioned_bytes(&state, &row, version.version).await {
         Ok(bytes) => bytes,
         Err(response) => return response,
     };

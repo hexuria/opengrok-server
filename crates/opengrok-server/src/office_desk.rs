@@ -230,6 +230,7 @@ impl Tools {
     /// session may never outlive a sync block — every verb opens it fresh after this returns.
     async fn fresh(
         &self,
+        context: &ToolContext,
         box_io: &dyn Computer,
         box_id: &str,
         row: &opengrok_store::DocSessionRow,
@@ -280,6 +281,18 @@ impl Tools {
                     None,
                 )
             })?;
+        // Drift is a version too — the picker's chain has a hole wherever a bump left no
+        // snapshot. Best-effort like open's v0: a snapshot that fails loses one entry, and
+        // the verb that noticed the drift still has its answer.
+        if let Ok(kind) = Self::kind_of(&rebased) {
+            let filename = rebased.path.rsplit('/').next().unwrap_or(&rebased.path);
+            if let Err(error) = self
+                .snapshot(context, &rebased, kind, &bytes, filename, "external")
+                .await
+            {
+                tracing::warn!(%error, doc = %rebased.id, "a drifted version could not be snapshotted");
+            }
+        }
         Ok((bytes, rebased, true))
     }
 
@@ -471,7 +484,7 @@ impl Tools {
             })?
         {
             let row = owned(context, box_id, &existing)?.clone();
-            let (bytes, row, external) = self.fresh(box_io, box_id, &row).await?;
+            let (bytes, row, external) = self.fresh(context, box_io, box_id, &row).await?;
             let body = {
                 let session = Self::open_row(&row, &bytes)?;
                 let (counts, capabilities) = Self::describe_parts(&session);
@@ -512,6 +525,16 @@ impl Tools {
                     None,
                 )
             })?;
+        // v0 — the version the session opened on, so the picker's chain starts at what the
+        // file was before anything touched it. Best-effort: a snapshot that fails leaves
+        // the chain without its first entry, not a failed open.
+        let filename = row.path.rsplit('/').next().unwrap_or(&row.path);
+        if let Err(error) = self
+            .snapshot(context, &row, kind, &bytes, filename, "office_open")
+            .await
+        {
+            tracing::warn!(%error, doc = %row.id, "a session's first version could not be snapshotted");
+        }
         let body = self.describe_open((counts, capabilities), &row, false);
         Ok((
             body,
@@ -642,7 +665,7 @@ impl Tools {
         edits: AskEdits<'_>,
     ) -> Result<(Value, Vec<Value>), String> {
         let row = self.session_row(context, box_id, document).await?;
-        let (bytes, row, external) = self.fresh(box_io, box_id, &row).await?;
+        let (bytes, row, external) = self.fresh(context, box_io, box_id, &row).await?;
         let kind = Self::kind_of(&row)?;
         // The session lives only inside this block: drop-tracking follows scopes, not
         // `drop()` calls, and a Session that reached the awaits below is not Send.
@@ -729,7 +752,7 @@ impl Tools {
         tracked: bool,
     ) -> Result<(Value, Vec<Value>), String> {
         let row = self.session_row(context, box_id, document).await?;
-        let (bytes, row, _external) = self.fresh(box_io, box_id, &row).await?;
+        let (bytes, row, _external) = self.fresh(context, box_io, box_id, &row).await?;
         let kind = Self::kind_of(&row)?;
         let (mut proposals, index) = Self::proposal_on(&row, proposal_id)?;
         let proposal = &proposals[index];
@@ -851,7 +874,7 @@ impl Tools {
         proposal_id: Option<&str>,
     ) -> Result<(Value, Vec<Value>), String> {
         let row = self.session_row(context, box_id, document).await?;
-        let (bytes, row, _external) = self.fresh(box_io, box_id, &row).await?;
+        let (bytes, row, _external) = self.fresh(context, box_io, box_id, &row).await?;
         let kind = Self::kind_of(&row)?;
         let path = expand_home(box_io, box_id, path).await?;
         if Kind::from_filename(&path) != Some(kind) {
@@ -958,7 +981,7 @@ impl OfficeDesk for Tools {
                 limit,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, _, external) = self.fresh(box_io, box_id, &row).await?;
+                let (bytes, _, external) = self.fresh(context, box_io, box_id, &row).await?;
                 let session = Self::open_row(&row, &bytes)?;
                 let mut result = session
                     .outline(story.as_deref(), headings_only, offset, limit)
@@ -975,7 +998,7 @@ impl OfficeDesk for Tools {
                 cursor,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, _, external) = self.fresh(box_io, box_id, &row).await?;
+                let (bytes, _, external) = self.fresh(context, box_io, box_id, &row).await?;
                 let session = Self::open_row(&row, &bytes)?;
                 let mut result = session
                     .grep(
@@ -997,7 +1020,7 @@ impl OfficeDesk for Tools {
                 field,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, _, external) = self.fresh(box_io, box_id, &row).await?;
+                let (bytes, _, external) = self.fresh(context, box_io, box_id, &row).await?;
                 let session = Self::open_row(&row, &bytes)?;
                 let mut result = session
                     .read(&ref_, start, length, field.as_deref())
@@ -1013,7 +1036,7 @@ impl OfficeDesk for Tools {
                 limit,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, _, external) = self.fresh(box_io, box_id, &row).await?;
+                let (bytes, _, external) = self.fresh(context, box_io, box_id, &row).await?;
                 let session = Self::open_row(&row, &bytes)?;
                 let mut result = session
                     .cells(&sheet, &range, offset, limit)
@@ -1027,7 +1050,7 @@ impl OfficeDesk for Tools {
                 proposal,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, row, _external) = self.fresh(box_io, box_id, &row).await?;
+                let (bytes, row, _external) = self.fresh(context, box_io, box_id, &row).await?;
                 // A proposal renders its would-be page on a copy, never the live session.
                 // Nothing here awaits until after the session is dropped.
                 let session = match proposal.as_deref() {
@@ -1077,7 +1100,7 @@ impl OfficeDesk for Tools {
             }
             Ask::Verify { document, proposal } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, row, _external) = self.fresh(box_io, box_id, &row).await?;
+                let (bytes, row, _external) = self.fresh(context, box_io, box_id, &row).await?;
                 let result = match proposal.as_deref() {
                     Some(proposal_id) => {
                         let (proposals, index) = Self::proposal_on(&row, proposal_id)?;
@@ -1161,7 +1184,8 @@ impl OfficeDesk for Tools {
                         ))
                     }
                     Some(proposal_id) => {
-                        let (bytes, row, _external) = self.fresh(box_io, box_id, &row).await?;
+                        let (bytes, row, _external) =
+                            self.fresh(context, box_io, box_id, &row).await?;
                         let session = Self::open_row(&row, &bytes)?;
                         let (proposals, index) = Self::proposal_on(&row, proposal_id)?;
                         let mut result = session

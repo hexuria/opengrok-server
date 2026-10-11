@@ -361,6 +361,15 @@ async fn stage(
         row.content_sha256 = hash;
         row.version += 1;
     }
+    // The upload IS the session's first version — its bytes were written before the session
+    // existed, so no snapshot() ran. Marking it keeps the version chain whole without a
+    // second copy of the same bytes.
+    if let Err(error) = store
+        .mark_artifact_doc_version(artifact_id, &row.id, row.version, "office_open")
+        .await
+    {
+        tracing::warn!(%error, artifact = %artifact_id, "a staged file's version could not be marked");
+    }
     Ok(row)
 }
 
