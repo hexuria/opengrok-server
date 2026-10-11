@@ -216,7 +216,7 @@
         ],
         "enabled": true,
         "label": "Manage computer",
-        "summary": "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and moves it to a screen of its own."
+        "summary": "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and looks at your other Bots' screens."
       }
     ]
   }

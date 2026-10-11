@@ -1713,7 +1713,7 @@ impl Executor {
             computer_desk::ROW => (
                 computer_desk::ROW_LABEL,
                 "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and \
-                 moves it to a screen of its own.",
+                 looks at your other Bots' screens.",
             ),
             computer_desk::COMPUTER_STATUS => (
                 "Computer status",
