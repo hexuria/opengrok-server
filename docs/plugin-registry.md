@@ -20,10 +20,21 @@ registry that did not answer, 502.
 | --- | --- | --- |
 | `GET /plugins/catalog` | Optional `?revision=<40-character commit SHA>` | `{registry, revision, plugins: [{name, description, repository, revision, path, unavailableReason}]}` |
 | `GET /plugins/catalog/{name}` | Optional registry `revision` query | `{entry, registryRevision, parts: [{kind, name, supported, reason}], connectors: [names]}` |
-| `GET /plugins/installations` | None | Array of the caller's snapshots: `{name, registry, registryRevision, repository, revision, installedAtMs, bundle}` |
+| `GET /plugins/installations` | None | Array of the caller's snapshots: `{name, source: "account", registry, registryRevision, repository, revision, installedAtMs, bundle, connectors, accounts}`, then the server's own plugins with `source: "server"` (below) |
 | `POST /plugins/installations` | `{name, registryRevision}` | 201 `{name, revision, registryRevision, parts}`; 409 if already installed |
-| `DELETE /plugins/installations/{name}` | None | 204, or 404 when absent for this account |
+| `DELETE /plugins/installations/{name}` | None | 204, or 404 when absent for this account; 409 for a server plugin |
 | `PUT /plugins/installations/{name}/credentials/{connector}` | `{token}` | 204; no credential is returned |
+
+A plugin in the server's own folder (`OG_PLUGINS_DIR`) is operator-installed and listed for every
+account, with `source: "server"`. It has every field an install has, empty where a folder has no
+such thing: `registry`, `registryRevision` and `repository` are `""`, `revision` is its manifest's
+`version` (or `""`) and `installedAtMs` is `0`. Its `bundle.mcp` is always `{"mcpServers": {}}`:
+an operator's `mcp.json` may hold the deployment's own keys, so its servers are named only, as
+`mcp` rows in `parts`. Uninstalling one answers 409; only the operator removes it, from the folder.
+Its skills (`skills/<name>/SKILL.md`, under the same checks as a registry bundle's, a bad one
+skipped with a warning at boot) are offered and listed by `GET /coworkers/{id}/plugin-skills`
+(each row's `source` is `"server"` or `"account"`) while the Bot's ceiling row for the plugin is
+on, which for a server plugin follows "all"; each skill's own switch works as an install's does.
 
 `bundle` contains `manifest`, `mcp`, `skills`, `files`, and `parts`. It contains registry data,
 never account tokens. `GET /connectors` retains configured provider rows and adds installed

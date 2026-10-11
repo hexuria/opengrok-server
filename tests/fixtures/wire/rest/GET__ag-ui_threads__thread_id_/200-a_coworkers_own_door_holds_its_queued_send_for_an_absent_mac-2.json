@@ -113,57 +113,57 @@
             "timestamp": 100
           }
         ]
+      },
+      {
+        "runId": "0199bb4e-0000-7000-8000-000000000004",
+        "status": "running",
+        "startedAtMs": 1790000002000,
+        "updatedAtMs": 1790000003000,
+        "failure": null,
+        "finishReason": null,
+        "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "events": [
+          {
+            "type": "RUN_STARTED",
+            "runId": "0199bb4e-0000-7000-8000-000000000004",
+            "threadId": "thr-0199bb4e000070008000000000000001",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_START",
+            "messageId": "m2",
+            "role": "user",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_CONTENT",
+            "messageId": "m2",
+            "delta": "then this, on my plan",
+            "timestamp": 100
+          },
+          {
+            "type": "TEXT_MESSAGE_END",
+            "messageId": "m2",
+            "timestamp": 100
+          },
+          {
+            "name": "opengrok.inferenceSource",
+            "type": "CUSTOM",
+            "runId": "0199bb4e-0000-7000-8000-000000000004",
+            "value": {
+              "via": "mac",
+              "kind": "local_proxy",
+              "model": "gpt-6-luna"
+            },
+            "threadId": "thr-0199bb4e000070008000000000000001",
+            "timestamp": 100
+          }
+        ]
       }
     ],
     "hiddenRunIds": [],
     "timeline": [],
-    "pendingUserMessages": [
-      {
-        "v": 1,
-        "id": "pum_0199bb4e-0000-7000-8000-000000000004",
-        "threadId": "thr-0199bb4e000070008000000000000001",
-        "content": "then this, on my plan",
-        "replyTo": null,
-        "recipeId": null,
-        "recipeValues": null,
-        "skillId": null,
-        "clientMessageId": "m2",
-        "status": "pending",
-        "createdAtMs": 1790000002000,
-        "updatedAtMs": 1790000002000,
-        "drainedAtMs": null,
-        "drainedRunId": null,
-        "heldFor": "relay_offline"
-      }
-    ],
-    "pendingEvents": [
-      {
-        "type": "CUSTOM",
-        "timestamp": 100,
-        "name": "pending-user-message",
-        "value": {
-          "v": 1,
-          "op": "snapshot",
-          "threadId": "thr-0199bb4e000070008000000000000001",
-          "message": {
-            "v": 1,
-            "id": "pum_0199bb4e-0000-7000-8000-000000000004",
-            "threadId": "thr-0199bb4e000070008000000000000001",
-            "content": "then this, on my plan",
-            "replyTo": null,
-            "recipeId": null,
-            "recipeValues": null,
-            "skillId": null,
-            "clientMessageId": "m2",
-            "status": "pending",
-            "createdAtMs": 1790000002000,
-            "updatedAtMs": 1790000002000,
-            "drainedAtMs": null,
-            "drainedRunId": null,
-            "heldFor": "relay_offline"
-          }
-        }
-      }
-    ]
+    "pendingUserMessages": [],
+    "pendingEvents": []
   }
 }

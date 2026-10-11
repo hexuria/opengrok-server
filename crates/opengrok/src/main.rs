@@ -461,6 +461,7 @@ fn load_plugins() -> std::collections::BTreeMap<String, opengrok_plugins::Plugin
                 tracing::info!(
                     plugin = plugin.manifest.name,
                     servers = plugin.mcp.servers.len(),
+                    skills = plugin.skills.len(),
                     trust = ?plugin.trust,
                     "loaded a plugin"
                 );

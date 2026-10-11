@@ -28,6 +28,7 @@ pub fn router(state: AgUiState) -> axum::Router {
 }
 pub fn router_with_registry(state: AgUiState, registry: Option<Registry>) -> axum::Router {
     let reserved_names = reserved_names(&state);
+    let server = opengrok_integrations::installed::server_listing(&state.plugins);
     let store = state.auth.store.clone();
     let vault = state.vault.clone();
     let authenticate = std::sync::Arc::new(move |headers: &axum::http::HeaderMap| {
@@ -39,5 +40,6 @@ pub fn router_with_registry(state: AgUiState, registry: Option<Registry>) -> axu
         authenticate,
         registry,
         reserved_names,
+        server_installations: std::sync::Arc::new(server),
     })
 }
