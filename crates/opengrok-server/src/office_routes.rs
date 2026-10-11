@@ -2,10 +2,13 @@
 //! frames are thin — id, path, version — and a watching client pulls the document's bytes and
 //! rendered pages through here, under the same bearer as the rest of the account's routes.
 //!
-//! BYTES COME FROM THE BOX, not from the session row: the file is what a person would see if
-//! they opened it, including any edits made outside the tools. A row whose box has been reset
-//! underneath it (the stored `box_id` is no longer the scope's) answers 404 — the document it
-//! named is gone, and pretending the stale copy is live would be worse.
+//! BYTES COME FROM THE BOX when the box can answer — the file is what a person would see if
+//! they opened it, including edits made outside the tools. A box that died or was reset
+//! underneath a row does NOT take the document with it: every committed version's bytes live
+//! in `artifact` (see `doc_version_artifacts`), so an orphaned session keeps answering from
+//! its newest kept snapshot — marked `X-Office-Stale` rather than passed off as live — and a
+//! scope that has since gained a different live box rehydrates the session onto it, path and
+//! row together.
 
 use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
@@ -14,6 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use opengrok_core::id::CoworkerId;
+use opengrok_office::Session;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -44,14 +48,16 @@ fn mime_of(kind: opengrok_office::Kind) -> &'static str {
     }
 }
 
-/// The session row the caller may see — theirs, and only if its stored box is still the
-/// coworker's scope's live one. `None` does not distinguish: a document on a reset box, a
-/// document of another account's, and no document at all are all "no such document".
+/// The session row the caller may see — theirs — and whether its stored box is still the
+/// coworker scope's live one. `None` does not distinguish: a document of another account's and
+/// no document at all are both "no such document". An orphaned box no longer closes the
+/// document: the version chain holds its bytes, so "dead computer" is a degraded read, not a
+/// deletion.
 async fn row_for(
     state: &AgUiState,
     headers: &HeaderMap,
     id: &str,
-) -> Result<opengrok_store::DocSessionRow, Response> {
+) -> Result<(opengrok_store::DocSessionRow, bool), Response> {
     let Some(account) = account_from_bearer(state, headers) else {
         return Err((StatusCode::UNAUTHORIZED, "sign in first").into_response());
     };
@@ -65,15 +71,76 @@ async fn row_for(
     if row.account_id != account.as_str() {
         return Err((StatusCode::NOT_FOUND, "no such document").into_response());
     }
-    // The session's box must still be the coworker's live one — a reset leaves the row naming a
-    // destroyed box whose files no longer exist.
     let coworker = CoworkerId::from_stored(row.coworker_id.clone());
-    let live = provision::scoped_box_row_for(state, &account, &coworker).await;
-    match live {
-        Some(scoped) if scoped.box_id == row.box_id => {}
-        _ => return Err((StatusCode::NOT_FOUND, "no such document").into_response()),
+    let box_live = provision::scoped_box_row_for(state, &account, &coworker)
+        .await
+        .is_some_and(|scoped| scoped.box_id == row.box_id);
+    Ok((row, box_live))
+}
+
+/// The newest kept snapshot of a session: `(bytes, version)` straight off the version chain —
+/// the stand-in a dead box's head falls back to, and the bytes a rehydrate writes forward.
+async fn newest_snapshot(
+    state: &AgUiState,
+    row: &opengrok_store::DocSessionRow,
+) -> Option<(Vec<u8>, i64)> {
+    let chain = state.auth.store.doc_version_artifacts(&row.id).await.ok()?;
+    let artifact = chain.first()?;
+    let version = artifact.meta["version"].as_i64()?;
+    let (_, bytes) = state.auth.store.artifact_bytes(&artifact.id).await.ok()??;
+    Some((bytes, version))
+}
+
+/// The session's box cannot answer and the scope already names a different one: write the
+/// newest kept copy to the session's path on that box and repoint the row — a reset or
+/// replaced computer gets the person's document back instead of stranding it. `None` when the
+/// scope has no other box, that box will not wake, the path is taken by other content, the
+/// session already has a row on the new box, or nothing was ever snapshotted — the caller
+/// falls back to the stale read then, so a failed recovery never costs the document.
+async fn rehydrate(state: &AgUiState, row: &opengrok_store::DocSessionRow) -> Option<Vec<u8>> {
+    let account = opengrok_core::id::AccountId::from_stored(row.account_id.clone());
+    let coworker = CoworkerId::from_stored(row.coworker_id.clone());
+    let scoped = provision::scoped_box_row_for(state, &account, &coworker).await?;
+    if scoped.box_id == row.box_id {
+        return None;
     }
-    Ok(row)
+    let store = &state.auth.store;
+    // A row on the new box already owns this path — repointing over it would hand one file
+    // two sessions, so the orphan stays stale-read until a person resolves the collision.
+    if store
+        .doc_session_by_path(&scoped.box_id, &row.path)
+        .await
+        .ok()?
+        .is_some()
+    {
+        return None;
+    }
+    let provider = provision::provider_for(state, scoped.org_id.as_deref(), &scoped.kind).await?;
+    provider
+        .wake(&scoped.box_id, std::time::Duration::from_secs(60))
+        .await
+        .ok()?;
+    let (bytes, _) = newest_snapshot(state, row).await?;
+    match provider.read_file_bytes(&scoped.box_id, &row.path).await {
+        // The file itself survived — a rebuilt box keeps its disk — so adopt it without a
+        // write. A different file holding the same path is left alone rather than clobbered.
+        Ok(existing) if existing == bytes => {}
+        Ok(_) => return None,
+        Err(_) => provider
+            .write_file_bytes(&scoped.box_id, &row.path, &bytes)
+            .await
+            .ok()?,
+    }
+    store
+        .repoint_doc_session_box(
+            &row.id,
+            &row.box_id,
+            &scoped.box_id,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .ok()?;
+    Some(bytes)
 }
 
 /// The row's provider and the file's current bytes — one box read for the bytes and page
@@ -124,16 +191,27 @@ struct VersionQuery {
     version: Option<i64>,
 }
 
+/// One page of an answer: the bytes, the version they actually are, and whether they came
+/// from a stand-in snapshot rather than the live box — the `X-Office-Version` and
+/// `X-Office-Stale` headers a client reads to say "this is what it last was" honestly.
+struct Served {
+    bytes: Vec<u8>,
+    version: i64,
+    stale: bool,
+}
+
 /// The bytes a `?version=` names: the live head off the box, an older version off its
-/// snapshot artifact. `bytes_for` is only for the head — anything else comes from the
-/// version chain the desk's snapshots write.
+/// snapshot artifact. `bytes_for` is only for the head — and only first: when the box cannot
+/// answer, a live replacement rehydrates the file back onto it, else the newest kept snapshot
+/// stands in as `stale`. Anything else comes from the version chain the desk's snapshots
+/// write.
 async fn versioned_bytes(
     state: &AgUiState,
     row: &opengrok_store::DocSessionRow,
     version: Option<i64>,
-) -> Result<Vec<u8>, Response> {
+) -> Result<Served, Response> {
     let Some(version) = version.filter(|v| *v != row.version) else {
-        return bytes_for(state, row).await;
+        return head_bytes(state, row).await;
     };
     let chain = state
         .auth
@@ -158,12 +236,51 @@ async fn versioned_bytes(
         .await
         .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response())?
     {
-        Some((_, bytes)) => Ok(bytes),
+        Some((_, bytes)) => Ok(Served {
+            bytes,
+            version,
+            stale: false,
+        }),
         None => Err((
             StatusCode::NOT_FOUND,
             format!("version {version} of this document was not kept"),
         )
             .into_response()),
+    }
+}
+
+/// The head's bytes: the box's current file when it answers; a live replacement box gets the
+/// session rehydrated onto it; a dead one leaves the newest kept snapshot standing in — stale
+/// but still the person's document. With no snapshot at all, the box's own error is the honest
+/// answer.
+async fn head_bytes(
+    state: &AgUiState,
+    row: &opengrok_store::DocSessionRow,
+) -> Result<Served, Response> {
+    let box_error = match bytes_for(state, row).await {
+        Ok(bytes) => {
+            return Ok(Served {
+                bytes,
+                version: row.version,
+                stale: false,
+            });
+        }
+        Err(error) => error,
+    };
+    if let Some(bytes) = rehydrate(state, row).await {
+        return Ok(Served {
+            bytes,
+            version: row.version,
+            stale: false,
+        });
+    }
+    match newest_snapshot(state, row).await {
+        Some((bytes, version)) => Ok(Served {
+            bytes,
+            version,
+            stale: true,
+        }),
+        None => Err(box_error),
     }
 }
 
@@ -175,8 +292,8 @@ async fn detail(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    let row = match row_for(&state, &headers, &id).await {
-        Ok(row) => row,
+    let (row, box_live) = match row_for(&state, &headers, &id).await {
+        Ok(found) => found,
         Err(response) => return response,
     };
     let proposals: Vec<Value> = row
@@ -228,6 +345,7 @@ async fn detail(
         "contentSha256": row.content_sha256,
         "proposals": proposals,
         "versions": versions,
+        "boxLive": box_live,
         "createdAt": row.created_at_ms,
         "updatedAt": row.updated_at_ms,
     }))
@@ -242,28 +360,38 @@ async fn bytes(
     Path(id): Path<String>,
     Query(version): Query<VersionQuery>,
 ) -> Response {
-    let row = match row_for(&state, &headers, &id).await {
-        Ok(row) => row,
+    let (row, _box_live) = match row_for(&state, &headers, &id).await {
+        Ok(found) => found,
         Err(response) => return response,
     };
     let kind = opengrok_office::Kind::from_filename(&row.path);
-    let bytes = match versioned_bytes(&state, &row, version.version).await {
-        Ok(bytes) => bytes,
+    let served = match versioned_bytes(&state, &row, version.version).await {
+        Ok(served) => served,
         Err(response) => return response,
     };
     let filename = row.path.rsplit('/').next().unwrap_or(&row.path).to_string();
-    let headers = [
+    let mut headers = vec![
         (
             CONTENT_TYPE,
             mime_of(kind.unwrap_or(opengrok_office::Kind::Docx)).to_string(),
         ),
-        (CONTENT_LENGTH, bytes.len().to_string()),
+        (CONTENT_LENGTH, served.bytes.len().to_string()),
         (
             CONTENT_DISPOSITION,
             format!("attachment; filename=\"{filename}\""),
         ),
+        (
+            axum::http::header::HeaderName::from_static("x-office-version"),
+            served.version.to_string(),
+        ),
     ];
-    (headers, bytes).into_response()
+    if served.stale {
+        headers.push((
+            axum::http::header::HeaderName::from_static("x-office-stale"),
+            "1".to_string(),
+        ));
+    }
+    (axum::response::AppendHeaders(headers), served.bytes).into_response()
 }
 
 /// `GET /office/docs/{id}/pages/{page}.png` — one rendered page/slide/used-range, one-based
@@ -282,8 +410,8 @@ async fn page_png(
         return StatusCode::NOT_FOUND.into_response();
     };
     let page: u32 = page;
-    let row = match row_for(&state, &headers, &id).await {
-        Ok(row) => row,
+    let (row, _box_live) = match row_for(&state, &headers, &id).await {
+        Ok(found) => found,
         Err(response) => return response,
     };
     let kind = match opengrok_office::Kind::from_filename(&row.path) {
@@ -292,25 +420,45 @@ async fn page_png(
             return (StatusCode::UNPROCESSABLE_ENTITY, "not an office document").into_response();
         }
     };
-    let bytes = match versioned_bytes(&state, &row, version.version).await {
-        Ok(bytes) => bytes,
+    let served = match versioned_bytes(&state, &row, version.version).await {
+        Ok(served) => served,
         Err(response) => return response,
     };
     // The engines are `!Send`; the render is a sync block after the awaits.
     let index = usize::try_from(page.saturating_sub(1)).unwrap_or(usize::MAX);
-    let image =
-        opengrok_office::Session::open(&bytes, kind).and_then(|session| session.render_png(index));
-    match image {
+    let opened = opengrok_office::Session::open(&served.bytes, kind);
+    // The count rides every answer the open produced — the 422 of an out-of-range ask
+    // included, so a pager learns the bound from the probe that found it, not only from
+    // pages that rendered.
+    let pages = opened.as_ref().ok().and_then(Session::page_count);
+    let mut headers = vec![(
+        axum::http::header::HeaderName::from_static("x-office-version"),
+        served.version.to_string(),
+    )];
+    if let Some(pages) = pages {
+        headers.push((
+            axum::http::header::HeaderName::from_static("x-office-pages"),
+            pages.to_string(),
+        ));
+    }
+    match opened.and_then(|session| session.render_png(index)) {
         Ok(image) => (
-            [
-                (CONTENT_TYPE, "image/png".to_string()),
-                (CONTENT_LENGTH, image.bytes.len().to_string()),
-            ],
+            axum::response::AppendHeaders(
+                [
+                    vec![
+                        (CONTENT_TYPE, "image/png".to_string()),
+                        (CONTENT_LENGTH, image.bytes.len().to_string()),
+                    ],
+                    headers,
+                ]
+                .concat(),
+            ),
             image.bytes,
         )
             .into_response(),
         Err(error) => (
             StatusCode::UNPROCESSABLE_ENTITY,
+            axum::response::AppendHeaders(headers),
             format!("the page could not be rendered: {error}"),
         )
             .into_response(),

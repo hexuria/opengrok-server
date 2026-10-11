@@ -156,6 +156,31 @@ impl PgStore {
         Ok(())
     }
 
+    /// Move the session onto a different box. The rehydrate path calls this after writing the
+    /// newest kept snapshot to the session's path on the scope's new computer — a reset or
+    /// rebuilt box gets the document back instead of stranding its row on a destroyed box.
+    /// Only moves a row that still names the old box: a racing repoint wins, and the loser
+    /// leaves the winner's value alone.
+    pub async fn repoint_doc_session_box(
+        &self,
+        id: &str,
+        old_box_id: &str,
+        box_id: &str,
+        updated_at_ms: i64,
+    ) -> StoreResult<bool> {
+        let done = sqlx::query(
+            "update doc_session set box_id = $3, updated_at_ms = $4
+              where id = $1 and box_id = $2",
+        )
+        .bind(id)
+        .bind(old_box_id)
+        .bind(box_id)
+        .bind(updated_at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     /// End a session — the row is the session, so closing deletes it. `office_close` is
     /// terminal: proposals pending on it die with it, and the file's snapshots already live in
     /// `artifact`, which is why a delete rather than a flag is honest.

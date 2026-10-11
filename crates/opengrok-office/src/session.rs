@@ -72,6 +72,17 @@ impl Session {
         }
     }
 
+    /// How many pages/slides/sheets this document holds — the bound a pager needs so it can
+    /// stop at the last one instead of asking for one past it. `None` for DOCX: its layout
+    /// pipeline is not wired, so it has no count to offer.
+    pub fn page_count(&self) -> Option<usize> {
+        match self {
+            Self::Docx(_) => None,
+            Self::Xlsx(workbook) => Some(workbook.sheet_count()),
+            Self::Pptx(presentation) => Some(presentation.slides().len()),
+        }
+    }
+
     /// Page/slide/sheet `index`, zero-based. DOCX refuses until the editing-session layout
     /// pipeline is wired — see [`Error::DocxLayoutNotWired`].
     pub fn render_png(&self, index: usize) -> Result<RenderedImage, Error> {

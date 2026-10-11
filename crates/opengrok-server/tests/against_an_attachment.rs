@@ -1191,6 +1191,54 @@ async fn a_staged_files_first_version_stays_viewable() {
     assert_eq!(status, 200);
     assert_eq!(&png[..4], b"\x89PNG", "v0 renders");
 
+    // The page's answer carries the deck's bound: the pager's Next can stop at the last
+    // slide instead of learning it from a render error one click too far. The bound rides
+    // that out-of-range answer too — the probe itself reports what it found.
+    let slide_count = opengrok_office::Session::open(pptx, opengrok_office::Kind::Pptx)
+        .expect("the fixture opens")
+        .page_count()
+        .expect("a pptx has a count") as u32;
+    let slide_count = slide_count.to_string();
+    let response = h
+        .client
+        .get(format!("{}/office/docs/{}/pages/1.png", h.base, session.id))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("page 1");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response.headers().get("x-office-pages"),
+        Some(
+            &reqwest::header::HeaderValue::from_str(&slide_count)
+                .expect("a count is a header value")
+        ),
+        "the rendered page says how many there are"
+    );
+    let response = h
+        .client
+        .get(format!(
+            "{}/office/docs/{}/pages/99.png",
+            h.base, session.id
+        ))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("page 99");
+    assert_eq!(
+        response.status().as_u16(),
+        422,
+        "past the deck is a refusal"
+    );
+    assert_eq!(
+        response.headers().get("x-office-pages"),
+        Some(
+            &reqwest::header::HeaderValue::from_str(&slide_count)
+                .expect("a count is a header value")
+        ),
+        "and it still says how many there are"
+    );
+
     // A version nothing kept names its absence rather than serving other bytes.
     let (status, _) = h
         .get_bytes(
@@ -1199,6 +1247,136 @@ async fn a_staged_files_first_version_stays_viewable() {
         )
         .await;
     assert_eq!(status, 404);
+}
+
+/// A box reset under an open document does not delete the document: the session row is the
+/// person's and every committed version's bytes are kept server-side, so the orphaned session
+/// still answers — `boxLive` saying the stored box is gone. And when the scope has since
+/// gained another live box, the first head read rehydrates the kept copy onto it: the file
+/// lands on the new computer and the row follows, so the document outlives its box.
+#[tokio::test]
+async fn a_document_follows_the_computer_when_its_box_is_replaced() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("orphan").await;
+    let thread = thread();
+    let (coworker, _box_id) = hired_on(&h, &ada).await;
+
+    let pptx = include_bytes!("../../opengrok-office/tests/fixtures/betteroffice-demo.pptx");
+    let (status, row) = h
+        .upload(
+            &ada,
+            &thread,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "deck.pptx",
+            pptx,
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+    let artifact_id = row["id"].as_str().unwrap().to_string();
+    let status = h
+        .turn_with(
+            &ada,
+            &thread,
+            "m-pptx",
+            json!([
+                { "type": "text", "text": "make this better" },
+                file_part(
+                    "document",
+                    &artifact_id,
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "deck.pptx"
+                ),
+            ]),
+            json!({ "coworkerId": coworker.as_str() }),
+        )
+        .await
+        .0;
+    assert_eq!(status, 200);
+
+    let staged = format!("/home/bot/office/inbox/{artifact_id}-deck.pptx");
+    let session = h
+        .store
+        .doc_session_by_path("bx_staged", &staged)
+        .await
+        .expect("session read")
+        .expect("a doc_session row");
+
+    // The computer is replaced under the open session: the scope names a new box, and the
+    // staged file — kept per box in a real deployment — is gone with the old one here.
+    h.store
+        .claim_scoped_computer(
+            "account",
+            ada.account.as_str(),
+            Some("bx_staged"),
+            "bx_fresh",
+            "local-docker",
+            None,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .expect("the scope's computer was replaced");
+    computer.written.lock().expect("written").remove(&staged);
+
+    // Orphaned, not gone: the row still answers, `boxLive` marking its box as lost.
+    let detail = h.get(&ada, &format!("/office/docs/{}", session.id)).await;
+    assert_eq!(detail["boxLive"], json!(false), "{detail}");
+    assert_eq!(detail["version"], json!(0));
+
+    // The first head read rehydrates: the kept copy lands on the new box and the row follows.
+    let (status, bytes) = h
+        .get_bytes(&ada, &format!("/office/docs/{}/bytes", session.id))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(bytes, pptx, "the kept copy stands in for the dead box");
+    assert_eq!(
+        computer.written.lock().expect("written").get(&staged),
+        Some(&pptx.to_vec()),
+        "rehydrate wrote the kept copy to the scope's new box"
+    );
+    let moved = h
+        .store
+        .doc_session(&session.id)
+        .await
+        .expect("session read")
+        .expect("the row");
+    assert_eq!(
+        moved.box_id, "bx_fresh",
+        "the session followed the computer"
+    );
+    let detail = h.get(&ada, &format!("/office/docs/{}", session.id)).await;
+    assert_eq!(detail["boxLive"], json!(true), "{detail}");
+
+    // And when the computer is gone outright, the kept copy still serves — marked stale on
+    // the response rather than passed off as live.
+    h.store
+        .clear_scoped_computer("account", ada.account.as_str(), "bx_fresh")
+        .await
+        .expect("the scope's computer cleared");
+    computer.written.lock().expect("written").remove(&staged);
+    let response = h
+        .client
+        .get(format!("{}/office/docs/{}/bytes", h.base, session.id))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("bytes");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response.headers().get("x-office-stale"),
+        Some(&reqwest::header::HeaderValue::from_static("1")),
+        "the stand-in says so"
+    );
+    assert_eq!(
+        response.headers().get("x-office-version"),
+        Some(&reqwest::header::HeaderValue::from_static("0")),
+        "and which kept version it is"
+    );
+    let detail = h.get(&ada, &format!("/office/docs/{}", session.id)).await;
+    assert_eq!(detail["boxLive"], json!(false), "{detail}");
 }
 
 /// Without a computer — or a turn that names no coworker — the file stays what it always was:
