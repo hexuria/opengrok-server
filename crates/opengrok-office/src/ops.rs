@@ -317,17 +317,14 @@ impl Session {
                 let read = presentation
                     .read_content(&ReadRequest { slide_ids: None })?
                     .map_err(|refusal| Error::Refused(refusal.failure.message.clone()))?;
-                if let Some((slide, shape, story)) = ref_.strip_prefix("sp:").and_then(|rest| {
-                    let mut parts = rest.splitn(3, ':');
-                    Some((
-                        parts.next()?.to_string(),
-                        parts.next()?.to_string(),
-                        parts.next()?.to_string(),
-                    ))
-                }) {
-                    let Some(story_text) = read.stories.iter().find(|s| {
-                        s.slide_id == slide && s.shape_id == shape && s.story_id == story
-                    }) else {
+                if ref_.starts_with("sp:") {
+                    // The ids in a ref each carry their own colons, so it is never split back
+                    // apart: it is recognised whole against the stories it could name.
+                    let Some(story_text) = read
+                        .stories
+                        .iter()
+                        .find(|s| pptx_ref(&s.slide_id, &s.shape_id, &s.story_id) == ref_)
+                    else {
                         return Err(Error::Refused(format!("no such story: {ref_}")));
                     };
                     let text = &story_text.text;
@@ -445,7 +442,7 @@ fn docx_ref(paragraph: &Paragraph, index: usize) -> String {
 }
 
 /// The ref a PPTX story answers to.
-fn pptx_ref(slide_id: &str, shape_id: &str, story_id: &str) -> String {
+pub(crate) fn pptx_ref(slide_id: &str, shape_id: &str, story_id: &str) -> String {
     format!("sp:{slide_id}:{shape_id}:{story_id}")
 }
 

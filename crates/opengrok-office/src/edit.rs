@@ -321,27 +321,27 @@ fn pptx_change(
     edit: &TextEditInput,
 ) -> Result<Change, Error> {
     let (ref_, start, end, text) = decode_match(&edit.match_)?;
-    let Some((slide, shape, story)) = ref_.strip_prefix("sp:").and_then(|rest| {
-        let mut parts = rest.splitn(3, ':');
-        Some((
-            parts.next()?.to_string(),
-            parts.next()?.to_string(),
-            parts.next()?.to_string(),
-        ))
-    }) else {
+    if !ref_.starts_with("sp:") {
         return Err(Error::Refused(format!(
             "match {ref_} does not name a pptx story"
         )));
-    };
+    }
     // read_content answers a double Result: io-style failure outside, an edit refusal inside.
     let read = presentation
         .read_content(&ReadRequest { slide_ids: None })?
         .map_err(|refusal| Error::Refused(refusal.failure.message.clone()))?;
+    // The ids in a ref each carry their own colons, so it is never split back apart: it is
+    // recognised whole against the stories it could name.
     let story_text = read
         .stories
         .iter()
-        .find(|s| s.slide_id == slide && s.shape_id == shape && s.story_id == story)
-        .ok_or_else(|| Error::Refused(format!("story {story} is gone")))?;
+        .find(|s| crate::ops::pptx_ref(&s.slide_id, &s.shape_id, &s.story_id) == ref_)
+        .ok_or_else(|| Error::Refused(format!("story at {ref_} is gone")))?;
+    let (slide, shape, story) = (
+        story_text.slide_id.clone(),
+        story_text.shape_id.clone(),
+        story_text.story_id.clone(),
+    );
     if utf16_slice(&story_text.text, start as usize, end as usize) != text.as_str() {
         return Err(Error::Refused(format!(
             "the story at {ref_} no longer reads what the match found; grep again"
