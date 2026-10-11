@@ -376,12 +376,18 @@ fn offer(
         if opengrok_plugins::is_valid_name(&name) {
             let description = opengrok_plugins::split_frontmatter(text).description;
             offers.push(SkillOffer {
-                id: format!("plugin/{bot}/{plugin}/{revision}/{skill}"),
+                id: plugin_skill_id(bot, plugin, revision, skill),
                 name,
                 description: description.unwrap_or_default(),
             });
         }
     }
+}
+
+/// The id a plugin skill is offered by, and picked by in the composer (`plugin-skills` rows):
+/// `plugin/<bot>/<plugin>/<revision>/<skill>`, read back by [`skill`].
+pub fn plugin_skill_id(bot: &CoworkerId, plugin: &str, revision: &str, skill: &str) -> String {
+    format!("plugin/{bot}/{plugin}/{revision}/{skill}")
 }
 
 /// A plugin skill as `use_skill` reads it, by the id `skill_offers` gave it.

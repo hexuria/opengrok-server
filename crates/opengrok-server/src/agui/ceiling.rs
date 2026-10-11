@@ -512,16 +512,21 @@ async fn plugin_skill_rows(
     // the account's installs, whatever their switch, less any a server plugin's name shadows.
     let server =
         opengrok_integrations::turn::server_plugins_on(&state.plugins, account, bot, &policy);
-    let server = server
-        .into_iter()
-        .map(|p| (&p.manifest.name, "server", &p.skills));
+    let server = server.into_iter().map(|p| {
+        let revision = opengrok_integrations::turn::SERVER_REVISION;
+        (&p.manifest.name, "server", revision, &p.skills)
+    });
     let installs = installs
         .iter()
-        .filter(|(p, ..)| !state.plugins.contains_key(p));
-    for (plugin, source, skills) in server.chain(installs.map(|(p, _, s)| (p, "account", s))) {
+        .filter(|(p, ..)| !state.plugins.contains_key(p))
+        .map(|(p, revision, s)| (p, "account", revision.as_str(), s));
+    for (plugin, source, revision, skills) in server.chain(installs) {
         for (skill, text) in skills {
             let front = opengrok_plugins::split_frontmatter(text);
+            // The id a turn takes it by (`forwardedProps.skill`), as `use_skill` is offered it.
+            let id = opengrok_integrations::turn::plugin_skill_id(bot, plugin, revision, skill);
             rows.push(json!({
+                "id": id,
                 "plugin": plugin,
                 "source": source,
                 "skill": skill,

@@ -68,6 +68,46 @@ fn input(messages: Vec<Message>) -> RunAgentInput {
     }
 }
 
+/// A plugin skill picked in the composer arrives by the id its row carries
+/// (`plugin/<bot>/<plugin>/<revision>/<skill>`); anything else with a slash in it is still not an
+/// id, and neither is one that climbs out of its segments or runs past the bound.
+#[test]
+fn a_plugin_skill_id_is_a_chosen_skill_and_nothing_else_with_a_slash_is() {
+    let chose = |skill: serde_json::Value| {
+        let mut bare = input(Vec::new());
+        bare.forwarded_props = json!({ "skill": skill });
+        chosen_skill_from(&bare)
+    };
+    for id in [
+        "skl_01a0c9ef-1",
+        "plugin/cw_1/bir/server/file-tax",
+        "plugin/cw_1/demo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/triage",
+    ] {
+        let chosen = match chose(json!(id)) {
+            Some(ChosenSkill::Id(chosen)) => Some(chosen),
+            _ => None,
+        };
+        assert_eq!(chosen.as_deref(), Some(id), "an id a row carries");
+    }
+    let long = format!("plugin/cw_1/bir/server/{}", "a".repeat(MAX_SKILL_ID_CHARS));
+    for id in [
+        "plugin/../x",
+        "plugin/cw_1/../server/file-tax",
+        "plugin/cw_1//server/file-tax",
+        "plugin/cw_1/bir/server/",
+        "plugin/cw_1/bir/server/file tax",
+        "plugin/cw_1/bir/server/file-tax\nWARN forged",
+        "plugin/cw_1/bir/server/file-tax/extra",
+        "skl_1/x",
+        long.as_str(),
+    ] {
+        assert!(
+            matches!(chose(json!(id)), Some(ChosenSkill::Unusable(_))),
+            "{id:?} is not an id"
+        );
+    }
+}
+
 #[test]
 fn the_recipe_a_person_chose_is_read_off_the_request() {
     let mut bare = input(Vec::new());

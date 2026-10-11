@@ -414,7 +414,7 @@ pub(crate) async fn files_line_for_turn(
 /// Copy `files` under `under` and say where; shared by a person's skills and a plugin's, so a
 /// plugin skill's files are held to the same rules: never a reason to wake the box, and checked
 /// against the path allow-list here rather than trusted from wherever they were stored.
-async fn files_line(
+pub(crate) async fn files_line(
     files: Vec<(String, Vec<u8>)>,
     under: &str,
     author: crate::persona::SkillAuthor,

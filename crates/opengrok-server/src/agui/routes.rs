@@ -344,13 +344,31 @@ pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
     // Bounded above, and here restricted to characters an id we mint can contain. A newline in
     // this value would otherwise be written into a WARN, where it forges a whole log record at a
     // position the caller chooses.
-    if !id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-    {
+    let shaped = if opengrok_integrations::turn::is_plugin_skill(id) {
+        plugin_skill_shaped(id)
+    } else {
+        id.bytes().all(id_byte)
+    };
+    if !shaped {
         return Some(ChosenSkill::Unusable("not shaped like an id"));
     }
     Some(ChosenSkill::Id(id.to_string()))
+}
+
+fn id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+}
+
+/// Whether `id` could be a plugin skill's id as its `plugin-skills` row carries it
+/// (`turn::plugin_skill_id`): `plugin/<bot>/<plugin>/<revision>/<skill>`, five segments, none
+/// empty and none climbing (`..`), each of the characters a name, a revision or a Bot id has.
+fn plugin_skill_shaped(id: &str) -> bool {
+    let segments: Vec<&str> = id.split('/').collect();
+    segments.len() == 5
+        && !id.contains("..")
+        && segments
+            .iter()
+            .all(|s| !s.is_empty() && s.bytes().all(|b| id_byte(b) || b == b'.'))
 }
 
 /// The skill segment of this turn's system message — the person's instructions quoted between
@@ -362,7 +380,7 @@ pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
 /// silence it was written to prevent.
 async fn skill_segment(
     state: &AgUiState,
-    account: &AccountId,
+    (account, coworker): (&AccountId, &CoworkerId),
     chosen: &ChosenSkill,
     tools: Option<&opengrok_harness::ToolRunner>,
 ) -> (String, Option<String>) {
@@ -380,6 +398,9 @@ async fn skill_segment(
         }
         ChosenSkill::Id(id) => id,
     };
+    if opengrok_integrations::turn::is_plugin_skill(id) {
+        return plugin_skill_segment(state, (account, coworker), id, tools).await;
+    }
     let skill = match crate::skills::for_turn(state, account, id).await {
         Ok(skill) => skill,
         Err(why) => {
@@ -415,13 +436,65 @@ async fn skill_segment(
     (quoted, Some(id.clone()))
 }
 
+/// [`skill_segment`] for a plugin skill picked in the composer, by the id its `plugin-skills` row
+/// carries. Read exactly as `use_skill` reads one (`skills::Reader`): only on the Bot it was
+/// offered for, only while its plugin and its own switch are on, and quoted as a plugin's words.
+async fn plugin_skill_segment(
+    state: &AgUiState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    id: &str,
+    tools: Option<&opengrok_harness::ToolRunner>,
+) -> (String, Option<String>) {
+    use crate::skills::NotForThisTurn;
+    let segments: Vec<&str> = id.split('/').collect();
+    // The Bot is in the id: what is offered to one Bot is not another's to quote, whoever owns both.
+    let ours = segments.get(1) == Some(&coworker.as_str());
+    let skill = if ours {
+        let store = &state.auth.store;
+        opengrok_integrations::turn::skill(store, account, id, &state.plugins).await
+    } else {
+        None
+    };
+    let Some(skill) = skill else {
+        // Switched off, uninstalled, or not this account's: `turn::skill` says which in its log.
+        let why = if ours {
+            NotForThisTurn::Disabled
+        } else {
+            NotForThisTurn::NotTheirs
+        };
+        tracing::warn!(skill = ?id, why = ?why, "a chosen plugin skill was not given to a turn");
+        return (why.line().to_string(), None);
+    };
+    // The name `use_skill` offers it by, `<plugin>.<skill>`.
+    let name = format!("{}.{}", segments[2], segments[4]);
+    let quoted = match crate::persona::skill_marker(&skill.body) {
+        Some(marker) => {
+            let target = tools
+                .and_then(ToolRunner::fill_target)
+                .map(|(computer, box_id, _)| (computer, box_id));
+            let author = crate::persona::SkillAuthor::Plugin;
+            let files = crate::skills::files_line(skill.files, &skill.dir, author, id, target);
+            let files = files.await.unwrap_or_default();
+            let door = crate::persona::SkillDoor::Chosen;
+            crate::persona::fenced_skill(door, &name, &skill.body, &marker, author, &files)
+        }
+        None => String::new(),
+    };
+    if quoted.is_empty() {
+        let why = NotForThisTurn::Unquotable;
+        tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
+        return (why.line().to_string(), None);
+    }
+    (quoted, Some(id.to_string()))
+}
+
 /// The skill line for this turn, and the id to record on `RunEvent::Started`.
 ///
 /// An id on this request is used as sent. None means look at prior runs on this
 /// thread, newest first, and take the first that quoted a skill.
 async fn skill_line_for_turn(
     state: &AgUiState,
-    account: &AccountId,
+    (account, coworker): (&AccountId, &CoworkerId),
     thread_id: &str,
     input: &RunAgentInput,
     tools: Option<&opengrok_harness::ToolRunner>,
@@ -433,7 +506,7 @@ async fn skill_line_for_turn(
             None => return (String::new(), None),
         },
     };
-    skill_segment(state, account, &chosen, tools).await
+    skill_segment(state, (account, coworker), &chosen, tools).await
 }
 
 /// Newest prior run on this thread, owned by this account, that recorded a quoted skill
@@ -3340,9 +3413,9 @@ async fn start_claimed_turn(
             // it costs the skill, and the coworker is told to say so rather than answer as though
             // it had followed instructions it never saw (CLAUDE.md #8). No id on this request
             // reuses the skill from a prior run on this thread.
+            let who = (account_id, coworker_id);
             let (skill_line, skill_id) =
-                skill_line_for_turn(&state, account_id, &input.thread_id, &input, tools.as_ref())
-                    .await;
+                skill_line_for_turn(&state, who, &input.thread_id, &input, tools.as_ref()).await;
             recorded_skill = skill_id;
             // Who is speaking and what day it is, from the token's account: FIRST in the tail,
             // and so never after the skill line, which must stay last.

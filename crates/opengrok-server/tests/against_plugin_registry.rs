@@ -2431,6 +2431,99 @@ async fn plugin_turn(
     }
 }
 
+/// A plugin skill picked from the composer's `/` list is the person's choice for that turn: the
+/// row carries the id the turn takes, the skill is quoted into the system message as a plugin's
+/// words, and later turns on the thread keep it. Another Bot's id, or a skill switched off, is
+/// refused out loud and never quoted.
+#[tokio::test]
+async fn a_plugin_skill_is_picked_by_its_rows_id_for_that_bot_only() {
+    let url = database_or_skip!();
+    let (registry, _) = registry_fixture().await;
+    let h = harness_with(&url, registry, None, server_bir()).await;
+    let a = h.person(None).await;
+    let aid = AccountId::from_stored(h.agui.auth.minter.verify_access(&a).unwrap().sub);
+    let mut bots = Vec::new();
+    for name in ["Tax bot", "Other bot"] {
+        let (status, hired, text) = h
+            .call(&a, "POST", "/coworkers", Some(json!({ "name": name })))
+            .await;
+        assert_eq!(status, 201, "{text}");
+        let bot = hired["id"].as_str().unwrap().to_string();
+        use opengrok_policy::ToolSet;
+        let (all, none) = (ToolSet::All, ToolSet::None);
+        let bot_id = opengrok_core::id::CoworkerId::from_stored(bot.as_str());
+        let at = chrono::Utc::now().timestamp_millis();
+        h.store
+            .grant_access(&aid, &bot_id, &all, &all, &none, at)
+            .await
+            .unwrap();
+        bots.push(bot);
+    }
+    let (bot, other) = (&bots[0], &bots[1]);
+
+    let skills_path = format!("/coworkers/{bot}/plugin-skills");
+    let (status, listed, text) = h.call(&a, "GET", &skills_path, None).await;
+    assert_eq!(status, 200, "{text}");
+    let id = format!("plugin/{bot}/bir/server/file-tax");
+    assert_eq!(listed["skills"][0]["id"], id.as_str(), "{listed}");
+    let bot_id = bots_id(bot);
+    let offered =
+        opengrok_integrations::turn::skill_offers(&h.store, &aid, &bot_id, &h.agui.plugins);
+    let offered: Vec<String> = offered.await.into_iter().map(|o| o.id).collect();
+    assert_eq!(
+        offered,
+        std::slice::from_ref(&id),
+        "the row's id is the turn's offer id"
+    );
+
+    // Picked: quoted as the plugin's, recorded, and kept by the next turn on the thread.
+    let thread = format!("thr_{}", uuid::Uuid::now_v7());
+    let (sse, system, recorded) = plugin_turn(&h, &a, bot, &thread, json!({"skill": id})).await;
+    let system = system.unwrap_or_else(|| panic!("no system message: {sse}"));
+    assert!(system.contains("Fill the form first."), "{system}");
+    assert!(system.contains("bir.file-tax"), "{system}");
+    assert!(
+        !system.ends_with(opengrok_plugins::skill::SKILL_UNAVAILABLE_LINE),
+        "{system}"
+    );
+    assert_eq!(recorded.as_deref(), Some(id.as_str()));
+    let (_, system, recorded) = plugin_turn(&h, &a, bot, &thread, json!({})).await;
+    assert!(system.unwrap().contains("Fill the form first."));
+    assert_eq!(recorded.as_deref(), Some(id.as_str()));
+
+    // Another Bot's turn with this Bot's id: refused, never quoted, nothing recorded.
+    let thread = format!("thr_{}", uuid::Uuid::now_v7());
+    let (_, system, recorded) = plugin_turn(&h, &a, other, &thread, json!({"skill": id})).await;
+    let system = system.unwrap();
+    assert!(
+        system.ends_with(opengrok_plugins::skill::SKILL_UNAVAILABLE_LINE),
+        "{system}"
+    );
+    assert!(!system.contains("Fill the form first."), "{system}");
+    assert_eq!(recorded, None);
+
+    // Switched off for this Bot, the plugin still on by name: refused the same way.
+    let ceiling_path = format!("/coworkers/{bot}/ceiling");
+    let (_, current, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    let by_name = json!({"enabled": ["bir"], "version": current["version"]});
+    assert_eq!(h.call(&a, "PUT", &ceiling_path, Some(by_name)).await.0, 200);
+    let off = json!({"plugin":"bir","skill":"file-tax","on":false});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(off)).await.0, 200);
+    let thread = format!("thr_{}", uuid::Uuid::now_v7());
+    let (_, system, recorded) = plugin_turn(&h, &a, bot, &thread, json!({"skill": id})).await;
+    let system = system.unwrap();
+    assert!(
+        system.ends_with(opengrok_plugins::skill::SKILL_UNAVAILABLE_LINE),
+        "{system}"
+    );
+    assert!(!system.contains("Fill the form first."), "{system}");
+    assert_eq!(recorded, None);
+}
+
+fn bots_id(bot: &str) -> opengrok_core::id::CoworkerId {
+    opengrok_core::id::CoworkerId::from_stored(bot)
+}
+
 /// `@bir` names a plugin in the server's own folder, which every account has: its owner's tag
 /// asks nothing and switches it on for that turn although the Bot's switch is off, a name nobody
 /// has still answers with the install card, and somebody else's tag on the Bot keeps nothing.
