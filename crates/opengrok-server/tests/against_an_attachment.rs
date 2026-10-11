@@ -103,6 +103,8 @@ struct Harness {
     door: Arc<RecordingDoor>,
     minter: Arc<TokenMinter>,
     client: reqwest::Client,
+    /// The router's state, kept so a test can hand it to a desk that answers off-route.
+    agui: AgUiState,
 }
 
 struct Person {
@@ -142,7 +144,7 @@ impl Harness {
             host_settings: None,
         };
         let host = HostState::new(agui.clone(), None);
-        let app = opengrok_server::router(agui, host);
+        let app = opengrok_server::router(agui.clone(), host);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -159,6 +161,7 @@ impl Harness {
             door,
             minter,
             client: reqwest::Client::new(),
+            agui,
         }
     }
 
@@ -954,6 +957,17 @@ impl Computer for StagedBox {
     async fn read_file(&self, _box_id: &str, _path: &str) -> BoxResult<String> {
         Ok(String::new())
     }
+    async fn read_file_bytes(&self, _box_id: &str, path: &str) -> BoxResult<Vec<u8>> {
+        self.written
+            .lock()
+            .expect("written")
+            .get(path)
+            .cloned()
+            .ok_or_else(|| opengrok_box::BoxError::Refused {
+                status: 404,
+                body: "no such file".to_string(),
+            })
+    }
     async fn write_file(&self, _box_id: &str, _path: &str, _content: &str) -> BoxResult<()> {
         Ok(())
     }
@@ -1222,4 +1236,115 @@ async fn an_office_file_on_a_computerless_turn_stays_named() {
         words.contains("report.docx") && words.contains("cannot be shown"),
         "named, not placed: {words}"
     );
+}
+
+/// A session's export may rewrite a path it itself shipped — the artifact chain already
+/// holds every copy that ever went there, so "the latest file" keeps one name instead of
+/// forking `-v2`s — but a path it never exported still refuses: export cannot clobber a
+/// file it did not make.
+#[tokio::test]
+async fn an_export_may_rewrite_only_paths_the_session_shipped() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("rexport").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    // A real deck is the session's file; a foreign file sits where exports must not land.
+    // The path is unique per run: `bx_staged` is a constant box id, so a leftover session row
+    // from an earlier run would be found instead of opening fresh — and it belongs to a dead
+    // account, which `owned` refuses.
+    let deck_path = format!(
+        "/home/bot/office/deck-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    let foreign_path = format!(
+        "/home/bot/office/outbox/foreign-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    let copy_path = format!(
+        "/home/bot/office/outbox/deck-copy-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    let deck: &[u8] = include_bytes!("../../opengrok-office/tests/fixtures/blank.pptx");
+    {
+        let mut files = computer.written.lock().expect("written");
+        files.insert(deck_path.clone(), deck.to_vec());
+        files.insert(foreign_path.clone(), b"not ours".to_vec());
+    }
+
+    let tools = opengrok_server::office_desk::Tools {
+        state: h.agui.clone(),
+    };
+    let context = opengrok_tools::ToolContext {
+        account_id: ada.account.clone(),
+        coworker_id: coworker,
+        box_id: Some(opengrok_core::id::BoxId::from_stored(box_id.clone())),
+        group_box: None,
+        screen_hold: false,
+        screen_held_in: None,
+        screen: Arc::new(Mutex::new(opengrok_box::Screen::Shared)),
+        thread_id: Some("thread".to_string()),
+        run_id: Some("run".to_string()),
+    };
+    let box_io: &dyn Computer = computer.as_ref();
+    let opened = opengrok_tools::office_desk::OfficeDesk::answer(
+        &tools,
+        &context,
+        box_io,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Open {
+            path: deck_path.clone(),
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"]
+        .as_str()
+        .expect("document id")
+        .to_string();
+
+    let tools = &tools;
+    let box_id = box_id.as_str();
+    let export = |path: &str| {
+        let document = document.clone();
+        let path = path.to_string();
+        let context = context.clone();
+        async move {
+            opengrok_tools::office_desk::OfficeDesk::answer(
+                tools,
+                &context,
+                box_io,
+                box_id,
+                opengrok_tools::office_desk::Ask::Export {
+                    document,
+                    path,
+                    proposal: None,
+                },
+            )
+            .await
+        }
+    };
+
+    // A first ship to a fresh path writes it; a second ship to the same path rewrites what
+    // the session itself put there — the name stays, the bytes update.
+    export(&copy_path).await.expect("first export");
+    let again = export(&copy_path)
+        .await
+        .expect("re-export of the session's own copy");
+    assert_eq!(again.result["path"].as_str().unwrap(), copy_path);
+
+    // A file the session never made still refuses — the inbox deck itself, and a stranger's.
+    for path in [deck_path.as_str(), foreign_path.as_str()] {
+        let refused = match export(path).await {
+            Ok(_) => panic!("{path} should refuse"),
+            Err(refused) => refused,
+        };
+        assert!(
+            refused.contains("already exists"),
+            "{path} should refuse: {refused}"
+        );
+    }
 }

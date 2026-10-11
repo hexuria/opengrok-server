@@ -3772,6 +3772,24 @@ impl PgStore {
         Ok(())
     }
 
+    /// The paths a doc session has `office_export`ed to. Export's "may rewrite its own copy"
+    /// check reads this: the artifact already holds every copy ever shipped to the path, so
+    /// a re-export there loses nothing and the delivered file keeps one name.
+    pub async fn doc_export_paths(&self, doc_session_id: &str) -> StoreResult<Vec<String>> {
+        let rows: Vec<(Option<String>,)> = sqlx::query_as(
+            "select distinct meta->>'exportPath'
+               from artifact
+              where meta->>'docSessionId' = $1
+                and meta->>'via' = 'office_export'
+                and meta ? 'exportPath'
+                and deleted_at_ms is null",
+        )
+        .bind(doc_session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().filter_map(|(path,)| path).collect())
+    }
+
     /// Every artifact produced by a recipe run, ordered by step then creation time.
     /// Ignores rows whose deleted_at_ms is set.
     pub async fn artifacts_for_run(

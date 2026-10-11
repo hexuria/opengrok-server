@@ -287,7 +287,7 @@ impl Tools {
         if let Ok(kind) = Self::kind_of(&rebased) {
             let filename = rebased.path.rsplit('/').next().unwrap_or(&rebased.path);
             if let Err(error) = self
-                .snapshot(context, &rebased, kind, &bytes, filename, "external")
+                .snapshot(context, &rebased, kind, &bytes, filename, "external", None)
                 .await
             {
                 tracing::warn!(%error, doc = %rebased.id, "a drifted version could not be snapshotted");
@@ -318,6 +318,7 @@ impl Tools {
     /// Store `bytes` as an artifact of `via` for this session — every mutation leaves one, so
     /// a person can always return to a known copy. Export's is attached under the thread so
     /// the transcript draws it on the bot's reply.
+    #[allow(clippy::too_many_arguments)]
     async fn snapshot(
         &self,
         context: &ToolContext,
@@ -326,8 +327,20 @@ impl Tools {
         bytes: &[u8],
         filename: &str,
         via: &str,
+        export_path: Option<&str>,
     ) -> Result<String, String> {
         let id = format!("art_{}", uuid::Uuid::now_v7());
+        let mut meta = json!({
+            "docSessionId": row.id,
+            "path": row.path,
+            "via": via,
+            "version": row.version,
+        });
+        // Export alone names a second path — the copy's destination — which is what lets a
+        // later export rewrite that path: it is a file this session made, not somebody's.
+        if let Some(export_path) = export_path {
+            meta["exportPath"] = json!(export_path);
+        }
         let artifact = ArtifactRow {
             id: id.clone(),
             account_id: context.account_id.to_string(),
@@ -339,12 +352,7 @@ impl Tools {
             run_id: context.run_id.clone(),
             step_index: None,
             thread_id: context.thread_id.clone(),
-            meta: json!({
-                "docSessionId": row.id,
-                "path": row.path,
-                "via": via,
-                "version": row.version,
-            }),
+            meta,
             created_at_ms: crate::now_ms(),
             deleted_at_ms: None,
         };
@@ -530,7 +538,7 @@ impl Tools {
         // the chain without its first entry, not a failed open.
         let filename = row.path.rsplit('/').next().unwrap_or(&row.path);
         if let Err(error) = self
-            .snapshot(context, &row, kind, &bytes, filename, "office_open")
+            .snapshot(context, &row, kind, &bytes, filename, "office_open", None)
             .await
         {
             tracing::warn!(%error, doc = %row.id, "a session's first version could not be snapshotted");
@@ -815,6 +823,7 @@ impl Tools {
                         &out_bytes,
                         filename,
                         "office_accept",
+                        None,
                     )
                     .await?;
                 let body = json!({
@@ -907,11 +916,30 @@ impl Tools {
                 .map_err(|e| engine_refusal(&e))?,
         };
         if box_io.read_file_bytes(box_id, &path).await.is_ok() {
-            return Err(refusal(
-                "EEXIST",
-                format!("{path} already exists; export never overwrites"),
-                None,
-            ));
+            // A path this session itself exported may be re-shipped — its artifacts already
+            // hold every copy ever written there, so the delivered file keeps one name
+            // instead of forking -v2 names. Anything else still refuses: export never
+            // clobbers a file it did not make.
+            let own_exports = self
+                .state
+                .auth
+                .store
+                .doc_export_paths(&row.id)
+                .await
+                .map_err(|error| {
+                    refusal(
+                        "ENGINE_ERROR",
+                        format!("the session's exports could not be read: {error}"),
+                        None,
+                    )
+                })?;
+            if !own_exports.iter().any(|exported| exported == &path) {
+                return Err(refusal(
+                    "EEXIST",
+                    format!("{path} already exists; export never overwrites"),
+                    None,
+                ));
+            }
         }
         box_io
             .write_file_bytes(box_id, &path, &out_bytes)
@@ -919,7 +947,15 @@ impl Tools {
             .map_err(|e| describe_box(&e))?;
         let filename = path.rsplit('/').next().unwrap_or(path.as_str());
         let artifact_id = self
-            .snapshot(context, &row, kind, &out_bytes, filename, "office_export")
+            .snapshot(
+                context,
+                &row,
+                kind,
+                &out_bytes,
+                filename,
+                "office_export",
+                Some(&path),
+            )
             .await?;
         let body = json!({
             "document": row.id,

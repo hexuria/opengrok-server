@@ -480,7 +480,11 @@ pub fn description(name: &str) -> Option<&'static str> {
         }
         OFFICE_CREATE => {
             "Create a NEW .docx, .xlsx, or .pptx on this Bot's computer; existing files are \
-             never overwritten. Format comes from the path extension and requires the matching \
+             never overwritten. A new path is a new document with its own history — to REVISE \
+             a file, open it and use office_propose + office_accept instead: the same path \
+             updates in place and becomes the next version of the SAME document, which is what \
+             the person sees in their version history. Format comes from the path extension \
+             and requires the matching \
              payload: docx.paragraphs [{text, style: title|heading1|heading2|normal, bold, \
              italic}]; xlsx.rows string[][] of raw inputs (\"42\" number, \"=SUM(A1:A3)\" \
              formula, other text); pptx.slides [{title, bullets: string[], notes}]. The parent \
@@ -537,14 +541,18 @@ pub fn description(name: &str) -> Option<&'static str> {
              fresh reads."
         }
         OFFICE_ACCEPT => {
-            "Apply a proposal to the open document atomically and write the file back. Stale \
-             targets are rejected. Export afterwards to hand the person a new file."
+            "Apply a proposal to the open document atomically and write the file back — the \
+             SAME path now holds the next version; no new file is made. Stale \
+             targets are rejected. Export afterwards to hand the person a copy."
         }
         OFFICE_REJECT => "Discard a pending proposal without editing the document.",
         OFFICE_EXPORT => {
-            "Write a new file of the opened format (.docx, .xlsx, .pptx) on this Bot's \
-             computer and attach it to your reply for the person. Existing files are never \
-             overwritten. Supply proposal to export a proposed result without accepting it; \
+            "Write a file of the opened format (.docx, .xlsx, .pptx) on this Bot's \
+             computer and attach it to your reply for the person — a copy: editing \
+             continues on the open document, not the copy. Existing files are never \
+             overwritten except a path this session itself exported before, so re-shipping \
+             the latest state keeps the same filename instead of inventing -v2 copies. \
+             Supply proposal to export a proposed result without accepting it; \
              omit proposal to export accepted edits."
         }
         ROW => ROW_DESCRIPTION,
