@@ -3225,7 +3225,14 @@ async fn start_claimed_turn(
     };
     if let (Some(account), Some(coworker)) = (&account_id, &run_coworker) {
         let store = &state.auth.store;
-        let kept = opengrok_integrations::turn::mentioned(store, account, coworker, &asked_plugins);
+        let operator = &state.plugins;
+        let kept = opengrok_integrations::turn::mentioned(
+            store,
+            account,
+            coworker,
+            &asked_plugins,
+            operator,
+        );
         turn_plugins.mentioned = kept.await;
         // A tagged plugin this turn could not use yet is asked about BEFORE the model is: the
         // turn answers with the card and ends, and the card's answer sends the same message again

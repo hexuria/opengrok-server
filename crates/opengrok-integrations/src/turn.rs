@@ -45,22 +45,29 @@ impl TurnPlugins {
 }
 
 /// The plugins named in this turn's message that it may use: installed by the driving account,
-/// on a Bot that account owns (`installed::for_turn` checks the owner in SQL). Anything else is
-/// dropped here, so a member's `@name` on a shared Bot, or a name nobody installed, can never
-/// widen a ceiling (`opengrok_policy::with_mentioned`).
+/// or in this server's own folder (`operator`), which every account has, on a Bot that account
+/// owns (`installed::for_turn` checks the owner in SQL, `owns` for the server's plugins). Anything
+/// else is dropped here, so a member's `@name` on a shared Bot, or a name nobody installed, can
+/// never widen a ceiling (`opengrok_policy::with_mentioned`).
 pub async fn mentioned(
     store: &PgStore,
     account: &AccountId,
     bot: &CoworkerId,
     asked: &[String],
+    operator: &BTreeMap<String, Plugin>,
 ) -> Vec<String> {
     if asked.is_empty() {
         return Vec::new();
     }
     let installs = installed(store, account, bot).await;
+    let server =
+        asked.iter().any(|name| operator.contains_key(name)) && owns(store, account, bot).await;
     asked
         .iter()
-        .filter(|name| installs.iter().any(|install| &install.name == *name))
+        .filter(|name| {
+            installs.iter().any(|install| &install.name == *name)
+                || (server && operator.contains_key(*name))
+        })
         .cloned()
         .collect()
 }
