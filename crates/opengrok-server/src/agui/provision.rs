@@ -392,70 +392,21 @@ pub async fn resolve_mode_for(
     }
 }
 
-/// The `bot` row's word for a screen of its own (#376); one row, so never also `per-bot`.
-pub const OWN_SCREEN: &str = "own-screen";
-
-/// Which screen a coworker works on: its own when told to and its computer is shared, else shared.
+/// Which screen a coworker works on (#376): on a computer it shares, always a screen of its own,
+/// with its own browser and profile, so no Bot's pages show on another's screen (the owner's
+/// call, 11 Oct 2026). A computer of its own already is its own screen, and a group's computer is
+/// its members' one shared desk.
 pub async fn screen_for(
     state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &str,
 ) -> opengrok_box::Screen {
-    let (_, _, _, _, mode) = scope_of(state, account_id, coworker_id).await;
-    if mode == BoxMode::Dedicated {
-        return opengrok_box::Screen::Shared;
-    }
-    match state.auth.store.sharing_mode("bot", coworker_id).await {
-        Ok(Some(own)) if own == OWN_SCREEN => opengrok_box::Screen::Own(coworker_id.to_string()),
-        _ => opengrok_box::Screen::Shared,
-    }
-}
-
-/// A screen of its own on the computer it shares (`own`), or the shared one (#376): the pane's
-/// switch and `use_own_screen`. Back on the shared screen its own one stops (its profile stays).
-pub async fn set_own_screen(
-    state: &AgUiState,
-    account_id: &AccountId,
-    coworker_id: &CoworkerId,
-    own: bool,
-) -> Result<opengrok_box::Screen, (axum::http::StatusCode, String)> {
-    let (_, _, scope, _, mode) = scope_of(state, account_id, coworker_id.as_str()).await;
-    if mode == BoxMode::Dedicated {
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            "this Bot has a computer of its own, so its screen is already its own".into(),
-        ));
-    }
-    if scope == "group" {
-        return Err((
-            axum::http::StatusCode::CONFLICT,
-            "a group's computer is its members' shared desk; it has one screen".into(),
-        ));
-    }
-    let store = &state.auth.store;
-    let saved = if own {
-        store
-            .set_sharing_mode("bot", coworker_id.as_str(), OWN_SCREEN, crate::now_ms())
-            .await
+    let (_, _, scope, _, mode) = scope_of(state, account_id, coworker_id).await;
+    if mode == BoxMode::Dedicated || scope == "group" {
+        opengrok_box::Screen::Shared
     } else {
-        store.clear_sharing_mode("bot", coworker_id.as_str()).await
-    };
-    saved.map_err(|_| {
-        let why = "the screen setting could not be saved now; try again in a moment";
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, why.to_string())
-    })?;
-    if let Some(row) = scoped_box_row_for(state, account_id, coworker_id).await {
-        super::screen_proxy::forget_box(&row.box_id);
-        if !own
-            && let Some(provider) = provider_for(state, row.org_id.as_deref(), &row.kind).await
-            && let Err(error) = provider
-                .close_screen(&row.box_id, coworker_id.as_str())
-                .await
-        {
-            tracing::warn!(%error, "a Bot's own screen was not stopped; it stops with the computer");
-        }
+        opengrok_box::Screen::Own(coworker_id.to_string())
     }
-    Ok(screen_for(state, account_id, coworker_id.as_str()).await)
 }
 
 /// The (scope, scope_id, box mode) a mode maps to: per-org shares one org box, per-account one box

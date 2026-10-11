@@ -470,10 +470,9 @@ impl Computer for DockerComputer {
         screen: &crate::Screen,
         url: &str,
     ) -> BoxResult<crate::devtools::DevTools> {
-        match screen.bot() {
+        match self.own_screen(box_id, screen).await? {
             None => crate::devtools::DevTools::spawn(box_id, url).await,
-            Some(bot) => {
-                let own = self.own_screen(box_id, bot).await?;
+            Some(own) => {
                 let env = [
                     ("BOX_DISPLAY", own.display.as_str()),
                     ("BOX_CHROME_PROFILE", own.profile.as_str()),
@@ -859,21 +858,17 @@ impl Computer for DockerComputer {
             return Ok(None);
         };
         let page = vnc_page_url(&format!("http://127.0.0.1:{port}"), &password);
-        Ok(Some(match screen.bot() {
+        Ok(Some(match self.own_screen(box_id, screen).await? {
             None => page,
-            Some(bot) => {
-                let own = self.own_screen(box_id, bot).await?;
-                format!("{page}&path={}", own_screen_path(&own.display))
-            }
+            Some(own) => format!("{page}&path={}", own_screen_path(&own.display)),
         }))
     }
 
     async fn open_url(&self, box_id: &str, screen: &crate::Screen, url: &str) -> BoxResult<()> {
         let quoted = url.replace('\'', "'\\''");
-        let command = match screen.bot() {
+        let command = match self.own_screen(box_id, screen).await? {
             None => format!("box-chromium '{quoted}'"),
-            Some(bot) => {
-                let own = self.own_screen(box_id, bot).await?;
+            Some(own) => {
                 format!(
                     "BOX_DISPLAY='{}' BOX_CHROME_PROFILE='{}' box-chromium '{quoted}'",
                     own.display, own.profile
@@ -884,11 +879,8 @@ impl Computer for DockerComputer {
         Ok(())
     }
 
-    async fn close_screen(&self, box_id: &str, bot: &str) -> BoxResult<()> {
-        let bot = safe_bot(bot)?;
-        self.run(box_id, &format!("box-screen down '{bot}'"), 30)
-            .await
-            .map(|_| ())
+    async fn open_screen(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<()> {
+        self.own_screen(box_id, screen).await.map(|_| ())
     }
 
     async fn screenshot(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<Screenshot> {
@@ -1004,21 +996,28 @@ impl DockerComputer {
     /// The guest client on `screen`: the box's shared screen, or a Bot's own.
     async fn guest_on(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<grok_box::GrokBox> {
         let guest = self.guest(box_id).await?;
-        match screen.bot() {
+        match self.own_screen(box_id, screen).await? {
             None => Ok(guest),
-            Some(bot) => Ok(guest.on(&self.own_screen(box_id, bot).await?.display)),
+            Some(own) => Ok(guest.on(&own.display)),
         }
     }
 
-    /// A Bot's own screen on this box: `box-screen up`, asked before each use. It is
-    /// idempotent, and a screen a restart stopped comes back on the next call rather than
-    /// failing on a display that is gone.
-    async fn own_screen(&self, box_id: &str, bot: &str) -> BoxResult<OwnScreen> {
+    /// The Bot's own screen on this box (`box-screen up`, asked before each use), or `None` for
+    /// the box's main screen. It is idempotent, and a screen a restart stopped comes back on the
+    /// next call rather than failing on a display that is gone.
+    async fn own_screen(
+        &self,
+        box_id: &str,
+        screen: &crate::Screen,
+    ) -> BoxResult<Option<OwnScreen>> {
+        let Some(bot) = screen.bot() else {
+            return Ok(None);
+        };
         let bot = safe_bot(bot)?;
         let out = self
             .run(box_id, &format!("box-screen up '{bot}'"), 30)
             .await?;
-        own_screen_in(&out.stdout)
+        or_main_screen(own_screen_in(&out.stdout))
     }
 }
 
@@ -1072,6 +1071,23 @@ fn own_screen_in(stdout: &str) -> BoxResult<OwnScreen> {
         _ => Err(BoxError::Unreachable(
             "box-screen answered without a display".to_string(),
         )),
+    }
+}
+
+/// A Bot works on the box's main screen when the box has no room for another own screen, or is
+/// on an image from before own screens: every Bot on a shared computer is on its own screen, so a
+/// refusal here would stop the Bot from doing anything at all.
+fn or_main_screen(own: BoxResult<OwnScreen>) -> BoxResult<Option<OwnScreen>> {
+    match own {
+        Ok(own) => Ok(Some(own)),
+        Err(BoxError::Refused {
+            status: 409 | 501,
+            body,
+        }) => {
+            tracing::warn!(%body, "a Bot works on the computer's main screen");
+            Ok(None)
+        }
+        Err(other) => Err(other),
     }
 }
 
@@ -1305,28 +1321,25 @@ fn uuid_like() -> String {
 mod tests {
     use super::*;
 
-    /// A Bot's own screen as hexuria/box `box-screen up` answers it, a refusal it gives, and an
-    /// image from before own screens (no `box-screen`, so no JSON); and the viewer's token path.
+    /// A Bot's own screen as hexuria/box `box-screen up` answers it; a box with no room for
+    /// another, or an image from before own screens (no `box-screen`, so no JSON), leaves the Bot
+    /// on the main screen rather than unable to act; and the viewer's token path.
     #[test]
     fn an_own_screen_is_read_from_box_screen() {
         let up = r#"{"bot":"cw_1","slot":2,"display":":2","profile":"/home/box/chrome-profile/bots/cw_1","running":true}"#;
         assert_eq!(
-            own_screen_in(up).unwrap(),
-            OwnScreen {
+            or_main_screen(own_screen_in(up)).unwrap(),
+            Some(OwnScreen {
                 display: ":2".into(),
                 profile: "/home/box/chrome-profile/bots/cw_1".into()
-            }
+            })
         );
         let full = r#"{"error":"this computer already runs 4 Bots' own screens"}"#;
-        assert!(matches!(
-            own_screen_in(full),
-            Err(BoxError::Refused { status: 409, .. })
-        ));
+        assert_eq!(or_main_screen(own_screen_in(full)).unwrap(), None);
         let old_image = "sh: 1: box-screen: not found";
-        assert!(matches!(
-            own_screen_in(old_image),
-            Err(BoxError::Refused { status: 501, .. })
-        ));
+        assert_eq!(or_main_screen(own_screen_in(old_image)).unwrap(), None);
+        let no_display = r#"{"running":true}"#;
+        assert!(or_main_screen(own_screen_in(no_display)).is_err());
         assert_eq!(own_screen_path(":2"), "websockify%3Ftoken%3Ds2");
     }
 

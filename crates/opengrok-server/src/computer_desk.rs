@@ -4,8 +4,8 @@
 //! so a Bot may do to its own computer what its owner's pane may, refused in the same words.
 //! Every call is answered for the `ToolContext`'s account and coworker only.
 
-use opengrok_tools::ToolContext;
 use opengrok_tools::computer_desk::{Ask, ComputerDesk};
+use opengrok_tools::{ToolContext, ToolImage};
 use serde_json::{Value, json};
 
 use crate::agui::AgUiState;
@@ -121,13 +121,10 @@ impl ComputerDesk for Tools {
                 Ok(json!({ "updating": true,
                     "note": "the computer is being rebuilt on the newest image; its files are kept" }))
             }
-            Ask::UseOwnScreen { own } => {
-                let screen = provision::set_own_screen(state, account, coworker, own)
-                    .await
-                    .map_err(|(_, message)| message)?;
-                context.set_screen(screen.clone()); // the turn's next screen action lands there
-                Ok(json!({ "screen": screen.word() }))
-            }
+            Ask::LookAtScreen { bot } => self
+                .look_at_screen(context, &bot)
+                .await
+                .map(|(said, _)| said),
             Ask::SetNetwork { mode } => {
                 let Some(stored) = egress_mode(&mode) else {
                     return Err("mode is always, ask or never".into());
@@ -153,6 +150,47 @@ impl ComputerDesk for Tools {
                 Ok(json!({ "network": mode }))
             }
         }
+    }
+
+    /// Another of the person's Bots' screens, found on their roster by id or name (a retired Bot
+    /// is gone, and a name two Bots share is asked for by id). Only the person's own Bots: the
+    /// roster is `context`'s account's, as the Computer pane's screen route is the owner's.
+    async fn look_at_screen(
+        &self,
+        context: &ToolContext,
+        bot: &str,
+    ) -> Result<(Value, ToolImage), String> {
+        let state = &self.state;
+        let roster = state.auth.store.coworkers_for(&context.account_id).await;
+        let roster = roster.map_err(|_| "the person's Bots could not be read now".to_string())?;
+        let roster: Vec<_> = roster.into_iter().filter(|c| !c.retired).collect();
+        let named = |c: &&opengrok_core::coworker::CoworkerView| {
+            c.id.as_str() == bot || c.name.trim().eq_ignore_ascii_case(bot)
+        };
+        let target = match roster.iter().filter(named).collect::<Vec<_>>().as_slice() {
+            [one] => (*one).clone(),
+            [] => {
+                let names: Vec<&str> = roster.iter().map(|c| c.name.as_str()).collect();
+                return Err(format!(
+                    "the person has no Bot called {bot}; their Bots are {}",
+                    names.join(", ")
+                ));
+            }
+            several => {
+                let ids: Vec<&str> = several.iter().map(|c| c.id.as_str()).collect();
+                return Err(format!(
+                    "{} Bots are called {bot}; name one by its id: {}",
+                    several.len(),
+                    ids.join(", ")
+                ));
+            }
+        };
+        let shot = provision::coworker_screenshot(state, &context.account_id, &target.id).await;
+        let shot =
+            shot.map_err(|(_, why)| format!("{}'s screen cannot be seen now: {why}", target.name))?;
+        let said = json!({ "bot": target.id.as_str(), "name": target.name,
+            "note": "a picture of that Bot's screen; this Bot cannot click or type there" });
+        Ok((said, ToolImage::from(shot)))
     }
 
     async fn ask_first(&self, _: &ToolContext, ask: &Ask) -> Result<Option<String>, String> {

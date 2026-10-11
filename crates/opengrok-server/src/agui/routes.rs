@@ -698,8 +698,20 @@ pub(crate) async fn tools_for_turn(
     // No row is `ask`: one card per run, as before there was a choice.
     let (egress_policy, egress_unconfirmed) =
         provision::egress_policy_for_turn(state, scope, &scope_id).await;
+    let which = provision::screen_for(state, account_id, coworker_id.as_str()).await;
+    // A Bot's own screen is started now, in the background, when its computer is already up:
+    // started on first use, it kept the Bot's first action waiting and showed the person a black
+    // screen while it came up. A computer asleep is not woken for it.
+    if running && which.bot().is_some() {
+        let (computer, box_id, screen) = (computer.clone(), box_id.clone(), which.clone());
+        tokio::spawn(async move {
+            if let Err(error) = computer.open_screen(&box_id, &screen).await {
+                tracing::warn!(%error, "a Bot's own screen was not started ahead of its turn");
+            }
+        });
+    }
+    context.set_screen(which);
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
-    context.set_screen(provision::screen_for(state, account_id, coworker_id.as_str()).await);
     let transcript_hold = match state
         .auth
         .store
@@ -1126,11 +1138,6 @@ pub fn router(state: AgUiState) -> Router {
         .route(
             "/coworkers/{coworker_id}/own-computer",
             axum::routing::put(super::ceiling::put_own_computer),
-        )
-        // A screen of its own on the computer it shares, or the shared screen again (#376).
-        .route(
-            "/coworkers/{coworker_id}/computer/screen",
-            axum::routing::put(super::ceiling::put_own_screen),
         )
         // One plugin skill on or off for this Bot, and its text for its page (`ceiling.rs`).
         .route(
