@@ -113,3 +113,22 @@ fn only_what_cannot_bill_twice_is_retried() {
             .is_none()
     );
 }
+
+/// What a provider gets back for a call's arguments: the text itself when it is a JSON object,
+/// `{}` for anything else (`docs/verification/empty-tool-args`).
+#[test]
+fn a_calls_provider_arguments_are_always_an_object() {
+    let with = |raw: &str| ToolCallRef {
+        id: "c1".to_string(),
+        name: "t".to_string(),
+        arguments: raw.to_string(),
+    };
+    for raw in [
+        "", " \n", "null", "[1]", "1", "\"s\"", "not json", "{", "\u{a0}{}",
+    ] {
+        assert_eq!(with(raw).provider_arguments(), "{}", "{raw:?}");
+    }
+    for raw in ["{}", " {\"a\":1}", "{\"a\":[1,{\"b\":null}]}\n"] {
+        assert_eq!(with(raw).provider_arguments(), raw, "{raw:?}");
+    }
+}
