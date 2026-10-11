@@ -2249,8 +2249,8 @@ fn tool_result_message(result: &opengrok_tools::ToolResult) -> ChatMessage {
     }
 }
 
-/// A call as its assistant message names it. Arguments that cannot be written back as JSON text
-/// go as `{}`, the same as fragments that never assembled.
+/// A call as its assistant message names it: the arguments written back as JSON text as they are,
+/// `null` included. What a provider is sent is [`ToolCallRef::provider_arguments`], an object.
 fn tool_call_ref(call: &opengrok_tools::ToolCall) -> ToolCallRef {
     ToolCallRef {
         id: call.id.clone(),

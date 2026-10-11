@@ -547,32 +547,44 @@ fn a_tool_round_is_sent_in_the_openai_dialect() {
     assert_eq!(messages.len(), 4);
 }
 
-/// A call to a tool that takes nothing streams no argument text at all, and reaches the request
-/// as `""` (from history) or `null` (from the loop). Sent back like that, the gateway cannot make
-/// the object Anthropic's `tool_use.input` must be and the next round fails with a 400 (11 Oct
-/// 2026: `bir_list_apps`, then `bir_form_context`, ended the turn). Either goes back as `{}`.
-#[test]
-fn a_call_with_no_arguments_is_sent_back_as_an_empty_object() {
-    let bare = |id: &str, arguments: &str| crate::ToolCallRef {
+fn call_with_raw_arguments(id: &str, raw: &str) -> crate::ToolCallRef {
+    crate::ToolCallRef {
         id: id.to_string(),
         name: "bir_list_apps".to_string(),
-        arguments: arguments.to_string(),
-    };
-    let body = chat_body(&asking(vec![
+        arguments: raw.to_string(),
+    }
+}
+
+/// Anthropic refuses a `tool_use.input` that is not an object, and the gateway passes valid JSON
+/// through: `"null"` and `"[1]"` answered 400 and ended the turn
+/// (`docs/verification/empty-tool-args`). A call's arguments are `null` when their text never
+/// parsed or when the approval was stored before a call with no text became `{}`, `""` from
+/// history, or anything a model wrote. Whatever is not a JSON object goes back as `{}`.
+#[test]
+fn arguments_that_are_not_an_object_are_sent_back_as_an_empty_object() {
+    let raws = ["", "   ", "null", "not json", "[1]", "1", "\u{a0}"];
+    let mut calls: Vec<_> = raws
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| call_with_raw_arguments(&format!("c{i}"), raw))
+        .collect();
+    calls.push(call("ok", "ls"));
+    let mut messages = vec![
         ChatMessage::text("user", "go"),
-        ChatMessage::calls(
-            "",
-            vec![bare("c1", ""), bare("c2", "null"), call("c3", "ls")],
-        ),
-        ChatMessage::tool_result("c1", "[]"),
-        ChatMessage::tool_result("c2", "[]"),
-        ChatMessage::tool_result("c3", "a"),
-    ]));
-    let calls = &body["messages"][1]["tool_calls"];
-    assert_eq!(calls[0]["function"]["arguments"], serde_json::json!("{}"));
-    assert_eq!(calls[1]["function"]["arguments"], serde_json::json!("{}"));
+        ChatMessage::calls("", calls.clone()),
+    ];
+    messages.extend(calls.iter().map(|c| ChatMessage::tool_result(&c.id, "[]")));
+    let body = chat_body(&asking(messages));
+    let sent = &body["messages"][1]["tool_calls"];
+    for (i, raw) in raws.iter().enumerate() {
+        assert_eq!(
+            sent[i]["function"]["arguments"],
+            serde_json::json!("{}"),
+            "{raw:?} must go back as {{}}"
+        );
+    }
     assert_eq!(
-        calls[2]["function"]["arguments"],
+        sent[raws.len()]["function"]["arguments"],
         serde_json::json!("{\"command\":\"ls\"}")
     );
 }

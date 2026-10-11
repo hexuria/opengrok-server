@@ -229,6 +229,26 @@ pub struct ToolCallRef {
     pub arguments: String,
 }
 
+/// JSON's own whitespace. `str::trim` would also strip a no-break space, which JSON rejects.
+pub(crate) const JSON_WHITESPACE: [char; 4] = [' ', '\t', '\n', '\r'];
+
+impl ToolCallRef {
+    /// The arguments as a provider must get them back: a JSON object. Anthropic refuses any other
+    /// `tool_use.input` with a 400 that ends the turn, and the gateway passes valid JSON through
+    /// (`docs/verification/empty-tool-args`). A call carries `null` when its text never parsed or
+    /// when its approval was stored before a call with no text became `{}`, `""` from history, or
+    /// whatever a model wrote; anything that is not an object goes as `{}`. Checked without
+    /// building a tree, so a long `write_file` body is not copied every round.
+    pub fn provider_arguments(&self) -> &str {
+        let is_object = self
+            .arguments
+            .trim_start_matches(JSON_WHITESPACE)
+            .starts_with('{')
+            && serde_json::from_str::<serde::de::IgnoredAny>(&self.arguments).is_ok();
+        if is_object { &self.arguments } else { "{}" }
+    }
+}
+
 impl ChatMessage {
     /// Words from `role`, and nothing else.
     pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {

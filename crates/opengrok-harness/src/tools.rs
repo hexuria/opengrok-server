@@ -352,11 +352,14 @@ pub fn collect_tool_calls(events: &[Event]) -> Vec<ToolCall> {
             EventType::ToolCallEnd => {
                 if let Some(index) = open.iter().position(|(open_id, _, _)| *open_id == id) {
                     let (id, name, arguments) = open.remove(index);
-                    // Arguments that will not parse are passed through as null; the executor
-                    // refuses them with a reason, which the model can act on. Dropping the call
-                    // silently would leave it waiting for a result that never comes. A call to a
-                    // tool that takes nothing streams no text at all: that is `{}`, not garbage.
-                    let arguments = if arguments.trim().is_empty() {
+                    // Arguments that will not parse are passed through as null, and each tool's
+                    // executor decides what null means. Dropping the call silently would leave it
+                    // waiting for a result that never comes. A call to a tool that takes nothing
+                    // streams no text at all (JSON whitespace at most): that is `{}`, not garbage.
+                    let arguments = if arguments
+                        .trim_matches(crate::model::JSON_WHITESPACE)
+                        .is_empty()
+                    {
                         serde_json::json!({})
                     } else {
                         serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null)
