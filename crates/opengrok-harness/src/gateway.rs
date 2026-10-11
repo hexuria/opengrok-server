@@ -26,8 +26,7 @@ use futures::{StreamExt, stream};
 use serde::Deserialize;
 
 use crate::model::{
-    ChatMessage, DeltaStream, JSON_WHITESPACE, ModelDelta, ModelDoor, ModelEndpoint, ModelError,
-    ModelRequest,
+    ChatMessage, DeltaStream, ModelDelta, ModelDoor, ModelEndpoint, ModelError, ModelRequest,
 };
 
 /// How much of a refused key reaches the log: `oag_live_` plus seven characters, which is exactly
@@ -526,8 +525,7 @@ fn as_words(message: &ChatMessage) -> serde_json::Value {
 /// A PICTURE CANNOT RIDE A TOOL RESULT in this dialect, so a round's screenshots follow its last
 /// result as one user message — never between a call and its answer, which would break the block.
 ///
-/// A CALL'S ARGUMENTS GO BACK AS AN OBJECT ([`crate::ToolCallRef::provider_arguments`]): a provider
-/// refuses the turn with a 400 for any other `tool_use.input`.
+/// A CALL'S ARGUMENTS GO BACK AS AN OBJECT ([`crate::ToolCallRef::provider_arguments`]).
 fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(request.messages.len() + 1);
     if let Some(system) = &request.system {
@@ -555,22 +553,10 @@ fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
             .tool_calls
             .iter()
             .map(|call| {
-                let arguments = call.provider_arguments();
-                // `""` is how history carries a call with no text; anything else replaced is
-                // worth a line, since the model is shown `{}` and not what it wrote.
-                if arguments != call.arguments
-                    && !call.arguments.trim_matches(JSON_WHITESPACE).is_empty()
-                {
-                    tracing::warn!(
-                        call = %call.id,
-                        tool = %call.name,
-                        "a call's arguments were not a JSON object and went back as {{}}"
-                    );
-                }
                 serde_json::json!({
                     "id": call.id,
                     "type": "function",
-                    "function": {"name": call.name, "arguments": arguments},
+                    "function": {"name": call.name, "arguments": call.provider_arguments()},
                 })
             })
             .collect();

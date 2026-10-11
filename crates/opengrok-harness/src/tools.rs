@@ -354,16 +354,13 @@ pub fn collect_tool_calls(events: &[Event]) -> Vec<ToolCall> {
                     let (id, name, arguments) = open.remove(index);
                     // Arguments that will not parse are passed through as null, and each tool's
                     // executor decides what null means. Dropping the call silently would leave it
-                    // waiting for a result that never comes. A call to a tool that takes nothing
-                    // streams no text at all (JSON whitespace at most): that is `{}`, not garbage.
-                    let arguments = if arguments
+                    // waiting for a result that never comes. A tool that takes nothing streams no
+                    // text at all (JSON whitespace at most): that is `{}`, not garbage.
+                    let blank = arguments
                         .trim_matches(crate::model::JSON_WHITESPACE)
-                        .is_empty()
-                    {
-                        serde_json::json!({})
-                    } else {
-                        serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null)
-                    };
+                        .is_empty();
+                    let arguments = serde_json::from_str(if blank { "{}" } else { &arguments })
+                        .unwrap_or(serde_json::Value::Null);
                     // A model that smuggled `values` onto `request_user_form` must not have
                     // those secrets reach execute, the pending row, or a later resume.
                     let arguments = if name == opengrok_tools::REQUEST_USER_FORM {

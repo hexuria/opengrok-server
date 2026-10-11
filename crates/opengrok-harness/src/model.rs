@@ -233,19 +233,23 @@ pub struct ToolCallRef {
 pub(crate) const JSON_WHITESPACE: [char; 4] = [' ', '\t', '\n', '\r'];
 
 impl ToolCallRef {
-    /// The arguments as a provider must get them back: a JSON object. Anthropic refuses any other
-    /// `tool_use.input` with a 400 that ends the turn, and the gateway passes valid JSON through
-    /// (`docs/verification/empty-tool-args`). A call carries `null` when its text never parsed or
-    /// when its approval was stored before a call with no text became `{}`, `""` from history, or
-    /// whatever a model wrote; anything that is not an object goes as `{}`. Checked without
-    /// building a tree, so a long `write_file` body is not copied every round.
+    /// The arguments as a provider must get them back: a JSON object, else `{}`. Anthropic ends the
+    /// turn with a 400 for any other `tool_use.input` (`docs/verification/empty-tool-args`). `""`
+    /// is how history carries a call with no text; replacing anything else is worth a line, since
+    /// the model is shown `{}` and not what it wrote. Checked without building a tree.
     pub fn provider_arguments(&self) -> &str {
-        let is_object = self
-            .arguments
-            .trim_start_matches(JSON_WHITESPACE)
-            .starts_with('{')
-            && serde_json::from_str::<serde::de::IgnoredAny>(&self.arguments).is_ok();
-        if is_object { &self.arguments } else { "{}" }
+        let text = self.arguments.trim_matches(JSON_WHITESPACE);
+        if text.starts_with('{') && serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok() {
+            return &self.arguments;
+        }
+        if !text.is_empty() {
+            tracing::warn!(
+                call = %self.id,
+                tool = %self.name,
+                "a call's arguments were not a JSON object and went back as {{}}"
+            );
+        }
+        "{}"
     }
 }
 

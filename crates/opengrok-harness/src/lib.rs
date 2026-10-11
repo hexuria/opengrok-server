@@ -563,14 +563,23 @@ impl Resumption {
         self
     }
 
-    pub fn approved(call: opengrok_tools::ToolCall, message_seq: u32) -> Self {
+    /// A card's answer, from nothing spent under the server's budget until told otherwise.
+    fn answered(
+        approved: opengrok_tools::ToolCall,
+        message_seq: u32,
+        outcome: ResumeOutcome,
+    ) -> Self {
         Self {
-            approved: call,
+            approved,
             message_seq,
-            outcome: ResumeOutcome::Approved,
+            outcome,
             spent: Spent::default(),
             budget: RunBudget::default(),
         }
+    }
+
+    pub fn approved(call: opengrok_tools::ToolCall, message_seq: u32) -> Self {
+        Self::answered(call, message_seq, ResumeOutcome::Approved)
     }
 
     pub fn refused(
@@ -578,13 +587,7 @@ impl Resumption {
         message_seq: u32,
         why: impl Into<String>,
     ) -> Self {
-        Self {
-            approved: call,
-            message_seq,
-            outcome: ResumeOutcome::Refused(why.into()),
-            spent: Spent::default(),
-            budget: RunBudget::default(),
-        }
+        Self::answered(call, message_seq, ResumeOutcome::Refused(why.into()))
     }
 
     pub fn settled(
@@ -592,13 +595,7 @@ impl Resumption {
         message_seq: u32,
         content: impl Into<String>,
     ) -> Self {
-        Self {
-            approved: call,
-            message_seq,
-            outcome: ResumeOutcome::Settled(content.into()),
-            spent: Spent::default(),
-            budget: RunBudget::default(),
-        }
+        Self::answered(call, message_seq, ResumeOutcome::Settled(content.into()))
     }
 }
 
@@ -643,20 +640,30 @@ pub async fn resume_conversation(
     // after this question and before `run_all` still lets the call through.
     let timing = timing::TurnTiming::new();
     let verbose_timing = timing::verbose_from_env();
+    // Every ending here closes the same way: no sink to stream to, no agent shot held back, and
+    // unless named, no round and nothing spent.
+    macro_rules! closed {
+        ($ending:expr) => {
+            closed!(Vec::new(), &RoundSpent::default(), $ending)
+        };
+        ($round:expr, $spent:expr, $ending:expr) => {
+            close(
+                journal,
+                None,
+                &run_id,
+                &mut projection,
+                &timing,
+                verbose_timing,
+                &mut None,
+                $round,
+                $spent,
+                $ending,
+            )
+            .await
+        };
+    }
     if journal.stopped(&run_id).await {
-        return close(
-            journal,
-            None,
-            &run_id,
-            &mut projection,
-            &timing,
-            verbose_timing,
-            &mut None,
-            Vec::new(),
-            &RoundSpent::default(),
-            Ending::Stop,
-        )
-        .await;
+        return closed!(Ending::Stop);
     }
 
     // A refusal never reaches the executor: the result is synthesised here and pushed exactly
@@ -678,21 +685,7 @@ pub async fn resume_conversation(
                 .tools_starting(&run_id, std::slice::from_ref(&started))
                 .await
             {
-                all.extend(
-                    close(
-                        journal,
-                        None,
-                        &run_id,
-                        &mut projection,
-                        &timing,
-                        verbose_timing,
-                        &mut None,
-                        Vec::new(),
-                        &RoundSpent::default(),
-                        start_refused(error),
-                    )
-                    .await,
-                );
+                all.extend(closed!(start_refused(error)));
                 return all;
             }
             // The person may have answered the card long after the box went to sleep.
@@ -738,38 +731,16 @@ pub async fn resume_conversation(
             .awaiting_reason
             .unwrap_or(opengrok_tools::AwaitingReason::ExecConsent);
         let waiting = vec![(approved.clone(), reason, still_waiting.content.clone())];
-        return close(
-            journal,
-            None,
-            &run_id,
-            &mut projection,
-            &timing,
-            verbose_timing,
-            &mut None,
-            all,
-            &approved_spent,
-            Ending::Park(waiting),
-        )
-        .await;
+        return closed!(all, &approved_spent, Ending::Park(waiting));
     }
 
     // DURABLE BEFORE THE NEXT CALL, as every round is: the approved call has run, and the model
     // is about to be asked about what it did. This write's error used to be ignored.
     if let Err(error) = record_round(journal, &run_id, &all, &approved_spent).await {
         // The results are not written again, only the ending (see `converse_raw`).
-        let mut ending = close(
-            journal,
-            None,
-            &run_id,
-            &mut projection,
-            &timing,
-            verbose_timing,
-            &mut None,
-            Vec::new(),
-            &RoundSpent::default(),
-            Ending::Fail(format!("the run could not be recorded: {error}")),
-        )
-        .await;
+        let mut ending = closed!(Ending::Fail(format!(
+            "the run could not be recorded: {error}"
+        )));
         all.append(&mut ending);
         return all;
     }
