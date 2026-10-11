@@ -508,14 +508,25 @@ async fn plugin_skill_rows(
         .await
         .map_err(|error| unavailable(&error))?;
     let mut rows = Vec::new();
-    for (plugin, _revision, skills) in installs {
+    // The server's own plugins while switched on for this Bot, since every account has them; then
+    // the account's installs, whatever their switch, less any a server plugin's name shadows.
+    let server =
+        opengrok_integrations::turn::server_plugins_on(&state.plugins, account, bot, &policy);
+    let server = server
+        .into_iter()
+        .map(|p| (&p.manifest.name, "server", &p.skills));
+    let installs = installs
+        .iter()
+        .filter(|(p, ..)| !state.plugins.contains_key(p));
+    for (plugin, source, skills) in server.chain(installs.map(|(p, _, s)| (p, "account", s))) {
         for (skill, text) in skills {
-            let front = opengrok_plugins::split_frontmatter(&text);
+            let front = opengrok_plugins::split_frontmatter(text);
             rows.push(json!({
                 "plugin": plugin,
+                "source": source,
                 "skill": skill,
                 "description": front.description.unwrap_or_default(),
-                "on": !opengrok_policy::skill_switched_off(&policy, &plugin, &skill),
+                "on": !opengrok_policy::skill_switched_off(&policy, plugin, skill),
                 "body": front.body,
             }));
         }

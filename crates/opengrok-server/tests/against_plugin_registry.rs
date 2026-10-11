@@ -153,6 +153,16 @@ async fn harness_with_computer(
     registry: opengrok_integrations::registry::Registry,
     computer: Option<Arc<dyn Computer>>,
 ) -> Harness {
+    harness_with(database_url, registry, computer, BTreeMap::new()).await
+}
+
+/// `plugins` are the server's own, as `OG_PLUGINS_DIR` loads them.
+async fn harness_with(
+    database_url: &str,
+    registry: opengrok_integrations::registry::Registry,
+    computer: Option<Arc<dyn Computer>>,
+    plugins: BTreeMap<String, opengrok_plugins::Plugin>,
+) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
         .connect(database_url)
@@ -184,7 +194,7 @@ async fn harness_with_computer(
             providers: Arc::new(BTreeMap::new()),
             redirect_uri: "http://127.0.0.1/callback".to_string(),
         },
-        plugins: Arc::new(BTreeMap::new()),
+        plugins: Arc::new(plugins),
         host_settings: None,
     };
     let gateway = HostState::new(agui.clone(), None);
@@ -574,7 +584,7 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
         .find(|r| r["name"] == "demo");
     assert_eq!(demo.unwrap()["enabled"], false, "{everything}");
     assert!(
-        opengrok_integrations::turn::skill_offers(&h.store, &aid, &bot_id)
+        opengrok_integrations::turn::skill_offers(&h.store, &aid, &bot_id, &BTreeMap::new())
             .await
             .is_empty()
     );
@@ -848,6 +858,177 @@ async fn pinned_installations_and_credentials_belong_only_to_the_driving_account
         orphan_count, 0,
         "save/uninstall ordering must never leave an orphan secret"
     );
+}
+
+/// A plugin in the server's own folder (`OG_PLUGINS_DIR`) is a whole plugin: every account sees
+/// it installed, nobody can uninstall it through the API, and its skills reach a Bot exactly as an
+/// install's do, behind the Bot's switch for the plugin and each skill's own switch.
+#[tokio::test]
+async fn a_server_folder_plugin_is_every_accounts_and_its_skills_follow_the_bots_switch() {
+    let url = database_or_skip!();
+    let folder = std::env::temp_dir().join(format!("og-server-plugin-{}", uuid::Uuid::now_v7()));
+    let write = |rel: &str, text: &str| {
+        let path = folder.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "plugin.json",
+        r#"{"name":"bir","version":"1.0.0","description":"BIR forms"}"#,
+    );
+    // The operator's key, in its own configuration: never shown to an account.
+    write(
+        "mcp.json",
+        r#"{"mcpServers":{"bir-mcp":{"type":"streamable-http","url":"https://bir.example/mcp",
+            "headers":{"authorization":"Bearer operator-key-not-for-accounts"}}}}"#,
+    );
+    write(
+        "skills/file-tax/SKILL.md",
+        "---\nname: file-tax\ndescription: File a BIR return\n---\nFill the form first.\n",
+    );
+    write(
+        "skills/broken/SKILL.md",
+        "---\nname: broken\nnever closed\n",
+    );
+    let plugin = opengrok_plugins::Plugin::load(&folder).unwrap();
+    std::fs::remove_dir_all(&folder).unwrap();
+    let plugins = BTreeMap::from([("bir".to_string(), plugin)]);
+    let (registry, _) = registry_fixture().await;
+    let h = harness_with(&url, registry, None, plugins).await;
+    let a = h.person(None).await;
+    let b = h.person(None).await;
+    let aid = AccountId::from_stored(h.agui.auth.minter.verify_access(&a).unwrap().sub);
+
+    let installs = "/fixture/plugins/installations";
+    for person in [&a, &b] {
+        let (status, listed, text) = h.call(person, "GET", installs, None).await;
+        assert_eq!(status, 200, "{text}");
+        let bir = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["name"] == "bir");
+        let bir = bir.unwrap_or_else(|| panic!("every account lists the server's plugin: {text}"));
+        assert_eq!(bir["source"], "server", "{bir}");
+        assert_eq!(bir["bundle"]["manifest"]["description"], "BIR forms");
+        let parts = bir["bundle"]["parts"].as_array().unwrap();
+        assert!(
+            parts
+                .iter()
+                .any(|p| p["kind"] == "mcp" && p["name"] == "bir-mcp")
+        );
+        assert!(
+            parts
+                .iter()
+                .any(|p| p["kind"] == "skill" && p["name"] == "file-tax")
+        );
+        assert!(
+            !text.contains("broken"),
+            "a bad skill is not loaded: {text}"
+        );
+        assert!(!text.contains("operator-key"), "{text}");
+    }
+    let (status, refused, _) = h.call(&a, "DELETE", &format!("{installs}/bir"), None).await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("operator"));
+    let (_, listed, _) = h.call(&a, "GET", installs, None).await;
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["name"] == "bir")
+    );
+
+    let (status, hired, text) = h
+        .call(&a, "POST", "/coworkers", Some(json!({"name":"Tax bot"})))
+        .await;
+    assert_eq!(status, 201, "{text}");
+    let bot = hired["id"].as_str().unwrap();
+    let bot_id = opengrok_core::id::CoworkerId::from_stored(bot);
+    use opengrok_policy::ToolSet;
+    let at = chrono::Utc::now().timestamp_millis();
+    let (all, none) = (ToolSet::All, ToolSet::None);
+    h.store
+        .grant_access(&aid, &bot_id, &all, &all, &none, at)
+        .await
+        .unwrap();
+    let offered = || async {
+        let offers =
+            opengrok_integrations::turn::skill_offers(&h.store, &aid, &bot_id, &h.agui.plugins);
+        offers
+            .await
+            .into_iter()
+            .map(|o| (o.name, o.id))
+            .collect::<Vec<_>>()
+    };
+    let skills_path = format!("/coworkers/{bot}/plugin-skills");
+    let ceiling_path = format!("/coworkers/{bot}/ceiling");
+    let (owner, path) = (&a, &ceiling_path);
+    let set_ceiling = |enabled: Value| {
+        let h = &h;
+        async move {
+            let (_, current, _) = h.call(owner, "GET", path, None).await;
+            let body = json!({"enabled": enabled, "version": current["version"]});
+            assert_eq!(h.call(owner, "PUT", path, Some(body)).await.0, 200);
+        }
+    };
+
+    // ON: the ceiling's row for it says so, its skill is listed and offered, and reads back.
+    let (_, ceiling, _) = h.call(&a, "GET", &ceiling_path, None).await;
+    let row = ceiling["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "bir");
+    assert_eq!(row.unwrap()["enabled"], true, "{ceiling}");
+    let (status, listed, text) = h.call(&a, "GET", &skills_path, None).await;
+    assert_eq!(status, 200, "{text}");
+    let row = &listed["skills"][0];
+    assert_eq!(row["plugin"], "bir", "{listed}");
+    assert_eq!(row["skill"], "file-tax", "{listed}");
+    assert_eq!(row["source"], "server", "{listed}");
+    assert_eq!(row["on"], true, "{listed}");
+    assert_eq!(listed["skills"].as_array().unwrap().len(), 1, "{listed}");
+    let (status, page, _) = h
+        .call(&a, "GET", &format!("{skills_path}/bir/file-tax"), None)
+        .await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(page["body"], "Fill the form first.\n");
+    let offers = offered().await;
+    assert_eq!(offers.len(), 1, "{offers:?}");
+    assert_eq!(offers[0].0, "bir.file-tax");
+    let read = opengrok_integrations::turn::skill(&h.store, &aid, &offers[0].1, &h.agui.plugins);
+    assert_eq!(read.await.unwrap().body, "Fill the form first.\n");
+    // Another account's turn on this Bot reads nothing of it: it is not their Bot.
+    let bid = AccountId::from_stored(h.agui.auth.minter.verify_access(&b).unwrap().sub);
+    let theirs = opengrok_integrations::turn::skill(&h.store, &bid, &offers[0].1, &h.agui.plugins);
+    assert!(theirs.await.is_none());
+
+    // OFF in the ceiling: not listed, not offered, and an id offered before reads nothing.
+    set_ceiling(json!([])).await;
+    let (status, listed, _) = h.call(&a, "GET", &skills_path, None).await;
+    assert_eq!(status, 200, "{listed}");
+    assert_eq!(listed["skills"], json!([]), "{listed}");
+    assert!(offered().await.is_empty());
+    let stale = opengrok_integrations::turn::skill(&h.store, &aid, &offers[0].1, &h.agui.plugins);
+    assert!(stale.await.is_none());
+    let (status, _, _) = h
+        .call(&a, "GET", &format!("{skills_path}/bir/file-tax"), None)
+        .await;
+    assert_eq!(status, 404);
+
+    // ON BY NAME, ONE SKILL OFF: listed as off and not offered, the plugin still on.
+    set_ceiling(json!(["bir"])).await;
+    assert_eq!(offered().await.len(), 1);
+    let off = json!({"plugin":"bir","skill":"file-tax","on":false});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(off)).await.0, 200);
+    let (_, listed, _) = h.call(&a, "GET", &skills_path, None).await;
+    assert_eq!(listed["skills"][0]["on"], false, "{listed}");
+    assert!(offered().await.is_empty());
+    let on = json!({"plugin":"bir","skill":"file-tax","on":true});
+    assert_eq!(h.call(&a, "PUT", &skills_path, Some(on)).await.0, 200);
+    assert_eq!(offered().await.len(), 1);
 }
 
 #[tokio::test]

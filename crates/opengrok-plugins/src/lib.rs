@@ -142,6 +142,12 @@ pub struct Plugin {
     pub root: PathBuf,
     pub manifest: Manifest,
     pub mcp: McpConfig,
+    /// `skills/<name>/SKILL.md`, whole, by skill name: the shape a registry bundle's `skills` has,
+    /// so a turn reads a plugin folder's skills exactly as it reads an install's.
+    pub skills: BTreeMap<String, String>,
+    /// Each taken skill's supporting text files, by path from the plugin's root
+    /// (`skills/<name>/...`), as a bundle's `files` are.
+    pub files: BTreeMap<String, String>,
     /// Whether anybody here has read this. Decided at install by the catalogue, carried with the
     /// plugin, and read by the policy layer — an unverified plugin's tools ask before each use.
     pub trust: Trust,
@@ -172,10 +178,14 @@ impl Plugin {
             McpConfig::default()
         };
 
+        let (skills, files) = read_skills(&root, &manifest.name);
+
         Ok(Self {
             root,
             manifest,
             mcp,
+            skills,
+            files,
             // Unverified until a catalogue says otherwise. Loading a folder is not a review, and
             // the safe reading has to be the one you get by default.
             trust: Trust::Unverified,
@@ -278,6 +288,75 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, PluginError
         .map_err(|error| PluginError::Unreadable(path.to_path_buf(), error.to_string()))?;
     serde_json::from_str(&text)
         .map_err(|error| PluginError::Malformed(path.to_path_buf(), error.to_string()))
+}
+
+/// `skills/<name>/SKILL.md` under `root`, each held to the registry's rules
+/// (`bundle::skill_refusal`), and the supporting text files of each one taken.
+///
+/// A SKILL THAT WILL NOT LOAD IS SKIPPED, by name and with its reason, never the plugin: one bad
+/// skill must not take its plugin's servers and other skills with it, as one bad plugin folder
+/// does not take the server down. Symlinks are left behind, as a registry read leaves them, and so
+/// is a file that is not UTF-8 text.
+fn read_skills(root: &Path, plugin: &str) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let (mut skills, mut files) = (BTreeMap::new(), BTreeMap::new());
+    let Ok(entries) = std::fs::read_dir(root.join("skills")) else {
+        return (skills, files);
+    };
+    for entry in entries.flatten() {
+        let (path, name) = (entry.path(), entry.file_name());
+        let (Some(skill), Ok(kind)) = (name.to_str(), entry.file_type()) else {
+            continue;
+        };
+        if !kind.is_dir() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path.join("SKILL.md")) else {
+            tracing::warn!(
+                plugin,
+                skill,
+                "skipping a plugin skill with no readable SKILL.md"
+            );
+            continue;
+        };
+        if let Some(reason) = bundle::skill_refusal(plugin, skill, &text) {
+            tracing::warn!(
+                plugin,
+                skill,
+                reason,
+                "skipping a plugin skill that would not load"
+            );
+            continue;
+        }
+        read_files(&path, &format!("skills/{skill}"), &mut files);
+        skills.insert(skill.to_string(), text);
+    }
+    (skills, files)
+}
+
+/// Every text file under `dir` but a `SKILL.md`, as `<prefix>/<path>`: a bundle's `files`.
+fn read_files(dir: &Path, prefix: &str, files: &mut BTreeMap<String, String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let (Some(name), Ok(kind)) = (
+            entry.file_name().to_str().map(str::to_string),
+            entry.file_type(),
+        ) else {
+            continue;
+        };
+        let at = format!("{prefix}/{name}");
+        if kind.is_dir() {
+            read_files(&entry.path(), &at, files);
+        } else if kind.is_file() && name != "SKILL.md" {
+            match std::fs::read_to_string(entry.path()) {
+                Ok(text) => {
+                    files.insert(at, text);
+                }
+                Err(_) => tracing::warn!(file = at, "skipping a skill file that is not text"),
+            }
+        }
+    }
 }
 
 /// A `SKILL.md` taken apart: what its frontmatter claimed, and the instructions under it.
@@ -623,6 +702,59 @@ mod tests {
         let plugin = Plugin::load(dir.path()).unwrap();
         assert!(plugin.mcp.servers.is_empty());
         assert_eq!(plugin.manifest.name, "nothing-much");
+    }
+
+    /// A plugin folder on this server carries its skills as a registry bundle does: the whole
+    /// `SKILL.md` by skill name, and its supporting files by path from the plugin's root.
+    #[test]
+    fn a_folders_skills_load_with_their_files() {
+        let dir = a_plugin();
+        write(
+            dir.path(),
+            "skills/triage/reference/codes.md",
+            "A1: urgent\n",
+        );
+        let plugin = Plugin::load(dir.path()).unwrap();
+        let names: Vec<&str> = plugin.skills.keys().map(String::as_str).collect();
+        assert_eq!(names, ["triage", "writing-replies"]);
+        assert_eq!(
+            plugin.skills["writing-replies"],
+            "---\nname: writing-replies\ndescription: How to draft a good reply\n---\n\nBe brief.\n"
+        );
+        let files: Vec<&str> = plugin.files.keys().map(String::as_str).collect();
+        assert_eq!(files, ["skills/triage/reference/codes.md"]);
+    }
+
+    /// ONE BAD SKILL IS ONE MISSING SKILL. Each is held to the registry's own rules
+    /// (`bundle::skill_refusal`), and the plugin, its servers and its other skills still load.
+    #[test]
+    fn a_bad_skill_is_left_out_and_the_plugin_still_loads() {
+        let dir = a_plugin();
+        let root = dir.path();
+        write(
+            root,
+            "skills/unclosed/SKILL.md",
+            "---\nname: unclosed\nBody.\n",
+        );
+        write(root, "skills/Shouty/SKILL.md", "Body.\n");
+        let long = "x".repeat(crate::skill::MAX_SKILL_BODY_CHARS + 1);
+        write(root, "skills/long/SKILL.md", &long);
+        let described = format!(
+            "---\ndescription: {}\n---\nBody.\n",
+            "d".repeat(crate::skill::MAX_SKILL_DESCRIPTION_CHARS + 1)
+        );
+        write(root, "skills/wordy/SKILL.md", &described);
+        write(
+            root,
+            "skills/unclosed/notes.md",
+            "kept only with its skill\n",
+        );
+        write(root, "skills/no-skill-file/notes.md", "no SKILL.md here\n");
+        let plugin = Plugin::load(root).expect("one bad skill must not refuse the plugin");
+        let names: Vec<&str> = plugin.skills.keys().map(String::as_str).collect();
+        assert_eq!(names, ["triage", "writing-replies"]);
+        assert!(plugin.files.is_empty(), "{:?}", plugin.files);
+        assert_eq!(plugin.mcp.servers.len(), 2);
     }
 
     #[test]
