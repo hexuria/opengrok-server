@@ -78,10 +78,18 @@ fn a_plugin_skill_id_is_a_chosen_skill_and_nothing_else_with_a_slash_is() {
         bare.forwarded_props = json!({ "skill": skill });
         chosen_skill_from(&bare)
     };
+    // The longest a row's id gets: a Bot id, a commit revision and two 64-character names.
+    let longest = format!(
+        "plugin/cw_01a12917-1c24-7b03-8316-fee640f323d7/{}/{}/{}",
+        "p".repeat(64),
+        "a".repeat(40),
+        "s".repeat(64)
+    );
     for id in [
         "skl_01a0c9ef-1",
         "plugin/cw_1/bir/server/file-tax",
         "plugin/cw_1/demo/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/triage",
+        longest.as_str(),
     ] {
         let chosen = match chose(json!(id)) {
             Some(ChosenSkill::Id(chosen)) => Some(chosen),

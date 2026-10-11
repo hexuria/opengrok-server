@@ -292,10 +292,12 @@ pub(super) fn recipe_values_from(values: Option<&serde_json::Value>) -> BTreeMap
 
 /// The most a `forwardedProps.skill` may be before it is refused unread.
 ///
-/// Ours are `skl_` plus a UUID — 40 characters. The bound is generous enough for a longer id shape
-/// later and small enough that a 2 MB `skill` field is refused before it reaches a log line: this
-/// value is caller-controlled, and a WARN that carries it is a record whose size the caller picks.
-const MAX_SKILL_ID_CHARS: usize = 128;
+/// Ours are `skl_` plus a UUID — 40 characters — or a plugin skill's
+/// `plugin/<bot>/<plugin>/<revision>/<skill>`: a 39-character Bot id, a 40-hex commit revision
+/// and two names of up to 64 reach 217. The bound holds that and is small enough that a 2 MB
+/// `skill` field is refused before it reaches a log line: this value is caller-controlled, and a
+/// WARN that carries it is a record whose size the caller picks.
+const MAX_SKILL_ID_CHARS: usize = 256;
 
 /// What `forwardedProps.skill` said this turn.
 pub(super) enum ChosenSkill {
