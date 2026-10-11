@@ -1733,7 +1733,6 @@ async fn egress_tunnel_still_asks_for_every_screen_action_that_acts() {
     asks.extend([
         ("computer", json!({})),
         ("computer", json!({ "action": ["screenshot"] })),
-        ("computer", json!("screenshot")),
         ("open_url", json!({ "url": "https://example.com" })),
         (RUN_RECIPE, json!({ "recipe": "r1" })),
     ]);
@@ -1757,6 +1756,21 @@ async fn egress_tunnel_still_asks_for_every_screen_action_that_acts() {
         assert!(result.content.contains("egress tunnel"), "{result:?}");
         assert_eq!(spy.last_box(), None, "{tool} {arguments}");
     }
+    // Not an object at all: refused before the gate, so it is no more exempt than one that asks.
+    let spy = Arc::new(SpyComputer::default());
+    let executor = allowing(spy.clone())
+        .with_screen(true)
+        .with_egress_tunnel(true);
+    let result = executor
+        .execute(
+            &context_with_box("box_mine"),
+            &call("computer", json!("screenshot")),
+        )
+        .await;
+    assert!(!result.ok, "{result:?}");
+    assert!(!result.awaiting_approval, "{result:?}");
+    assert_eq!(result.content, format!("refused: {NOT_AN_OBJECT}"));
+    assert_eq!(spy.last_box(), None);
 }
 
 /// The "waking" frame agrees with the gate: a screenshot the tunnel no longer asks about
@@ -3616,4 +3630,65 @@ async fn a_routines_own_run_may_only_list_and_a_ceiling_can_switch_them_off() {
     let refused = off.execute(&context_with_box("box_mine"), &list).await;
     assert!(refused.content.contains("may never run"), "{refused:?}");
     assert!(desk.asked.lock().unwrap().is_empty());
+}
+
+/// What the harness hands on for argument text that will not parse, `{"filter":"overdue",}`.
+fn unreadable() -> Value {
+    serde_json::from_str(r#"{"filter":"overdue",}"#).unwrap_or(Value::Null)
+}
+
+/// A form asked with arguments that are not an object is refused in words, and no card waits.
+#[tokio::test]
+async fn request_user_form_with_unreadable_arguments_is_refused_and_parks_nothing() {
+    let spy = Arc::new(SpyComputer::default());
+    let executor = allowing(spy.clone());
+    let context = context_with_box("box_mine");
+    for arguments in [unreadable(), json!([{"id": "x"}]), json!(7), json!("form")] {
+        let result = executor
+            .execute(&context, &call(REQUEST_USER_FORM, arguments.clone()))
+            .await;
+        assert!(!result.ok, "{arguments}: {result:?}");
+        assert!(!result.awaiting_approval, "{arguments}: {result:?}");
+        assert_eq!(result.awaiting_reason, None, "{arguments}: {result:?}");
+        assert!(
+            result.content.contains("not a JSON object"),
+            "{arguments}: {result:?}"
+        );
+    }
+    assert_eq!(spy.last_box(), None);
+}
+
+/// Null, an array, a number or a string never runs a built-in with defaults; `{}` and a real
+/// object still run, and shell's own refusals read as before.
+#[tokio::test]
+async fn a_tool_whose_arguments_are_not_an_object_is_refused_before_it_runs() {
+    let awake = Arc::new(SleepyComputer::new(&["running"]));
+    let executor = allowing(awake.clone());
+    let context = context_with_box("box_mine");
+    for arguments in [unreadable(), json!(["ls"]), json!(1), json!("ls")] {
+        let result = executor
+            .execute(&context, &call("shell", arguments.clone()))
+            .await;
+        assert!(!result.ok, "{arguments}: {result:?}");
+        assert!(!result.awaiting_approval, "{arguments}: {result:?}");
+        assert!(
+            result.content.contains("not a JSON object"),
+            "{arguments}: {result:?}"
+        );
+        assert!(
+            result.content.contains("call the tool again"),
+            "{arguments}: {result:?}"
+        );
+    }
+    assert_eq!(awake.ran(), 0, "nothing ran on unreadable arguments");
+
+    let blank = executor.execute(&context, &call("shell", json!({}))).await;
+    assert!(!blank.ok, "{blank:?}");
+    assert!(blank.content.contains("bad arguments"), "{blank:?}");
+    assert!(!blank.content.contains("not a JSON object"), "{blank:?}");
+    let listed = executor
+        .execute(&context, &call("shell", json!({"command": "ls"})))
+        .await;
+    assert!(listed.ok, "{listed:?}");
+    assert_eq!(awake.ran(), 1, "a real object still runs");
 }
