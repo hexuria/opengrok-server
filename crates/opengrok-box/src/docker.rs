@@ -210,6 +210,24 @@ pub fn image_is_local(image: &str) -> bool {
         .is_some_and(|(_, tag)| tag == "local")
 }
 
+/// Where create-time egress intent comes from: a test's pin, or a live probe the server
+/// wired at boot (its default reads the `OG_EGRESS_TUNNEL_ENABLED` / `SAND_…` env). A probe
+/// is a callback, so it has no `Debug` to derive — the variant name is enough.
+#[derive(Clone)]
+enum EgressIntent {
+    Pin(bool),
+    Probe(Arc<dyn Fn() -> bool + Send + Sync>),
+}
+
+impl std::fmt::Debug for EgressIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pin(on) => f.debug_tuple("Pin").field(on).finish(),
+            Self::Probe(_) => f.write_str("Probe(..)"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DockerComputer {
     pub image: String,
@@ -219,11 +237,12 @@ pub struct DockerComputer {
     /// `OG_BOX_RUN_TAG`. The gate sets one per invocation and removes everything carrying it on
     /// exit, so a smoke that hires and forgets leaves nothing behind. `None` outside such runs.
     pub run_tag: Option<String>,
-    /// Pins host egress intent for tests. `None` reads `OG_EGRESS_TUNNEL_ENABLED` /
-    /// `SAND_EGRESS_TUNNEL_ENABLED` (strict `"1"`, same words as the gateway helper) at
-    /// create time. The in-app `egressTunnelEnabled` toggle is host intent for the *verb*;
-    /// it cannot publish a port on an already-created container.
-    egress_tunnel: Option<bool>,
+    /// Where `wants_egress` reads host intent at create time: env by default, the server's
+    /// live host-settings record once the binary wires it (`with_egress_intent`), a test's
+    /// pin (`with_egress_tunnel`). The in-app `egressTunnelEnabled` toggle is host intent —
+    /// it cannot publish a port on an already-created container, but it must reach the next
+    /// create or the toggle can never take effect anywhere.
+    egress_intent: EgressIntent,
     seen: Arc<Seen>,
 }
 
@@ -241,7 +260,7 @@ impl DockerComputer {
             run_tag: std::env::var("OG_BOX_RUN_TAG")
                 .ok()
                 .filter(|tag| !tag.is_empty()),
-            egress_tunnel: None,
+            egress_intent: EgressIntent::Probe(Arc::new(host_wants_egress_from_env)),
             seen: Arc::default(),
         }
     }
@@ -253,16 +272,25 @@ impl DockerComputer {
 
     /// Pin host egress intent so unit tests do not inherit CI's `OG_EGRESS_TUNNEL_ENABLED=1`.
     pub fn with_egress_tunnel(mut self, on: bool) -> Self {
-        self.egress_tunnel = Some(on);
+        self.egress_intent = EgressIntent::Pin(on);
         self
     }
 
-    /// Host wants the guest CONNECT-proxy + WS. Same env words as the gateway helper
-    /// (`OG_…` / `SAND_…` strictly `"1"`). Settings live in the gateway crate; Docker
-    /// cannot see them here, and they cannot hot-add a publish anyway.
+    /// Ask something else what the host wants at create time — the binary wires the shared
+    /// host-settings record in here, so the in-app `egressTunnelEnabled` toggle reaches the
+    /// next create or recreate instead of only the `*EGRESS_TUNNEL_ENABLED` env vars.
+    pub fn with_egress_intent(mut self, intent: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.egress_intent = EgressIntent::Probe(Arc::new(intent));
+        self
+    }
+
+    /// Host wants the guest CONNECT-proxy + WS. The env words are the default probe; a wired
+    /// deployment replaces them with the live settings record.
     pub fn wants_egress(&self) -> bool {
-        self.egress_tunnel
-            .unwrap_or_else(host_wants_egress_from_env)
+        match &self.egress_intent {
+            EgressIntent::Pin(on) => *on,
+            EgressIntent::Probe(probe) => probe(),
+        }
     }
 
     /// Run `docker` and return its output, mapping the ways it can fail.
@@ -1507,6 +1535,31 @@ mod tests {
         assert!(
             !args.iter().any(|arg| arg.contains("BOX_EGRESS_TUNNEL")),
             "{args:?}"
+        );
+    }
+
+    /// The in-app `egressTunnelEnabled` reaches a create through the probe the binary wired,
+    /// not env — and it is asked at create time, so a toggle flipped between two creates
+    /// lands on the second box, not the first.
+    #[test]
+    fn the_intent_probe_is_asked_at_each_create() {
+        let wanted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let docker = DockerComputer::new()
+            .with_image("grok-box:local")
+            .with_egress_intent({
+                let wanted = wanted.clone();
+                move || wanted.load(std::sync::atomic::Ordering::SeqCst)
+            });
+        let before = docker.create_args(None).expect("create args");
+        assert!(
+            !before.iter().any(|arg| arg.contains("8790")),
+            "off intent publishes nothing: {before:?}"
+        );
+        wanted.store(true, std::sync::atomic::Ordering::SeqCst);
+        let after = docker.create_args(None).expect("create args");
+        assert!(
+            after.iter().any(|arg| arg == "127.0.0.1::8790"),
+            "the toggle flipped on reaches the next create: {after:?}"
         );
     }
 

@@ -7,7 +7,7 @@ mod purge;
 mod repair;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use opengrok_harness::{GatewayDoor, MockDoor, ModelDoor};
@@ -249,6 +249,20 @@ async fn main() -> anyhow::Result<()> {
     // VM (`provision::lookup_provider`), and a bot container on the API host sits beside the
     // token secret and the org vault.
     let hosted = !opengrok_server::agui::provision::local_docker_allowed();
+    // The host settings record exists before the computer so a Docker create can ask it:
+    // a publish decided by `egressTunnelEnabled` alone (env unset) still publishes 8790 —
+    // without the wire the in-app toggle could never reach a box.
+    let host_settings = Arc::new(Mutex::new(opengrok_server::host_state::default_settings()));
+    let docker_computer = |settings: &Arc<Mutex<serde_json::Value>>| {
+        let settings = settings.clone();
+        opengrok_box::DockerComputer::new().with_egress_intent(move || {
+            let settings = settings
+                .lock()
+                .map(|record| record.clone())
+                .unwrap_or_else(|_| opengrok_server::host_state::default_settings());
+            opengrok_server::host_state::egress_tunnel_available(&settings)
+        })
+    };
     let computer: Option<Arc<dyn opengrok_box::Computer>> = match std::env::var("OG_COMPUTER")
         .as_deref()
     {
@@ -260,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
             "OG_COMPUTER=docker is refused with OG_HOSTED=1: a hosted deployment never runs bot \
              containers on its API host; set OG_BOX_API_KEY or OG_COMPUTER=none"
         ),
-        Ok("docker") => Some(Arc::new(opengrok_box::DockerComputer::new())),
+        Ok("docker") => Some(Arc::new(docker_computer(&host_settings))),
         Ok("ascii") | Ok("box") => Some(Arc::new(opengrok_box::AsciiBoxes::new(
             std::env::var("OG_BOX_API_KEY").context("OG_COMPUTER=ascii needs OG_BOX_API_KEY")?,
         ))),
@@ -274,7 +288,7 @@ async fn main() -> anyhow::Result<()> {
             }
             _ => {
                 tracing::info!("no OG_BOX_API_KEY — using local Docker for coworkers");
-                Some(Arc::new(opengrok_box::DockerComputer::new()))
+                Some(Arc::new(docker_computer(&host_settings)))
             }
         },
     };
@@ -317,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
         vault,
         connectors,
         plugins: Arc::new(plugins),
-        host_settings: None,
+        host_settings: Some(host_settings),
     };
 
     tokio::spawn({
