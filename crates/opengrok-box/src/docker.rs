@@ -879,11 +879,8 @@ impl Computer for DockerComputer {
         Ok(())
     }
 
-    async fn close_screen(&self, box_id: &str, bot: &str) -> BoxResult<()> {
-        let bot = safe_bot(bot)?;
-        self.run(box_id, &format!("box-screen down '{bot}'"), 30)
-            .await
-            .map(|_| ())
+    async fn open_screen(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<()> {
+        self.own_screen(box_id, screen).await.map(|_| ())
     }
 
     async fn screenshot(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<Screenshot> {

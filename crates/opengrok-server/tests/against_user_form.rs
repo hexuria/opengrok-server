@@ -59,9 +59,9 @@ struct FillStub {
     /// The page the box reports in front of its browser; `None` is a box that cannot say, and
     /// an empty page one that says no browser page is open.
     front: Mutex<Option<String>>,
-    /// The screen each action went to (#376), and the Bots whose own screens were stopped.
+    /// The screen each action went to (#376), and the screens started ahead of a turn.
     screens: Mutex<Vec<opengrok_box::Screen>>,
-    closed: Mutex<Vec<String>>,
+    opened: Mutex<Vec<opengrok_box::Screen>>,
     /// The screen each screenshot was taken of.
     shot_screens: Mutex<Vec<opengrok_box::Screen>>,
 }
@@ -166,8 +166,8 @@ impl Computer for FillStub {
             seq,
         })
     }
-    async fn close_screen(&self, _box_id: &str, bot: &str) -> BoxResult<()> {
-        self.closed.lock().expect("closed").push(bot.to_string());
+    async fn open_screen(&self, _box_id: &str, screen: &opengrok_box::Screen) -> BoxResult<()> {
+        self.opened.lock().expect("opened").push(screen.clone());
         Ok(())
     }
     async fn active_tab_url(
@@ -2628,7 +2628,7 @@ async fn a_saved_login_is_typed_only_on_the_site_it_was_saved_for() {
 
 /// Bots that share a computer each work on a screen of their own, with no switch to flip (#376,
 /// the owner's call on 11 Oct 2026): one Bot's fill lands on its screen and the other's on its
-/// own, and each Bot's computer says so.
+/// own, each Bot's computer says so, and each Bot's screen is started as its turn begins.
 #[tokio::test]
 async fn bots_that_share_a_computer_each_work_on_a_screen_of_their_own() {
     let database_url = database_or_skip!();
@@ -2684,6 +2684,14 @@ async fn bots_that_share_a_computer_each_work_on_a_screen_of_their_own() {
     for bot in [&ada, &bea] {
         let body = status_of(bot.to_string()).await;
         assert_eq!(body["screen"], "own", "{body}");
+    }
+    // Each Bot's screen was started as its turn began, not on its first action.
+    let opened = h.stub.opened.lock().expect("opened").clone();
+    for bot in [&ada, &bea] {
+        assert!(
+            opened.contains(&opengrok_box::Screen::Own(bot.to_string())),
+            "{bot}'s screen is started ahead of its turn: {opened:?}"
+        );
     }
 }
 

@@ -8,7 +8,7 @@
       "coworkerId": "cw_0199bb4e-0000-7000-8000-000000000002",
       "name": "Inbox",
       "cron": null,
-      "prompt": "sign in",
+      "prompt": "a webhook arrived; report in",
       "kind": "webhook",
       "active": true,
       "nextDueMs": null,

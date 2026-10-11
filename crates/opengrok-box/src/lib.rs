@@ -528,9 +528,9 @@ pub trait Computer: Send + Sync {
         Ok(())
     }
 
-    /// Stop a Bot's own screen (its browser, its display), keeping its profile for the next
-    /// time: it went back to the shared screen. Default: nothing to stop.
-    async fn close_screen(&self, _box_id: &str, _bot: &str) -> BoxResult<()> {
+    /// Start a Bot's own screen ahead of its first use, so neither its first action nor the
+    /// person's first look waits for it to come up. Default: nothing to start.
+    async fn open_screen(&self, _box_id: &str, _screen: &Screen) -> BoxResult<()> {
         Ok(())
     }
 
