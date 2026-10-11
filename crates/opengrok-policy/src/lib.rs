@@ -97,10 +97,10 @@ pub const TOOL_GROUPS: &[(&str, &[&str])] = &[
         "manage_computer",
         &[
             "computer_status",
+            "look_at_screen",
             "start_computer",
             "shutdown_computer",
             "restart_computer",
-            "use_own_screen",
             "reset_computer",
             "update_computer",
             "set_network",
