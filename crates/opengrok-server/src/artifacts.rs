@@ -101,15 +101,26 @@ async fn create(
     }
 
     // Images and videos, and what a person attaches to a message (#229, nativechat#90): a PDF
-    // or a text file, which reach the model as words rather than pixels.
+    // or a text file, which reach the model as words rather than pixels; and an Office
+    // document, which is staged onto the bot's own computer for the office_* tools
+    // (attachments.rs) instead of being read here. A document sent as a bare zip or
+    // octet-stream — what some uploaders call one — is accepted on its extension alone.
+    let office = request
+        .mime
+        .starts_with("application/vnd.openxmlformats-officedocument.")
+        || (matches!(
+            request.mime.as_str(),
+            "application/octet-stream" | "application/zip"
+        ) && opengrok_office::Kind::from_filename(&request.filename).is_some());
     let accepted = ["image/", "video/", "text/"]
         .iter()
         .any(|prefix| request.mime.starts_with(prefix))
-        || request.mime == "application/pdf";
+        || request.mime == "application/pdf"
+        || office;
     if !accepted {
         return (
             StatusCode::BAD_REQUEST,
-            "only images, videos, PDFs and text files are accepted",
+            "only images, videos, PDFs, text and Office files are accepted",
         )
             .into_response();
     }

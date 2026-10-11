@@ -657,6 +657,8 @@ fn without_a_computer_the_models_box_id_is_removed_not_kept() {
         screen_hold: false,
         screen_held_in: None,
         screen: Default::default(),
+        thread_id: None,
+        run_id: None,
     };
     let overwritten = overwrite_identity(&json!({"box_id": "box_elsewhere"}), &context);
     assert!(
@@ -676,6 +678,8 @@ async fn a_coworker_without_a_computer_is_refused_not_crashed() {
         screen_hold: false,
         screen_held_in: None,
         screen: Default::default(),
+        thread_id: None,
+        run_id: None,
     };
     let result = executor
         .execute(&context, &call("shell", json!({"command": "ls"})))
@@ -892,9 +896,12 @@ fn the_policys_tool_groups_are_the_groups_tools_lists() {
 /// app never has to show the model's words (written in its capitals) or make up its own (#359).
 #[test]
 fn every_built_in_has_words_for_people() {
-    for name in
-        Executor::every_builtin().chain([routine::ROW, plugin_desk::ROW, computer_desk::ROW])
-    {
+    for name in Executor::every_builtin().chain([
+        routine::ROW,
+        plugin_desk::ROW,
+        computer_desk::ROW,
+        crate::office_desk::ROW,
+    ]) {
         let words = Executor::builtin_for_people(name);
         assert!(words.is_some(), "{name} has no words for people");
         let (label, summary) = words.unwrap_or_default();
@@ -1353,6 +1360,8 @@ fn no_box_context() -> ToolContext {
         screen_hold: false,
         screen_held_in: None,
         screen: Default::default(),
+        thread_id: None,
+        run_id: None,
     }
 }
 

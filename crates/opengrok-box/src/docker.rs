@@ -636,9 +636,15 @@ impl Computer for DockerComputer {
     }
 
     async fn write_file(&self, box_id: &str, path: &str, content: &str) -> BoxResult<()> {
+        self.write_file_bytes(box_id, path, content.as_bytes())
+            .await
+    }
+
+    async fn write_file_bytes(&self, box_id: &str, path: &str, bytes: &[u8]) -> BoxResult<()> {
         // Written through stdin, and the path handed over as `$1`, rather than either being
         // interpolated into a shell string: a quote in the content or the path would otherwise
         // become part of the command — and a skill's bundle paths are often somebody else's.
+        // stdin is already a byte pipe, so `write_file` is this with its text encoded.
         use tokio::io::AsyncWriteExt;
 
         let mut child = Command::new("docker")
@@ -660,7 +666,7 @@ impl Computer for DockerComputer {
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin
-                .write_all(content.as_bytes())
+                .write_all(bytes)
                 .await
                 .map_err(|error| BoxError::Unreachable(error.to_string()))?;
             stdin

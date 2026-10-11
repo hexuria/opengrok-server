@@ -1478,3 +1478,33 @@ do $do$ begin
             add column target_connection text;
     end if;
 end $do$;
+
+-- One open Office document per (box, path): the session an `odoc_` tool handle names. The
+-- bytes are NOT here — the box working copy is the draft and `artifact` holds the snapshots;
+-- what this row holds is the state a staged edit must carry across a turn boundary: which
+-- content the session last saw (content_sha256), how many accepted changes it has written
+-- (version), and which edits are still proposed rather than applied (proposals — the Proposal
+-- JSON the office_* tools exchange). Unique on (box_id, path): two sessions on one file would
+-- be two versions of the truth about the same bytes, so office_open of an already-open path
+-- re-reads this row rather than making a second.
+create table if not exists doc_session (
+    id             text   primary key,
+    account_id     text   not null,
+    coworker_id    text   not null,
+    box_id         text   not null,
+    path           text   not null,
+    -- docx | xlsx | pptx — decided from the path's extension at open, kept so a later open of
+    -- the same path cannot silently become a different kind of document.
+    kind           text   not null,
+    -- Of the bytes the session last read or wrote; a box file changed outside the tools is
+    -- caught by comparing, never by trusting this to still match.
+    content_sha256 text   not null,
+    -- Counts mutations this session wrote; a proposal staged at version N that accepts over a
+    -- document now at N+2 is how a stale target is reported rather than applied blindly.
+    version        bigint not null default 0,
+    proposals      jsonb  not null default '[]'::jsonb,
+    created_at_ms  bigint not null,
+    updated_at_ms  bigint not null,
+    unique (box_id, path)
+);
+create index if not exists doc_session_coworker_idx on doc_session (account_id, coworker_id);

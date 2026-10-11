@@ -354,6 +354,7 @@ async fn a_run_through_the_mock_door_is_well_formed() {
         None,
         &opengrok_harness::MemoryJournal::new(),
         ModelRequest {
+            customs: Vec::new(),
             gateway_key: None,
             spend_scope: None,
             spend_actor: None,
