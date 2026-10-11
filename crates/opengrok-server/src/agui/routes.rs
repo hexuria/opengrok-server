@@ -2465,7 +2465,7 @@ async fn list_tools(
         .collect();
     // The routine tools are listed as their ceiling's one row (#316), as the Tools card shows it,
     // and so are the plugin tools (#359).
-    use opengrok_tools::{computer_desk, plugin_desk, routine};
+    use opengrok_tools::{computer_desk, office_desk, plugin_desk, routine};
     let routines =
         |row: &serde_json::Value| row["name"].as_str().is_some_and(routine::is_routine_tool);
     let (offered, tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(routines);
@@ -2480,7 +2480,13 @@ async fn list_tools(
             .as_str()
             .is_some_and(computer_desk::is_computer_tool)
     };
-    let (computer_offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(computer);
+    let (computer_offered, tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(computer);
+    let office = |row: &serde_json::Value| {
+        row["name"]
+            .as_str()
+            .is_some_and(office_desk::is_office_tool)
+    };
+    let (office_offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(office);
     // A plugin's tools the person switched off for this Bot are listed too, as `never`, so its
     // page can switch them back on; they are not offered to the Bot.
     for tool in runner
@@ -2541,6 +2547,11 @@ async fn list_tools(
         &computer_desk::TOOLS,
         computer_desk::description,
     );
+    let office_offered = group(
+        office_offered,
+        &office_desk::TOOLS,
+        office_desk::description,
+    );
     // `enabled` is the group's own switch (7 Oct 2026), apart from its tools' choices.
     tools.push(serde_json::json!({ "name": routine::ROW,
         "description": routine::ROW_DESCRIPTION, "kind": "builtin", "tools": offered,
@@ -2551,6 +2562,9 @@ async fn list_tools(
     tools.push(serde_json::json!({ "name": computer_desk::ROW,
         "description": computer_desk::ROW_DESCRIPTION, "kind": "builtin", "tools": computer_offered,
         "enabled": !runner.executor().is_some_and(|(executor, _)| executor.group_off(computer_desk::ROW)) }));
+    tools.push(serde_json::json!({ "name": office_desk::ROW,
+        "description": office_desk::ROW_DESCRIPTION, "kind": "builtin", "tools": office_offered,
+        "enabled": !runner.executor().is_some_and(|(executor, _)| executor.group_off(office_desk::ROW)) }));
     // What a person reads about each built-in and group, beside the model's words (#359).
     fn for_people(row: &mut serde_json::Value) {
         if let Some((label, summary)) = row["name"]

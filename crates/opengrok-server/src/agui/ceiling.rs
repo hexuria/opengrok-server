@@ -266,7 +266,8 @@ async fn save(
             Some(_)
                 if name == routine::ROW
                     || name == plugin_desk::ROW
-                    || name == computer_desk::ROW =>
+                    || name == computer_desk::ROW
+                    || name == opengrok_tools::office_desk::ROW =>
             {
                 named_groups.insert(name);
                 true

@@ -972,6 +972,39 @@ async fn the_machine_can_be_switched_on_before_there_is_one_to_reach() {
     assert!(listed.contains(&"shell".to_string()), "{listed:?}");
 }
 
+/// THE ROW THIS PINS: the office group had a ceiling row and desk tools but no entry in
+/// `TOOL_GROUPS` — `group_on` could never return true, so the row read off forever, and `save`
+/// stored the word `office` as a bare tool that allows nothing, so no PUT could switch it on.
+#[tokio::test]
+async fn the_office_row_is_a_group_switch_a_turn_reads() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let agent = h.hire().await;
+
+    // Fresh, the row reads on, as every builtin does out of the box.
+    let ceiling = h.ceiling(&agent).await;
+    assert_eq!(row(&ceiling, "office")["enabled"], true, "{ceiling}");
+
+    // Every row on but this one: the group switches off and its tools leave the turn.
+    let all: Vec<String> = builtins().iter().map(|s| s.to_string()).collect();
+    let without: Vec<String> = all.iter().filter(|n| *n != "office").cloned().collect();
+    let (status, put) = h.put(&agent, json!({ "enabled": without })).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(row(&put, "office")["enabled"], false, "{put}");
+    let offered = h.offered_on_a_turn(&agent).await;
+    assert!(
+        !offered.iter().any(|n| n.starts_with("office_")),
+        "{offered:?}"
+    );
+
+    // Named back, the row switches the whole group on — the switch a person could never move.
+    let (status, put) = h.put(&agent, json!({ "enabled": all })).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!(row(&put, "office")["enabled"], true, "{put}");
+    let offered = h.offered_on_a_turn(&agent).await;
+    assert!(offered.contains(&"office_open".to_string()), "{offered:?}");
+}
+
 /// A choice that happens to equal an older built-in set is still a choice: the boot-time pass that
 /// brings old default rows up to date must not switch back on what its owner switched off.
 #[tokio::test]
