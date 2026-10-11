@@ -354,9 +354,13 @@ pub fn collect_tool_calls(events: &[Event]) -> Vec<ToolCall> {
                     let (id, name, arguments) = open.remove(index);
                     // Arguments that will not parse are passed through as null; the executor
                     // refuses them with a reason, which the model can act on. Dropping the call
-                    // silently would leave it waiting for a result that never comes.
-                    let arguments =
-                        serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null);
+                    // silently would leave it waiting for a result that never comes. A call to a
+                    // tool that takes nothing streams no text at all: that is `{}`, not garbage.
+                    let arguments = if arguments.trim().is_empty() {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null)
+                    };
                     // A model that smuggled `values` onto `request_user_form` must not have
                     // those secrets reach execute, the pending row, or a later resume.
                     let arguments = if name == opengrok_tools::REQUEST_USER_FORM {

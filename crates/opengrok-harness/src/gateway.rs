@@ -551,10 +551,20 @@ fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
             .tool_calls
             .iter()
             .map(|call| {
+                // A provider requires the arguments back as an object and refuses the whole
+                // round otherwise. A call to a tool that takes nothing streamed no text, which
+                // arrives here as `""` or as `null`; either goes back as `{}`.
+                let is_object = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                    .is_ok_and(|value| value.is_object());
+                let arguments = if is_object {
+                    call.arguments.as_str()
+                } else {
+                    "{}"
+                };
                 serde_json::json!({
                     "id": call.id,
                     "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments},
+                    "function": {"name": call.name, "arguments": arguments},
                 })
             })
             .collect();

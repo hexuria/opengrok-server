@@ -547,6 +547,36 @@ fn a_tool_round_is_sent_in_the_openai_dialect() {
     assert_eq!(messages.len(), 4);
 }
 
+/// A call to a tool that takes nothing streams no argument text at all, and reaches the request
+/// as `""` (from history) or `null` (from the loop). Sent back like that, the gateway cannot make
+/// the object Anthropic's `tool_use.input` must be and the next round fails with a 400 (11 Oct
+/// 2026: `bir_list_apps`, then `bir_form_context`, ended the turn). Either goes back as `{}`.
+#[test]
+fn a_call_with_no_arguments_is_sent_back_as_an_empty_object() {
+    let bare = |id: &str, arguments: &str| crate::ToolCallRef {
+        id: id.to_string(),
+        name: "bir_list_apps".to_string(),
+        arguments: arguments.to_string(),
+    };
+    let body = chat_body(&asking(vec![
+        ChatMessage::text("user", "go"),
+        ChatMessage::calls(
+            "",
+            vec![bare("c1", ""), bare("c2", "null"), call("c3", "ls")],
+        ),
+        ChatMessage::tool_result("c1", "[]"),
+        ChatMessage::tool_result("c2", "[]"),
+        ChatMessage::tool_result("c3", "a"),
+    ]));
+    let calls = &body["messages"][1]["tool_calls"];
+    assert_eq!(calls[0]["function"]["arguments"], serde_json::json!("{}"));
+    assert_eq!(calls[1]["function"]["arguments"], serde_json::json!("{}"));
+    assert_eq!(
+        calls[2]["function"]["arguments"],
+        serde_json::json!("{\"command\":\"ls\"}")
+    );
+}
+
 /// A provider answers a `tool` message whose call it cannot see, or a call with no answer,
 /// with a 400 that fails the whole turn. Neither is dropped: the orphan result goes as the
 /// words the loop always wrote, and the unanswered call is told it has no result.
