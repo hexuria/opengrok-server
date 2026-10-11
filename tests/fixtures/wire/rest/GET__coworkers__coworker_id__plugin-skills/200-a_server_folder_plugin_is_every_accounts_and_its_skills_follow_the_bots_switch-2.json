@@ -5,9 +5,10 @@
   "body": {
     "skills": [
       {
-        "plugin": "demo",
-        "skill": "triage",
-        "description": "Triage safely",
+        "plugin": "bir",
+        "source": "server",
+        "skill": "file-tax",
+        "description": "File a BIR return",
         "on": true
       }
     ]
