@@ -96,7 +96,7 @@
         "name": "bir",
         "kind": "plugin",
         "label": "bir",
-        "enabled": false,
+        "enabled": true,
         "description": "BIR forms"
       }
     ],
