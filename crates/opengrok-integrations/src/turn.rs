@@ -384,14 +384,67 @@ fn offer(
     }
 }
 
+/// A Bot's `plugin-skills` rows, each with the id a turn takes it by (`forwardedProps.skill`), as
+/// `use_skill` is offered it: this server's own plugins while switched on, since every account
+/// has them, then the account's installs whatever their switch, less any a server plugin shadows.
+pub async fn skill_rows(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+    operator: &BTreeMap<String, Plugin>,
+) -> opengrok_store::StoreResult<Vec<serde_json::Value>> {
+    let installs = installed::skills_for_turn(store, account, bot).await?;
+    let policy = store.policy_for(account, bot).await?;
+    let server = server_plugins_on(operator, account, bot, &policy).into_iter();
+    let server = server.map(|p| {
+        let name = p.manifest.name.as_str();
+        (name, "server", SERVER_REVISION, &p.skills)
+    });
+    let installs = installs
+        .iter()
+        .filter(|(p, ..)| !operator.contains_key(p))
+        .map(|(p, revision, s)| (p.as_str(), "account", revision.as_str(), s));
+    let mut rows = Vec::new();
+    for (plugin, source, revision, skills) in server.chain(installs) {
+        for (skill, text) in skills {
+            let front = opengrok_plugins::split_frontmatter(text);
+            rows.push(serde_json::json!({
+                "id": plugin_skill_id(bot, plugin, revision, skill),
+                "plugin": plugin,
+                "source": source,
+                "skill": skill,
+                "description": front.description.unwrap_or_default(),
+                "on": !opengrok_policy::skill_switched_off(&policy, plugin, skill),
+                "body": front.body,
+            }));
+        }
+    }
+    Ok(rows)
+}
+
 /// The id a plugin skill is offered by, and picked by in the composer (`plugin-skills` rows):
 /// `plugin/<bot>/<plugin>/<revision>/<skill>`, read back by [`skill`].
 pub fn plugin_skill_id(bot: &CoworkerId, plugin: &str, revision: &str, skill: &str) -> String {
     format!("plugin/{bot}/{plugin}/{revision}/{skill}")
 }
 
+/// The Bot of an id shaped as [`plugin_skill_id`] mints one: five segments, none empty and none
+/// climbing (`..`), each of the characters a Bot id, a name or a revision has. `None` for any other.
+pub fn plugin_skill_bot(id: &str) -> Option<&str> {
+    let parts: Vec<&str> = id.split('/').collect();
+    let ["plugin", bot, plugin, revision, skill] = parts.as_slice() else {
+        return None;
+    };
+    let byte = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.');
+    let shaped = |s: &&str| !s.is_empty() && s.bytes().all(byte);
+    let segments = [bot, plugin, revision, skill];
+    (!id.contains("..") && segments.into_iter().all(shaped)).then_some(*bot)
+}
+
 /// A plugin skill as `use_skill` reads it, by the id `skill_offers` gave it.
 pub struct PluginSkill {
+    /// The name `use_skill` offers it by, `<plugin>.<skill>`.
+    pub name: String,
     pub body: String,
     /// Its supporting files, by path under the skill's own folder.
     pub files: Vec<(String, Vec<u8>)>,
@@ -403,6 +456,32 @@ pub struct PluginSkill {
 /// Whether `id` is one `skill_offers` minted.
 pub fn is_plugin_skill(id: &str) -> bool {
     id.starts_with("plugin/")
+}
+
+/// Why a plugin skill picked in the composer is not given to the turn.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NotChosen {
+    /// Its id names another Bot: what is offered to one is not another's, whoever owns both.
+    OtherBot,
+    /// [`skill`] read nothing: switched off, uninstalled, or not this account's; it logs which.
+    Unread,
+}
+
+/// [`skill`] for a turn of `bot` that picked `id`, a `plugin-skills` row's id, in the composer:
+/// read as `use_skill` reads one, and only on the Bot it was offered for.
+pub async fn chosen_skill(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+    id: &str,
+    operator: &BTreeMap<String, Plugin>,
+) -> Result<PluginSkill, NotChosen> {
+    if plugin_skill_bot(id) != Some(bot.as_str()) {
+        return Err(NotChosen::OtherBot);
+    }
+    skill(store, account, id, operator)
+        .await
+        .ok_or(NotChosen::Unread)
 }
 
 /// `None` when it is not this account's, no longer installed at that revision, or switched off
@@ -474,6 +553,7 @@ fn read_skill(
         })
         .collect();
     PluginSkill {
+        name: format!("{name}.{skill}"),
         body: opengrok_plugins::split_frontmatter(text).body,
         files,
         dir: format!(".skills/plugin-{name}/{skill}/{revision}"),

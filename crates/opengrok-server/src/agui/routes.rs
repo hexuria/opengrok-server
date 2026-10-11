@@ -292,11 +292,9 @@ pub(super) fn recipe_values_from(values: Option<&serde_json::Value>) -> BTreeMap
 
 /// The most a `forwardedProps.skill` may be before it is refused unread.
 ///
-/// Ours are `skl_` plus a UUID — 40 characters — or a plugin skill's
-/// `plugin/<bot>/<plugin>/<revision>/<skill>`: a 39-character Bot id, a 40-hex commit revision
-/// and two names of up to 64 reach 217. The bound holds that and is small enough that a 2 MB
-/// `skill` field is refused before it reaches a log line: this value is caller-controlled, and a
-/// WARN that carries it is a record whose size the caller picks.
+/// Ours are `skl_` plus a UUID, 40 characters, or a plugin skill's id, at most 217. The bound is
+/// small enough that a 2 MB `skill` field is refused before it reaches a log line: this value is
+/// caller-controlled, and a WARN that carries it is a record whose size the caller picks.
 const MAX_SKILL_ID_CHARS: usize = 256;
 
 /// What `forwardedProps.skill` said this turn.
@@ -346,31 +344,11 @@ pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
     // Bounded above, and here restricted to characters an id we mint can contain. A newline in
     // this value would otherwise be written into a WARN, where it forges a whole log record at a
     // position the caller chooses.
-    let shaped = if opengrok_integrations::turn::is_plugin_skill(id) {
-        plugin_skill_shaped(id)
-    } else {
-        id.bytes().all(id_byte)
-    };
-    if !shaped {
+    let byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-';
+    if opengrok_integrations::turn::plugin_skill_bot(id).is_none() && !id.bytes().all(byte) {
         return Some(ChosenSkill::Unusable("not shaped like an id"));
     }
     Some(ChosenSkill::Id(id.to_string()))
-}
-
-fn id_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
-}
-
-/// Whether `id` could be a plugin skill's id as its `plugin-skills` row carries it
-/// (`turn::plugin_skill_id`): `plugin/<bot>/<plugin>/<revision>/<skill>`, five segments, none
-/// empty and none climbing (`..`), each of the characters a name, a revision or a Bot id has.
-fn plugin_skill_shaped(id: &str) -> bool {
-    let segments: Vec<&str> = id.split('/').collect();
-    segments.len() == 5
-        && !id.contains("..")
-        && segments
-            .iter()
-            .all(|s| !s.is_empty() && s.bytes().all(|b| id_byte(b) || b == b'.'))
 }
 
 /// The skill segment of this turn's system message — the person's instructions quoted between
@@ -414,17 +392,52 @@ async fn skill_segment(
             return (why.line().to_string(), None);
         }
     };
-    // The files go before the closing line, so our restatement of the rules stays the last word:
-    // the fence places them, as it does for a skill read with `use_skill`.
-    let quoted = match crate::persona::skill_marker(&skill.body) {
+    let files = |target| crate::skills::files_line_for_turn(state, &skill, target);
+    quote_chosen(id, (&skill.name, &skill.body), skill.author, tools, files).await
+}
+
+/// [`skill_segment`] for a plugin skill, by its `plugin-skills` row's id (`turn::chosen_skill`).
+async fn plugin_skill_segment(
+    state: &AgUiState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    id: &str,
+    tools: Option<&opengrok_harness::ToolRunner>,
+) -> (String, Option<String>) {
+    use opengrok_integrations::turn::{self, NotChosen};
+    let (store, plugins) = (&state.auth.store, &state.plugins);
+    let skill = match turn::chosen_skill(store, account, coworker, id, plugins).await {
+        Ok(skill) => skill,
+        Err(not) => {
+            let why = match not {
+                NotChosen::OtherBot => crate::skills::NotForThisTurn::NotTheirs,
+                NotChosen::Unread => crate::skills::NotForThisTurn::Disabled,
+            };
+            tracing::warn!(skill = ?id, why = ?why, "a chosen plugin skill was not given to a turn");
+            return (why.line().to_string(), None);
+        }
+    };
+    let author = crate::persona::SkillAuthor::Plugin;
+    let files = |target| crate::skills::files_line(skill.files, &skill.dir, author, id, target);
+    quote_chosen(id, (&skill.name, &skill.body), author, tools, files).await
+}
+
+/// A chosen skill fenced between unforgeable markers, `files` before the closing line so our rules
+/// stay the last word; or the refusal, and no id, when no marker could be minted.
+async fn quote_chosen<F: std::future::Future<Output = Option<String>>>(
+    id: &str,
+    (name, body): (&str, &str),
+    author: crate::persona::SkillAuthor,
+    tools: Option<&opengrok_harness::ToolRunner>,
+    files: impl FnOnce(Option<(Arc<dyn opengrok_box::Computer>, String)>) -> F,
+) -> (String, Option<String>) {
+    let quoted = match crate::persona::skill_marker(body) {
         Some(marker) => {
             let target = tools
                 .and_then(ToolRunner::fill_target)
                 .map(|(computer, box_id, _)| (computer, box_id));
-            let files = crate::skills::files_line_for_turn(state, &skill, target).await;
-            let (door, author) = (crate::persona::SkillDoor::Chosen, skill.author);
-            let files = files.unwrap_or_default();
-            crate::persona::fenced_skill(door, &skill.name, &skill.body, &marker, author, &files)
+            let files = files(target).await.unwrap_or_default();
+            let door = crate::persona::SkillDoor::Chosen;
+            crate::persona::fenced_skill(door, name, body, &marker, author, &files)
         }
         None => String::new(),
     };
@@ -432,58 +445,6 @@ async fn skill_segment(
         // No marker the body does not already contain, so the quote could not be closed where
         // we say it closes. Refuse rather than quote it unbounded.
         let why = crate::skills::NotForThisTurn::Unquotable;
-        tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
-        return (why.line().to_string(), None);
-    }
-    (quoted, Some(id.clone()))
-}
-
-/// [`skill_segment`] for a plugin skill picked in the composer, by the id its `plugin-skills` row
-/// carries. Read exactly as `use_skill` reads one (`skills::Reader`): only on the Bot it was
-/// offered for, only while its plugin and its own switch are on, and quoted as a plugin's words.
-async fn plugin_skill_segment(
-    state: &AgUiState,
-    (account, coworker): (&AccountId, &CoworkerId),
-    id: &str,
-    tools: Option<&opengrok_harness::ToolRunner>,
-) -> (String, Option<String>) {
-    use crate::skills::NotForThisTurn;
-    let segments: Vec<&str> = id.split('/').collect();
-    // The Bot is in the id: what is offered to one Bot is not another's to quote, whoever owns both.
-    let ours = segments.get(1) == Some(&coworker.as_str());
-    let skill = if ours {
-        let store = &state.auth.store;
-        opengrok_integrations::turn::skill(store, account, id, &state.plugins).await
-    } else {
-        None
-    };
-    let Some(skill) = skill else {
-        // Switched off, uninstalled, or not this account's: `turn::skill` says which in its log.
-        let why = if ours {
-            NotForThisTurn::Disabled
-        } else {
-            NotForThisTurn::NotTheirs
-        };
-        tracing::warn!(skill = ?id, why = ?why, "a chosen plugin skill was not given to a turn");
-        return (why.line().to_string(), None);
-    };
-    // The name `use_skill` offers it by, `<plugin>.<skill>`.
-    let name = format!("{}.{}", segments[2], segments[4]);
-    let quoted = match crate::persona::skill_marker(&skill.body) {
-        Some(marker) => {
-            let target = tools
-                .and_then(ToolRunner::fill_target)
-                .map(|(computer, box_id, _)| (computer, box_id));
-            let author = crate::persona::SkillAuthor::Plugin;
-            let files = crate::skills::files_line(skill.files, &skill.dir, author, id, target);
-            let files = files.await.unwrap_or_default();
-            let door = crate::persona::SkillDoor::Chosen;
-            crate::persona::fenced_skill(door, &name, &skill.body, &marker, author, &files)
-        }
-        None => String::new(),
-    };
-    if quoted.is_empty() {
-        let why = NotForThisTurn::Unquotable;
         tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
         return (why.line().to_string(), None);
     }
