@@ -181,6 +181,31 @@ impl PgStore {
         Ok(done.rows_affected() > 0)
     }
 
+    /// Move every session on `old_box_id` to `box_id` — the update path's call once a rebuilt
+    /// box is the scope's: it runs on the old box's volumes, so the files are the same files
+    /// and the sessions are still theirs. A path the new box already has a session for keeps
+    /// that one; the old row stays behind for the fetch routes' stale read rather than
+    /// becoming a second session on one file. Answers how many moved.
+    pub async fn move_doc_sessions_box(
+        &self,
+        old_box_id: &str,
+        box_id: &str,
+        updated_at_ms: i64,
+    ) -> StoreResult<u64> {
+        let done = sqlx::query(
+            "update doc_session as moving set box_id = $2, updated_at_ms = $3
+              where moving.box_id = $1
+                and not exists (select 1 from doc_session as held
+                                 where held.box_id = $2 and held.path = moving.path)",
+        )
+        .bind(old_box_id)
+        .bind(box_id)
+        .bind(updated_at_ms)
+        .execute(self.pool())
+        .await?;
+        Ok(done.rows_affected())
+    }
+
     /// End a session — the row is the session, so closing deletes it. `office_close` is
     /// terminal: proposals pending on it die with it, and the file's snapshots already live in
     /// `artifact`, which is why a delete rather than a flag is honest.

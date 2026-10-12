@@ -91,56 +91,141 @@ async fn newest_snapshot(
     Some((bytes, version))
 }
 
-/// The session's box cannot answer and the scope already names a different one: write the
-/// newest kept copy to the session's path on that box and repoint the row — a reset or
-/// replaced computer gets the person's document back instead of stranding it. `None` when the
-/// scope has no other box, that box will not wake, the path is taken by other content, the
-/// session already has a row on the new box, or nothing was ever snapshotted — the caller
-/// falls back to the stale read then, so a failed recovery never costs the document.
-async fn rehydrate(state: &AgUiState, row: &opengrok_store::DocSessionRow) -> Option<Vec<u8>> {
+/// What a rehydrate left on the scope's new box: the bytes, which version they are, and
+/// whether that is older than the session's head — a reset box gets the newest KEPT copy,
+/// which is the head only when the last mutation's snapshot landed.
+pub(crate) struct Rehydrated {
+    pub bytes: Vec<u8>,
+    pub version: i64,
+    pub stale: bool,
+}
+
+/// Whether a file is at `path` on the box: `Some(false)` only on the shell's own "no such
+/// file". A probe that could not answer is `None`, never "missing" — writing a snapshot on a
+/// guess could replace a file somebody else put there.
+async fn file_exists(
+    provider: &dyn opengrok_box::Computer,
+    box_id: &str,
+    path: &str,
+) -> Option<bool> {
+    let probe = format!("test -e {}", crate::office_desk::shq(path));
+    match provider.run(box_id, &probe, 10).await {
+        Ok(out) if out.exit_code == 0 => Some(true),
+        Ok(out) if out.exit_code == 1 => Some(false),
+        Ok(out) => {
+            tracing::warn!(
+                box_id,
+                path,
+                exit = out.exit_code,
+                "rehydrate: the existence probe did not answer"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, box_id, path, "rehydrate: the existence probe could not run");
+            None
+        }
+    }
+}
+
+/// The session's box is not the scope's any more and the scope names a different one: give
+/// that box the document and repoint the row, so a reset or replaced computer gets the
+/// person's document back instead of stranding it — for the fetch routes and the agent's own
+/// office tools alike.
+///
+/// A file already at the path is adopted only when it IS this document: the head the session
+/// last saw (a box rebuilt on the same disk) or the newest kept snapshot. Anything else is
+/// somebody else's file and is left alone. A missing file gets the newest kept snapshot
+/// written. `None` — with the reason logged — when the scope has no other box, it will not
+/// wake, the path holds other content or already has a session there, the probe could not
+/// answer, or nothing was ever kept; the caller's stale read then still serves the document.
+pub(crate) async fn rehydrate(
+    state: &AgUiState,
+    row: &opengrok_store::DocSessionRow,
+) -> Option<Rehydrated> {
     let account = opengrok_core::id::AccountId::from_stored(row.account_id.clone());
     let coworker = CoworkerId::from_stored(row.coworker_id.clone());
     let scoped = provision::scoped_box_row_for(state, &account, &coworker).await?;
     if scoped.box_id == row.box_id {
         return None;
     }
+    let (doc, to) = (row.id.as_str(), scoped.box_id.as_str());
     let store = &state.auth.store;
     // A row on the new box already owns this path — repointing over it would hand one file
-    // two sessions, so the orphan stays stale-read until a person resolves the collision.
-    if store
-        .doc_session_by_path(&scoped.box_id, &row.path)
-        .await
-        .ok()?
-        .is_some()
-    {
-        return None;
+    // two sessions, so the orphan stays stale-read; `office_open` adopts orphans before it
+    // mints a row, so this is only a race or a session from before that rule.
+    match store.doc_session_by_path(to, &row.path).await {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            tracing::info!(
+                doc,
+                to,
+                "rehydrate: the new box already has a session on this path"
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(%error, doc, "rehydrate: the path's session could not be read");
+            return None;
+        }
     }
     let provider = provision::provider_for(state, scoped.org_id.as_deref(), &scoped.kind).await?;
-    provider
-        .wake(&scoped.box_id, std::time::Duration::from_secs(60))
-        .await
-        .ok()?;
-    let (bytes, _) = newest_snapshot(state, row).await?;
-    match provider.read_file_bytes(&scoped.box_id, &row.path).await {
-        // The file itself survived — a rebuilt box keeps its disk — so adopt it without a
-        // write. A different file holding the same path is left alone rather than clobbered.
-        Ok(existing) if existing == bytes => {}
-        Ok(_) => return None,
-        Err(_) => provider
-            .write_file_bytes(&scoped.box_id, &row.path, &bytes)
-            .await
-            .ok()?,
+    if let Err(error) = provider.wake(to, std::time::Duration::from_secs(60)).await {
+        tracing::warn!(%error, doc, to, "rehydrate: the new box did not wake");
+        return None;
     }
-    store
-        .repoint_doc_session_box(
-            &row.id,
-            &row.box_id,
-            &scoped.box_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
+    let recovered = if file_exists(provider.as_ref(), to, &row.path).await? {
+        let existing = match provider.read_file_bytes(to, &row.path).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(%error, doc, to, "rehydrate: the file on the new box could not be read");
+                return None;
+            }
+        };
+        if crate::office_desk::sha256_hex(&existing) == row.content_sha256 {
+            Rehydrated {
+                bytes: existing,
+                version: row.version,
+                stale: false,
+            }
+        } else {
+            let (kept, version) = newest_snapshot(state, row).await?;
+            if existing != kept {
+                tracing::info!(
+                    doc,
+                    to,
+                    "rehydrate: a different file holds the path; left alone"
+                );
+                return None;
+            }
+            Rehydrated {
+                bytes: existing,
+                version,
+                stale: version != row.version,
+            }
+        }
+    } else {
+        let (kept, version) = newest_snapshot(state, row).await?;
+        if let Err(error) = provider.write_file_bytes(to, &row.path, &kept).await {
+            tracing::warn!(%error, doc, to, "rehydrate: the kept copy could not be written");
+            return None;
+        }
+        Rehydrated {
+            bytes: kept,
+            version,
+            stale: version != row.version,
+        }
+    };
+    match store
+        .repoint_doc_session_box(doc, &row.box_id, to, chrono::Utc::now().timestamp_millis())
         .await
-        .ok()?;
-    Some(bytes)
+    {
+        Ok(_) => Some(recovered),
+        Err(error) => {
+            tracing::warn!(%error, doc, to, "rehydrate: the session could not be repointed");
+            None
+        }
+    }
 }
 
 /// The row's provider and the file's current bytes — one box read for the bytes and page
@@ -200,6 +285,33 @@ struct Served {
     stale: bool,
 }
 
+impl Served {
+    /// The headers every answer built from these bytes carries — `/bytes` and the rendered
+    /// pages alike, so a page drawn from a stand-in is as honest about it as the file is.
+    fn headers(&self) -> Vec<(axum::http::header::HeaderName, String)> {
+        let mut headers = vec![(
+            axum::http::header::HeaderName::from_static("x-office-version"),
+            self.version.to_string(),
+        )];
+        if self.stale {
+            headers.push((
+                axum::http::header::HeaderName::from_static("x-office-stale"),
+                "1".to_string(),
+            ));
+        }
+        headers
+    }
+}
+
+/// A `?version=` the chain does not hold — named as absent, never answered with other bytes.
+fn not_kept(version: i64) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        format!("version {version} of this document was not kept"),
+    )
+        .into_response()
+}
+
 /// The bytes a `?version=` names: the live head off the box, an older version off its
 /// snapshot artifact. `bytes_for` is only for the head — and only first: when the box cannot
 /// answer, a live replacement rehydrates the file back onto it, else the newest kept snapshot
@@ -223,11 +335,7 @@ async fn versioned_bytes(
         .iter()
         .find(|a| a.meta["version"].as_i64() == Some(version))
     else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("version {version} of this document was not kept"),
-        )
-            .into_response());
+        return Err(not_kept(version));
     };
     match state
         .auth
@@ -241,11 +349,7 @@ async fn versioned_bytes(
             version,
             stale: false,
         }),
-        None => Err((
-            StatusCode::NOT_FOUND,
-            format!("version {version} of this document was not kept"),
-        )
-            .into_response()),
+        None => Err(not_kept(version)),
     }
 }
 
@@ -267,11 +371,11 @@ async fn head_bytes(
         }
         Err(error) => error,
     };
-    if let Some(bytes) = rehydrate(state, row).await {
+    if let Some(recovered) = rehydrate(state, row).await {
         return Ok(Served {
-            bytes,
-            version: row.version,
-            stale: false,
+            bytes: recovered.bytes,
+            version: recovered.version,
+            stale: recovered.stale,
         });
     }
     match newest_snapshot(state, row).await {
@@ -380,17 +484,8 @@ async fn bytes(
             CONTENT_DISPOSITION,
             format!("attachment; filename=\"{filename}\""),
         ),
-        (
-            axum::http::header::HeaderName::from_static("x-office-version"),
-            served.version.to_string(),
-        ),
     ];
-    if served.stale {
-        headers.push((
-            axum::http::header::HeaderName::from_static("x-office-stale"),
-            "1".to_string(),
-        ));
-    }
+    headers.extend(served.headers());
     (axum::response::AppendHeaders(headers), served.bytes).into_response()
 }
 
@@ -431,10 +526,7 @@ async fn page_png(
     // included, so a pager learns the bound from the probe that found it, not only from
     // pages that rendered.
     let pages = opened.as_ref().ok().and_then(Session::page_count);
-    let mut headers = vec![(
-        axum::http::header::HeaderName::from_static("x-office-version"),
-        served.version.to_string(),
-    )];
+    let mut headers = served.headers();
     if let Some(pages) = pages {
         headers.push((
             axum::http::header::HeaderName::from_static("x-office-pages"),

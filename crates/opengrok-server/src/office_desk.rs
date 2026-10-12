@@ -66,7 +66,7 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// Shell-quote a string for embedding in a `sh -c` command the model half-chose: wrap in
 /// single quotes, escape each inner quote. The box runs GNU/Linux, so `find`/`stat` are GNU.
-fn shq(s: &str) -> String {
+pub(crate) fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -219,7 +219,74 @@ impl Tools {
                 )
             })?
             .ok_or_else(|| refusal("NOT_FOUND", format!("no document {document} is open"), None))?;
+        // This coworker's document on a box the scope has since replaced is still its
+        // document: rehydrate gives the new box the file and repoints the row, so a reset
+        // does not leave the agent refused on its own handle until somebody opens a window.
+        let row = if row.box_id != box_id
+            && row.account_id == context.account_id.as_str()
+            && row.coworker_id == context.coworker_id.as_str()
+            && crate::office_routes::rehydrate(&self.state, &row)
+                .await
+                .is_some()
+        {
+            self.state
+                .auth
+                .store
+                .doc_session(document)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(row)
+        } else {
+            row
+        };
         owned(context, box_id, &row).cloned()
+    }
+
+    /// The session this path already has on `box_id` — or, failing that, this coworker's
+    /// session for the same path on a box the scope has since replaced, moved here. Same
+    /// coworker, same path is the same document: minting a second row would strand the
+    /// first, with its proposals and version chain, as a stale-only orphan for good.
+    async fn session_at_path(
+        &self,
+        context: &ToolContext,
+        box_id: &str,
+        path: &str,
+    ) -> Result<Option<opengrok_store::DocSessionRow>, String> {
+        let store = &self.state.auth.store;
+        let unreadable = |error: opengrok_store::StoreError| {
+            refusal(
+                "ENGINE_ERROR",
+                format!("the session could not be read: {error}"),
+                None,
+            )
+        };
+        if let Some(existing) = store
+            .doc_session_by_path(box_id, path)
+            .await
+            .map_err(unreadable)?
+        {
+            return Ok(Some(existing));
+        }
+        let Some(orphan) = store
+            .doc_sessions_for(context.account_id.as_str(), context.coworker_id.as_str())
+            .await
+            .map_err(unreadable)?
+            .into_iter()
+            .find(|row| row.path == path && row.box_id != box_id)
+        else {
+            return Ok(None);
+        };
+        // A racing move wins; either way the row now names some box, and re-reading by
+        // path answers whichever session holds this one.
+        store
+            .repoint_doc_session_box(&orphan.id, &orphan.box_id, box_id, crate::now_ms())
+            .await
+            .map_err(unreadable)?;
+        store
+            .doc_session_by_path(box_id, path)
+            .await
+            .map_err(unreadable)
     }
 
     /// Read the file's CURRENT bytes, and re-base the row when they no longer match the hash
@@ -477,20 +544,7 @@ impl Tools {
         let hash = sha256_hex(&bytes);
         // A second open of the same path returns the same handle — the session, not the open,
         // is what proposals key on. Its stored bytes are re-checked in case it moved since.
-        if let Some(existing) = self
-            .state
-            .auth
-            .store
-            .doc_session_by_path(box_id, &path)
-            .await
-            .map_err(|error| {
-                refusal(
-                    "ENGINE_ERROR",
-                    format!("the session could not be read: {error}"),
-                    None,
-                )
-            })?
-        {
+        if let Some(existing) = self.session_at_path(context, box_id, &path).await? {
             let row = owned(context, box_id, &existing)?.clone();
             let (bytes, row, external) = self.fresh(context, box_io, box_id, &row).await?;
             let body = {
@@ -850,7 +904,9 @@ impl Tools {
                 // another apply attempt.
                 if let OfficeError::StaleTargets(refs) = &error {
                     proposals[index].stale_refs = refs.clone();
-                    let _ = self
+                    // The refusal below already carries the refs, so a failed save costs only
+                    // `office_review`'s copy of them — said in the log, never swallowed.
+                    if let Err(save_error) = self
                         .state
                         .auth
                         .store
@@ -862,7 +918,10 @@ impl Tools {
                             &proposals_value(&proposals)?,
                             crate::now_ms(),
                         )
-                        .await;
+                        .await
+                    {
+                        tracing::warn!(%save_error, doc = %row.id, "a proposal's stale targets could not be recorded");
+                    }
                 }
                 Err(engine_refusal(&error))
             }

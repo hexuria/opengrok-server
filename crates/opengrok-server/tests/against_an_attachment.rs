@@ -924,6 +924,15 @@ async fn a_pdf_reaches_the_model_as_its_text() {
 /// every byte written kept so the test can look at what landed where.
 struct StagedBox {
     written: Mutex<BTreeMap<String, Vec<u8>>>,
+    /// Boxes a test has destroyed: reads and probes against them fail the way a removed
+    /// container's do, so a stand-in is not quietly served from a box that is gone.
+    gone: Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl StagedBox {
+    fn is_gone(&self, box_id: &str) -> bool {
+        self.gone.lock().expect("gone").contains(box_id)
+    }
 }
 
 #[async_trait::async_trait]
@@ -931,10 +940,22 @@ impl Computer for StagedBox {
     async fn create(&self, _ttl: Option<u64>) -> BoxResult<String> {
         Ok("bx_staged".to_string())
     }
-    async fn run(&self, _box_id: &str, _command: &str, _timeout: u32) -> BoxResult<CommandOutput> {
-        // `expand_home` asks the box for $HOME; nothing else is played.
+    async fn run(&self, box_id: &str, command: &str, _timeout: u32) -> BoxResult<CommandOutput> {
+        if self.is_gone(box_id) {
+            return Err(opengrok_box::BoxError::NoSuchBox);
+        }
+        // `expand_home` asks the box for $HOME, and rehydrate asks whether a path holds a
+        // file (`test -e '<path>'`) — answered from what was written, as a shell would.
+        let exit_code = match command
+            .strip_prefix("test -e '")
+            .and_then(|rest| rest.strip_suffix('\''))
+        {
+            Some(path) if self.written.lock().expect("written").contains_key(path) => 0,
+            Some(_) => 1,
+            None => 0,
+        };
         Ok(CommandOutput {
-            exit_code: 0,
+            exit_code,
             stdout: "/home/bot".to_string(),
             stderr: String::new(),
             stdout_truncated: false,
@@ -957,7 +978,10 @@ impl Computer for StagedBox {
     async fn read_file(&self, _box_id: &str, _path: &str) -> BoxResult<String> {
         Ok(String::new())
     }
-    async fn read_file_bytes(&self, _box_id: &str, path: &str) -> BoxResult<Vec<u8>> {
+    async fn read_file_bytes(&self, box_id: &str, path: &str) -> BoxResult<Vec<u8>> {
+        if self.is_gone(box_id) {
+            return Err(opengrok_box::BoxError::NoSuchBox);
+        }
         self.written
             .lock()
             .expect("written")
@@ -990,7 +1014,10 @@ impl Computer for StagedBox {
     async fn destroy(&self, _box_id: &str) -> BoxResult<()> {
         Ok(())
     }
-    async fn state(&self, _box_id: &str) -> BoxResult<String> {
+    async fn state(&self, box_id: &str) -> BoxResult<String> {
+        if self.is_gone(box_id) {
+            return Err(opengrok_box::BoxError::NoSuchBox);
+        }
         Ok("running".to_string())
     }
 }
@@ -1030,6 +1057,7 @@ async fn an_office_file_is_staged_onto_the_bots_computer() {
     let database_url = database_or_skip!();
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("docx").await;
@@ -1117,6 +1145,7 @@ async fn a_staged_files_first_version_stays_viewable() {
     let database_url = database_or_skip!();
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("pptx").await;
@@ -1259,6 +1288,7 @@ async fn a_document_follows_the_computer_when_its_box_is_replaced() {
     let database_url = database_or_skip!();
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("orphan").await;
@@ -1375,8 +1405,170 @@ async fn a_document_follows_the_computer_when_its_box_is_replaced() {
         Some(&reqwest::header::HeaderValue::from_static("0")),
         "and which kept version it is"
     );
+    // A page drawn from the stand-in says so too, not only the file.
+    let response = h
+        .client
+        .get(format!("{}/office/docs/{}/pages/1.png", h.base, session.id))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("page");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response.headers().get("x-office-stale"),
+        Some(&reqwest::header::HeaderValue::from_static("1")),
+        "a stand-in's page is marked stale"
+    );
     let detail = h.get(&ada, &format!("/office/docs/{}", session.id)).await;
     assert_eq!(detail["boxLive"], json!(false), "{detail}");
+}
+
+/// The agent's own office tools get a document back after its computer is replaced — no
+/// window has to open it first. A handle names the same document on the new box; opening
+/// the same path again adopts the old session instead of minting a second one; a file kept
+/// on the new box's disk is adopted as it is; and a different file at that path is never
+/// overwritten — the document stays readable from its kept copy instead.
+#[tokio::test]
+async fn the_agents_documents_follow_a_replaced_computer() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("follow").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+    let run = uuid::Uuid::now_v7().simple().to_string();
+    let deck_path = format!("/home/bot/office/follow-{run}.pptx");
+    let deck: &[u8] = include_bytes!("../../opengrok-office/tests/fixtures/blank.pptx");
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(deck_path.clone(), deck.to_vec());
+
+    let tools = opengrok_server::office_desk::Tools {
+        state: h.agui.clone(),
+    };
+    let box_io: &dyn Computer = computer.as_ref();
+    let ask = |box_id: String, ask: opengrok_tools::office_desk::Ask| {
+        let context = opengrok_tools::ToolContext {
+            account_id: ada.account.clone(),
+            coworker_id: coworker.clone(),
+            box_id: Some(opengrok_core::id::BoxId::from_stored(box_id.clone())),
+            group_box: None,
+            screen_hold: false,
+            screen_held_in: None,
+            screen: Arc::new(Mutex::new(opengrok_box::Screen::Shared)),
+            thread_id: Some("thread".to_string()),
+            run_id: Some("run".to_string()),
+        };
+        let tools = &tools;
+        async move {
+            opengrok_tools::office_desk::OfficeDesk::answer(tools, &context, box_io, &box_id, ask)
+                .await
+        }
+    };
+    // The scope's computer is replaced and the old one is gone with it, as a reset leaves it.
+    let replace = |from: String, to: String| {
+        let store = h.store.clone();
+        let account = ada.account.clone();
+        computer.gone.lock().expect("gone").insert(from.clone());
+        async move {
+            store
+                .claim_scoped_computer(
+                    "account",
+                    account.as_str(),
+                    Some(&from),
+                    &to,
+                    "local-docker",
+                    None,
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await
+                .expect("the scope's computer was replaced");
+        }
+    };
+
+    let opened = ask(
+        box_id.clone(),
+        opengrok_tools::office_desk::Ask::Open {
+            path: deck_path.clone(),
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"].as_str().expect("id").to_string();
+
+    // Rebuilt on the same disk: the file is still there, byte for byte the head. The agent's
+    // next call on its handle works on the new box, with nothing rewritten.
+    let rebuilt = format!("bx_rebuilt-{run}");
+    replace(box_id.clone(), rebuilt.clone()).await;
+    let verified = ask(
+        rebuilt.clone(),
+        opengrok_tools::office_desk::Ask::Verify {
+            document: document.clone(),
+            proposal: None,
+        },
+    )
+    .await;
+    if let Err(refused) = &verified {
+        panic!("the handle answers on the new box: {refused}");
+    }
+    let row = h
+        .store
+        .doc_session(&document)
+        .await
+        .expect("read")
+        .expect("row");
+    assert_eq!(row.box_id, rebuilt, "the session followed the rebuild");
+    assert_eq!(row.version, 0, "an adopted head is not a new version");
+
+    // Replaced again; this time the agent opens the path rather than using its handle. It
+    // gets the same document back, not a second session for one file.
+    let replaced = format!("bx_replaced-{run}");
+    replace(rebuilt.clone(), replaced.clone()).await;
+    let reopened = ask(
+        replaced.clone(),
+        opengrok_tools::office_desk::Ask::Open {
+            path: deck_path.clone(),
+        },
+    )
+    .await
+    .expect("reopen");
+    assert_eq!(
+        reopened.result["document"].as_str(),
+        Some(document.as_str()),
+        "the same path on the new box is the same document"
+    );
+
+    // A stranger's file at the path on the next box is left alone: the document is served
+    // from its kept copy, marked stale, and the stranger's bytes are untouched.
+    let foreign = format!("bx_foreign-{run}");
+    replace(replaced.clone(), foreign.clone()).await;
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(deck_path.clone(), b"not ours".to_vec());
+    let response = h
+        .client
+        .get(format!("{}/office/docs/{document}/bytes", h.base))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("bytes");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response.headers().get("x-office-stale"),
+        Some(&reqwest::header::HeaderValue::from_static("1")),
+        "the kept copy stands in, marked"
+    );
+    assert_eq!(
+        computer.written.lock().expect("written").get(&deck_path),
+        Some(&b"not ours".to_vec()),
+        "a different file at the path is never overwritten"
+    );
 }
 
 /// Without a computer — or a turn that names no coworker — the file stays what it always was:
@@ -1425,6 +1617,7 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
     let database_url = database_or_skip!();
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("rexport").await;
