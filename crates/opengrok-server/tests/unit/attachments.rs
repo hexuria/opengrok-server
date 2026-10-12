@@ -126,4 +126,13 @@ fn a_staged_name_stays_inside_the_inbox() {
     assert_eq!(staged_name("..."), "document");
     assert_eq!(staged_name(""), "document");
     assert!(staged_name(&"é".repeat(200)).len() <= 80);
+    // The cap is at the stem: a name that loses `.pptx` to the cut is a file no office
+    // tool recognizes — `Kind::from_filename` only reads the extension.
+    let long = format!("{}.pptx", "q".repeat(200));
+    let staged = staged_name(&long);
+    assert!(staged.len() <= 80, "{staged}");
+    assert_eq!(
+        opengrok_office::Kind::from_filename(&staged),
+        Some(opengrok_office::Kind::Pptx)
+    );
 }

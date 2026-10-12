@@ -86,8 +86,11 @@ pub enum Ask {
         directory: Option<String>,
         offset: usize,
     },
-    /// `office_open`: open a path, returning its `document` handle.
-    Open { path: String },
+    /// `office_open`: open a path, returning its `document` handle. `adopt_kept_copy` is the
+    /// answer to a stale rehydrated copy: the file on the box is a kept older version, the
+    /// head having been lost with the old computer — set, it becomes the new head instead of
+    /// every verb refusing `STALE_COPY`.
+    Open { path: String, adopt_kept_copy: bool },
     /// `office_create`: the payload section (`docx`/`xlsx`/`pptx`) the path's extension names.
     Create { path: String, args: Value },
     /// `office_outline`: the document's addressable surface, paged.
@@ -309,6 +312,9 @@ fn read(name: &str, arguments: &Value) -> Result<Ask, String> {
         }),
         OFFICE_OPEN => Ok(Ask::Open {
             path: required("path")?,
+            adopt_kept_copy: get("adoptKeptCopy")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }),
         OFFICE_CREATE => Ok(Ask::Create {
             path: required("path")?,
@@ -580,7 +586,16 @@ pub fn schema(name: &str) -> Option<Value> {
             }),
             json!([]),
         ),
-        OFFICE_OPEN => (json!({ "path": path }), json!(["path"])),
+        OFFICE_OPEN => (
+            json!({
+                "path": path,
+                "adoptKeptCopy": { "type": "boolean",
+                    "description": "When the file is a kept copy of an older version — the \
+                     session's head was lost with the old computer — adopt it as the new \
+                     head rather than staying refused as a stale copy." },
+            }),
+            json!(["path"]),
+        ),
         OFFICE_CREATE => (
             json!({
                 "path": path,

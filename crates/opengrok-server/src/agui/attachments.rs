@@ -168,7 +168,7 @@ pub(crate) async fn resolve(
             let resolved = 'res: {
                 if let Some(kind) = opengrok_office::Kind::from_filename(&row.filename) {
                     if stage_in.is_none() {
-                        stage_in = coworker_box(state, run_coworker).await;
+                        stage_in = coworker_box(state, account, run_coworker).await;
                     }
                     if let Some((coworker_id, box_id)) = &stage_in {
                         break 'res match stage(
@@ -183,7 +183,8 @@ pub(crate) async fn resolve(
                         )
                         .await
                         {
-                            Ok(session) => {
+                            Ok(staged) => {
+                                let session = staged.session().clone();
                                 attached.customs.push((
                                     opengrok_tools::office_desk::OFFICE_DOC_EVENT.to_string(),
                                     crate::office_desk::frame(
@@ -193,14 +194,26 @@ pub(crate) async fn resolve(
                                         Some(&row.id),
                                     ),
                                 ));
-                                Resolved::Words(format!(
-                                    "[The person attached {name} ({mime}, {size} bytes) — it is \
-                                     on your computer at {path}; open it with the office tools.]",
-                                    name = one_line(&row.filename),
-                                    mime = one_line(&row.mime),
-                                    size = size,
-                                    path = session.path,
-                                ))
+                                match staged {
+                                    Staged::Wrote(session) => Resolved::Words(format!(
+                                        "[The person attached {name} ({mime}, {size} bytes) — it is \
+                                         on your computer at {path}; open it with the office tools.]",
+                                        name = one_line(&row.filename),
+                                        mime = one_line(&row.mime),
+                                        size = size,
+                                        path = session.path,
+                                    )),
+                                    Staged::Kept(session) => Resolved::Words(format!(
+                                        "[The person attached {name} ({mime}, {size} bytes) again — \
+                                         the file at {path} is that document and carries the edits \
+                                         made since; the original upload is still artifact {artifact}.]",
+                                        name = one_line(&row.filename),
+                                        mime = one_line(&row.mime),
+                                        size = size,
+                                        path = session.path,
+                                        artifact = row.id,
+                                    )),
+                                }
                             }
                             Err(why) => Resolved::Words(format!(
                                 "[The person attached {name} ({mime}, {size} bytes): it cannot \
@@ -235,20 +248,26 @@ const STAGE_DIR: &str = "~/office/inbox";
 
 /// The bot's own box for a stage-in, loaded once per turn and only when an Office file can use
 /// it: a turn with none never pays the read. `(coworker, box)` so the session row can name both.
+/// The box is the SCOPE's record, not `coworker.computer()` — that field is the first box ever
+/// given, which a reset leaves naming a destroyed one (see `provision::live_boxes`).
 async fn coworker_box(
     state: &AgUiState,
+    account: &AccountId,
     run_coworker: Option<&CoworkerId>,
 ) -> Option<(CoworkerId, String)> {
     state.computer.as_ref()?;
     let id = run_coworker?;
-    let (coworker, _) = state.auth.store.load_coworker(id).await.ok()?;
-    Some((id.clone(), coworker.computer()?.to_string()))
+    let row = super::provision::scoped_box_row_for(state, account, id).await?;
+    Some((id.clone(), row.box_id))
 }
 
 /// A filename as it is safe to write under `STAGE_DIR`. The upload already refused a line break
 /// and a quote, but a name here is also a path: anything that is not a plain name character
-/// becomes an underscore, so `..` and `/` can never leave the inbox.
+/// becomes an underscore, so `..` and `/` can never leave the inbox. Long names are cut to 80
+/// chars at the STEM, never the extension — `Kind::from_filename` reads it, and a truncated
+/// `.pptx` is a document no office tool recognizes.
 fn staged_name(filename: &str) -> String {
+    const LIMIT: usize = 80;
     let name: String = filename
         .chars()
         .map(|ch| {
@@ -258,13 +277,38 @@ fn staged_name(filename: &str) -> String {
                 '_'
             }
         })
-        .take(80)
         .collect();
+    // Every kept char is ASCII, so byte and char lengths agree from here on.
     let name = name.trim_start_matches('.');
     if name.is_empty() {
-        "document".to_string()
-    } else {
-        name.to_string()
+        return "document".to_string();
+    }
+    if name.len() <= LIMIT {
+        return name.to_string();
+    }
+    match name.rfind('.') {
+        // The extension only survives when it fits whole — a dot tail longer than the
+        // limit is no extension anyway, and a stem that leaves none is the old cut.
+        Some(dot) if name.len() - dot <= LIMIT => {
+            format!("{}{}", &name[..LIMIT - (name.len() - dot)], &name[dot..])
+        }
+        _ => name[..LIMIT].to_string(),
+    }
+}
+
+/// What `stage` did with the bytes: `Wrote` — they landed (a new file, or one the box had
+/// lost); `Kept` — the session already there still holds its file, edits included, so the
+/// re-sent upload changes nothing on the box.
+enum Staged {
+    Wrote(opengrok_store::DocSessionRow),
+    Kept(opengrok_store::DocSessionRow),
+}
+
+impl Staged {
+    fn session(&self) -> &opengrok_store::DocSessionRow {
+        match self {
+            Staged::Wrote(row) | Staged::Kept(row) => row,
+        }
     }
 }
 
@@ -282,7 +326,7 @@ async fn stage(
     filename: &str,
     kind: opengrok_office::Kind,
     bytes: &[u8],
-) -> Result<opengrok_store::DocSessionRow, String> {
+) -> Result<Staged, String> {
     let computer = state.computer.as_deref().ok_or("there is no computer")?;
 
     // The turn's own wake patience, spent once up front: the file cannot land on a box that is
@@ -303,6 +347,28 @@ async fn stage(
 
     let dir = crate::office_desk::expand_home(computer, box_id, STAGE_DIR).await?;
     let path = format!("{dir}/{artifact_id}-{}", staged_name(filename));
+    let store = &state.auth.store;
+
+    // A re-sent artifact names the same path and the session already there IS the document:
+    // the file it has is the person's work — edits made since the upload included — not this
+    // upload again. Writing over it would erase the accepted changes the version chain
+    // recorded. Only a file that went missing gets the bytes rewritten; a probe that cannot
+    // say is not "missing".
+    let existing = store
+        .doc_session_by_path(box_id, &path)
+        .await
+        .ok()
+        .flatten();
+    if let Some(row) = &existing {
+        match crate::office_desk::file_exists(computer, box_id, &path).await {
+            Some(true) => return Ok(Staged::Kept(row.clone())),
+            Some(false) => {}
+            None => {
+                return Err("its computer could not say whether the file is there".to_string());
+            }
+        }
+    }
+
     computer
         .write_file_bytes(box_id, &path, bytes)
         .await
@@ -312,15 +378,9 @@ async fn stage(
     // the same path), a lost insert race is re-read by path — and either way the row's hash is
     // brought to the bytes now on disk, because whatever the file was before, it is these
     // bytes now. Without that the first office_* read would look like drift somebody caused.
-    let store = &state.auth.store;
     let hash = crate::office_desk::sha256_hex(bytes);
     let now = crate::now_ms();
-    let mut row = match store
-        .doc_session_by_path(box_id, &path)
-        .await
-        .ok()
-        .flatten()
-    {
+    let mut row = match existing {
         Some(existing) => existing,
         None => {
             let fresh = opengrok_store::DocSessionRow {
@@ -374,7 +434,7 @@ async fn stage(
     {
         tracing::warn!(%error, artifact = %artifact_id, "a staged file's version could not be marked");
     }
-    Ok(row)
+    Ok(Staged::Wrote(row))
 }
 
 /// Whether `ch` ends a line for a reader: every control character (CR, LF, NEL), and the two

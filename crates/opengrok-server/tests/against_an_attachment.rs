@@ -927,6 +927,13 @@ struct StagedBox {
     /// Boxes a test has destroyed: reads and probes against them fail the way a removed
     /// container's do, so a stand-in is not quietly served from a box that is gone.
     gone: Mutex<std::collections::BTreeSet<String>>,
+    /// Paths the existence probe cannot answer for (exit 2): a probe that cannot say is a
+    /// third answer beside "there" and "not there", and the desk must refuse on it.
+    blind: Mutex<std::collections::BTreeSet<String>>,
+    /// `(store, document)` — when set, the next byte read bumps the session's version first,
+    /// a racing writer the caller's own optimistic save must then lose to. Deterministic
+    /// instead of two tasks hoping to interleave.
+    race: Mutex<Option<(PgStore, String)>>,
 }
 
 impl StagedBox {
@@ -944,12 +951,13 @@ impl Computer for StagedBox {
         if self.is_gone(box_id) {
             return Err(opengrok_box::BoxError::NoSuchBox);
         }
-        // `expand_home` asks the box for $HOME, and rehydrate asks whether a path holds a
+        // `expand_home` asks the box for $HOME, and the desk asks whether a path holds a
         // file (`test -e '<path>'`) — answered from what was written, as a shell would.
         let exit_code = match command
             .strip_prefix("test -e '")
             .and_then(|rest| rest.strip_suffix('\''))
         {
+            Some(path) if self.blind.lock().expect("blind").contains(path) => 2,
             Some(path) if self.written.lock().expect("written").contains_key(path) => 0,
             Some(_) => 1,
             None => 0,
@@ -981,6 +989,24 @@ impl Computer for StagedBox {
     async fn read_file_bytes(&self, box_id: &str, path: &str) -> BoxResult<Vec<u8>> {
         if self.is_gone(box_id) {
             return Err(opengrok_box::BoxError::NoSuchBox);
+        }
+        // An armed race fires INSIDE a caller's read: the version bump lands while the
+        // caller still believes it holds the row — the same as a second agent's save
+        // winning between the caller's read and its own.
+        let tripped = self.race.lock().expect("race").take();
+        if let Some((store, document)) = tripped
+            && let Ok(Some(row)) = store.doc_session(&document).await
+        {
+            let _ = store
+                .save_doc_session(
+                    &row.id,
+                    row.version,
+                    &row.content_sha256,
+                    row.version + 1,
+                    &row.proposals,
+                    chrono::Utc::now().timestamp_millis(),
+                )
+                .await;
         }
         self.written
             .lock()
@@ -1058,6 +1084,8 @@ async fn an_office_file_is_staged_onto_the_bots_computer() {
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
         gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("docx").await;
@@ -1146,6 +1174,8 @@ async fn a_staged_files_first_version_stays_viewable() {
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
         gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("pptx").await;
@@ -1289,6 +1319,8 @@ async fn a_document_follows_the_computer_when_its_box_is_replaced() {
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
         gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("orphan").await;
@@ -1336,7 +1368,7 @@ async fn a_document_follows_the_computer_when_its_box_is_replaced() {
         .expect("a doc_session row");
 
     // The computer is replaced under the open session: the scope names a new box, and the
-    // staged file — kept per box in a real deployment — is gone with the old one here.
+    // old one — the staged file on it — is destroyed, as a reset leaves it.
     h.store
         .claim_scoped_computer(
             "account",
@@ -1349,6 +1381,11 @@ async fn a_document_follows_the_computer_when_its_box_is_replaced() {
         )
         .await
         .expect("the scope's computer was replaced");
+    computer
+        .gone
+        .lock()
+        .expect("gone")
+        .insert("bx_staged".to_string());
     computer.written.lock().expect("written").remove(&staged);
 
     // Orphaned, not gone: the row still answers, `boxLive` marking its box as lost.
@@ -1434,6 +1471,8 @@ async fn the_agents_documents_follow_a_replaced_computer() {
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
         gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("follow").await;
@@ -1494,6 +1533,7 @@ async fn the_agents_documents_follow_a_replaced_computer() {
         box_id.clone(),
         opengrok_tools::office_desk::Ask::Open {
             path: deck_path.clone(),
+            adopt_kept_copy: false,
         },
     )
     .await
@@ -1532,6 +1572,7 @@ async fn the_agents_documents_follow_a_replaced_computer() {
         replaced.clone(),
         opengrok_tools::office_desk::Ask::Open {
             path: deck_path.clone(),
+            adopt_kept_copy: false,
         },
     )
     .await
@@ -1618,6 +1659,8 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
         gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("rexport").await;
@@ -1668,6 +1711,7 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
         &box_id,
         opengrok_tools::office_desk::Ask::Open {
             path: deck_path.clone(),
+            adopt_kept_copy: false,
         },
     )
     .await
@@ -1724,7 +1768,7 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
     }
     let chain = h
         .store
-        .doc_version_artifacts(&document)
+        .doc_version_artifacts(ada.account.as_str(), &document)
         .await
         .expect("the chain");
     assert!(
@@ -1745,6 +1789,960 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
     }
 }
 
+// ---------- desk-driven regressions ----------
+
+const DEMO_DECK: &[u8] =
+    include_bytes!("../../opengrok-office/tests/fixtures/betteroffice-demo.pptx");
+
+/// The desk wired to this harness, and the context a verb runs in, as the executor hands them.
+fn desk(h: &Harness) -> opengrok_server::office_desk::Tools {
+    opengrok_server::office_desk::Tools {
+        state: h.agui.clone(),
+    }
+}
+
+fn desk_context(who: &Person, coworker: &CoworkerId, box_id: &str) -> opengrok_tools::ToolContext {
+    opengrok_tools::ToolContext {
+        account_id: who.account.clone(),
+        coworker_id: coworker.clone(),
+        box_id: Some(opengrok_core::id::BoxId::from_stored(box_id.to_string())),
+        group_box: None,
+        screen_hold: false,
+        screen_held_in: None,
+        screen: Arc::new(Mutex::new(opengrok_box::Screen::Shared)),
+        thread_id: Some("thread".to_string()),
+        run_id: Some("run".to_string()),
+    }
+}
+
+async fn desk_ask(
+    tools: &opengrok_server::office_desk::Tools,
+    computer: &StagedBox,
+    context: &opengrok_tools::ToolContext,
+    box_id: &str,
+    ask: opengrok_tools::office_desk::Ask,
+) -> Result<opengrok_tools::office_desk::Reply, String> {
+    opengrok_tools::office_desk::OfficeDesk::answer(tools, context, computer, box_id, ask).await
+}
+
+/// `office_grep` for `query`, then `office_propose` over the first match handle — the id of
+/// the pending proposal it left on the row.
+async fn propose_for(
+    tools: &opengrok_server::office_desk::Tools,
+    computer: &StagedBox,
+    context: &opengrok_tools::ToolContext,
+    box_id: &str,
+    document: &str,
+    query: &str,
+    new_text: &str,
+) -> String {
+    let hits = desk_ask(
+        tools,
+        computer,
+        context,
+        box_id,
+        opengrok_tools::office_desk::Ask::Grep {
+            document: document.to_string(),
+            query: query.to_string(),
+            case_sensitive: false,
+            story: None,
+            limit: 10,
+            cursor: None,
+        },
+    )
+    .await
+    .expect("grep");
+    let handle = hits.result["matches"][0]["match"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{query} found no match: {}", hits.result))
+        .to_string();
+    let proposed = desk_ask(
+        tools,
+        computer,
+        context,
+        box_id,
+        opengrok_tools::office_desk::Ask::Propose {
+            document: document.to_string(),
+            author: "bot".to_string(),
+            note: "a change".to_string(),
+            edits: vec![opengrok_tools::office_desk::TextEditArg {
+                match_: handle,
+                new_text: new_text.to_string(),
+            }],
+        },
+    )
+    .await
+    .expect("propose");
+    proposed.result["proposal"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no proposal id: {}", proposed.result))
+        .to_string()
+}
+
+/// The staged upload's session and the path it landed on.
+async fn staged_session(
+    h: &Harness,
+    account: &AccountId,
+    coworker: &CoworkerId,
+) -> (String, String) {
+    let rows = h
+        .store
+        .doc_sessions_for(account.as_str(), coworker.as_str())
+        .await
+        .expect("sessions");
+    let row = rows.first().expect("a staged document's session");
+    (row.id.clone(), row.path.clone())
+}
+
+/// An artifact another account mints cannot name this document's chain keys — the server
+/// strips `docSessionId`/`version`/`via`/`exportPath` out of client meta before the row is
+/// stored, and the chain's queries are scoped to the session's account besides: a grafted
+/// row must not appear in the version list nor win an export path it never earned.
+#[tokio::test]
+async fn another_accounts_upload_cannot_graft_onto_a_documents_chain() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("owner").await;
+    let bess = h.person("graft").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    let path = &format!(
+        "/home/bot/office/{}-mine.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(path.to_string(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Open {
+            path: path.to_string(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"].as_str().expect("id").to_string();
+
+    let response = h
+        .client
+        .post(format!("{}/artifacts", h.base))
+        .header("authorization", format!("Bearer {}", bess.token))
+        .json(&json!({
+            "kind": "attachment",
+            "mime": "text/plain",
+            "filename": "note.txt",
+            "base64": base64::engine::general_purpose::STANDARD.encode(b"not hers"),
+            "meta": {
+                "docSessionId": document,
+                "version": 999,
+                "via": "office_open",
+                "exportPath": "/root/.bashrc",
+            },
+        }))
+        .send()
+        .await
+        .expect("upload");
+    assert_eq!(response.status().as_u16(), 200);
+    let graft: Value = response.json().await.expect("row");
+    let graft_id = graft["id"].as_str().expect("id").to_string();
+
+    // The stored row kept none of the server's keys.
+    let stored = h
+        .store
+        .artifact(&graft_id)
+        .await
+        .expect("read")
+        .expect("the grafted row");
+    for key in ["docSessionId", "version", "via", "exportPath"] {
+        assert!(
+            stored.meta.get(key).is_none(),
+            "client meta planted {key}: {}",
+            stored.meta
+        );
+    }
+    // And Ada's chain and export paths never saw it — scoped to her account, a row of
+    // Bess's cannot be a version nor a path the export guard honours. A row the strip never
+    // saw (the keys ARE planted, under Bess's account) must stay out on the account scope
+    // alone: the scope is the last line when a meta key slips through anywhere else.
+    let graft_at = |meta: Value| opengrok_store::postgres::ArtifactRow {
+        id: format!("art_{}", uuid::Uuid::now_v7().simple()),
+        account_id: bess.account.to_string(),
+        kind: "attachment".to_string(),
+        mime: "text/plain".to_string(),
+        filename: "graft".to_string(),
+        size_bytes: 1,
+        recipe_id: None,
+        run_id: None,
+        step_index: None,
+        thread_id: None,
+        meta,
+        created_at_ms: now_ms(),
+        deleted_at_ms: None,
+    };
+    let mut meta = json!({ "docSessionId": document, "version": 999, "via": "office_open" });
+    let version_graft = graft_at(meta.clone());
+    h.store
+        .put_artifact(&version_graft, b"x")
+        .await
+        .expect("the seeded version graft");
+    meta["via"] = json!("office_export");
+    meta["exportPath"] = json!("/root/.bashrc");
+    let export_graft = graft_at(meta);
+    h.store
+        .put_artifact(&export_graft, b"x")
+        .await
+        .expect("the seeded export graft");
+    let chain = h
+        .store
+        .doc_version_artifacts(ada.account.as_str(), &document)
+        .await
+        .expect("the chain");
+    assert!(
+        chain
+            .iter()
+            .all(|a| a.id != graft_id && a.id != version_graft.id),
+        "a cross-account artifact entered the version chain"
+    );
+    let exports = h
+        .store
+        .doc_export_paths(ada.account.as_str(), &document)
+        .await
+        .expect("the exports");
+    assert!(
+        !exports.iter().any(|path| path == "/root/.bashrc"),
+        "a cross-account export path was honoured: {exports:?}"
+    );
+}
+
+/// A document on a LIVE box that is not the scope's — the stand-in for a room's shared
+/// computer — stays where the person left it: `boxLive` reads true, the bytes come from
+/// that box, and an agent call on the scope's own box refuses rather than repointing the
+/// session onto a box that never held the file.
+#[tokio::test]
+async fn a_document_on_a_live_shared_box_is_not_moved() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("shared").await;
+    let (coworker, scoped_box) = hired_on(&h, &ada).await;
+
+    // The shared box lives under its OWN scope — the room's, standing in with a bot scope.
+    h.store
+        .claim_scoped_computer(
+            "bot",
+            &format!("cw_room_{}", uuid::Uuid::now_v7().simple()),
+            None,
+            "bx_shared",
+            "local-docker",
+            None,
+            now_ms(),
+        )
+        .await
+        .expect("the shared box was claimed");
+
+    let path = &format!(
+        "/home/bot/office/{}-room.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(path.to_string(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &desk_context(&ada, &coworker, "bx_shared"),
+        "bx_shared",
+        opengrok_tools::office_desk::Ask::Open {
+            path: path.to_string(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open on the shared box");
+    let document = opened.result["document"].as_str().expect("id").to_string();
+
+    // The fetch routes agree the document's box is live, and serve its bytes from it.
+    let detail = h.get(&ada, &format!("/office/docs/{document}")).await;
+    assert_eq!(detail["boxLive"], json!(true), "{detail}");
+    let (status, bytes) = h
+        .get_bytes(&ada, &format!("/office/docs/{document}/bytes"))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(bytes, DEMO_DECK);
+
+    // A call on the scope's own box refuses — the session is not repointed onto it.
+    let refused = desk_ask(
+        &tools,
+        &computer,
+        &desk_context(&ada, &coworker, &scoped_box),
+        &scoped_box,
+        opengrok_tools::office_desk::Ask::Outline {
+            document: document.clone(),
+            story: None,
+            headings_only: false,
+            offset: 0,
+            limit: 50,
+        },
+    )
+    .await;
+    let refused = refused
+        .err()
+        .expect("a live shared box's document is not this box's");
+    assert!(refused.contains("no document"), "{refused}");
+    let row = h
+        .store
+        .doc_session(&document)
+        .await
+        .expect("read")
+        .expect("the row");
+    assert_eq!(
+        row.box_id, "bx_shared",
+        "the session stayed on the live shared box"
+    );
+}
+
+/// An attachment lands on the box the coworker's scope records NOW — `coworker.computer()`
+/// is only the first box ever given, and a re-scoped account would see its file written to
+/// a computer it no longer has.
+#[tokio::test]
+async fn an_attachment_stages_on_the_scoped_computer() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("rescoped").await;
+    let thread = thread();
+    let (coworker, first_box) = hired_on(&h, &ada).await;
+    assert_eq!(first_box, "bx_staged");
+
+    // The scope was re-homed: the coworker's first box is not its live box any more.
+    h.store
+        .claim_scoped_computer(
+            "account",
+            ada.account.as_str(),
+            Some(&first_box),
+            "bx_new",
+            "local-docker",
+            None,
+            now_ms(),
+        )
+        .await
+        .expect("the scope's computer was replaced");
+
+    let (status, row) = h
+        .upload(
+            &ada,
+            &thread,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "deck.pptx",
+            DEMO_DECK,
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+    let artifact_id = row["id"].as_str().unwrap().to_string();
+    let status = h
+        .turn_with(
+            &ada,
+            &thread,
+            "m-pptx",
+            json!([
+                { "type": "text", "text": "look at this" },
+                file_part(
+                    "document",
+                    &artifact_id,
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "deck.pptx"
+                ),
+            ]),
+            json!({ "coworkerId": coworker.as_str() }),
+        )
+        .await
+        .0;
+    assert_eq!(status, 200);
+
+    let (_, path) = staged_session(&h, &ada.account, &coworker).await;
+    let row = h
+        .store
+        .doc_session_by_path("bx_new", &path)
+        .await
+        .expect("session read")
+        .expect("the staged document's session");
+    assert_eq!(
+        row.box_id, "bx_new",
+        "the attachment staged on the scoped box, not the first box ever given"
+    );
+}
+
+/// An accept that loses the version race must not have written: the row claims the version
+/// BEFORE the bytes land, so a stale row's save loses and the box keeps the file the winning
+/// writer left — record and file stay the same document, never a version apart.
+#[tokio::test]
+async fn an_accept_that_loses_the_version_race_writes_nothing() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("racer").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    let path = &format!(
+        "/home/bot/office/{}-raced.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(path.to_string(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Open {
+            path: path.to_string(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"].as_str().expect("id").to_string();
+    let proposal = propose_for(
+        &tools, &computer, &context, &box_id, &document, "WASM", "REPLACED",
+    )
+    .await;
+
+    // A second writer lands between this accept's read of the file and its own save: the
+    // box trips it mid-read, the way a concurrent verb's save would.
+    *computer.race.lock().expect("race") = Some((h.store.clone(), document.clone()));
+    let refused = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Accept {
+            document: document.clone(),
+            proposal,
+            tracked: false,
+        },
+    )
+    .await;
+    let refused = refused.err().expect("the stale accept must lose the race");
+    assert!(refused.contains("CONFLICT"), "{refused}");
+
+    // Nothing was written: the file is still what it was, and the record still says so.
+    let on_disk = computer
+        .written
+        .lock()
+        .expect("written")
+        .get(path)
+        .cloned()
+        .expect("the file");
+    assert_eq!(on_disk, DEMO_DECK, "the losing accept wrote bytes anyway");
+    let row = h
+        .store
+        .doc_session(&document)
+        .await
+        .expect("read")
+        .expect("the row");
+    assert_eq!(row.version, 1, "only the racing writer's bump landed");
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(&on_disk);
+    let hex = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert_eq!(row.content_sha256, hex, "the record drifted from the file");
+}
+
+/// A rehydrated box that only had an older kept copy is a STALE copy, not the document:
+/// every verb that writes or bumps the row refuses `STALE_COPY` until `office_open
+/// {adoptKeptCopy: true}` makes the kept version the head again.
+#[tokio::test]
+async fn a_stale_kept_copy_refuses_until_adopted() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("stale").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    let path = &format!(
+        "/home/bot/office/{}-lost.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(path.to_string(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Open {
+            path: path.to_string(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"].as_str().expect("id").to_string();
+
+    // v1 and v2 land and are kept; a third proposal stays pending.
+    for (query, new_text) in [("WASM", "WASMX"), ("CRDT", "CRDTX")] {
+        let proposal = propose_for(
+            &tools, &computer, &context, &box_id, &document, query, new_text,
+        )
+        .await;
+        desk_ask(
+            &tools,
+            &computer,
+            &context,
+            &box_id,
+            opengrok_tools::office_desk::Ask::Accept {
+                document: document.clone(),
+                proposal,
+                tracked: false,
+            },
+        )
+        .await
+        .expect("accept");
+    }
+    let v1_bytes = {
+        // The kept chain: [v2, v1, v0] newest first — v2's snapshot is then lost.
+        let chain = h
+            .store
+            .doc_version_artifacts(ada.account.as_str(), &document)
+            .await
+            .expect("the chain");
+        let v1 = chain
+            .iter()
+            .find(|a| a.meta["version"].as_i64() == Some(1))
+            .expect("v1 was kept");
+        h.store
+            .artifact_bytes(&v1.id)
+            .await
+            .expect("bytes")
+            .expect("v1 bytes")
+            .1
+    };
+    let pending = propose_for(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        &document,
+        "LOCAL-FIRST",
+        "LOCAL",
+    )
+    .await;
+    // The head's snapshot never made it — the version chain's newest is v1.
+    let v2_artifact = h
+        .store
+        .doc_version_artifacts(ada.account.as_str(), &document)
+        .await
+        .expect("the chain")
+        .into_iter()
+        .find(|a| a.meta["version"].as_i64() == Some(2))
+        .expect("v2 was kept");
+    h.store
+        .soft_delete_artifact(&v2_artifact.id, now_ms())
+        .await
+        .expect("the head snapshot was lost");
+
+    // The computer is destroyed and the scope re-homed — the file went with the old box, so
+    // rehydrate can only put the kept v1 back.
+    computer.gone.lock().expect("gone").insert(box_id.clone());
+    computer.written.lock().expect("written").remove(path);
+    h.store
+        .claim_scoped_computer(
+            "account",
+            ada.account.as_str(),
+            Some(&box_id),
+            "bx_next",
+            "local-docker",
+            None,
+            now_ms(),
+        )
+        .await
+        .expect("the scope's computer was replaced");
+
+    // The first call on the new box rehydrates the kept copy; reads still answer.
+    let outline = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        "bx_next",
+        opengrok_tools::office_desk::Ask::Outline {
+            document: document.clone(),
+            story: None,
+            headings_only: false,
+            offset: 0,
+            limit: 50,
+        },
+    )
+    .await
+    .expect("a read still answers");
+    assert_eq!(
+        outline.result["externalChange"],
+        json!(true),
+        "marked stale"
+    );
+    assert_eq!(
+        computer.written.lock().expect("written").get(path),
+        Some(&v1_bytes),
+        "the kept copy is on the new box"
+    );
+
+    // But verbs that write or bump the row refuse until the copy is adopted.
+    for ask in [
+        opengrok_tools::office_desk::Ask::Accept {
+            document: document.clone(),
+            proposal: pending.clone(),
+            tracked: false,
+        },
+        opengrok_tools::office_desk::Ask::Propose {
+            document: document.clone(),
+            author: "bot".to_string(),
+            note: "again".to_string(),
+            edits: vec![opengrok_tools::office_desk::TextEditArg {
+                match_: "anything".to_string(),
+                new_text: "x".to_string(),
+            }],
+        },
+        opengrok_tools::office_desk::Ask::Reject {
+            document: document.clone(),
+            proposal: pending.clone(),
+        },
+    ] {
+        let refused = desk_ask(&tools, &computer, &context, "bx_next", ask).await;
+        let refused = refused.err().expect("a stale kept copy refuses writers");
+        assert!(refused.contains("STALE_COPY"), "{refused}");
+    }
+    let row = h
+        .store
+        .doc_session(&document)
+        .await
+        .expect("read")
+        .expect("the row");
+    assert_eq!(row.version, 2, "the row did not move while stale");
+    assert_eq!(
+        computer.written.lock().expect("written").get(path),
+        Some(&v1_bytes),
+        "the file did not move while stale"
+    );
+
+    // Adopting makes the kept copy the head — one version up, the lost head untouched —
+    // and the desk works again.
+    let adopted = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        "bx_next",
+        opengrok_tools::office_desk::Ask::Open {
+            path: path.to_string(),
+            adopt_kept_copy: true,
+        },
+    )
+    .await
+    .expect("adopt");
+    assert_eq!(adopted.result["version"], json!(3), "{:?}", adopted.result);
+    let row = h
+        .store
+        .doc_session(&document)
+        .await
+        .expect("read")
+        .expect("the row");
+    assert_eq!(row.version, 3);
+    let proposal = propose_for(
+        &tools, &computer, &context, "bx_next", &document, "CRDT", "CRDTZ",
+    )
+    .await;
+    let accepted = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        "bx_next",
+        opengrok_tools::office_desk::Ask::Accept {
+            document: document.clone(),
+            proposal,
+            tracked: false,
+        },
+    )
+    .await;
+    assert!(accepted.is_ok(), "the adopted copy accepts again");
+}
+
+/// A box that cannot answer "is the file there" is not answered "no" for it — create must
+/// refuse rather than write over a file somebody else may have put there.
+#[tokio::test]
+async fn a_create_refuses_when_the_existence_probe_cannot_answer() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("blind").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    let path = &format!(
+        "/home/bot/office/{}-new.docx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .blind
+        .lock()
+        .expect("blind")
+        .insert(path.to_string());
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let refused = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Create {
+            path: path.to_string(),
+            args: json!({ "docx": { "paragraphs": [{ "text": "hi", "style": "normal" }] } }),
+        },
+    )
+    .await;
+    let refused = refused
+        .err()
+        .expect("a probe that cannot answer must refuse");
+    assert!(refused.contains("could not tell whether"), "{refused}");
+    assert!(
+        !computer.written.lock().expect("written").contains_key(path),
+        "a refused create wrote anyway"
+    );
+}
+
+/// Re-sending an attachment that is already a document does not rewind it: the file on the
+/// box carries the edits made since the upload — accepted proposals included — and the
+/// session's version does not move; the original upload is still its artifact.
+#[tokio::test]
+async fn a_resent_attachment_keeps_the_edited_document() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("resend").await;
+    let thread = thread();
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    let (status, row) = h
+        .upload(
+            &ada,
+            &thread,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "deck.pptx",
+            DEMO_DECK,
+        )
+        .await;
+    assert_eq!(status, 200, "{row}");
+    let artifact_id = row["id"].as_str().unwrap().to_string();
+    let attach = json!([
+        { "type": "text", "text": "here is the deck" },
+        file_part(
+            "document",
+            &artifact_id,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "deck.pptx"
+        ),
+    ]);
+    let status = h
+        .turn_with(
+            &ada,
+            &thread,
+            "m-first",
+            attach.clone(),
+            json!({ "coworkerId": coworker.as_str() }),
+        )
+        .await
+        .0;
+    assert_eq!(status, 200);
+    let (document, path) = staged_session(&h, &ada.account, &coworker).await;
+
+    // An edit lands: the file and the version both move off the upload.
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let proposal = propose_for(
+        &tools, &computer, &context, &box_id, &document, "WASM", "REPLACED",
+    )
+    .await;
+    desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Accept {
+            document: document.clone(),
+            proposal,
+            tracked: false,
+        },
+    )
+    .await
+    .expect("accept");
+    let edited = computer
+        .written
+        .lock()
+        .expect("written")
+        .get(&path)
+        .cloned()
+        .expect("the edited file");
+    assert_ne!(edited, DEMO_DECK, "the accept did not land");
+
+    // The same upload arrives again — the document keeps its edits, its version and its
+    // file untouched, and the model is told the upload still lives at its artifact.
+    let status = h
+        .turn_with(
+            &ada,
+            &thread,
+            "m-again",
+            attach,
+            json!({ "coworkerId": coworker.as_str() }),
+        )
+        .await
+        .0;
+    assert_eq!(status, 200);
+    let (words, _) = h.last_user_message();
+    assert!(
+        words.contains(&format!("still artifact {artifact_id}")),
+        "the model was not told the upload stays: {words}"
+    );
+    assert_eq!(
+        computer.written.lock().expect("written").get(&path),
+        Some(&edited),
+        "the re-send overwrote the edited file"
+    );
+    let row = h
+        .store
+        .doc_session(&document)
+        .await
+        .expect("read")
+        .expect("the row");
+    assert_eq!(row.version, 1, "the re-send bumped the version");
+}
+
+/// A download names its file for both readers: an ASCII `filename` an old client can show,
+/// and the RFC 5987 `filename*` carrying the real one — quotes and non-ASCII intact.
+#[tokio::test]
+async fn a_download_names_an_international_file_safely() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("named").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+
+    // A name the upload route would refuse (a quote) is a perfectly legal document path —
+    // office paths are only ever the agent's to write.
+    let path = &format!(
+        "/home/bot/office/{}-Résumé \"q\".pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(path.to_string(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Open {
+            path: path.to_string(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"].as_str().expect("id").to_string();
+
+    let response = h
+        .client
+        .get(format!("{}/office/docs/{document}/bytes", h.base))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("download");
+    assert_eq!(response.status().as_u16(), 200);
+    let disposition = response
+        .headers()
+        .get("content-disposition")
+        .expect("a content-disposition")
+        .to_str()
+        .expect("ascii header")
+        .to_string();
+    // The uuid prefix is pure attr-char — literal in both forms; the name's own bytes are
+    // what each form is there for.
+    let filename = path.rsplit('/').next().expect("a filename");
+    let ascii = filename.replace(['é', '"'], "_");
+    let encoded = filename
+        .replace('é', "%C3%A9")
+        .replace('"', "%22")
+        .replace(' ', "%20");
+    assert_eq!(
+        disposition,
+        format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"),
+        "{disposition}"
+    );
+}
+
 /// The person answers a staged edit from the document window, not only the Bot: a reject
 /// discards it untouched, an accept applies it to the file and bumps the version — through the
 /// same desk verbs, so a second answer to the same proposal is refused in the desk's words,
@@ -1755,6 +2753,8 @@ async fn a_person_accepts_and_rejects_a_bots_proposal_from_the_window() {
     let computer = Arc::new(StagedBox {
         written: Mutex::new(BTreeMap::new()),
         gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("verdict").await;
@@ -1764,73 +2764,41 @@ async fn a_person_accepts_and_rejects_a_bots_proposal_from_the_window() {
         "/home/bot/office/verdict-{}.pptx",
         uuid::Uuid::now_v7().simple()
     );
-    let deck = include_bytes!("../../opengrok-office/tests/fixtures/betteroffice-demo.pptx");
     computer
         .written
         .lock()
         .expect("written")
-        .insert(deck_path.clone(), deck.to_vec());
+        .insert(deck_path.clone(), DEMO_DECK.to_vec());
 
-    let tools = opengrok_server::office_desk::Tools {
-        state: h.agui.clone(),
-    };
-    let context = opengrok_tools::ToolContext {
-        account_id: ada.account.clone(),
-        coworker_id: coworker,
-        box_id: Some(opengrok_core::id::BoxId::from_stored(box_id.clone())),
-        group_box: None,
-        screen_hold: false,
-        screen_held_in: None,
-        screen: Arc::new(Mutex::new(opengrok_box::Screen::Shared)),
-        thread_id: Some("thread".to_string()),
-        run_id: Some("run".to_string()),
-    };
-    let box_io: &dyn Computer = computer.as_ref();
-    let ask = |ask: opengrok_tools::office_desk::Ask| {
-        let (tools, context, box_id) = (&tools, &context, box_id.clone());
-        async move {
-            match opengrok_tools::office_desk::OfficeDesk::answer(
-                tools, context, box_io, &box_id, ask,
-            )
-            .await
-            {
-                Ok(reply) => reply.result,
-                Err(refused) => panic!("the desk refused: {refused}"),
-            }
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let ask = |ask: opengrok_tools::office_desk::Ask| async {
+        match desk_ask(&tools, &computer, &context, &box_id, ask).await {
+            Ok(reply) => reply.result,
+            Err(refused) => panic!("the desk refused: {refused}"),
         }
     };
     let opened = ask(opengrok_tools::office_desk::Ask::Open {
         path: deck_path.clone(),
+        adopt_kept_copy: false,
     })
     .await;
     let document = opened["document"].as_str().expect("id").to_string();
     // Two proposals on the same words, the Bot's way: grep for a handle, then propose.
     let mut proposals = Vec::new();
     for new_text in ["Files, without the office.", "Office files, at last,"] {
-        let found = ask(opengrok_tools::office_desk::Ask::Grep {
-            document: document.clone(),
-            query: "Office files,".to_string(),
-            case_sensitive: true,
-            story: None,
-            limit: 5,
-            cursor: None,
-        })
-        .await;
-        let handle = found["matches"][0]["match"]
-            .as_str()
-            .expect("a match handle")
-            .to_string();
-        let staged = ask(opengrok_tools::office_desk::Ask::Propose {
-            document: document.clone(),
-            author: "bot".to_string(),
-            note: "retitle".to_string(),
-            edits: vec![opengrok_tools::office_desk::TextEditArg {
-                match_: handle,
-                new_text: new_text.to_string(),
-            }],
-        })
-        .await;
-        proposals.push(staged["proposal"].as_str().expect("proposal").to_string());
+        proposals.push(
+            propose_for(
+                &tools,
+                &computer,
+                &context,
+                &box_id,
+                &document,
+                "Office files,",
+                new_text,
+            )
+            .await,
+        );
     }
 
     let verdict = |who: &Person, proposal: &str, verdict: &str| {
@@ -1854,7 +2822,7 @@ async fn a_person_accepts_and_rejects_a_bots_proposal_from_the_window() {
     assert_eq!(response.status().as_u16(), 200);
     assert_eq!(
         computer.written.lock().expect("written").get(&deck_path),
-        Some(&deck.to_vec()),
+        Some(&DEMO_DECK.to_vec()),
         "a reject leaves the file alone"
     );
     let again = verdict(&ada, &proposals[0], "accept").await.expect("again");
@@ -1875,7 +2843,7 @@ async fn a_person_accepts_and_rejects_a_bots_proposal_from_the_window() {
     assert_eq!(accepted["accepted"], json!(true), "{accepted}");
     assert_ne!(
         computer.written.lock().expect("written").get(&deck_path),
-        Some(&deck.to_vec()),
+        Some(&DEMO_DECK.to_vec()),
         "an accept writes the file"
     );
     let detail = h.get(&ada, &format!("/office/docs/{document}")).await;

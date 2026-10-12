@@ -146,11 +146,12 @@ fn mime_of(kind: opengrok_office::Kind) -> &'static str {
     }
 }
 
-/// The session row the caller may see — theirs — and whether its stored box is still the
-/// coworker scope's live one. `None` does not distinguish: a document of another account's and
-/// no document at all are both "no such document". An orphaned box no longer closes the
-/// document: the version chain holds its bytes, so "dead computer" is a degraded read, not a
-/// deletion.
+/// The session row the caller may see — theirs — and whether its stored box still serves
+/// the document: the scope's current box, or another live computer the provider confirms
+/// (a room's shared box the document was opened on, say). `None` does not distinguish: a
+/// document of another account's and no document at all are both "no such document". An
+/// orphaned box no longer closes the document: the version chain holds its bytes, so "dead
+/// computer" is a degraded read, not a deletion.
 async fn row_for(
     state: &AgUiState,
     headers: &HeaderMap,
@@ -170,10 +171,60 @@ async fn row_for(
         return Err((StatusCode::NOT_FOUND, "no such document").into_response());
     }
     let coworker = CoworkerId::from_stored(row.coworker_id.clone());
-    let box_live = provision::scoped_box_row_for(state, &account, &coworker)
-        .await
-        .is_some_and(|scoped| scoped.box_id == row.box_id);
+    let scoped = provision::scoped_box_row_for(state, &account, &coworker).await;
+    let box_live = row_box_live(state, &row, scoped.as_ref()).await;
     Ok((row, box_live))
+}
+
+/// The provider that can answer for the row's stored box: the scope that claims the box NOW
+/// — a shared computer is recorded under its own scope, not the document's owner's — else,
+/// for a box nothing claims, the document's own scope's kind, which a replaced box almost
+/// always kept. `None` when nobody can name the box's provider.
+pub(crate) async fn provider_for_row_box(
+    state: &AgUiState,
+    row: &opengrok_store::DocSessionRow,
+    scoped: Option<&provision::ScopedBoxRow>,
+) -> Option<std::sync::Arc<dyn opengrok_box::Computer>> {
+    if let Ok(Some((_, _, kind, org_id))) =
+        state.auth.store.scoped_computer_of_box(&row.box_id).await
+    {
+        return provision::provider_for(state, org_id.as_deref(), &kind).await;
+    }
+    let scoped = scoped?;
+    provision::provider_for(state, scoped.org_id.as_deref(), &scoped.kind).await
+}
+
+/// Whether the provider that serves the row's stored box says it is GONE — the desk's
+/// `box_gone` asked of the right provider. `false` when nobody can answer: a missing
+/// answer never moved a document, and a box that cannot be asked is not a dead one.
+async fn row_box_gone(
+    state: &AgUiState,
+    row: &opengrok_store::DocSessionRow,
+    scoped: Option<&provision::ScopedBoxRow>,
+) -> bool {
+    match provider_for_row_box(state, row, scoped).await {
+        Some(provider) => crate::office_desk::box_gone(provider.as_ref(), &row.box_id).await,
+        None => false,
+    }
+}
+
+/// `box_live` for `row_for`: the stored box is the scope's, or a provider can still reach
+/// it. A box nobody can answer for reads as dead — `boxLive` is the client's "the computer
+/// still holds this" signal, and an unanswerable box is not that.
+async fn row_box_live(
+    state: &AgUiState,
+    row: &opengrok_store::DocSessionRow,
+    scoped: Option<&provision::ScopedBoxRow>,
+) -> bool {
+    if let Some(scoped) = scoped
+        && scoped.box_id == row.box_id
+    {
+        return true;
+    }
+    match provider_for_row_box(state, row, scoped).await {
+        Some(provider) => !crate::office_desk::box_gone(provider.as_ref(), &row.box_id).await,
+        None => false,
+    }
 }
 
 /// The newest kept snapshot of a session: `(bytes, version)` straight off the version chain —
@@ -182,7 +233,12 @@ async fn newest_snapshot(
     state: &AgUiState,
     row: &opengrok_store::DocSessionRow,
 ) -> Option<(Vec<u8>, i64)> {
-    let chain = state.auth.store.doc_version_artifacts(&row.id).await.ok()?;
+    let chain = state
+        .auth
+        .store
+        .doc_version_artifacts(&row.account_id, &row.id)
+        .await
+        .ok()?;
     let artifact = chain.first()?;
     let version = artifact.meta["version"].as_i64()?;
     let (_, bytes) = state.auth.store.artifact_bytes(&artifact.id).await.ok()??;
@@ -196,34 +252,6 @@ pub(crate) struct Rehydrated {
     pub bytes: Vec<u8>,
     pub version: i64,
     pub stale: bool,
-}
-
-/// Whether a file is at `path` on the box: `Some(false)` only on the shell's own "no such
-/// file". A probe that could not answer is `None`, never "missing" — writing a snapshot on a
-/// guess could replace a file somebody else put there.
-async fn file_exists(
-    provider: &dyn opengrok_box::Computer,
-    box_id: &str,
-    path: &str,
-) -> Option<bool> {
-    let probe = format!("test -e {}", crate::office_desk::shq(path));
-    match provider.run(box_id, &probe, 10).await {
-        Ok(out) if out.exit_code == 0 => Some(true),
-        Ok(out) if out.exit_code == 1 => Some(false),
-        Ok(out) => {
-            tracing::warn!(
-                box_id,
-                path,
-                exit = out.exit_code,
-                "rehydrate: the existence probe did not answer"
-            );
-            None
-        }
-        Err(error) => {
-            tracing::warn!(%error, box_id, path, "rehydrate: the existence probe could not run");
-            None
-        }
-    }
 }
 
 /// The session's box is not the scope's any more and the scope names a different one: give
@@ -245,6 +273,18 @@ pub(crate) async fn rehydrate(
     let coworker = CoworkerId::from_stored(row.coworker_id.clone());
     let scoped = provision::scoped_box_row_for(state, &account, &coworker).await?;
     if scoped.box_id == row.box_id {
+        return None;
+    }
+    // Only a box the provider itself says is gone is moved off of. A stored box that is
+    // simply not the scope's can also be a LIVE computer — a room's shared box the
+    // document was opened on — and repointing a live box's session strands the file on
+    // it while the row claims the new box has it.
+    if !row_box_gone(state, row, Some(&scoped)).await {
+        tracing::info!(
+            doc = %row.id,
+            box_id = %row.box_id,
+            "rehydrate: the stored box is not gone; the session stays"
+        );
         return None;
     }
     let (doc, to) = (row.id.as_str(), scoped.box_id.as_str());
@@ -272,7 +312,7 @@ pub(crate) async fn rehydrate(
         tracing::warn!(%error, doc, to, "rehydrate: the new box did not wake");
         return None;
     }
-    let recovered = if file_exists(provider.as_ref(), to, &row.path).await? {
+    let recovered = if crate::office_desk::file_exists(provider.as_ref(), to, &row.path).await? {
         let existing = match provider.read_file_bytes(to, &row.path).await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -327,18 +367,18 @@ pub(crate) async fn rehydrate(
 }
 
 /// The row's provider and the file's current bytes — one box read for the bytes and page
-/// routes. A box that will not answer is a 503 with the provider's words, matching how the
-/// box-bound routes fail.
+/// routes. The provider is the one that OWNS the stored box — a shared computer's own
+/// scope, or the document's scope for a box nothing claims — so a document on a live
+/// non-scoped box is read from it, not through the wrong provider. A box that will not
+/// answer is a 503 with the provider's words, matching how the box-bound routes fail.
 async fn bytes_for(
     state: &AgUiState,
     row: &opengrok_store::DocSessionRow,
 ) -> Result<Vec<u8>, Response> {
     let coworker = CoworkerId::from_stored(row.coworker_id.clone());
     let account = opengrok_core::id::AccountId::from_stored(row.account_id.clone());
-    let scoped = provision::scoped_box_row_for(state, &account, &coworker)
-        .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "no such document").into_response())?;
-    let provider = provision::provider_for(state, scoped.org_id.as_deref(), &scoped.kind)
+    let scoped = provision::scoped_box_row_for(state, &account, &coworker).await;
+    let provider = provider_for_row_box(state, row, scoped.as_ref())
         .await
         .ok_or_else(|| {
             (
@@ -426,7 +466,7 @@ async fn versioned_bytes(
     let chain = state
         .auth
         .store
-        .doc_version_artifacts(&row.id)
+        .doc_version_artifacts(&row.account_id, &row.id)
         .await
         .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response())?;
     let Some(artifact) = chain
@@ -515,7 +555,12 @@ async fn detail(
                 .collect()
         })
         .unwrap_or_default();
-    let mut versions: Vec<Value> = match state.auth.store.doc_version_artifacts(&row.id).await {
+    let mut versions: Vec<Value> = match state
+        .auth
+        .store
+        .doc_version_artifacts(&row.account_id, &row.id)
+        .await
+    {
         Ok(chain) => chain
             .iter()
             .map(|artifact| {
@@ -554,6 +599,37 @@ async fn detail(
     .into_response()
 }
 
+/// The `Content-Disposition` a download carries, RFC 6266 + RFC 5987: a conservative ASCII
+/// `filename` for old readers — anything outside printable ASCII, plus `"` and `\`, becomes
+/// `_` — and a `filename*` that percent-encodes every byte outside attr-char so the real
+/// name survives intact. Hand-rolled: pulling a crate in for one header is not worth it.
+fn content_disposition(filename: &str) -> String {
+    let ascii: String = filename
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && (0x20..0x7f).contains(&(c as u32)) && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut encoded = String::new();
+    for byte in filename.as_bytes() {
+        let keep = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#' | b'$' | b'&' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+            );
+        if keep {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
 /// `GET /office/docs/{id}/bytes` — the document's bytes: the box's current file, or the
 /// kept copy of the version `?version=` names.
 async fn bytes(
@@ -578,10 +654,7 @@ async fn bytes(
             mime_of(kind.unwrap_or(opengrok_office::Kind::Docx)).to_string(),
         ),
         (CONTENT_LENGTH, served.bytes.len().to_string()),
-        (
-            CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{filename}\""),
-        ),
+        (CONTENT_DISPOSITION, content_disposition(&filename)),
     ];
     headers.extend(served.headers());
     (axum::response::AppendHeaders(headers), served.bytes).into_response()
@@ -654,3 +727,7 @@ async fn page_png(
             .into_response(),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/office_routes.rs"]
+mod tests;
