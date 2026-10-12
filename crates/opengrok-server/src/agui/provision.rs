@@ -1049,10 +1049,15 @@ pub fn open_own_screen(
     let (state, account, coworker) = (state.clone(), account.clone(), coworker.clone());
     let (box_id, screen) = (box_id.to_string(), screen.clone());
     tokio::spawn(async move {
+        // Every turn asks (`box-screen up` brings back a screen a restart stopped), and only a
+        // screen that came up, or fell back, is news: a note per turn would be noise.
+        let before = computer.screen_progress(&box_id, &screen);
         if let Err(error) = computer.open_screen(&box_id, &screen).await {
             tracing::warn!(%error, "a Bot's own screen did not start");
         }
-        announce_computer(&state, &account, &coworker).await;
+        if computer.screen_progress(&box_id, &screen) != before {
+            announce_computer(&state, &account, &coworker).await;
+        }
     });
 }
 
