@@ -251,8 +251,11 @@ async fn main() -> anyhow::Result<()> {
     let hosted = !opengrok_server::agui::provision::local_docker_allowed();
     // The host settings record exists before the computer so a Docker create can ask it:
     // a publish decided by `egressTunnelEnabled` alone (env unset) still publishes 8790 —
-    // without the wire the in-app toggle could never reach a box.
-    let host_settings = Arc::new(Mutex::new(opengrok_server::host_state::default_settings()));
+    // without the wire the in-app toggle could never reach a box. The saved record, not
+    // the defaults: a restart must not switch off what a person turned on.
+    let host_settings = Arc::new(Mutex::new(
+        opengrok_server::host_state::load_settings(&auth.store).await,
+    ));
     let docker_computer = |settings: &Arc<Mutex<serde_json::Value>>| {
         let settings = settings.clone();
         opengrok_box::DockerComputer::new().with_egress_intent(move || {
@@ -475,6 +478,7 @@ fn load_plugins() -> std::collections::BTreeMap<String, opengrok_plugins::Plugin
                 tracing::info!(
                     plugin = plugin.manifest.name,
                     servers = plugin.mcp.servers.len(),
+                    skills = plugin.skills.len(),
                     trust = ?plugin.trust,
                     "loaded a plugin"
                 );

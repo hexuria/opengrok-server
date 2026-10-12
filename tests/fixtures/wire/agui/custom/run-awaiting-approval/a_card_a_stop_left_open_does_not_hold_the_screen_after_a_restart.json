@@ -2,12 +2,12 @@
   "type": "CUSTOM",
   "timestamp": 100,
   "name": "run-awaiting-approval",
-  "threadId": "gateway-cw_0199bb4e-0000-7000-8000-000000000001",
+  "threadId": "thr-a-0199bb4e-0000-7000-8000-000000000001",
   "runId": "0199bb4e-0000-7000-8000-000000000002",
   "callId": "form-0199bb4e000070008000000000000003",
   "tool": "request_user_form",
   "arguments": {
-    "title": "Log in to Facebook",
+    "title": "Google account",
     "instruction": "",
     "fields": [
       {
@@ -25,13 +25,13 @@
         "secret": false
       }
     ],
-    "liveHost": "www.facebook.com"
+    "liveHost": "accounts.google.com"
   },
   "reason": "user-form",
   "why": "Waiting for you",
   "entryId": "e_0199bb4e-0000-7000-8000-000000000004",
   "formRequest": {
-    "title": "Log in to Facebook",
+    "title": "Google account",
     "instruction": "",
     "fields": [
       {
@@ -49,6 +49,6 @@
         "secret": false
       }
     ],
-    "liveHost": "www.facebook.com"
+    "liveHost": "accounts.google.com"
   }
 }

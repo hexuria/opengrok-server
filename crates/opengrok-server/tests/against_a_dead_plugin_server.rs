@@ -153,6 +153,8 @@ fn plugin(name: &str, url: &str) -> Plugin {
                 },
             )]),
         },
+        skills: BTreeMap::new(),
+        files: BTreeMap::new(),
         trust: Trust::Verified,
     }
 }

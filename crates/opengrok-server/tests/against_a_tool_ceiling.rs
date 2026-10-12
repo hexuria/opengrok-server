@@ -154,6 +154,8 @@ fn plugin(name: &str, description: &str, url: &str, headers: &[(&str, &str)]) ->
                 },
             )]),
         },
+        skills: BTreeMap::new(),
+        files: BTreeMap::new(),
         trust: Trust::Verified,
     }
 }

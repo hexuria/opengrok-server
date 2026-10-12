@@ -74,9 +74,9 @@ pub struct ToolContext {
     /// The conversation whose form or handoff holds the screen, when the hold is tied to a run.
     /// Named in the refusal: a turn held by another conversation cannot see why otherwise.
     pub screen_held_in: Option<String>,
-    /// Which of its computer's screens this Bot uses (#376): the shared one, or its own when it
-    /// was told to use one. One cell for every copy of the context a turn makes, so a switch
-    /// (`use_own_screen`) is where the turn's next screen action lands.
+    /// Which of its computer's screens this Bot uses (#376): its own on a computer it shares, the
+    /// one screen on a computer of its own or a group's. One cell for every copy of the context a
+    /// turn makes.
     pub screen: Arc<std::sync::Mutex<Screen>>,
     /// The thread this turn is spoken in — an office export's artifact is attached under it so
     /// the transcript can draw the file the bot delivered. `None` where no thread scopes the
@@ -872,6 +872,10 @@ impl Computer for NoComputer {
         Ok("absent".to_string())
     }
 }
+
+/// Why a call whose arguments are not a JSON object (malformed JSON, an array, a number) is refused.
+pub const NOT_AN_OBJECT: &str = "your arguments were not a JSON object (malformed JSON, or not \
+     an object); call the tool again with one JSON object of its parameters";
 
 /// What a Bot with no computer is told when it calls a computer tool anyway.
 pub const NO_COMPUTER: &str =
@@ -1755,7 +1759,7 @@ impl Executor {
             computer_desk::ROW => (
                 computer_desk::ROW_LABEL,
                 "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and \
-                 moves it to a screen of its own.",
+                 looks at your other Bots' screens.",
             ),
             computer_desk::COMPUTER_STATUS => (
                 "Computer status",
@@ -1767,9 +1771,9 @@ impl Executor {
                 "Shuts the Bot's computer down, keeping its files.",
             ),
             computer_desk::RESTART_COMPUTER => ("Restart computer", "Restarts the Bot's computer."),
-            computer_desk::USE_OWN_SCREEN => (
-                "Use its own screen",
-                "Moves the Bot to a screen of its own on a shared computer, or back to the shared one.",
+            computer_desk::LOOK_AT_SCREEN => (
+                "Look at another Bot's screen",
+                "Shows the Bot a picture of another of your Bots' screens, without touching it.",
             ),
             computer_desk::RESET_COMPUTER => (
                 "Reset computer",
@@ -2132,6 +2136,11 @@ impl Executor {
     /// is never re-judged), or when no active policy is attached. Then the ladder in
     /// `review::combine`, which is pure and table-tested. Only `Outcome::Run` reaches a dispatch.
     pub async fn execute(&self, context: &ToolContext, call: &ToolCall) -> ToolResult {
+        // Text that would not parse arrives as null. Run with defaults it is a different call
+        // from the one the model meant, so it is refused before identity, gates and cards.
+        if !call.arguments.is_object() {
+            return ToolResult::refused(&call.id, NOT_AN_OBJECT);
+        }
         // The identity rule, applied once, before anything reads an argument — including the judge
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
@@ -3026,7 +3035,7 @@ pub fn overwrite_identity(arguments: &Value, context: &ToolContext) -> Value {
     let mut object = match arguments {
         Value::Object(map) => map.clone(),
         // A non-object argument carries no identity to overwrite, but must still not be able to
-        // smuggle one — it is replaced by an object with only ours.
+        // smuggle one — it is replaced by an object with only ours. `execute` refuses it first.
         _ => serde_json::Map::new(),
     };
 

@@ -506,34 +506,15 @@ pub(super) async fn put_tool_mode(
     }
 }
 
-/// One installed plugin skill and whether it is on for this Bot.
+/// One installed plugin skill and whether it is on for this Bot (`turn::skill_rows`).
 async fn plugin_skill_rows(
     state: &AgUiState,
     account: &AccountId,
     bot: &CoworkerId,
 ) -> Result<Vec<Value>, Response> {
     let store = &state.auth.store;
-    let installs = opengrok_integrations::installed::skills_for_turn(store, account, bot)
-        .await
-        .map_err(|error| unavailable(&error))?;
-    let policy = store
-        .policy_for(account, bot)
-        .await
-        .map_err(|error| unavailable(&error))?;
-    let mut rows = Vec::new();
-    for (plugin, _revision, skills) in installs {
-        for (skill, text) in skills {
-            let front = opengrok_plugins::split_frontmatter(&text);
-            rows.push(json!({
-                "plugin": plugin,
-                "skill": skill,
-                "description": front.description.unwrap_or_default(),
-                "on": !opengrok_policy::skill_switched_off(&policy, &plugin, &skill),
-                "body": front.body,
-            }));
-        }
-    }
-    Ok(rows)
+    let rows = opengrok_integrations::turn::skill_rows(store, account, bot, &state.plugins);
+    rows.await.map_err(|error| unavailable(&error))
 }
 
 /// `GET /coworkers/{id}/plugin-skills`: every installed plugin's skills with their switch for this
@@ -750,31 +731,4 @@ pub(super) async fn put_own_computer(
     let (_, _, _, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
     Json(json!({ "ownComputer": mode == opengrok_core::coworker::BoxMode::Dedicated }))
         .into_response()
-}
-
-#[derive(serde::Deserialize)]
-pub(super) struct OwnScreen {
-    own: bool,
-}
-
-/// `PUT /coworkers/{id}/computer/screen` `{own}`: the Computer pane's switch between a screen of
-/// its own on the computer it shares and the shared screen (#376; `provision::set_own_screen`).
-/// Answers `{screen: "own" | "shared"}`.
-pub(super) async fn put_own_screen(
-    State(state): State<AgUiState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    body: Result<Json<OwnScreen>, JsonRejection>,
-) -> Response {
-    let (account, bot) = match owner(&state, &headers, id).await {
-        Ok(found) => found,
-        Err(refused) => return refused,
-    };
-    let Ok(Json(OwnScreen { own })) = body else {
-        return refusal(422, "send {\"own\"}");
-    };
-    match super::provision::set_own_screen(&state, &account, &bot, own).await {
-        Ok(screen) => Json(json!({ "screen": screen.word() })).into_response(),
-        Err((status, message)) => refusal(status.as_u16(), &message),
-    }
 }

@@ -219,6 +219,16 @@ async fn the_record_reads_back_whole_and_a_patch_keeps_the_rest() {
         "wanted is not available: no coworker was named and this host has no computer"
     );
 
+    // The next process starts from the saved record: a restart does not switch the tunnel back
+    // off, and the keys nobody set still come from the defaults.
+    let reloaded = opengrok_server::host_state::load_settings(&h.store).await;
+    assert_eq!(
+        reloaded["egressTunnelEnabled"],
+        json!(true),
+        "the write survives a restart"
+    );
+    assert_eq!(reloaded["hasSeenOnboarding"], json!(true));
+
     let (_, again) = h.get(Some(&access), "?coworker=cw_nobody").await;
     assert_eq!(again["egressTunnelEnabled"], json!(true), "the write stuck");
     assert_eq!(

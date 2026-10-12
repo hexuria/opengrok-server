@@ -1508,3 +1508,12 @@ create table if not exists doc_session (
     unique (box_id, path)
 );
 create index if not exists doc_session_coworker_idx on doc_session (account_id, coworker_id);
+
+-- The host settings record (`GET/PUT /ag-ui/host-settings`), kept so a restart does not quietly
+-- undo what a person switched — the route-traffic switch was lost on every restart while it
+-- lived in memory only. One host, one row; the record's shape is the server's (`default_settings`).
+create table if not exists host_settings (
+    id             text   primary key check (id = 'host'),
+    record         jsonb  not null,
+    updated_at_ms  bigint not null
+);

@@ -97,10 +97,10 @@ pub const TOOL_GROUPS: &[(&str, &[&str])] = &[
         "manage_computer",
         &[
             "computer_status",
+            "look_at_screen",
             "start_computer",
             "shutdown_computer",
             "restart_computer",
-            "use_own_screen",
             "reset_computer",
             "update_computer",
             "set_network",
@@ -440,6 +440,26 @@ pub fn names_plugin(
     };
     let both = ceiling.tools.intersect(&grant.profile);
     &ceiling.coworker == coworker && both.whole_plugins().any(|named| named == plugin)
+}
+
+/// Whether a plugin in this server's own folder (`OG_PLUGINS_DIR`) is switched on: what the
+/// ceiling and grant BOTH admit takes in every tool it brings (`ToolSet::allows_all_of`), on a live
+/// grant for this coworker. The switch its ceiling row shows, which follows "all" because the
+/// operator put the plugin there, unlike an account's install ([`names_plugin`]).
+pub fn admits_plugin(
+    principal: &AccountId,
+    coworker: &CoworkerId,
+    plugin: &str,
+    context: &Context,
+) -> bool {
+    if !decide(principal, coworker, Action::UseCoworker, context).is_allowed() {
+        return false;
+    }
+    let (Some(grant), Some(ceiling)) = (&context.grant, &context.ceiling) else {
+        return false;
+    };
+    let both = ceiling.tools.intersect(&grant.profile);
+    &ceiling.coworker == coworker && both.allows_all_of(plugin)
 }
 
 /// The ceiling entry that switches one plugin skill off for a Bot: `-skill:<plugin>.<skill>`.

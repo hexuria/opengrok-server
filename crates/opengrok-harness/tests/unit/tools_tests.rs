@@ -106,6 +106,52 @@ fn unparseable_arguments_still_produce_a_call_to_refuse() {
     assert!(calls[0].arguments.is_null());
 }
 
+/// A tool that takes nothing is called with no argument text at all. That is `{}`, not the
+/// unparseable `null` above, which once went back to the provider and failed the next round.
+#[test]
+fn a_call_with_no_argument_text_has_empty_object_arguments() {
+    let events = events_for(vec![
+        ModelDelta::ToolCallStart {
+            id: "c1".to_string(),
+            name: "bir_list_apps".to_string(),
+        },
+        ModelDelta::ToolCallEnd {
+            id: "c1".to_string(),
+        },
+    ]);
+    let calls = collect_tool_calls(&events);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].arguments, serde_json::json!({}));
+}
+
+fn one_call_with_text(text: &str) -> Vec<ToolCall> {
+    collect_tool_calls(&events_for(vec![
+        ModelDelta::ToolCallStart {
+            id: "c1".to_string(),
+            name: "bir_list_apps".to_string(),
+        },
+        ModelDelta::ToolCallArgs {
+            id: "c1".to_string(),
+            delta: text.to_string(),
+        },
+        ModelDelta::ToolCallEnd {
+            id: "c1".to_string(),
+        },
+    ]))
+}
+
+/// Only JSON's own whitespace (space, tab, newline, carriage return) counts as "no text". A
+/// no-break space is not JSON whitespace: that text does not parse, so it is `null` like any
+/// other unparseable text.
+#[test]
+fn only_json_whitespace_counts_as_no_argument_text() {
+    assert_eq!(
+        one_call_with_text(" \t\r\n")[0].arguments,
+        serde_json::json!({})
+    );
+    assert!(one_call_with_text("\u{a0}")[0].arguments.is_null());
+}
+
 #[test]
 fn a_run_with_no_tool_calls_yields_none() {
     let events = events_for(vec![ModelDelta::Text("just talking".to_string())]);
