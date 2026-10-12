@@ -143,6 +143,21 @@ async fn create(
     let id = format!("art_{}", uuid::Uuid::now_v7());
     let at_ms = now_ms();
 
+    // The office version chain's keys are the server's alone: `docSessionId` and `version`
+    // mark a session's kept copies, `via` says which verb kept them, `exportPath` lets the
+    // owning session rewrite a file. A client naming them would graft its upload onto a
+    // document's chain — or claim a path export then refuses to protect — so they are
+    // dropped here, before the row exists; other meta a client sends round-trips as always.
+    let meta = match request.meta {
+        Some(serde_json::Value::Object(mut map)) => {
+            for key in ["docSessionId", "version", "via", "exportPath"] {
+                map.remove(key);
+            }
+            serde_json::Value::Object(map)
+        }
+        other => other.unwrap_or(json!({})),
+    };
+
     let row = ArtifactRow {
         id: id.clone(),
         account_id: account.as_str().to_string(),
@@ -154,7 +169,7 @@ async fn create(
         run_id: request.run_id,
         step_index: request.step_index,
         thread_id: request.thread_id,
-        meta: request.meta.unwrap_or(json!({})),
+        meta,
         created_at_ms: at_ms,
         deleted_at_ms: None,
     };
