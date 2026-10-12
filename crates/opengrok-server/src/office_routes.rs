@@ -92,7 +92,7 @@ async fn proposal_verdict(
             Some(recovered) => recovered,
             None => {
                 return refusal_response(
-                    "this document's computer is gone; it can be read from its kept copy but                      not changed"
+                    "this document's computer is gone; it can be read from its kept copy but not changed"
                         .to_string(),
                 );
             }
