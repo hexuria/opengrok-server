@@ -71,6 +71,26 @@ pub fn default_settings() -> serde_json::Value {
     })
 }
 
+/// The record this process starts with: the saved one's keys over today's defaults, so a key a
+/// newer server added is still in the record and one a person set is still theirs. A store that
+/// cannot answer starts from the defaults and says so — refusing to boot over a preference would
+/// be the wrong trade.
+pub async fn load_settings(store: &opengrok_store::PgStore) -> serde_json::Value {
+    let mut record = default_settings();
+    match store.host_settings().await {
+        Ok(Some(serde_json::Value::Object(saved))) => {
+            if let Some(merged) = record.as_object_mut() {
+                merged.extend(saved);
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "host settings: the saved record could not be read; starting from the defaults");
+        }
+    }
+    record
+}
+
 /// Grok host: `process.env.SAND_EGRESS_TUNNEL_ENABLED === "1"`. OpenGrok also honors
 /// `OG_EGRESS_TUNNEL_ENABLED`. The in-app toggle is `egressTunnelEnabled`. Any one is
 /// host intent — not yet "the laptop client is attached".
