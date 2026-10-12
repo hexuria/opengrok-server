@@ -1034,7 +1034,7 @@ impl DockerComputer {
         };
         let bot = safe_bot(bot)?;
         let key = (box_id.to_string(), bot.to_string());
-        self.note_screen(&key, Some(ScreenProgress::Starting));
+        self.begin_screen(&key, screen);
         let own = match self
             .run(box_id, &format!("box-screen up '{bot}'"), 30)
             .await
@@ -1044,6 +1044,16 @@ impl DockerComputer {
         };
         self.note_screen(&key, progress_of(&own));
         or_main_screen(own)
+    }
+
+    /// A `box-screen up` is about to run. Only a screen not up yet is starting: every screenshot,
+    /// click and page asks again (it brings back a screen a restart stopped), and marking an up
+    /// screen as starting for each of those had the pane read "Starting Ada's screen…" every
+    /// other poll while the screen worked.
+    fn begin_screen(&self, key: &(String, String), screen: &crate::Screen) {
+        if self.screen_progress(&key.0, screen) == ScreenProgress::NotAsked {
+            self.note_screen(key, Some(ScreenProgress::Starting));
+        }
     }
 
     /// Keep what a `box-screen up` came to for `screen_progress`; `None` forgets it, so a failure
@@ -1449,6 +1459,28 @@ mod tests {
         assert_eq!(
             docker.screen_progress("box_a", &own),
             ScreenProgress::NotAsked
+        );
+    }
+
+    /// A screen already up stays up while it is asked again (the pane's screenshot does every two
+    /// seconds): reading it as starting meanwhile flickered the pane's cover on a working screen.
+    #[test]
+    fn asking_again_for_a_screen_that_is_up_does_not_make_it_starting() {
+        let docker = DockerComputer::new();
+        let own = crate::Screen::Own("cw_1".into());
+        let key = ("box_a".to_string(), "cw_1".to_string());
+        docker.begin_screen(&key, &own);
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::Starting,
+            "first ask"
+        );
+        docker.note_screen(&key, Some(ScreenProgress::Given));
+        docker.begin_screen(&key, &own);
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::Given,
+            "asked again"
         );
     }
 
