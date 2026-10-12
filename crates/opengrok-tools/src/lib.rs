@@ -853,6 +853,10 @@ impl Computer for NoComputer {
     }
 }
 
+/// Why a call whose arguments are not a JSON object (malformed JSON, an array, a number) is refused.
+pub const NOT_AN_OBJECT: &str = "your arguments were not a JSON object (malformed JSON, or not \
+     an object); call the tool again with one JSON object of its parameters";
+
 /// What a Bot with no computer is told when it calls a computer tool anyway.
 pub const NO_COMPUTER: &str =
     "This Bot has no computer, so it cannot run computer tools. Its plugins' tools still work.";
@@ -2033,6 +2037,11 @@ impl Executor {
     /// is never re-judged), or when no active policy is attached. Then the ladder in
     /// `review::combine`, which is pure and table-tested. Only `Outcome::Run` reaches a dispatch.
     pub async fn execute(&self, context: &ToolContext, call: &ToolCall) -> ToolResult {
+        // Text that would not parse arrives as null. Run with defaults it is a different call
+        // from the one the model meant, so it is refused before identity, gates and cards.
+        if !call.arguments.is_object() {
+            return ToolResult::refused(&call.id, NOT_AN_OBJECT);
+        }
         // The identity rule, applied once, before anything reads an argument — including the judge
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
@@ -2892,7 +2901,7 @@ pub fn overwrite_identity(arguments: &Value, context: &ToolContext) -> Value {
     let mut object = match arguments {
         Value::Object(map) => map.clone(),
         // A non-object argument carries no identity to overwrite, but must still not be able to
-        // smuggle one — it is replaced by an object with only ours.
+        // smuggle one — it is replaced by an object with only ours. `execute` refuses it first.
         _ => serde_json::Map::new(),
     };
 
