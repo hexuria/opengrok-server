@@ -2944,9 +2944,9 @@ async fn an_unknown_proposal_gets_a_json_404() {
     assert!(refused["message"].is_string(), "{refused}");
 }
 
-/// The verdict writes the file BEFORE it claims nothing — no: the row claims first, so a
-/// failed write unwinds the claim and answers the desk's words as a 503 JSON refusal, the
-/// file and version exactly as they were.
+/// The verdict claims the version BEFORE the write: a write the box refuses unwinds the
+/// claim and answers the desk's words as a 503 JSON refusal, the file and version exactly
+/// as they were.
 #[tokio::test]
 async fn a_failed_write_reverts_the_claimed_version_and_answers_503() {
     let database_url = database_or_skip!();
