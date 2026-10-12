@@ -1707,6 +1707,31 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
         .expect("re-export of the session's own copy");
     assert_eq!(again.result["path"].as_str().unwrap(), copy_path);
 
+    // The conversation's file list holds what the reply handed over — the exports — and not
+    // the session's own versions, which the document's chain keeps instead.
+    let listed = h
+        .store
+        .artifacts_for_thread(ada.account.as_str(), "thread")
+        .await
+        .expect("the thread's artifacts");
+    assert!(!listed.is_empty(), "the exports are on the thread");
+    for row in &listed {
+        assert_eq!(
+            row.meta["via"], "office_export",
+            "only exports are filed under the thread: {}",
+            row.meta
+        );
+    }
+    let chain = h
+        .store
+        .doc_version_artifacts(&document)
+        .await
+        .expect("the chain");
+    assert!(
+        chain.iter().any(|row| row.meta["via"] == "office_open"),
+        "the open's version is still in the document's chain"
+    );
+
     // A file the session never made still refuses — the inbox deck itself, and a stranger's.
     for path in [deck_path.as_str(), foreign_path.as_str()] {
         let refused = match export(path).await {

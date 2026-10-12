@@ -383,8 +383,11 @@ impl Tools {
     }
 
     /// Store `bytes` as an artifact of `via` for this session — every mutation leaves one, so
-    /// a person can always return to a known copy. Export's is attached under the thread so
-    /// the transcript draws it on the bot's reply.
+    /// a person can always return to a known copy. Only an export is filed under the turn's
+    /// thread and run: it is the file the reply hands the person, and the frame that carries
+    /// its `artifactId` puts it on that reply. The versions in between belong to the
+    /// document's chain (`doc_version_artifacts` reads them by session) — filed under the
+    /// thread too, they filled the conversation's file list with every intermediate copy.
     #[allow(clippy::too_many_arguments)]
     async fn snapshot(
         &self,
@@ -408,6 +411,10 @@ impl Tools {
         if let Some(export_path) = export_path {
             meta["exportPath"] = json!(export_path);
         }
+        let (run_id, thread_id) = match export_path {
+            Some(_) => (context.run_id.clone(), context.thread_id.clone()),
+            None => (None, None),
+        };
         let artifact = ArtifactRow {
             id: id.clone(),
             account_id: context.account_id.to_string(),
@@ -416,9 +423,9 @@ impl Tools {
             filename: filename.to_string(),
             size_bytes: bytes.len() as i64,
             recipe_id: None,
-            run_id: context.run_id.clone(),
+            run_id,
             step_index: None,
-            thread_id: context.thread_id.clone(),
+            thread_id,
             meta,
             created_at_ms: crate::now_ms(),
             deleted_at_ms: None,
