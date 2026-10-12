@@ -887,7 +887,8 @@ fn the_policys_tool_groups_are_the_groups_tools_lists() {
         [
             (routine::ROW, routine::TOOLS.to_vec()),
             (plugin_desk::ROW, plugin_desk::TOOLS.to_vec()),
-            (computer_desk::ROW, computer_desk::TOOLS.to_vec())
+            (computer_desk::ROW, computer_desk::TOOLS.to_vec()),
+            (office_desk::ROW, office_desk::TOOLS.to_vec())
         ]
     );
 }

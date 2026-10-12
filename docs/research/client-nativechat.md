@@ -99,6 +99,9 @@ What a run produces and what a person attaches.
 | `/artifacts` | POST | `artifacts.rs:26` | the stored artifact's record (no bytes); 25 MiB cap | *unverified* |
 | `/artifacts/{id}` | GET DELETE | `artifacts.rs:36` | GET: the record; DELETE: removes it; the same 404 for missing, deleted or not yours | *unverified* |
 | `/artifacts/{id}/bytes` | GET | `artifacts.rs:37` | the bytes; the same 404 rule | *unverified* |
+| `/office/docs/{id}` | GET | `office_routes.rs:30` | `{docId, path, kind, version, contentSha256, proposals, versions, boxLive, createdAt, updatedAt}` — the session as the document window wants it: the kept-version chain the picker lists, the proposals still pending, `boxLive` whether the box can answer | NativeChat `src/opengrok/client.rs` `office_doc` (the document window), development verification |
+| `/office/docs/{id}/bytes` | GET | `office_routes.rs:31` | the document's bytes: the box's current file, or the kept copy `?version=` names; `X-Office-Version` always, `X-Office-Stale` when a kept snapshot stands in for a box that cannot answer | NativeChat `src/opengrok/client.rs` `office_doc_bytes` (Save a copy), development verification |
+| `/office/docs/{id}/pages/{*page}` | GET | `office_routes.rs:32` | one rendered page/slide/used-range PNG; the wildcard arrives as `N.png`, one-based; `?version=` renders a kept version; `X-Office-Pages` the count (a 422 past the end carries it), `X-Office-Version`/`X-Office-Stale` as `/bytes` | NativeChat `src/opengrok/client.rs` `office_doc_page` (the window's pager), development verification |
 
 ## MCP and skills
 
