@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use opengrok_core::id::CoworkerId;
 use opengrok_office::Session;
@@ -30,7 +30,105 @@ pub fn router(state: AgUiState) -> Router {
         .route("/office/docs/{id}", get(detail))
         .route("/office/docs/{id}/bytes", get(bytes))
         .route("/office/docs/{id}/pages/{*page}", get(page_png))
+        .route(
+            "/office/docs/{id}/proposals/{proposal}/{verdict}",
+            post(proposal_verdict),
+        )
         .with_state(state)
+}
+
+/// `POST /office/docs/{id}/proposals/{proposal}/accept` (or `/reject`) — the person's own
+/// answer to an edit the Bot staged, from the document window. Answered by the same desk verbs
+/// the Bot's `office_accept`/`office_reject` call, as the document's account and coworker on
+/// the scope's live box, so a person's accept is checked against the fresh file, re-based on
+/// drift and snapshotted exactly like the Bot's — and refused in the same words, as a 409
+/// carrying the desk's `{code, message}`.
+///
+/// No turn scopes it, so nothing is filed under a thread and no frame is streamed: the window
+/// that asked re-reads the detail, and the Bot sees the proposal's new status on its next read.
+/// A document whose box was replaced gets it back first; one with no live box left cannot
+/// take an accept, which writes the file.
+async fn proposal_verdict(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path((id, proposal, verdict)): Path<(String, String, String)>,
+) -> Response {
+    use opengrok_tools::office_desk::{Ask, OfficeDesk as _};
+    let Some(account) = account_from_bearer(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let (row, box_live) = match row_for(&state, &headers, &id).await {
+        Ok(found) => found,
+        Err(response) => return response,
+    };
+    let ask = match verdict.as_str() {
+        "accept" => Ask::Accept {
+            document: row.id.clone(),
+            proposal,
+            tracked: false,
+        },
+        "reject" => Ask::Reject {
+            document: row.id.clone(),
+            proposal,
+        },
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    if !box_live && rehydrate(&state, &row).await.is_none() {
+        return (
+            StatusCode::CONFLICT,
+            "this document's computer is gone; it can be read from its kept copy but not changed",
+        )
+            .into_response();
+    }
+    let coworker = CoworkerId::from_stored(row.coworker_id.clone());
+    let Some(scoped) = provision::scoped_box_row_for(&state, &account, &coworker).await else {
+        return (StatusCode::CONFLICT, "this document's Bot has no computer").into_response();
+    };
+    let Some(provider) =
+        provision::provider_for(&state, scoped.org_id.as_deref(), &scoped.kind).await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no provider for the document's computer",
+        )
+            .into_response();
+    };
+    if let Err(error) = provider
+        .wake(&scoped.box_id, std::time::Duration::from_secs(60))
+        .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("the computer could not be woken: {error}"),
+        )
+            .into_response();
+    }
+    let context = opengrok_tools::ToolContext {
+        account_id: account,
+        coworker_id: coworker,
+        box_id: Some(opengrok_core::id::BoxId::from_stored(scoped.box_id.clone())),
+        group_box: None,
+        screen_hold: false,
+        screen_held_in: None,
+        screen: std::sync::Arc::new(std::sync::Mutex::new(opengrok_box::Screen::Shared)),
+        thread_id: None,
+        run_id: None,
+    };
+    let desk = crate::office_desk::Tools {
+        state: state.clone(),
+    };
+    match desk
+        .answer(&context, provider.as_ref(), &scoped.box_id, ask)
+        .await
+    {
+        Ok(reply) => Json(reply.result).into_response(),
+        Err(refusal) => (
+            StatusCode::CONFLICT,
+            [(CONTENT_TYPE, "application/json")],
+            refusal,
+        )
+            .into_response(),
+    }
 }
 
 /// The MIME a kind's bytes are served as.

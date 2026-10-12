@@ -1744,3 +1744,146 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
         );
     }
 }
+
+/// The person answers a staged edit from the document window, not only the Bot: a reject
+/// discards it untouched, an accept applies it to the file and bumps the version — through the
+/// same desk verbs, so a second answer to the same proposal is refused in the desk's words,
+/// and another account's request is "no such document".
+#[tokio::test]
+async fn a_person_accepts_and_rejects_a_bots_proposal_from_the_window() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("verdict").await;
+    let eve = h.person("verdict-eve").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+    let deck_path = format!(
+        "/home/bot/office/verdict-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    let deck = include_bytes!("../../opengrok-office/tests/fixtures/betteroffice-demo.pptx");
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(deck_path.clone(), deck.to_vec());
+
+    let tools = opengrok_server::office_desk::Tools {
+        state: h.agui.clone(),
+    };
+    let context = opengrok_tools::ToolContext {
+        account_id: ada.account.clone(),
+        coworker_id: coworker,
+        box_id: Some(opengrok_core::id::BoxId::from_stored(box_id.clone())),
+        group_box: None,
+        screen_hold: false,
+        screen_held_in: None,
+        screen: Arc::new(Mutex::new(opengrok_box::Screen::Shared)),
+        thread_id: Some("thread".to_string()),
+        run_id: Some("run".to_string()),
+    };
+    let box_io: &dyn Computer = computer.as_ref();
+    let ask = |ask: opengrok_tools::office_desk::Ask| {
+        let (tools, context, box_id) = (&tools, &context, box_id.clone());
+        async move {
+            match opengrok_tools::office_desk::OfficeDesk::answer(
+                tools, context, box_io, &box_id, ask,
+            )
+            .await
+            {
+                Ok(reply) => reply.result,
+                Err(refused) => panic!("the desk refused: {refused}"),
+            }
+        }
+    };
+    let opened = ask(opengrok_tools::office_desk::Ask::Open {
+        path: deck_path.clone(),
+    })
+    .await;
+    let document = opened["document"].as_str().expect("id").to_string();
+    // Two proposals on the same words, the Bot's way: grep for a handle, then propose.
+    let mut proposals = Vec::new();
+    for new_text in ["Files, without the office.", "Office files, at last,"] {
+        let found = ask(opengrok_tools::office_desk::Ask::Grep {
+            document: document.clone(),
+            query: "Office files,".to_string(),
+            case_sensitive: true,
+            story: None,
+            limit: 5,
+            cursor: None,
+        })
+        .await;
+        let handle = found["matches"][0]["match"]
+            .as_str()
+            .expect("a match handle")
+            .to_string();
+        let staged = ask(opengrok_tools::office_desk::Ask::Propose {
+            document: document.clone(),
+            author: "bot".to_string(),
+            note: "retitle".to_string(),
+            edits: vec![opengrok_tools::office_desk::TextEditArg {
+                match_: handle,
+                new_text: new_text.to_string(),
+            }],
+        })
+        .await;
+        proposals.push(staged["proposal"].as_str().expect("proposal").to_string());
+    }
+
+    let verdict = |who: &Person, proposal: &str, verdict: &str| {
+        h.client
+            .post(format!(
+                "{}/office/docs/{document}/proposals/{proposal}/{verdict}",
+                h.base
+            ))
+            .header("authorization", format!("Bearer {}", who.token))
+            .send()
+    };
+
+    // Another account cannot answer it, and is not told the document exists.
+    let response = verdict(&eve, &proposals[0], "accept").await.expect("eve");
+    assert_eq!(response.status().as_u16(), 404);
+
+    // The person rejects the first: the file is untouched and the proposal is no longer pending.
+    let response = verdict(&ada, &proposals[0], "reject")
+        .await
+        .expect("reject");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        computer.written.lock().expect("written").get(&deck_path),
+        Some(&deck.to_vec()),
+        "a reject leaves the file alone"
+    );
+    let again = verdict(&ada, &proposals[0], "accept").await.expect("again");
+    assert_eq!(
+        again.status().as_u16(),
+        409,
+        "a rejected proposal is not pending"
+    );
+    let refused: Value = again.json().await.expect("the desk's refusal");
+    assert_eq!(refused["code"], "STALE_PROPOSAL", "{refused}");
+
+    // And accepts the second: the file changes on the computer and the version moves.
+    let response = verdict(&ada, &proposals[1], "accept")
+        .await
+        .expect("accept");
+    assert_eq!(response.status().as_u16(), 200);
+    let accepted: Value = response.json().await.expect("the accept");
+    assert_eq!(accepted["accepted"], json!(true), "{accepted}");
+    assert_ne!(
+        computer.written.lock().expect("written").get(&deck_path),
+        Some(&deck.to_vec()),
+        "an accept writes the file"
+    );
+    let detail = h.get(&ada, &format!("/office/docs/{document}")).await;
+    assert_eq!(detail["version"], json!(1), "{detail}");
+
+    // A verb that is neither is no route at all.
+    let response = verdict(&ada, &proposals[1], "approve")
+        .await
+        .expect("approve");
+    assert_eq!(response.status().as_u16(), 404);
+}
