@@ -336,19 +336,22 @@ async fn stage(
                 created_at_ms: now,
                 updated_at_ms: now,
             };
+            // A lost insert race leaves the winner's row to re-read. Neither stored nor
+            // re-readable means there is no session, and handing back `fresh` would let the
+            // turn key proposals on a row the table never held.
             match store.put_doc_session(&fresh).await {
                 Ok(()) => fresh,
-                Err(_) => store
+                Err(error) => store
                     .doc_session_by_path(box_id, &path)
                     .await
                     .ok()
                     .flatten()
-                    .unwrap_or(fresh),
+                    .ok_or_else(|| format!("its document session could not be stored ({error})"))?,
             }
         }
     };
     if row.content_sha256 != hash {
-        let _ = store
+        store
             .save_doc_session(
                 &row.id,
                 row.version,
@@ -357,7 +360,8 @@ async fn stage(
                 &row.proposals,
                 now,
             )
-            .await;
+            .await
+            .map_err(|error| format!("its document session could not be updated ({error})"))?;
         row.content_sha256 = hash;
         row.version += 1;
     }
