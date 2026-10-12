@@ -147,7 +147,6 @@ struct Harness {
     agui: AgUiState,
     base: String,
     token: String,
-    computer: Arc<ScreenBox>,
     client: reqwest::Client,
 }
 
@@ -237,7 +236,6 @@ async fn harness(database_url: &str) -> Harness {
         agui,
         base,
         token,
-        computer,
         client: reqwest::Client::new(),
     }
 }
@@ -270,17 +268,6 @@ impl Harness {
         res.json().await.expect("computer json")
     }
 
-    async fn listen(&self) -> reqwest::Response {
-        let res = self
-            .client
-            .get(format!("{}/ag-ui/events", self.base))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .expect("events");
-        assert_eq!(res.status().as_u16(), 200);
-        res
-    }
 }
 
 impl Harness {
