@@ -21,6 +21,7 @@ path = "src/main.rs"
 opengrok-server = { path = "../opengrok-server", default-features = false }
 opengrok-harness = { path = "../opengrok-harness" }
 opengrok-box = { path = "../opengrok-box" }
+opengrok-screen-ssh = { path = "../opengrok-screen-ssh" }
 opengrok-plugins = { path = "../opengrok-plugins" }
 serde_json.workspace = true
 opengrok-store = { path = "../opengrok-store" }

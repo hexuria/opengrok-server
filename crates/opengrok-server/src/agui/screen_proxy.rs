@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId};
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ use crate::agui::AgUiState;
 use crate::auth::TokenMinter;
 pub use crate::seams::screen_tickets_due;
 pub use opengrok_box::viewer::public_origin;
-use opengrok_box::viewer::{Dialled, loopback_port, socket_path, with_storage_shim};
+use opengrok_box::viewer::{Dialled, Fetched, loopback_port, socket_path};
 
 /// What a ticket is for; an access token (same key) never verifies as one, nor this as that.
 const PURPOSE: &str = "screen";
@@ -159,6 +159,76 @@ async fn upstream_for(state: &AgUiState, cw: &str, ticket: &str) -> Option<(u16,
     Some((port, row.box_id, path))
 }
 
+/// The box behind a Bot's computer and that Bot's screen page, for a screen reached through this
+/// server: its Docker box only, which is on this host's loopback.
+async fn screen_page(
+    state: &AgUiState,
+    account: &AccountId,
+    bot: &CoworkerId,
+) -> Option<(String, String)> {
+    let row = crate::agui::provision::scoped_box_row_for(state, account, bot).await?;
+    let row = Some(row).filter(|row| row.kind == "local-docker")?;
+    let docker = crate::agui::provision::provider_for(state, None, "local-docker").await?;
+    let which = crate::agui::provision::screen_for(state, account, bot.as_str()).await;
+    let page = docker.screen_url(&row.box_id, &which).await.ok()??;
+    Some((row.box_id, page))
+}
+
+/// The SSH gateway's check, at every forward (#386): the code's account still has the Bot, the Bot
+/// is still on the box the code was minted for, and that Bot's screen, as the proxy finds it.
+pub struct SshScreens(pub AgUiState);
+
+#[async_trait::async_trait]
+impl opengrok_screen_ssh::Screens for SshScreens {
+    async fn screen_for(&self, grant: &opengrok_screen_ssh::Grant) -> Option<(u16, String)> {
+        let account = AccountId::from_stored(grant.account.clone());
+        let bot = CoworkerId::from_stored(grant.coworker.clone());
+        let Ok(true) = crate::agui::routes::owned_coworker(&self.0, &account, &bot).await else {
+            return None;
+        };
+        let (box_id, page) = screen_page(&self.0, &account, &bot).await?;
+        if box_id != grant.box_id {
+            return None;
+        }
+        Some((loopback_port(&page)?, socket_path(&page)))
+    }
+}
+
+/// `POST /coworkers/{id}/computer/ssh` — a code that reaches this Bot's screen over SSH for
+/// fifteen minutes, with the command that uses it and the screen's VNC password (#386).
+pub async fn ssh_code(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path(bot): Path<String>,
+) -> Response {
+    let (account, bot) = match crate::agui::routes::owner_of(&state, &headers, bot).await {
+        Ok(owner) => owner,
+        Err(refusal) => return refusal,
+    };
+    let refused = |status, why: &str| (status, why.to_string()).into_response();
+    if opengrok_screen_ssh::listening().is_none() {
+        return refused(StatusCode::SERVICE_UNAVAILABLE, opengrok_screen_ssh::OFF);
+    }
+    let Some((box_id, page)) = screen_page(&state, &account, &bot).await else {
+        return refused(StatusCode::CONFLICT, opengrok_screen_ssh::NO_SCREEN);
+    };
+    let (account, coworker) = (account.to_string(), bot.to_string());
+    let grant = opengrok_screen_ssh::Grant {
+        account,
+        coworker,
+        box_id,
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    let origin = public_origin(&state.auth.public_url, &headers).unwrap_or_default();
+    match opengrok_screen_ssh::offer(grant, &origin, &page, now) {
+        Some(offer) => axum::Json(offer).into_response(),
+        None => refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a code could not be made now",
+        ),
+    }
+}
+
 /// `GET /coworkers/{id}/computer/vnc/{ticket}/{*rest}` — noVNC's files, and its websocket.
 /// Every refusal is the same 404: a guessed ticket learns nothing about which part was wrong.
 /// A remembered port nothing answers on is asked for once more, fresh, before giving up.
@@ -193,97 +263,30 @@ const SILENT: &str = "the computer's screen did not answer";
 const REDIRECTED: &str =
     "the computer's screen answered with a redirect, which this server does not follow";
 
-/// The one client the proxy dials a box with. NO REDIRECTS: `loopback_port` pins only the first
-/// hop, and reqwest follows ten by default — a box answering `302 Location:
-/// http://169.254.169.254/…` had this host fetch its cloud credentials (or the gateway's loopback
-/// admin, or any internal service) and hand the body to the ticket holder, and to the box's own
-/// script. NO PROXY: it only ever dials loopback, and must not carry a box's port through an
-/// `HTTP_PROXY` in the server's environment.
-static DIAL: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .ok()
-});
-
-/// One of noVNC's files from the box on `port`, with only its status, body and `Content-Type`.
-/// `None` when nothing on `port` took the request.
+/// One of noVNC's files from the box on `port`, with only its status, body and `Content-Type`
+/// (`viewer::fetch_file`, which also says why a redirect is never followed). `None` when nothing
+/// on `port` took the request.
 async fn fetch(port: u16, rest: &str) -> Option<Response> {
-    let silent = || Some((StatusCode::BAD_GATEWAY, SILENT).into_response());
-    if rest
-        .split('/')
-        .any(|segment| segment == ".." || segment.is_empty())
-    {
-        return Some((StatusCode::NOT_FOUND, "no such file").into_response());
+    let refused = |status, why| Some((status, why).into_response());
+    match opengrok_box::viewer::fetch_file(port, rest).await {
+        Fetched::NoAnswer => None,
+        Fetched::NotFound => refused(StatusCode::NOT_FOUND, "no such file"),
+        Fetched::Silent => refused(StatusCode::BAD_GATEWAY, SILENT),
+        Fetched::Redirected => refused(StatusCode::BAD_GATEWAY, REDIRECTED),
+        Fetched::Got { status, kind, body } => {
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            let mut response = (status, body).into_response();
+            if let Some(kind) = kind {
+                response.headers_mut().insert(header::CONTENT_TYPE, kind);
+            }
+            Some(response)
+        }
     }
-    let Some(client) = DIAL.as_ref() else {
-        return silent();
-    };
-    let fetched = match client
-        .get(format!("http://127.0.0.1:{port}/{rest}"))
-        .send()
-        .await
-    {
-        Ok(fetched) => fetched,
-        Err(error) if error.is_connect() => return None,
-        Err(_) => return silent(),
-    };
-    if fetched.status().is_redirection() {
-        return Some((StatusCode::BAD_GATEWAY, REDIRECTED).into_response());
-    }
-    let status = StatusCode::from_u16(fetched.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let kind = fetched.headers().get(header::CONTENT_TYPE).cloned();
-    let Ok(bytes) = fetched.bytes().await else {
-        return silent();
-    };
-    let page = kind
-        .as_ref()
-        .is_some_and(|kind| kind.as_bytes().starts_with(b"text/html"));
-    let bytes = if page {
-        with_storage_shim(&bytes).into()
-    } else {
-        bytes
-    };
-    let mut response = (status, bytes).into_response();
-    if let Some(kind) = kind {
-        response.headers_mut().insert(header::CONTENT_TYPE, kind);
-    }
-    Some(response)
 }
 
-/// Every answer on the proxy's path, the box's files included, as a page that cannot act as the
-/// person. Without this a box that replaced its noVNC (a shell command, a colleague's skill
-/// script, a prompt injection) ran script on THIS origin: `fetch('/coworkers', {credentials:
-/// 'include'})` with the `og_access` cookie of whoever opened `vncUrl` in a browser signed in to
-/// `/console` — or framed `/console` and read it. Before the proxy the page was on its own
-/// loopback origin, which carried no cookies.
-///
-/// - `sandbox` without `allow-same-origin` gives the page an OPAQUE origin. Its requests to this
-///   server are cross-site, so the `SameSite=Lax` cookies stay home, and without CORS on the API
-///   it could not read an answer anyway. noVNC needs only its scripts and pointer lock; forms,
-///   popups and top navigation stay off. DO NOT add `allow-same-origin` to "fix" a noVNC error:
-///   together with `allow-scripts` it removes the sandbox.
-/// - `Access-Control-Allow-Origin: *` is what makes that workable: noVNC loads its modules with
-///   `crossorigin="anonymous"` and fetches its locale and `package.json`, and from an opaque
-///   origin each of those is a CORS request. `*` never carries credentials.
-/// - `nosniff`, so a file is only ever what its `Content-Type` says.
-/// - `no-referrer`, because the ticket is in the path and would ride along to anything else the
-///   page loads.
+/// Every answer on the proxy's path as a page that cannot act as the person (`viewer::confine`).
 fn confined(mut response: Response) -> Response {
-    let headers = response.headers_mut();
-    for (name, value) in [
-        (
-            header::CONTENT_SECURITY_POLICY,
-            "sandbox allow-scripts allow-pointer-lock",
-        ),
-        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-        (header::REFERRER_POLICY, "no-referrer"),
-    ] {
-        headers.insert(name, HeaderValue::from_static(value));
-    }
+    opengrok_box::viewer::confine(response.headers_mut());
     response
 }
 

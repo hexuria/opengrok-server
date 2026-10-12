@@ -22,6 +22,7 @@ members = [
   "crates/opengrok-local-exec", # the approved command transport
   "crates/opengrok-auth",       # access and refresh token primitives
   "crates/opengrok-policy",  # what a principal may make a coworker do
+  "crates/opengrok-screen-ssh", # one Bot's screen over SSH: one-time codes, the gateway, the bridge
   "crates/opengrok-events",  # the account events stream's outbox: notes written with the change they describe
   "crates/opengrok-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
   "crates/opengrok-testdb",  # the gate-database guard; each test binary's own database

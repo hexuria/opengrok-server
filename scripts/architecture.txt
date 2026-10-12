@@ -33,6 +33,8 @@ opengrok-auth:
     | axum sqlx
 opengrok-box: opengrok-core
     | axum sqlx
+opengrok-screen-ssh: opengrok-box
+    | axum sqlx
 opengrok-events: opengrok-core opengrok-wire
     | axum reqwest hyper
 opengrok-store: opengrok-core opengrok-events opengrok-policy opengrok-testdb opengrok-wire
@@ -47,7 +49,7 @@ opengrok-integrations: opengrok-core opengrok-plugins opengrok-policy opengrok-s
     | axum
 opengrok-plugin-api: opengrok-core opengrok-integrations opengrok-store
     |
-opengrok-server: opengrok-plugin-api opengrok-integrations opengrok-box opengrok-core opengrok-auth opengrok-gateway-admin opengrok-harness opengrok-jev opengrok-local-exec opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
+opengrok-server: opengrok-plugin-api opengrok-integrations opengrok-box opengrok-core opengrok-screen-ssh opengrok-auth opengrok-gateway-admin opengrok-harness opengrok-jev opengrok-local-exec opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
     |
-opengrok: opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-server opengrok-store
+opengrok: opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-screen-ssh opengrok-server opengrok-store
     |

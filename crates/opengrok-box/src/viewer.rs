@@ -5,7 +5,12 @@
 
 use std::time::Duration;
 
-use reqwest::header::{HOST, HeaderMap};
+use std::sync::LazyLock;
+
+use reqwest::header::{
+    ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_SECURITY_POLICY, CONTENT_TYPE, HOST, HeaderMap,
+    HeaderValue, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The most of the box's handshake reply that is read before giving up on it.
@@ -77,6 +82,110 @@ fn loopback_origin(headers: &HeaderMap) -> Option<String> {
         rest => rest.strip_prefix(':')?.parse::<u16>().ok()?,
     };
     Some(format!("http://{name}:{port}"))
+}
+
+/// The one client the proxy dials a box with. NO REDIRECTS: `loopback_port` pins only the first
+/// hop, and reqwest follows ten by default — a box answering `302 Location:
+/// http://169.254.169.254/…` had this host fetch its cloud credentials (or the gateway's loopback
+/// admin, or any internal service) and hand the body to the ticket holder, and to the box's own
+/// script. NO PROXY: it only ever dials loopback, and must not carry a box's port through an
+/// `HTTP_PROXY` in the server's environment.
+static DIAL: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .ok()
+});
+
+/// What asking the box's viewer for one of noVNC's files came to.
+pub enum Fetched {
+    /// Its status, `Content-Type` and body; a page with `STORAGE_SHIM` put in.
+    Got {
+        status: u16,
+        kind: Option<HeaderValue>,
+        body: Vec<u8>,
+    },
+    /// Nothing on the port took the request.
+    NoAnswer,
+    /// A path that steps out of noVNC's files (`..` or an empty segment).
+    NotFound,
+    /// The viewer took the request and then said nothing usable.
+    Silent,
+    /// The viewer answered with a redirect, which is never followed (`DIAL`).
+    Redirected,
+}
+
+/// One of noVNC's files from the box's viewer on loopback `port`.
+pub async fn fetch_file(port: u16, rest: &str) -> Fetched {
+    if rest
+        .split('/')
+        .any(|segment| segment == ".." || segment.is_empty())
+    {
+        return Fetched::NotFound;
+    }
+    let Some(client) = DIAL.as_ref() else {
+        return Fetched::Silent;
+    };
+    let fetched = match client
+        .get(format!("http://127.0.0.1:{port}/{rest}"))
+        .send()
+        .await
+    {
+        Ok(fetched) => fetched,
+        Err(error) if error.is_connect() => return Fetched::NoAnswer,
+        Err(_) => return Fetched::Silent,
+    };
+    if fetched.status().is_redirection() {
+        return Fetched::Redirected;
+    }
+    let status = fetched.status().as_u16();
+    let kind = fetched.headers().get(CONTENT_TYPE).cloned();
+    let Ok(bytes) = fetched.bytes().await else {
+        return Fetched::Silent;
+    };
+    let page = kind
+        .as_ref()
+        .is_some_and(|kind| kind.as_bytes().starts_with(b"text/html"));
+    let body = if page {
+        with_storage_shim(&bytes)
+    } else {
+        bytes.to_vec()
+    };
+    Fetched::Got { status, kind, body }
+}
+
+/// Every answer on the proxy's path, the box's files included, as a page that cannot act as the
+/// person. Without this a box that replaced its noVNC (a shell command, a colleague's skill
+/// script, a prompt injection) ran script on THIS origin: `fetch('/coworkers', {credentials:
+/// 'include'})` with the `og_access` cookie of whoever opened `vncUrl` in a browser signed in to
+/// `/console` — or framed `/console` and read it. Before the proxy the page was on its own
+/// loopback origin, which carried no cookies.
+///
+/// - `sandbox` without `allow-same-origin` gives the page an OPAQUE origin. Its requests to this
+///   server are cross-site, so the `SameSite=Lax` cookies stay home, and without CORS on the API
+///   it could not read an answer anyway. noVNC needs only its scripts and pointer lock; forms,
+///   popups and top navigation stay off. DO NOT add `allow-same-origin` to "fix" a noVNC error:
+///   together with `allow-scripts` it removes the sandbox.
+/// - `Access-Control-Allow-Origin: *` is what makes that workable: noVNC loads its modules with
+///   `crossorigin="anonymous"` and fetches its locale and `package.json`, and from an opaque
+///   origin each of those is a CORS request. `*` never carries credentials.
+/// - `nosniff`, so a file is only ever what its `Content-Type` says.
+/// - `no-referrer`, because the ticket is in the path and would ride along to anything else the
+///   page loads.
+pub fn confine(headers: &mut HeaderMap) {
+    for (name, value) in [
+        (
+            CONTENT_SECURITY_POLICY,
+            "sandbox allow-scripts allow-pointer-lock",
+        ),
+        (X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        (ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+        (REFERRER_POLICY, "no-referrer"),
+    ] {
+        headers.insert(name, HeaderValue::from_static(value));
+    }
 }
 
 /// Put first in every page the box serves, because `confined` takes its storage away. noVNC

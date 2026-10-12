@@ -2,7 +2,7 @@
 
 use super::*;
 use axum::http::HeaderMap;
-use opengrok_box::viewer::STORAGE_SHIM;
+use opengrok_box::viewer::{STORAGE_SHIM, with_storage_shim};
 
 /// A request's headers as it arrives with `Host: host`, carrying `more` besides.
 fn arriving(host: &str, more: &[(&str, &str)]) -> HeaderMap {
