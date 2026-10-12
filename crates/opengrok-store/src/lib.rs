@@ -18,6 +18,7 @@ use opengrok_core::id::AccountId;
 pub mod auto_review;
 pub mod autonomy;
 pub mod gateway;
+pub mod host_settings;
 pub mod identity;
 pub mod migrations;
 pub mod pairs;

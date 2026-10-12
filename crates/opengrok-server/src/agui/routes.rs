@@ -5636,15 +5636,33 @@ pub async fn patch_host_settings(
         )
             .into_response();
     };
+    // Saved before it is believed: a record the store refused would be undone by the next
+    // restart, so the person is told now rather than finding the switch off tomorrow.
+    let mut next = lock
+        .lock()
+        .ok()
+        .map(|settings| settings.clone())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(crate::host_state::default_settings);
+    if let Some(record) = next.as_object_mut() {
+        for (key, value) in patch {
+            record.insert(key.clone(), value.clone());
+        }
+    }
+    if let Err(error) = state
+        .auth
+        .store
+        .save_host_settings(&next, chrono::Utc::now().timestamp_millis())
+        .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("the settings could not be saved: {error}"),
+        )
+            .into_response();
+    }
     if let Ok(mut settings) = lock.lock() {
-        if !settings.is_object() {
-            *settings = crate::host_state::default_settings();
-        }
-        if let Some(record) = settings.as_object_mut() {
-            for (key, value) in patch {
-                record.insert(key.clone(), value.clone());
-            }
-        }
+        *settings = next;
     }
     host_settings_reply(&state, &account_id, query.coworker.as_deref()).await
 }
