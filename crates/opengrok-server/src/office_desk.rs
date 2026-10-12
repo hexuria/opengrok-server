@@ -109,6 +109,82 @@ pub(crate) async fn expand_home(
     Ok(format!("{}{}", home, &path[1..]))
 }
 
+/// Whether a file is at `path` on the box: `Some(false)` only on the shell's own "no such
+/// file". A probe that could not answer is `None`, never "missing" — writing on a guess
+/// could replace a file somebody else put there, so callers must refuse on `None`.
+pub(crate) async fn file_exists(provider: &dyn Computer, box_id: &str, path: &str) -> Option<bool> {
+    let probe = format!("test -e {}", shq(path));
+    match provider.run(box_id, &probe, 10).await {
+        Ok(out) if out.exit_code == 0 => Some(true),
+        Ok(out) if out.exit_code == 1 => Some(false),
+        Ok(out) => {
+            tracing::warn!(
+                box_id,
+                path,
+                exit = out.exit_code,
+                "the existence probe did not answer"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(%error, box_id, path, "the existence probe could not run");
+            None
+        }
+    }
+}
+
+/// Whether the provider says `box_id` is GONE — destroyed, not asleep and not merely not the
+/// scope's box any more. A missing box is reported two ways: `"absent"`, the state the
+/// trait's contract gives it (Docker and box.ascii.dev both answer this way), and a
+/// `NoSuchBox` error where a provider fails instead. Anything else — running, stopped,
+/// unreachable — is a box that may still hold the document's bytes, and the session must
+/// not be moved off it.
+pub(crate) async fn box_gone(provider: &dyn Computer, box_id: &str) -> bool {
+    match provider.state(box_id).await {
+        Err(opengrok_box::BoxError::NoSuchBox) => true,
+        Ok(state) => state == "absent",
+        Err(_) => false,
+    }
+}
+
+/// The refusal every verb that writes or bumps a stale rehydrated copy gives. The file is a
+/// kept copy of an older version — the head's bytes went with the old computer — and only
+/// `office_open {adoptKeptCopy: true}` moves on from it: a silent re-base would erase the
+/// lost version from the chain the person can roll back to.
+pub(crate) fn stale_copy_refusal(path: &str, kept: i64, head: i64) -> String {
+    refusal(
+        "STALE_COPY",
+        format!(
+            "{path} is the kept copy of version {kept}; version {head} was lost with the old \
+             computer. Re-open it with office_open {{adoptKeptCopy: true}} to continue from \
+             version {kept}."
+        ),
+        Some(json!({ "keptVersion": kept, "headVersion": head })),
+    )
+}
+
+/// What `fresh` found the file to be against the row's stored hash.
+#[derive(Clone, Copy)]
+enum Freshness {
+    /// The file is what the session last saw.
+    Same,
+    /// The file moved outside the tools: the row re-based on it.
+    External,
+    /// The file is a kept copy of an OLDER version — a rehydrate put back the newest kept
+    /// snapshot after the head's bytes went with the old computer. Carries that version.
+    /// Reads answer from it marked as changed; verbs that write or bump the row refuse
+    /// `STALE_COPY` until an explicit `office_open {adoptKeptCopy: true}` adopts it.
+    StaleCopy(i64),
+}
+
+impl Freshness {
+    /// The `externalChange` flag reads report: anything but the file the session last saw —
+    /// a stale kept copy included — is a change the caller should know about.
+    fn changed(&self) -> bool {
+        !matches!(self, Freshness::Same)
+    }
+}
+
 /// The refusal JSON a desk error becomes — `{code, message, details?}` like upstream's
 /// `DocumentToolError`, so a model can branch on `code` rather than parse the sentence.
 fn refusal(code: &str, message: impl Into<String>, details: Option<Value>) -> String {
@@ -277,12 +353,11 @@ impl Tools {
         else {
             return Ok(None);
         };
-        // A racing move wins; either way the row now names some box, and re-reading by
-        // path answers whichever session holds this one.
-        store
-            .repoint_doc_session_box(&orphan.id, &orphan.box_id, box_id, crate::now_ms())
-            .await
-            .map_err(unreadable)?;
+        // `rehydrate` does the moving — the kept copy written forward, the row repointed —
+        // and only when the provider says the orphan's box is gone: repointing a live box's
+        // session would strand its file and name a box that never had it. A live orphan
+        // keeps its document; this path then mints a new session as it always could.
+        let _ = crate::office_routes::rehydrate(&self.state, &orphan).await;
         store
             .doc_session_by_path(box_id, path)
             .await
@@ -301,7 +376,7 @@ impl Tools {
         box_io: &dyn Computer,
         box_id: &str,
         row: &opengrok_store::DocSessionRow,
-    ) -> Result<(Vec<u8>, opengrok_store::DocSessionRow, bool), String> {
+    ) -> Result<(Vec<u8>, opengrok_store::DocSessionRow, Freshness), String> {
         let bytes = box_io
             .read_file_bytes(box_id, &row.path)
             .await
@@ -319,7 +394,13 @@ impl Tools {
         }
         let hash = sha256_hex(&bytes);
         if hash == row.content_sha256 {
-            return Ok((bytes, row.clone(), false));
+            return Ok((bytes, row.clone(), Freshness::Same));
+        }
+        // A file that differs from the head but IS a kept older version is a stale
+        // rehydrated copy, not an outside edit: re-basing on it would write the loss of
+        // the head version into the chain as if the person had made the change.
+        if let Some(kept) = self.kept_copy_at(row, &hash, bytes.len()).await {
+            return Ok((bytes, row.clone(), Freshness::StaleCopy(kept)));
         }
         // The file moved outside the tools: the session is still valid (same file, same
         // handle) but everything staged on it is now measured against this content.
@@ -360,7 +441,59 @@ impl Tools {
                 tracing::warn!(%error, doc = %rebased.id, "a drifted version could not be snapshotted");
             }
         }
-        Ok((bytes, rebased, true))
+        Ok((bytes, rebased, Freshness::External))
+    }
+
+    /// Which kept version, if any, the file IS: the artifact chain's versioned entries,
+    /// newest first, each compared by size before its bytes are fetched. Only a version
+    /// BELOW the head counts — a kept copy of the current head is just the file, and a
+    /// version the chain does not hold is plain drift.
+    async fn kept_copy_at(
+        &self,
+        row: &opengrok_store::DocSessionRow,
+        hash: &str,
+        size: usize,
+    ) -> Option<i64> {
+        let chain = self
+            .state
+            .auth
+            .store
+            .doc_version_artifacts(&row.account_id, &row.id)
+            .await
+            .ok()?;
+        for artifact in chain {
+            let Some(version) = artifact.meta["version"].as_i64() else {
+                continue;
+            };
+            if version >= row.version || artifact.size_bytes as usize != size {
+                continue;
+            }
+            if let Ok(Some((_, bytes))) = self.state.auth.store.artifact_bytes(&artifact.id).await
+                && sha256_hex(&bytes) == hash
+            {
+                return Some(version);
+            }
+        }
+        None
+    }
+
+    /// The kept-copy half of `fresh` for a verb that must not re-base: the version the file
+    /// is a stale copy of, when it is one.
+    async fn stale_copy_kept(
+        &self,
+        box_io: &dyn Computer,
+        box_id: &str,
+        row: &opengrok_store::DocSessionRow,
+    ) -> Result<Option<i64>, String> {
+        let bytes = box_io
+            .read_file_bytes(box_id, &row.path)
+            .await
+            .map_err(|e| describe_box(&e))?;
+        let hash = sha256_hex(&bytes);
+        if hash == row.content_sha256 {
+            return Ok(None);
+        }
+        Ok(self.kept_copy_at(row, &hash, bytes.len()).await)
     }
 
     /// Open a session in a sync block — the caller's guarantee that no `.await` follows while
@@ -518,13 +651,16 @@ impl Tools {
     }
 
     /// `office_open`: read the file, open it in the engine, and return (or reuse) the session
-    /// row that keeps it a document across turns.
+    /// row that keeps it a document across turns. `adopt_kept_copy` is answered only when the
+    /// file is a stale kept copy: the kept version becomes the new head — a version like any
+    /// other mutation — rather than the copy staying a refusal for every verb that writes.
     async fn open(
         &self,
         context: &ToolContext,
         box_io: &dyn Computer,
         box_id: &str,
         path: &str,
+        adopt_kept_copy: bool,
     ) -> Result<(Value, Vec<Value>), String> {
         let path = expand_home(box_io, box_id, path).await?;
         let kind = Kind::from_filename(&path).ok_or_else(|| {
@@ -553,7 +689,60 @@ impl Tools {
         // is what proposals key on. Its stored bytes are re-checked in case it moved since.
         if let Some(existing) = self.session_at_path(context, box_id, &path).await? {
             let row = owned(context, box_id, &existing)?.clone();
-            let (bytes, row, external) = self.fresh(context, box_io, box_id, &row).await?;
+            let (bytes, row, freshness) = self.fresh(context, box_io, box_id, &row).await?;
+            // Asked to adopt a stale kept copy: make the kept bytes the head again, one
+            // version up so the lost head is never rewritten, with `office_restore` on the
+            // chain marking how this version came back. Proposals are left as they were —
+            // their guards decide against the adopted bytes on the next accept.
+            let (row, external) = match freshness {
+                Freshness::StaleCopy(_) if adopt_kept_copy => {
+                    let adopted = opengrok_store::DocSessionRow {
+                        content_sha256: sha256_hex(&bytes),
+                        version: row.version + 1,
+                        updated_at_ms: crate::now_ms(),
+                        ..row.clone()
+                    };
+                    self.state
+                        .auth
+                        .store
+                        .save_doc_session(
+                            &row.id,
+                            row.version,
+                            &adopted.content_sha256,
+                            adopted.version,
+                            &row.proposals,
+                            adopted.updated_at_ms,
+                        )
+                        .await
+                        .map_err(|error| {
+                            refusal(
+                                "CONFLICT",
+                                format!("the session moved under the open; retry it: {error}"),
+                                None,
+                            )
+                        })?;
+                    let filename = adopted.path.rsplit('/').next().unwrap_or(&adopted.path);
+                    // Best-effort like the first version's snapshot: the kept bytes are
+                    // already in the chain under their own version, so a failed snapshot
+                    // loses one entry, not the adoption.
+                    if let Err(error) = self
+                        .snapshot(
+                            context,
+                            &adopted,
+                            kind,
+                            &bytes,
+                            filename,
+                            "office_restore",
+                            None,
+                        )
+                        .await
+                    {
+                        tracing::warn!(%error, doc = %adopted.id, "an adopted kept copy could not be snapshotted");
+                    }
+                    (adopted, true)
+                }
+                other => (row, other.changed()),
+            };
             let body = {
                 let session = Self::open_row(&row, &bytes)?;
                 let (counts, capabilities) = Self::describe_parts(&session);
@@ -685,13 +874,24 @@ impl Tools {
                 None,
             )
         })?;
-        // Never overwrite — the same rule export keeps.
-        if box_io.read_file_bytes(box_id, &path).await.is_ok() {
-            return Err(refusal(
-                "EEXIST",
-                format!("{path} already exists; create never overwrites"),
-                None,
-            ));
+        // Never overwrite — the same rule export keeps. A probe that cannot answer is not a
+        // free path: `is_ok()` would call an unreachable box "empty" and write over it.
+        match file_exists(box_io, box_id, &path).await {
+            Some(true) => {
+                return Err(refusal(
+                    "EEXIST",
+                    format!("{path} already exists; create never overwrites"),
+                    None,
+                ));
+            }
+            Some(false) => {}
+            None => {
+                return Err(refusal(
+                    "ENGINE_ERROR",
+                    format!("could not tell whether {path} exists; nothing was written"),
+                    None,
+                ));
+            }
         }
         let bytes = opengrok_office::create_bytes(kind, args).map_err(|e| engine_refusal(&e))?;
         box_io
@@ -734,7 +934,10 @@ impl Tools {
         edits: AskEdits<'_>,
     ) -> Result<(Value, Vec<Value>), String> {
         let row = self.session_row(context, box_id, document).await?;
-        let (bytes, row, external) = self.fresh(context, box_io, box_id, &row).await?;
+        let (bytes, row, freshness) = self.fresh(context, box_io, box_id, &row).await?;
+        if let Freshness::StaleCopy(kept) = freshness {
+            return Err(stale_copy_refusal(&row.path, kept, row.version));
+        }
         let kind = Self::kind_of(&row)?;
         // The session lives only inside this block: drop-tracking follows scopes, not
         // `drop()` calls, and a Session that reached the awaits below is not Send.
@@ -794,7 +997,7 @@ impl Tools {
             "proposal": proposal.id,
             "changes": proposal.changes.len(),
             "version": row.version,
-            "externalChange": external,
+            "externalChange": freshness.changed(),
             "note": "review with office_review, then office_accept applies it and writes the file",
         });
         Ok((
@@ -821,7 +1024,10 @@ impl Tools {
         tracked: bool,
     ) -> Result<(Value, Vec<Value>), String> {
         let row = self.session_row(context, box_id, document).await?;
-        let (bytes, row, _external) = self.fresh(context, box_io, box_id, &row).await?;
+        let (bytes, row, freshness) = self.fresh(context, box_io, box_id, &row).await?;
+        if let Freshness::StaleCopy(kept) = freshness {
+            return Err(stale_copy_refusal(&row.path, kept, row.version));
+        }
         let kind = Self::kind_of(&row)?;
         let (mut proposals, index) = Self::proposal_on(&row, proposal_id)?;
         let proposal = &proposals[index];
@@ -844,10 +1050,6 @@ impl Tools {
         };
         match outcome {
             Ok((applied, out_bytes)) => {
-                box_io
-                    .write_file_bytes(box_id, &row.path, &out_bytes)
-                    .await
-                    .map_err(|e| describe_box(&e))?;
                 proposals[index].status = ProposalStatus::Accepted;
                 let version = row.version + 1;
                 let saved_row = opengrok_store::DocSessionRow {
@@ -856,6 +1058,11 @@ impl Tools {
                     updated_at_ms: crate::now_ms(),
                     ..row.clone()
                 };
+                // The row claims the version BEFORE the bytes land: written first, a write
+                // that raced another verb could reach the box while losing the chain and
+                // leave the file at odds with the session. Losing the CAS leaves the box
+                // untouched; a lost write instead is reverted below so the row keeps
+                // describing the file that is actually there.
                 self.state
                     .auth
                     .store
@@ -875,6 +1082,29 @@ impl Tools {
                             None,
                         )
                     })?;
+                if let Err(error) = box_io.write_file_bytes(box_id, &row.path, &out_bytes).await {
+                    // Undo the claim — the file still holds the old bytes, so the row must
+                    // say so. A revert that also fails leaves the row a version ahead of
+                    // the file; the next `fresh` re-bases on the drift, but only if the
+                    // row's hash is found among the kept versions, so say it loudly here.
+                    if let Err(revert) = self
+                        .state
+                        .auth
+                        .store
+                        .save_doc_session(
+                            &row.id,
+                            version,
+                            &row.content_sha256,
+                            row.version,
+                            &row.proposals,
+                            crate::now_ms(),
+                        )
+                        .await
+                    {
+                        tracing::error!(%revert, doc = %row.id, "a failed write's accept could not be reverted");
+                    }
+                    return Err(describe_box(&error));
+                }
                 let filename = row.path.rsplit('/').next().unwrap_or(&row.path);
                 let artifact_id = self
                     .snapshot(
@@ -949,7 +1179,15 @@ impl Tools {
         proposal_id: Option<&str>,
     ) -> Result<(Value, Vec<Value>), String> {
         let row = self.session_row(context, box_id, document).await?;
-        let (bytes, row, _external) = self.fresh(context, box_io, box_id, &row).await?;
+        let (bytes, row, freshness) = self.fresh(context, box_io, box_id, &row).await?;
+        // Exporting the head of a stale copy would ship the kept version as if it were the
+        // current document — the same guard the other writing verbs keep. A proposal's
+        // would-be export is still allowed: it writes a copy, not the document's head.
+        if proposal_id.is_none()
+            && let Freshness::StaleCopy(kept) = freshness
+        {
+            return Err(stale_copy_refusal(&row.path, kept, row.version));
+        }
         let kind = Self::kind_of(&row)?;
         let path = expand_home(box_io, box_id, path).await?;
         if Kind::from_filename(&path) != Some(kind) {
@@ -981,28 +1219,39 @@ impl Tools {
                 .save()
                 .map_err(|e| engine_refusal(&e))?,
         };
-        if box_io.read_file_bytes(box_id, &path).await.is_ok() {
-            // A path this session itself exported may be re-shipped — its artifacts already
-            // hold every copy ever written there, so the delivered file keeps one name
-            // instead of forking -v2 names. Anything else still refuses: export never
-            // clobbers a file it did not make.
-            let own_exports = self
-                .state
-                .auth
-                .store
-                .doc_export_paths(&row.id)
-                .await
-                .map_err(|error| {
-                    refusal(
-                        "ENGINE_ERROR",
-                        format!("the session's exports could not be read: {error}"),
+        match file_exists(box_io, box_id, &path).await {
+            Some(true) => {
+                // A path this session itself exported may be re-shipped — its artifacts
+                // already hold every copy ever written there, so the delivered file keeps
+                // one name instead of forking -v2 names. Anything else still refuses:
+                // export never clobbers a file it did not make.
+                let own_exports = self
+                    .state
+                    .auth
+                    .store
+                    .doc_export_paths(&row.account_id, &row.id)
+                    .await
+                    .map_err(|error| {
+                        refusal(
+                            "ENGINE_ERROR",
+                            format!("the session's exports could not be read: {error}"),
+                            None,
+                        )
+                    })?;
+                if !own_exports.iter().any(|exported| exported == &path) {
+                    return Err(refusal(
+                        "EEXIST",
+                        format!("{path} already exists; export never overwrites"),
                         None,
-                    )
-                })?;
-            if !own_exports.iter().any(|exported| exported == &path) {
+                    ));
+                }
+            }
+            Some(false) => {}
+            // A probe that cannot answer is not a free path, under the same rule as create.
+            None => {
                 return Err(refusal(
-                    "EEXIST",
-                    format!("{path} already exists; export never overwrites"),
+                    "ENGINE_ERROR",
+                    format!("could not tell whether {path} exists; nothing was written"),
                     None,
                 ));
             }
@@ -1063,8 +1312,13 @@ impl OfficeDesk for Tools {
                 .files(context, box_io, box_id, directory.as_deref(), offset)
                 .await
                 .map(Reply::just),
-            Ask::Open { path } => {
-                let (result, customs) = self.open(context, box_io, box_id, &path).await?;
+            Ask::Open {
+                path,
+                adopt_kept_copy,
+            } => {
+                let (result, customs) = self
+                    .open(context, box_io, box_id, &path, adopt_kept_copy)
+                    .await?;
                 Ok(Reply {
                     result,
                     customs,
@@ -1083,12 +1337,12 @@ impl OfficeDesk for Tools {
                 limit,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, _, external) = self.fresh(context, box_io, box_id, &row).await?;
+                let (bytes, _, freshness) = self.fresh(context, box_io, box_id, &row).await?;
                 let session = Self::open_row(&row, &bytes)?;
                 let mut result = session
                     .outline(story.as_deref(), headings_only, offset, limit)
                     .map_err(|e| engine_refusal(&e))?;
-                result["externalChange"] = json!(external);
+                result["externalChange"] = json!(freshness.changed());
                 Ok(Reply::just(result))
             }
             Ask::Grep {
@@ -1100,7 +1354,7 @@ impl OfficeDesk for Tools {
                 cursor,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, _, external) = self.fresh(context, box_io, box_id, &row).await?;
+                let (bytes, _, freshness) = self.fresh(context, box_io, box_id, &row).await?;
                 let session = Self::open_row(&row, &bytes)?;
                 let mut result = session
                     .grep(
@@ -1111,7 +1365,7 @@ impl OfficeDesk for Tools {
                         cursor.as_deref(),
                     )
                     .map_err(|e| engine_refusal(&e))?;
-                result["externalChange"] = json!(external);
+                result["externalChange"] = json!(freshness.changed());
                 Ok(Reply::just(result))
             }
             Ask::Read {
@@ -1122,12 +1376,12 @@ impl OfficeDesk for Tools {
                 field,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, _, external) = self.fresh(context, box_io, box_id, &row).await?;
+                let (bytes, _, freshness) = self.fresh(context, box_io, box_id, &row).await?;
                 let session = Self::open_row(&row, &bytes)?;
                 let mut result = session
                     .read(&ref_, start, length, field.as_deref())
                     .map_err(|e| engine_refusal(&e))?;
-                result["externalChange"] = json!(external);
+                result["externalChange"] = json!(freshness.changed());
                 Ok(Reply::just(result))
             }
             Ask::Cells {
@@ -1138,12 +1392,12 @@ impl OfficeDesk for Tools {
                 limit,
             } => {
                 let row = self.session_row(context, box_id, &document).await?;
-                let (bytes, _, external) = self.fresh(context, box_io, box_id, &row).await?;
+                let (bytes, _, freshness) = self.fresh(context, box_io, box_id, &row).await?;
                 let session = Self::open_row(&row, &bytes)?;
                 let mut result = session
                     .cells(&sheet, &range, offset, limit)
                     .map_err(|e| engine_refusal(&e))?;
-                result["externalChange"] = json!(external);
+                result["externalChange"] = json!(freshness.changed());
                 Ok(Reply::just(result))
             }
             Ask::Render {
@@ -1315,6 +1569,12 @@ impl OfficeDesk for Tools {
             }
             Ask::Reject { document, proposal } => {
                 let row = self.session_row(context, box_id, &document).await?;
+                // Rejecting rewrites the row's proposals, so a stale kept copy refuses it
+                // like the other writing verbs: the row must not move while the file is an
+                // older version pretending to be current.
+                if let Some(kept) = self.stale_copy_kept(box_io, box_id, &row).await? {
+                    return Err(stale_copy_refusal(&row.path, kept, row.version));
+                }
                 let (mut proposals, index) = Self::proposal_on(&row, &proposal)?;
                 if proposals[index].status != ProposalStatus::Pending {
                     return Err(refusal(
