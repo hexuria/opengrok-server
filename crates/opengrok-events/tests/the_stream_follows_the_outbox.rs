@@ -532,3 +532,24 @@ async fn a_note_whose_wake_was_lost_is_found_by_the_poll() {
         (1, Some("quiet"))
     );
 }
+
+/// A note for a change that is not a store write (a computer restarting) goes out on its own
+/// transaction and reaches the account's stream like any other.
+#[tokio::test]
+async fn an_announced_note_reaches_the_stream() {
+    let Some(pool) = pool().await else { return };
+    let (hub, ada) = (hub(&pool), account());
+    let mut frames = hub.follow(&ada, None).await.unwrap();
+    let _reset = must(&mut frames).await;
+    let restarted = Note::ComputerChanged {
+        coworker_id: "cw_1",
+        box_id: Some("og-box-1"),
+    };
+    hub.announce(&ada, &restarted).await.unwrap();
+    let heard = must(&mut frames).await;
+    assert_eq!((heard.id, heard.event.as_str()), (1, "computer.changed"));
+    assert_eq!(
+        heard.data,
+        json!({ "coworkerId": "cw_1", "boxId": "og-box-1" })
+    );
+}

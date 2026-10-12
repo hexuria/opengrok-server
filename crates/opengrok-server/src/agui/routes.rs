@@ -739,12 +739,8 @@ pub(crate) async fn tools_for_turn(
     // started on first use, it kept the Bot's first action waiting and showed the person a black
     // screen while it came up. A computer asleep is not woken for it.
     if running && which.bot().is_some() {
-        let (computer, box_id, screen) = (computer.clone(), box_id.clone(), which.clone());
-        tokio::spawn(async move {
-            if let Err(error) = computer.open_screen(&box_id, &screen).await {
-                tracing::warn!(%error, "a Bot's own screen was not started ahead of its turn");
-            }
-        });
+        let opened = (computer.clone(), box_id.as_str(), &which);
+        provision::open_own_screen(state, account_id, &coworker_id, opened);
     }
     context.set_screen(which);
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));

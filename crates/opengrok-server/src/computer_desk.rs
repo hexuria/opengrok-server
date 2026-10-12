@@ -4,6 +4,7 @@
 //! so a Bot may do to its own computer what its owner's pane may, refused in the same words.
 //! Every call is answered for the `ToolContext`'s account and coworker only.
 
+use opengrok_box::screen_status::Busy;
 use opengrok_tools::computer_desk::{Ask, ComputerDesk};
 use opengrok_tools::{ToolContext, ToolImage};
 use serde_json::{Value, json};
@@ -104,8 +105,11 @@ impl ComputerDesk for Tools {
             Ask::Start => self.start(context).await,
             Ask::Shutdown => self.shutdown(context).await,
             Ask::Restart => {
-                self.shutdown(context).await?;
-                self.start(context).await
+                let restart = async {
+                    self.shutdown(context).await?;
+                    self.start(context).await
+                };
+                provision::busy_while(state, (account, coworker), Busy::Restarting, restart).await
             }
             Ask::Reset => {
                 provision::reset_for_coworker(state, account, coworker)

@@ -11,7 +11,10 @@
 
 use std::sync::Arc;
 
-use opengrok_box::{Computer, EgressTunnel};
+use opengrok_box::Computer;
+pub use opengrok_box::pane::{scope_for, share_scope_of};
+use opengrok_box::pane::{stamp_egress_fields, stamp_share_scope, wait_for_screen};
+use opengrok_box::screen_status::{self, Busy, ScreenProgress};
 use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerError, CoworkerEvent};
 use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 
@@ -409,30 +412,6 @@ pub async fn screen_for(
     }
 }
 
-/// The (scope, scope_id, box mode) a mode maps to: per-org shares one org box, per-account one box
-/// per member, per-bot a dedicated box each. An account with no org falls back to account scope.
-pub fn scope_for(
-    mode: &str,
-    account_id: &str,
-    org_id: Option<&str>,
-    coworker_id: &str,
-    group: bool,
-) -> (&'static str, String, BoxMode) {
-    // A group has a computer of its own whatever the sharing mode: the room's shared desk, which
-    // every member can reach next to its own box.
-    if group {
-        return ("group", coworker_id.to_string(), BoxMode::Shared);
-    }
-    match mode {
-        "per-org" => match org_id {
-            Some(org) => ("org", org.to_string(), BoxMode::Shared),
-            None => ("account", account_id.to_string(), BoxMode::Shared),
-        },
-        "per-bot" => ("bot", coworker_id.to_string(), BoxMode::Dedicated),
-        _ => ("account", account_id.to_string(), BoxMode::Shared),
-    }
-}
-
 /// The scope a coworker's computer lives under, with everything `scope_for` needs looked up:
 /// the account's mode and org, and whether the coworker is a group. The one call sites should
 /// make when they have only an id.
@@ -711,36 +690,6 @@ pub async fn teardown_computer_for(
     }
 }
 
-/// NativeChat (tip `729bdd9`) gates Route traffic from **only** this JSON —
-/// `isEgressTunnelAvailable` or nested `egress_tunnel.ready`. It does not call Box `/v1/info`.
-/// Probe the scoped live `boxId` already in the payload (never a frozen coworker-row id) on every
-/// status read, bar a guest just silent (`shown_egress`). Do not invent `ready`.
-fn stamp_egress_fields(screen: &mut Value, host_wants: bool, cap: Option<EgressTunnel>) {
-    screen["isEgressTunnelAvailable"] = json!(EgressTunnel::advertised(host_wants, cap));
-    if let Some(cap) = cap {
-        screen["egress_tunnel"] = json!({
-            "enabled": cap.enabled,
-            "ready": cap.ready,
-        });
-    }
-}
-
-/// NativeChat places Route traffic chrome by computer **share**, not on every
-/// bot pane. Internal `scope_for` stays `bot|account|group|org`; sharing-mode
-/// policy stays `per-bot|per-account|per-org`. This is the client-facing
-/// placement name (`dedicated` = bot sidebar, `user` = Settings→Computer,
-/// `group` = group sidebar, `org` = admin console).
-pub fn share_scope_of(scope: &str) -> &'static str {
-    match scope {
-        "bot" => "dedicated",
-        "account" => "user",
-        "group" => "group",
-        "org" => "org",
-        // Unknown internal scope must not paint dedicated bot-pane chrome.
-        _ => "user",
-    }
-}
-
 /// The standing answer for a computer scope; no row is `ask`. `Err` when the store could not
 /// answer — the caller decides what that means where it stands: the run path fails closed,
 /// the pane says nothing, the GET says 503.
@@ -784,13 +733,6 @@ pub async fn egress_policy_for_turn(
 async fn stamp_egress_policy(state: &AgUiState, screen: &mut Value, scope: &str, scope_id: &str) {
     if let Ok(policy) = egress_policy_read(state, scope, scope_id).await {
         screen["egressPolicy"] = json!(policy.as_stored());
-    }
-}
-
-fn stamp_share_scope(screen: &mut Value, scope: &str, scope_id: &str) {
-    screen["shareScope"] = json!(share_scope_of(scope));
-    if scope == "group" {
-        screen["groupId"] = json!(scope_id);
     }
 }
 
@@ -911,8 +853,8 @@ pub async fn coworker_screen(
         body
     };
     let store = &state.auth.store;
-    let group = match store.load_coworker(coworker_id).await {
-        Ok((coworker, _)) if !coworker.name.is_empty() => coworker.is_group(),
+    let (group, name) = match store.load_coworker(coworker_id).await {
+        Ok((coworker, _)) if !coworker.name.is_empty() => (coworker.is_group(), coworker.name),
         _ => return absent(),
     };
     let (mode, org_id) = resolve_mode_for(state, account_id, agent_id).await;
@@ -923,6 +865,17 @@ pub async fn coworker_screen(
         agent_id,
         group,
     );
+    // What the pane and the screen window say over the viewer until its first picture (#386).
+    let busy = screen_status::busy(&screen_status::scope_key(scope, &scope_id));
+    let facts = |state, error| screen_status::Facts {
+        name: &name,
+        busy,
+        update: None,
+        state,
+        screen: screen_status::ScreenProgress::Given,
+        has_page: false,
+        error,
+    };
     let Ok(Some((box_id, kind, stopped))) = store.scoped_computer_full(scope, &scope_id).await
     else {
         if let Ok(Some((code, message, at_ms))) =
@@ -935,22 +888,27 @@ pub async fn coworker_screen(
                 "computerError": { "code": code, "message": message, "updatedAtMs": at_ms },
             });
             stamp_egress_fields(&mut body, host_wants, None);
+            screen_status::stamp_status(&mut body, &facts("absent", Some(&message)));
             return body;
         }
-        return absent();
+        let mut body = absent();
+        screen_status::stamp_status(&mut body, &facts("absent", None));
+        return body;
     };
     let lookup = lookup_provider(state, org_id.as_deref(), &kind).await;
     let Some(provider) = lookup.computer else {
         let unknown = || ("unknown".into(), NO_PROVIDER.into());
         let (code, message) = lookup.error.unwrap_or_else(unknown);
         let at_ms = chrono::Utc::now().timestamp_millis();
+        let word = if stopped { "stopped" } else { "unknown" };
         let mut body = json!({
             "agentId": agent_id,
-            "state": if stopped { "stopped" } else { "unknown" },
+            "state": word,
             "vncUrl": Value::Null,
             "computerError": { "code": code, "message": message, "updatedAtMs": at_ms },
         });
         stamp_egress_fields(&mut body, host_wants, None);
+        screen_status::stamp_status(&mut body, &facts(word, Some(&message)));
         stamp_share_scope(&mut body, scope, &scope_id);
         stamp_egress_policy(state, &mut body, scope, &scope_id).await;
         return body;
@@ -960,7 +918,20 @@ pub async fn coworker_screen(
     let (live_state, cap) = tokio::join!(provider.state(&box_id), probe);
     let live_state = live_state.unwrap_or_else(|_| "unknown".to_string());
     let which = screen_for(state, account_id, coworker_id.as_str()).await;
-    let (mut vnc_url, image) = if live_state == "running" {
+    let progress = provider.screen_progress(&box_id, &which);
+    // A Bot's own screen not up yet is started in the background, and its page handed out once it
+    // is: asked here, `screen_url` would hold this read for as long as the start takes.
+    // (A screen shared by design is always `Given`.)
+    let own_coming = matches!(
+        progress,
+        ScreenProgress::NotAsked | ScreenProgress::Starting
+    );
+    if live_state == "running" && progress == ScreenProgress::NotAsked {
+        let opened = (provider.clone(), box_id.as_str(), &which);
+        open_own_screen(state, account_id, coworker_id, opened);
+    }
+    let shown = live_state == "running" && busy.is_none() && !own_coming;
+    let (mut vnc_url, image) = if shown {
         (
             provider.screen_url(&box_id, &which).await.ok().flatten(),
             provider.image_status(&box_id).await.ok(),
@@ -999,8 +970,20 @@ pub async fn coworker_screen(
             "latest": image.latest,
             "stale": image.stale(),
         })),
-        "screen": which.word(), // which screen of the computer it works on (#376)
     });
+    // Which screen of the computer it works on (#376), as the computer really gave it (#386).
+    screen_status::stamp_screen(&mut screen, &name, which.bot().is_some(), progress);
+    let (now, update) = (
+        chrono::Utc::now().timestamp_millis(),
+        screen["update"].clone(),
+    );
+    let facts = screen_status::Facts {
+        update: screen_status::update_of(&update, now),
+        screen: progress,
+        has_page: screen["vncUrl"].is_string(),
+        ..facts(&live_state, None)
+    };
+    screen_status::stamp_status(&mut screen, &facts);
     // A Local VM with a TAKEOVER stamp beside it is a takeover's box: the stamp says the box
     // changed and why. Only that stamp — the account's error row also holds other scopes' failed
     // hires (a per-bot quota refusal), which beside a healthy Local VM would read as its fault.
@@ -1016,6 +999,61 @@ pub async fn coworker_screen(
     stamp_share_scope(&mut screen, scope, &scope_id);
     stamp_egress_policy(state, &mut screen, scope, &scope_id).await;
     screen
+}
+
+/// Tell the account's app that this Bot's computer changed what it is doing (`computer.changed`,
+/// #386), so an open pane or screen window reads it again instead of waiting for its next poll.
+pub async fn announce_computer(state: &AgUiState, account: &AccountId, coworker: &CoworkerId) {
+    let row = scoped_box_row_for(state, account, coworker).await;
+    let box_id = row.map(|row| row.box_id);
+    let note = opengrok_wire::events::Note::ComputerChanged {
+        coworker_id: coworker.as_str(),
+        box_id: box_id.as_deref(),
+    };
+    if let Err(error) = state
+        .auth
+        .store
+        .events
+        .announce(account.as_str(), &note)
+        .await
+    {
+        tracing::debug!(%error, "computer.changed was not written; the pane's poll still sees it");
+    }
+}
+
+/// Run `work` with the Bot's computer marked `busy` for whoever reads it meanwhile, announced
+/// when it begins and when it ends. The mark is the scope's, so a reset's new box keeps it.
+pub async fn busy_while<T>(
+    state: &AgUiState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    busy: Busy,
+    work: impl Future<Output = T>,
+) -> T {
+    let (_, _, scope, scope_id, _) = scope_of(state, account, coworker.as_str()).await;
+    let mark = screen_status::mark_busy(screen_status::scope_key(scope, &scope_id), busy);
+    announce_computer(state, account, coworker).await;
+    let done = work.await;
+    drop(mark);
+    announce_computer(state, account, coworker).await;
+    done
+}
+
+/// Start a Bot's own screen in the background and announce it when it is up (or fell back):
+/// ahead of its turn, so neither its first action nor the person's first look waits for it.
+pub fn open_own_screen(
+    state: &AgUiState,
+    account: &AccountId,
+    coworker: &CoworkerId,
+    (computer, box_id, screen): (Arc<dyn Computer>, &str, &opengrok_box::Screen),
+) {
+    let (state, account, coworker) = (state.clone(), account.clone(), coworker.clone());
+    let (box_id, screen) = (box_id.to_string(), screen.clone());
+    tokio::spawn(async move {
+        if let Err(error) = computer.open_screen(&box_id, &screen).await {
+            tracing::warn!(%error, "a Bot's own screen did not start");
+        }
+        announce_computer(&state, &account, &coworker).await;
+    });
 }
 
 /// The coworker's screen right now, as the box's PNG — what the Computer pane paints in its
@@ -1070,23 +1108,6 @@ async fn updating(state: &AgUiState, scope: &str, scope_id: &str) -> bool {
         }
         Ok(None) => false,
         Err(_) => true,
-    }
-}
-
-/// Poll until the box's screen is reachable or patience runs out; the caller reports either way.
-pub async fn wait_for_screen(provider: &dyn Computer, box_id: &str, patience: std::time::Duration) {
-    let started = std::time::Instant::now();
-    loop {
-        if let Ok(Some(_)) = provider
-            .screen_url(box_id, &opengrok_box::Screen::Shared)
-            .await
-        {
-            return;
-        }
-        if started.elapsed() >= patience {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
 }
 
@@ -1224,7 +1245,13 @@ pub async fn begin_update_for_coworker(
     {
         return Err((StatusCode::SERVICE_UNAVAILABLE, error.to_string()));
     }
-    Ok(update_scope_box(state.clone(), org_id, scope, scope_id))
+    // Heard when it begins and when it ends; its phases in between are on the status route.
+    announce_computer(state, account_id, coworker_id).await;
+    let (state, account, coworker) = (state.clone(), account_id.clone(), coworker_id.clone());
+    Ok(async move {
+        update_scope_box(state.clone(), org_id, scope, scope_id).await;
+        announce_computer(&state, &account, &coworker).await;
+    })
 }
 
 /// Destroy a coworker's computer, data and all, and provision a fresh one in its place.
@@ -1237,9 +1264,12 @@ pub async fn reset_for_coworker(
         scope_of(state, account_id, coworker_id.as_str()).await;
     // The fresh box is claimed like any first one, so a request that found the scope empty in
     // this gap and made its own ends on one box with this reset (#302).
-    destroy_and_clear(state, org_id.as_deref(), scope, &scope_id).await;
-    let _ = state.auth.store.clear_box_update(scope, &scope_id).await;
-    reprovision_coworker(state, account_id, coworker_id).await
+    let reset = async {
+        destroy_and_clear(state, org_id.as_deref(), scope, &scope_id).await;
+        let _ = state.auth.store.clear_box_update(scope, &scope_id).await;
+        reprovision_coworker(state, account_id, coworker_id).await
+    };
+    busy_while(state, (account_id, coworker_id), Busy::Resetting, reset).await
 }
 
 /// Provision (or re-provision) a coworker's box and PERSIST the assignment to its aggregate, so
@@ -1280,7 +1310,8 @@ pub async fn wake_coworker_computer(
 ) {
     if let Some(scoped) = scoped_box_for(state, account_id, coworker_id).await {
         let patience = std::time::Duration::from_secs(90);
-        let _ = scoped.computer.wake(&scoped.box_id, patience).await;
+        let wake = scoped.computer.wake(&scoped.box_id, patience);
+        let _ = busy_while(state, (account_id, coworker_id), Busy::Starting, wake).await;
     }
 }
 

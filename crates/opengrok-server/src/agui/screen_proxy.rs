@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use opengrok_core::id::{AccountId, CoworkerId};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,7 @@ use tokio::io::AsyncWriteExt;
 use crate::agui::AgUiState;
 use crate::auth::TokenMinter;
 pub use crate::seams::screen_tickets_due;
+pub use opengrok_box::viewer::public_origin;
 use opengrok_box::viewer::{Dialled, loopback_port, socket_path, with_storage_shim};
 
 /// What a ticket is for; an access token (same key) never verifies as one, nor this as that.
@@ -92,48 +93,6 @@ struct Ticket {
     bx: String,
     exp: i64,
     purpose: String,
-}
-
-/// Where the person's app reached this server: `loopback_origin`, or else `OG_PUBLIC_GATEWAY_URL`
-/// when it names a real host, whatever the `Host` (behind a proxy, a name only the proxy knows).
-/// Its default, `http://{OG_BIND}`, is usually a listen address (`0.0.0.0`, `[::]`) no webview can
-/// open, so then the `Host` the request came in on, by construction one the app can reach.
-pub fn public_origin(configured: &str, headers: &HeaderMap) -> Option<String> {
-    if let Some(origin) = loopback_origin(headers) {
-        return Some(origin);
-    }
-    let configured = configured.trim_end_matches('/');
-    let listen_address = configured.contains("://0.0.0.0") || configured.contains("://[::]");
-    if configured.starts_with("http") && !listen_address {
-        return Some(configured.to_string());
-    }
-    let host = headers.get(header::HOST)?.to_str().ok()?;
-    let plain = |c: char| c.is_ascii_alphanumeric() || ".-:[]".contains(c);
-    if host.is_empty() || !host.chars().all(plain) {
-        return None;
-    }
-    let https = headers
-        .get("x-forwarded-proto")
-        .is_some_and(|proto| proto.as_bytes() == b"https");
-    Some(format!("{}://{host}", if https { "https" } else { "http" }))
-}
-
-/// `http://` and a `Host` of `127.0.0.1`, `localhost` or `[::1]`, any port, where an app on this
-/// machine just reached this plain listener; `OG_PUBLIC_GATEWAY_URL` can name a front that is down
-/// (an `https://….local` with no Caddy blanked every screen). REBUILT, NEVER ECHOED: it outranks
-/// that in a URL with a ticket in it. Not after a front proxy (`Forwarded`, `X-Forwarded-*`,
-/// `X-Real-IP`; noticed, never read): its `Host` is the proxy's (nginx sends its upstream's).
-fn loopback_origin(headers: &HeaderMap) -> Option<String> {
-    let proxied = |name: &str| name.contains("forwarded") || name == "x-real-ip";
-    let direct = !headers.keys().any(|name| proxied(name.as_str()));
-    let host = headers.get(header::HOST)?.to_str().ok()?;
-    let names = ["127.0.0.1", "localhost", "[::1]"];
-    let name = names.into_iter().find(|n| direct && host.starts_with(n))?;
-    let port = match host.strip_prefix(name)? {
-        "" => return Some(format!("http://{name}")),
-        rest => rest.strip_prefix(':')?.parse::<u16>().ok()?,
-    };
-    Some(format!("http://{name}:{port}"))
 }
 
 /// `local_page` (the box's own noVNC URL on this host) as a URL on `origin`, carrying the same
