@@ -22,6 +22,9 @@ pub struct RegistryState {
     pub authenticate: Authenticate,
     pub registry: Option<Registry>,
     pub reserved_names: std::collections::BTreeSet<String>,
+    /// The plugins in the server's own folder, as `list` answers them
+    /// (`installed::server_listing`): listed for every account, uninstalled by none.
+    pub server_installations: Arc<Vec<serde_json::Value>>,
 }
 /// Recording tests supply a local registry; deployment always uses GitHub's fixed roots.
 pub fn router(state: RegistryState) -> Router {
@@ -121,8 +124,10 @@ async fn list(State(s): State<RegistryState>, headers: HeaderMap) -> Response {
                     let mut value = serde_json::to_value(&row).unwrap_or_default();
                     value["connectors"] = serde_json::json!(connectors);
                     value["accounts"] = serde_json::json!(accounts);
+                    value["source"] = serde_json::json!("account");
                     value
                 })
+                .chain(s.server_installations.iter().cloned())
                 .collect();
             Json(rows).into_response()
         }
@@ -186,6 +191,18 @@ async fn uninstall(
     let at_ms = chrono::Utc::now().timestamp_millis();
     match installed::uninstall(&s.store, &account, &name, at_ms).await {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        // The server's own plugin is the operator's to remove, from its folder; an account's
+        // install shadowed by one of the same name is still removed above.
+        Ok(false)
+            if s.server_installations
+                .iter()
+                .any(|p| p["name"] == name.as_str()) =>
+        {
+            refused(
+                409,
+                "this plugin was installed on the server by its operator, and only they can remove it",
+            )
+        }
         Ok(false) => refused(404, "no such installation"),
         Err(_) => refused(503, "plugin could not be uninstalled"),
     }

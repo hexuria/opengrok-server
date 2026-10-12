@@ -713,11 +713,65 @@ async fn a_call_to_an_unavailable_server_says_why() {
     assert!(unknown.content.contains("there is no tool"), "{unknown:?}");
 }
 
+/// Argument text that will not parse, `{"filter":"overdue",}`, reaches the executor as null. A
+/// plugin tool called with it, or with an array or a number, is refused in words and the server
+/// is never called: it must not run with its defaults. `{}` and a real object still reach it.
+#[tokio::test]
+async fn a_plugin_tool_with_unreadable_arguments_is_refused_and_never_called() {
+    let (url, seen) = start_server().await;
+    let session = Arc::new(
+        Session::connect(endpoint(&url, &[]))
+            .await
+            .expect("connect"),
+    );
+    let tools = session.tools().await.expect("list");
+    let executor = Executor::with_policy(std::sync::Arc::new(NoBox), everything_allowed())
+        .with_plugin_tools(
+            BTreeMap::from([("gmail.api".to_string(), session.clone())]),
+            tools,
+        );
+    let unreadable = serde_json::from_str(r#"{"filter":"overdue",}"#).unwrap_or(Value::Null);
+    for arguments in [unreadable, json!([]), json!(42)] {
+        let result = call_with(&executor, "gmail_api_send", arguments.clone()).await;
+        assert!(!result.ok, "{arguments}: {result:?}");
+        assert!(!result.awaiting_approval, "{arguments}: {result:?}");
+        assert!(
+            result.content.contains("not a JSON object"),
+            "{arguments}: {result:?}"
+        );
+    }
+    assert!(
+        seen.calls.lock().expect("lock").is_empty(),
+        "the plugin must not be called with defaults"
+    );
+
+    let blank = call_with(&executor, "gmail_api_send", json!({})).await;
+    assert!(!blank.content.contains("not a JSON object"), "{blank:?}");
+    let sent = call_with(
+        &executor,
+        "gmail_api_send",
+        json!({ "to": "a@example.com" }),
+    )
+    .await;
+    assert!(sent.ok, "{sent:?}");
+    let calls = seen.calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[1].1["to"], "a@example.com");
+}
+
 async fn send_through(executor: &Executor) -> opengrok_tools::ToolResult {
     call_through(executor, "gmail_api_send").await
 }
 
 async fn call_through(executor: &Executor, name: &str) -> opengrok_tools::ToolResult {
+    call_with(executor, name, json!({ "to": "someone@example.com" })).await
+}
+
+async fn call_with(
+    executor: &Executor,
+    name: &str,
+    arguments: Value,
+) -> opengrok_tools::ToolResult {
     let context = opengrok_tools::ToolContext {
         account_id: AccountId::from_stored("acct_1"),
         coworker_id: CoworkerId::from_stored("cw_1"),
@@ -734,7 +788,7 @@ async fn call_through(executor: &Executor, name: &str) -> opengrok_tools::ToolRe
     let call = opengrok_tools::ToolCall {
         id: "call_1".to_string(),
         name: name.to_string(),
-        arguments: json!({ "to": "someone@example.com" }),
+        arguments,
     };
     executor.execute(&context, &call).await
 }

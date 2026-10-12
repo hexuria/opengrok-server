@@ -414,7 +414,7 @@ pub(crate) async fn files_line_for_turn(
 /// Copy `files` under `under` and say where; shared by a person's skills and a plugin's, so a
 /// plugin skill's files are held to the same rules: never a reason to wake the box, and checked
 /// against the path allow-list here rather than trusted from wherever they were stored.
-async fn files_line(
+pub(crate) async fn files_line(
     files: Vec<(String, Vec<u8>)>,
     under: &str,
     author: crate::persona::SkillAuthor,
@@ -509,7 +509,9 @@ pub(crate) async fn onto(
     });
     let mut offers: Vec<SkillOffer> = offers.collect();
     let store = &state.auth.store;
-    for offer in opengrok_integrations::turn::skill_offers(store, account, coworker).await {
+    let plugins =
+        opengrok_integrations::turn::skill_offers(store, account, coworker, &state.plugins);
+    for offer in plugins.await {
         if !offers.iter().any(|o| o.name == offer.name) {
             offers.push(offer);
         }
@@ -570,7 +572,9 @@ impl SkillSource for Reader {
     async fn read(&self, offer: &SkillOffer) -> Option<SkillRead> {
         if opengrok_integrations::turn::is_plugin_skill(&offer.id) {
             let store = &self.state.auth.store;
-            let skill = opengrok_integrations::turn::skill(store, &self.who, &offer.id).await?;
+            let plugins = &self.state.plugins;
+            let skill = opengrok_integrations::turn::skill(store, &self.who, &offer.id, plugins);
+            let skill = skill.await?;
             let (author, target) = (crate::persona::SkillAuthor::Plugin, self.target.clone());
             let files = files_line(skill.files, &skill.dir, author, &offer.id, target).await;
             let instructions = skill.body;

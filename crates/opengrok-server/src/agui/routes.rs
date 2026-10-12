@@ -292,10 +292,10 @@ pub(super) fn recipe_values_from(values: Option<&serde_json::Value>) -> BTreeMap
 
 /// The most a `forwardedProps.skill` may be before it is refused unread.
 ///
-/// Ours are `skl_` plus a UUID — 40 characters. The bound is generous enough for a longer id shape
-/// later and small enough that a 2 MB `skill` field is refused before it reaches a log line: this
-/// value is caller-controlled, and a WARN that carries it is a record whose size the caller picks.
-const MAX_SKILL_ID_CHARS: usize = 128;
+/// Ours are `skl_` plus a UUID, 40 characters, or a plugin skill's id, at most 217. The bound is
+/// small enough that a 2 MB `skill` field is refused before it reaches a log line: this value is
+/// caller-controlled, and a WARN that carries it is a record whose size the caller picks.
+const MAX_SKILL_ID_CHARS: usize = 256;
 
 /// What `forwardedProps.skill` said this turn.
 pub(super) enum ChosenSkill {
@@ -344,10 +344,8 @@ pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
     // Bounded above, and here restricted to characters an id we mint can contain. A newline in
     // this value would otherwise be written into a WARN, where it forges a whole log record at a
     // position the caller chooses.
-    if !id
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-    {
+    let byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-';
+    if opengrok_integrations::turn::plugin_skill_bot(id).is_none() && !id.bytes().all(byte) {
         return Some(ChosenSkill::Unusable("not shaped like an id"));
     }
     Some(ChosenSkill::Id(id.to_string()))
@@ -362,7 +360,7 @@ pub(super) fn chosen_skill_from(input: &RunAgentInput) -> Option<ChosenSkill> {
 /// silence it was written to prevent.
 async fn skill_segment(
     state: &AgUiState,
-    account: &AccountId,
+    (account, coworker): (&AccountId, &CoworkerId),
     chosen: &ChosenSkill,
     tools: Option<&opengrok_harness::ToolRunner>,
 ) -> (String, Option<String>) {
@@ -380,6 +378,9 @@ async fn skill_segment(
         }
         ChosenSkill::Id(id) => id,
     };
+    if opengrok_integrations::turn::is_plugin_skill(id) {
+        return plugin_skill_segment(state, (account, coworker), id, tools).await;
+    }
     let skill = match crate::skills::for_turn(state, account, id).await {
         Ok(skill) => skill,
         Err(why) => {
@@ -391,17 +392,52 @@ async fn skill_segment(
             return (why.line().to_string(), None);
         }
     };
-    // The files go before the closing line, so our restatement of the rules stays the last word:
-    // the fence places them, as it does for a skill read with `use_skill`.
-    let quoted = match crate::persona::skill_marker(&skill.body) {
+    let files = |target| crate::skills::files_line_for_turn(state, &skill, target);
+    quote_chosen(id, (&skill.name, &skill.body), skill.author, tools, files).await
+}
+
+/// [`skill_segment`] for a plugin skill, by its `plugin-skills` row's id (`turn::chosen_skill`).
+async fn plugin_skill_segment(
+    state: &AgUiState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    id: &str,
+    tools: Option<&opengrok_harness::ToolRunner>,
+) -> (String, Option<String>) {
+    use opengrok_integrations::turn::{self, NotChosen};
+    let (store, plugins) = (&state.auth.store, &state.plugins);
+    let skill = match turn::chosen_skill(store, account, coworker, id, plugins).await {
+        Ok(skill) => skill,
+        Err(not) => {
+            let why = match not {
+                NotChosen::OtherBot => crate::skills::NotForThisTurn::NotTheirs,
+                NotChosen::Unread => crate::skills::NotForThisTurn::Disabled,
+            };
+            tracing::warn!(skill = ?id, why = ?why, "a chosen plugin skill was not given to a turn");
+            return (why.line().to_string(), None);
+        }
+    };
+    let author = crate::persona::SkillAuthor::Plugin;
+    let files = |target| crate::skills::files_line(skill.files, &skill.dir, author, id, target);
+    quote_chosen(id, (&skill.name, &skill.body), author, tools, files).await
+}
+
+/// A chosen skill fenced between unforgeable markers, `files` before the closing line so our rules
+/// stay the last word; or the refusal, and no id, when no marker could be minted.
+async fn quote_chosen<F: std::future::Future<Output = Option<String>>>(
+    id: &str,
+    (name, body): (&str, &str),
+    author: crate::persona::SkillAuthor,
+    tools: Option<&opengrok_harness::ToolRunner>,
+    files: impl FnOnce(Option<(Arc<dyn opengrok_box::Computer>, String)>) -> F,
+) -> (String, Option<String>) {
+    let quoted = match crate::persona::skill_marker(body) {
         Some(marker) => {
             let target = tools
                 .and_then(ToolRunner::fill_target)
                 .map(|(computer, box_id, _)| (computer, box_id));
-            let files = crate::skills::files_line_for_turn(state, &skill, target).await;
-            let (door, author) = (crate::persona::SkillDoor::Chosen, skill.author);
-            let files = files.unwrap_or_default();
-            crate::persona::fenced_skill(door, &skill.name, &skill.body, &marker, author, &files)
+            let files = files(target).await.unwrap_or_default();
+            let door = crate::persona::SkillDoor::Chosen;
+            crate::persona::fenced_skill(door, name, body, &marker, author, &files)
         }
         None => String::new(),
     };
@@ -412,7 +448,7 @@ async fn skill_segment(
         tracing::warn!(skill = ?id, why = ?why, "a chosen skill could not be quoted safely");
         return (why.line().to_string(), None);
     }
-    (quoted, Some(id.clone()))
+    (quoted, Some(id.to_string()))
 }
 
 /// The skill line for this turn, and the id to record on `RunEvent::Started`.
@@ -421,7 +457,7 @@ async fn skill_segment(
 /// thread, newest first, and take the first that quoted a skill.
 async fn skill_line_for_turn(
     state: &AgUiState,
-    account: &AccountId,
+    (account, coworker): (&AccountId, &CoworkerId),
     thread_id: &str,
     input: &RunAgentInput,
     tools: Option<&opengrok_harness::ToolRunner>,
@@ -433,7 +469,7 @@ async fn skill_line_for_turn(
             None => return (String::new(), None),
         },
     };
-    skill_segment(state, account, &chosen, tools).await
+    skill_segment(state, (account, coworker), &chosen, tools).await
 }
 
 /// Newest prior run on this thread, owned by this account, that recorded a quoted skill
@@ -698,8 +734,20 @@ pub(crate) async fn tools_for_turn(
     // No row is `ask`: one card per run, as before there was a choice.
     let (egress_policy, egress_unconfirmed) =
         provision::egress_policy_for_turn(state, scope, &scope_id).await;
+    let which = provision::screen_for(state, account_id, coworker_id.as_str()).await;
+    // A Bot's own screen is started now, in the background, when its computer is already up:
+    // started on first use, it kept the Bot's first action waiting and showed the person a black
+    // screen while it came up. A computer asleep is not woken for it.
+    if running && which.bot().is_some() {
+        let (computer, box_id, screen) = (computer.clone(), box_id.clone(), which.clone());
+        tokio::spawn(async move {
+            if let Err(error) = computer.open_screen(&box_id, &screen).await {
+                tracing::warn!(%error, "a Bot's own screen was not started ahead of its turn");
+            }
+        });
+    }
+    context.set_screen(which);
     context.box_id = Some(opengrok_core::id::BoxId::from_stored(box_id));
-    context.set_screen(provision::screen_for(state, account_id, coworker_id.as_str()).await);
     let transcript_hold = match state
         .auth
         .store
@@ -1129,11 +1177,6 @@ pub fn router(state: AgUiState) -> Router {
         .route(
             "/coworkers/{coworker_id}/own-computer",
             axum::routing::put(super::ceiling::put_own_computer),
-        )
-        // A screen of its own on the computer it shares, or the shared screen again (#376).
-        .route(
-            "/coworkers/{coworker_id}/computer/screen",
-            axum::routing::put(super::ceiling::put_own_screen),
         )
         // One plugin skill on or off for this Bot, and its text for its page (`ceiling.rs`).
         .route(
@@ -3235,7 +3278,14 @@ async fn start_claimed_turn(
     };
     if let (Some(account), Some(coworker)) = (&account_id, &run_coworker) {
         let store = &state.auth.store;
-        let kept = opengrok_integrations::turn::mentioned(store, account, coworker, &asked_plugins);
+        let operator = &state.plugins;
+        let kept = opengrok_integrations::turn::mentioned(
+            store,
+            account,
+            coworker,
+            &asked_plugins,
+            operator,
+        );
         turn_plugins.mentioned = kept.await;
         // A tagged plugin this turn could not use yet is asked about BEFORE the model is: the
         // turn answers with the card and ends, and the card's answer sends the same message again
@@ -3347,9 +3397,9 @@ async fn start_claimed_turn(
             // it costs the skill, and the coworker is told to say so rather than answer as though
             // it had followed instructions it never saw (CLAUDE.md #8). No id on this request
             // reuses the skill from a prior run on this thread.
+            let who = (account_id, coworker_id);
             let (skill_line, skill_id) =
-                skill_line_for_turn(&state, account_id, &input.thread_id, &input, tools.as_ref())
-                    .await;
+                skill_line_for_turn(&state, who, &input.thread_id, &input, tools.as_ref()).await;
             recorded_skill = skill_id;
             // Who is speaking and what day it is, from the token's account: FIRST in the tail,
             // and so never after the skill line, which must stay last.
@@ -5614,15 +5664,33 @@ pub async fn patch_host_settings(
         )
             .into_response();
     };
+    // Saved before it is believed: a record the store refused would be undone by the next
+    // restart, so the person is told now rather than finding the switch off tomorrow.
+    let mut next = lock
+        .lock()
+        .ok()
+        .map(|settings| settings.clone())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(crate::host_state::default_settings);
+    if let Some(record) = next.as_object_mut() {
+        for (key, value) in patch {
+            record.insert(key.clone(), value.clone());
+        }
+    }
+    if let Err(error) = state
+        .auth
+        .store
+        .save_host_settings(&next, chrono::Utc::now().timestamp_millis())
+        .await
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("the settings could not be saved: {error}"),
+        )
+            .into_response();
+    }
     if let Ok(mut settings) = lock.lock() {
-        if !settings.is_object() {
-            *settings = crate::host_state::default_settings();
-        }
-        if let Some(record) = settings.as_object_mut() {
-            for (key, value) in patch {
-                record.insert(key.clone(), value.clone());
-            }
-        }
+        *settings = next;
     }
     host_settings_reply(&state, &account_id, query.coworker.as_deref()).await
 }
