@@ -82,9 +82,8 @@ pub(crate) struct PluginCall<'a> {
 
 /// Run one plugin tool for a card, through the same executor and gates as a model's call, with
 /// the card's plugin admitted for this call by `turn::mentioned`'s rule (the owner's own Bot and
-/// plugin only). Held under the coworker's lock, so a press cannot interleave with an MCP door
-/// call or another press on the same Bot, and audited like a door call: a press has no run to
-/// journal it.
+/// plugin only), and audited like a door call: a press has no run to journal it. The caller holds
+/// the Bot's `coworker_lock` (`card_lock`), and has read the card under it.
 pub(crate) async fn run_plugin_tool(
     host: &HostState,
     account: &AccountId,
@@ -93,8 +92,6 @@ pub(crate) async fn run_plugin_tool(
 ) -> ToolResult {
     let state = &host.agui;
     let store = &state.auth.store;
-    let lock = crate::mcp_door::coworker_lock(coworker);
-    let _guard = lock.lock().await;
     let mut id = format!("form_{}", uuid::Uuid::now_v7().simple());
     let mut approved = Vec::new();
     if call.yes {
@@ -200,6 +197,8 @@ pub(crate) async fn mint(
                 yes: false,
                 request_id: &entry_id,
             };
+            let lock = card_lock(coworker);
+            let _held = lock.lock().await;
             let result = run_plugin_tool(host, account, coworker, call).await;
             reply_of(&result).and_then(|reply| form_mode::card_request(&plugin, &reply))
         }
@@ -272,6 +271,10 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
         let error = "action must be save, submit, view, focus or refresh";
         return (400, json!({ "error": error }));
     }
+    // ONE PRESS AT A TIME ON A BOT, AND THE CARD READ UNDER IT. Read before the lock, a second
+    // Submit would pass the check while the first is sending, and queue the return twice.
+    let lock = card_lock(&coworker);
+    let _held = lock.lock().await;
     let loaded = super::user_form::load_owned_entry(host, account, &coworker, &entry_id).await;
     let (seq, entry) = match loaded {
         Ok(row) => row,
@@ -346,14 +349,15 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
         body["formRequest"] = json!(card);
         if action == "refresh" {
             let opened = reopened(entry.clone(), &card);
-            if let Err(error) = host
-                .agui
-                .auth
-                .store
-                .update_gateway_entry(&coworker, account, seq, &opened)
-                .await
-            {
-                tracing::error!(%error, "a refreshed form-mode card could not be kept");
+            let store = &host.agui.auth.store;
+            let kept =
+                store.update_gateway_entry_if((&coworker, account), (seq, Some(&entry)), &opened);
+            match kept.await {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!("a form-mode card changed while it was refreshed"),
+                Err(error) => {
+                    tracing::error!(%error, "a refreshed form-mode card could not be kept")
+                }
             }
         }
     }
@@ -379,18 +383,60 @@ async fn submitted(
         body["ok"] = json!(false);
         return (200, body);
     };
-    let settled = settle_submitted(entry, &queue_ref, fingerprint.as_deref(), &values);
-    let store = &host.agui.auth.store;
-    if let Err(error) = store
-        .update_gateway_entry(coworker, account, seq, &settled)
-        .await
-    {
-        // The return IS queued: saying otherwise would invite a second press. The card is left a
-        // draft in the transcript, and the plugin's queue still refuses a second send.
-        tracing::error!(%error, %queue_ref, "a submitted form-mode card could not be settled");
-    }
+    let settle = |entry| settle_submitted(entry, &queue_ref, fingerprint.as_deref(), &values);
+    let settled = match record(host, (account, coworker), (seq, entry), settle).await {
+        Ok(settled) => settled,
+        Err(settled) => {
+            // The return IS queued: saying otherwise would invite a second press.
+            tracing::error!(%queue_ref, "a submitted form-mode card could not be settled");
+            settled
+        }
+    };
     body["entry"] = settled;
     (200, body)
+}
+
+/// Write `settle` of the card, against the card as read. Lost to a write in between (another
+/// replica's Dismiss or Resume), it is read again and settled again, once: a submit wins over
+/// either. `Err` carries the settled card that could not be written.
+async fn record(
+    host: &HostState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    (seq, mut was): (i64, Value),
+    settle: impl Fn(Value) -> Value,
+) -> Result<Value, Value> {
+    let store = &host.agui.auth.store;
+    let entry_id = was
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    for _ in 0..2 {
+        let settled = settle(was.clone());
+        let written =
+            store.update_gateway_entry_if((coworker, account), (seq, Some(&was)), &settled);
+        match written.await {
+            Ok(true) => return Ok(settled),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "a form-mode card's write failed; trying again"),
+        }
+        match super::user_form::load_owned_entry(host, account, coworker, &entry_id).await {
+            Ok((_, now)) if is_submitted(&now) => return Ok(now),
+            Ok((_, now)) => was = now,
+            Err(_) => break,
+        }
+    }
+    Err(settle(was))
+}
+
+fn is_submitted(entry: &Value) -> bool {
+    entry.get("formResolution").and_then(Value::as_str) == Some("submitted")
+}
+
+/// The lock a card's verbs, and its mint, hold on their Bot: the MCP door's, so a press cannot
+/// interleave with a door call or another press either.
+fn card_lock(coworker: &CoworkerId) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    crate::mcp_door::coworker_lock(coworker)
 }
 
 /// A submitted card's view: the values it was submitted with, as its entry keeps them.
@@ -508,15 +554,22 @@ fn reopened(mut entry: Value, card: &FormRequest) -> Value {
     entry
 }
 
-/// `dismissUserForm` on a form-mode card.
+/// `dismissUserForm` on a form-mode card, read again under its Bot's lock: a Dismiss read
+/// before a Submit settled would otherwise write the draft back over the queued return.
 pub(crate) async fn dismiss(
     host: &HostState,
     (account, coworker): (&AccountId, &CoworkerId),
-    seq: i64,
-    entry: Value,
+    entry_id: &str,
     args: &Value,
 ) -> (u16, Value) {
-    if entry.get("formResolution").and_then(Value::as_str) == Some("submitted") {
+    let lock = card_lock(coworker);
+    let _held = lock.lock().await;
+    let (seq, entry) =
+        match super::user_form::load_owned_entry(host, account, coworker, entry_id).await {
+            Ok(row) => row,
+            Err(reply) => return reply,
+        };
+    if is_submitted(&entry) {
         return (
             409,
             json!({ "error": "this return was submitted; it can only be viewed" }),
@@ -529,13 +582,17 @@ pub(crate) async fn dismiss(
         .filter(|key| form.fields.iter().any(|field| field.id == *key))
         .map(str::to_string)
         .or(form.focus);
-    let settled = settle_dismissed(entry, focus.as_deref());
+    let settled = settle_dismissed(entry.clone(), focus.as_deref());
     let store = &host.agui.auth.store;
     match store
-        .update_gateway_entry(coworker, account, seq, &settled)
+        .update_gateway_entry_if((coworker, account), (seq, Some(&entry)), &settled)
         .await
     {
-        Ok(()) => (200, settled),
+        Ok(true) => (200, settled),
+        Ok(false) => (
+            409,
+            json!({ "error": "the form changed meanwhile; try again" }),
+        ),
         Err(error) => {
             tracing::error!(%error, "could not dismiss a form-mode card");
             (500, json!({ "error": "transcript unavailable" }))

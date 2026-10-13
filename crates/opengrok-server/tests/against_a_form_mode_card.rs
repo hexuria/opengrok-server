@@ -897,3 +897,93 @@ async fn a_dismissed_card_keeps_its_draft_and_resumes() {
         json!("100.00")
     );
 }
+
+/// Two Submits at once queue the return once, and nothing written after it puts the queued
+/// return back to a draft. The row's own condition is checked as well as the lock: the lock is
+/// one process's, so a stale write from another replica has to stop at the row.
+#[tokio::test]
+async fn racing_presses_queue_a_return_once_and_never_unsubmit_it() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (entry_id, _) = h.open_card(&h.agent.clone()).await;
+    let (status, _) = h
+        .act(
+            &entry_id,
+            "save",
+            json!({ "values": { TAX14: "12,500.00" } }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let seen = json!({ "fingerprint": h.bir.fingerprint() });
+
+    let (first, second) = tokio::join!(
+        h.act(&entry_id, "submit", seen.clone()),
+        h.act(&entry_id, "submit", seen.clone())
+    );
+    assert_eq!(
+        h.bir.calls_to("bir_form_submit").len(),
+        1,
+        "{first:?} {second:?}"
+    );
+    let mut statuses = [first.0, second.0];
+    statuses.sort_unstable();
+    assert_eq!(statuses, [200, 409], "{first:?} {second:?}");
+
+    let (status, _) = h
+        .post(
+            "/ag-ui/user-form/dismiss",
+            &json!({ "entryId": entry_id, "agentId": h.agent, "mode": "dismissed" }),
+        )
+        .await;
+    assert_eq!(status, 409);
+    let (status, _) = h.act(&entry_id, "refresh", json!({})).await;
+    assert_eq!(status, 409);
+    let submitted = h.entry(&entry_id).await;
+    assert_eq!(
+        submitted["formResolution"],
+        json!("submitted"),
+        "{submitted}"
+    );
+    assert_eq!(
+        submitted["formOutcome"]["queueRef"],
+        json!("q_0619E_2026-09")
+    );
+
+    // Another replica's writes, made from what it read before: neither lands.
+    let coworker = CoworkerId::from_stored(h.agent.clone());
+    let who = (&coworker, &h.account);
+    let (seq, _) = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &entry_id)
+        .await
+        .expect("entry")
+        .expect("row");
+    let mut draft = submitted.clone();
+    draft["formResolution"] = json!("dismissed");
+    let over_submitted = h
+        .store
+        .update_gateway_entry_if(who, (seq, Some(&submitted)), &draft)
+        .await
+        .expect("write");
+    assert!(!over_submitted, "a submitted card is never written over");
+    let (other, _) = h.open_card(&format!("{}-2", h.agent)).await;
+    let (seq, read) = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &other)
+        .await
+        .expect("entry")
+        .expect("row");
+    let mut first_write = read.clone();
+    first_write["formResolution"] = json!("dismissed");
+    let first = h
+        .store
+        .update_gateway_entry_if(who, (seq, Some(&read)), &first_write);
+    assert!(first.await.expect("write"));
+    let stale = h
+        .store
+        .update_gateway_entry_if(who, (seq, Some(&read)), &read);
+    assert!(
+        !stale.await.expect("write"),
+        "a write from a stale read stops at the row"
+    );
+}

@@ -389,7 +389,7 @@ pub async fn dismiss_user_form(
             );
         }
         let who = (account_id, &coworker_id);
-        return super::form_mode::dismiss(state, who, seq, entry, args).await;
+        return super::form_mode::dismiss(state, who, &entry_id, args).await;
     }
     if !is_unresolved(&entry) {
         // Skip after Open the screen can land as dismissed on the *form* id while a

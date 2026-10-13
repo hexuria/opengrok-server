@@ -107,17 +107,24 @@ impl PgStore {
         seq: i64,
         entry: &Value,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "update gateway_entry set entry = $3
-              where coworker_id = $1 and seq = $2 and account_id = $4",
-        )
-        .bind(coworker.as_str())
-        .bind(seq)
-        .bind(entry)
-        .bind(account.as_str())
-        .execute(self.pool())
-        .await?;
-        Ok(())
+        let unconditional = self.update_gateway_entry_if((coworker, account), (seq, None), entry);
+        unconditional.await.map(drop)
+    }
+
+    /// With `was`, only while the row is still `was` and no submit settled it (#220): a card's
+    /// lock is one process's, so a stale write from another replica stops here.
+    pub async fn update_gateway_entry_if(
+        &self,
+        (coworker, account): (&CoworkerId, &AccountId),
+        (seq, was): (i64, Option<&Value>),
+        entry: &Value,
+    ) -> StoreResult<bool> {
+        let sql = "update gateway_entry set entry = $3 where coworker_id = $1 and seq = $2 and \
+                   account_id = $4 and ($5::jsonb is null or (entry = $5 and \
+                   coalesce(entry->>'formResolution', '') <> 'submitted'))";
+        let query = sqlx::query(sql).bind(coworker.as_str()).bind(seq);
+        let query = query.bind(entry).bind(account.as_str()).bind(was);
+        Ok(query.execute(self.pool()).await?.rows_affected() == 1)
     }
 
     /// Seam B's extra profile fields for a coworker (description, title, avatar shape/colour).
