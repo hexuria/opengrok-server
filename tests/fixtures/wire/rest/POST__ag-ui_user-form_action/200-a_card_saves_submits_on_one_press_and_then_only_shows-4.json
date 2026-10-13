@@ -1,0 +1,12 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/action",
+  "status": 200,
+  "body": {
+    "ok": true,
+    "action": "view",
+    "reply": {
+      "html": "<!doctype html><title>0619-E</title><p>12,500.00</p>"
+    }
+  }
+}

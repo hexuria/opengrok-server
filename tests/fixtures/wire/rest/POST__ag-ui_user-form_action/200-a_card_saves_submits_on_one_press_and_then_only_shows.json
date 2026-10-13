@@ -1,0 +1,104 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/action",
+  "status": 200,
+  "body": {
+    "ok": true,
+    "action": "submit",
+    "reply": {
+      "queued": true,
+      "queue_ref": "q_0619E_2026-09",
+      "fingerprint": "sha256:draft-1",
+      "values": {
+        "frm0619E:txtTax14": "12,500.00"
+      }
+    },
+    "entry": {
+      "id": "e_0199bb4e-0000-7000-8000-000000000001",
+      "kind": "send-message",
+      "message": {
+        "type": "user-form",
+        "formRequest": {
+          "form": {
+            "tin": "123456789000",
+            "form": "0619E",
+            "period": "2026-09"
+          },
+          "focus": "frm0619E:txtTax14",
+          "pages": [
+            {
+              "n": 1,
+              "title": "Part II · Tax Remittance"
+            }
+          ],
+          "title": "Form 0619-E",
+          "fields": [
+            {
+              "id": "frm0619E:rdoTaxWithheld",
+              "line": "4",
+              "page": 1,
+              "part": "I",
+              "type": "radio",
+              "label": "Any Taxes Withheld?",
+              "value": "Y",
+              "secret": false,
+              "options": [
+                {
+                  "label": "Yes",
+                  "value": "Y"
+                },
+                {
+                  "label": "No",
+                  "value": "N"
+                }
+              ],
+              "required": true,
+              "readOnly": true
+            },
+            {
+              "id": "frm0619E:txtTax14",
+              "line": "14",
+              "page": 1,
+              "part": "II",
+              "type": "text",
+              "readOnly": true,
+              "label": "Amount of Remittance",
+              "value": "12,500.00",
+              "secret": false,
+              "required": true
+            },
+            {
+              "id": "frm0619E:txtTax16",
+              "line": "16",
+              "page": 1,
+              "part": "II",
+              "type": "text",
+              "label": "Net Amount of Remittance",
+              "value": "0.00",
+              "secret": false,
+              "readOnly": true,
+              "required": false
+            }
+          ],
+          "plugin": "bir",
+          "status": "queued",
+          "formMode": true,
+          "fingerprint": "sha256:draft-0",
+          "instruction": ""
+        }
+      },
+      "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
+      "timestampMs": 1790000000000,
+      "requestCallId": "call-0199bb4e000070008000000000000003",
+      "formResolution": "submitted",
+      "formOutcome": {
+        "queueRef": "q_0619E_2026-09",
+        "fingerprint": "sha256:draft-1",
+        "values": {
+          "frm0619E:txtTax14": "12,500.00"
+        },
+        "atMs": 1790000001000
+      }
+    }
+  }
+}

@@ -354,6 +354,10 @@
       "source": "streamed or replayed by /ag-ui, recorded from the test a_bots_computer_tools_are_one_group_and_a_reset_asks_first (crates/opengrok-server/tests/against_routine_tools.rs); ids and times are placeholders"
     },
     {
+      "file": "agui/custom/run-awaiting-approval/a_model_that_submits_by_itself_waits_for_a_yes.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_model_that_submits_by_itself_waits_for_a_yes (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
       "file": "agui/custom/run-stopped/stopping_a_run_mid_relay_cancels_the_call_on_the_mac.json",
       "source": "streamed or replayed by /ag-ui, recorded from the test stopping_a_run_mid_relay_cancels_the_call_on_the_mac (crates/opengrok-server/tests/against_the_mac_relay.rs); ids and times are placeholders"
     },
@@ -404,6 +408,10 @@
     {
       "file": "agui/custom/user-form/a_handed_back_form_replays_as_handed_back_and_leaves_the_approvals_queue.json",
       "source": "streamed or replayed by /ag-ui/runs/{run_id}, recorded from the test a_handed_back_form_replays_as_handed_back_and_leaves_the_approvals_queue (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/custom/user-form/a_card_saves_submits_on_one_press_and_then_only_shows.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
     },
     {
       "file": "events/computer.changed/a_reset_is_seen_by_a_second_viewer_and_heard_on_the_events_stream.json",
@@ -1306,6 +1314,10 @@
       "source": "GET /coworkers/{coworker_id}/mcp-calls, recorded from the test a_bot_key_shakes_hands_and_a_computerless_coworker_lists_an_empty_toolbox (crates/opengrok-server/tests/against_the_mcp_door.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__coworkers__coworker_id__mcp-calls/200-a_card_saves_submits_on_one_press_and_then_only_shows.json",
+      "source": "GET /coworkers/{coworker_id}/mcp-calls, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__coworkers__coworker_id__plugin-skills/200-a_server_folder_plugin_is_every_accounts_and_its_skills_follow_the_bots_switch.json",
       "source": "GET /coworkers/{coworker_id}/plugin-skills, recorded from the test a_server_folder_plugin_is_every_accounts_and_its_skills_follow_the_bots_switch (crates/opengrok-server/tests/against_plugin_registry.rs); ids and times are placeholders"
     },
@@ -2134,6 +2146,10 @@
       "source": "POST /ag-ui/user-form/dismiss, recorded from the test a_skip_that_cannot_read_the_run_log_settles_nothing (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/POST__ag-ui_user-form_dismiss/200-a_dismissed_card_keeps_its_draft_and_resumes.json",
+      "source": "POST /ag-ui/user-form/dismiss, recorded from the test a_dismissed_card_keeps_its_draft_and_resumes (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/POST__ag-ui_user-form_submit/200-collect_submit_returns_answers_without_computer_effects_and_retry_keeps_them.json",
       "source": "POST /ag-ui/user-form/submit, recorded from the test collect_submit_returns_answers_without_computer_effects_and_retry_keeps_them (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
@@ -2928,6 +2944,30 @@
     {
       "file": "rest/PUT__skills__id_/410-a_deleted_skill_leaves_the_list_and_stops_taking_writes.json",
       "source": "PUT /skills/{id}, recorded from the test a_deleted_skill_leaves_the_list_and_stops_taking_writes (crates/opengrok-server/tests/against_another_persons_skill.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/200-a_card_saves_submits_on_one_press_and_then_only_shows.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/200-a_card_saves_submits_on_one_press_and_then_only_shows-2.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/200-a_card_saves_submits_on_one_press_and_then_only_shows-3.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/200-a_card_saves_submits_on_one_press_and_then_only_shows-4.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/200-a_card_saves_submits_on_one_press_and_then_only_shows-5.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/409-a_card_saves_submits_on_one_press_and_then_only_shows.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
     }
   ],
   "unrecorded": []

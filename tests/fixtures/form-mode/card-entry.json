@@ -1,0 +1,77 @@
+{
+  "id": "<id>",
+  "kind": "send-message",
+  "message": {
+    "type": "user-form",
+    "formRequest": {
+      "form": {
+        "tin": "123456789000",
+        "form": "0619E",
+        "period": "2026-09"
+      },
+      "focus": "frm0619E:txtTax14",
+      "pages": [
+        {
+          "n": 1,
+          "title": "Part II · Tax Remittance"
+        }
+      ],
+      "title": "Form 0619-E",
+      "fields": [
+        {
+          "id": "frm0619E:rdoTaxWithheld",
+          "line": "4",
+          "page": 1,
+          "part": "I",
+          "type": "radio",
+          "label": "Any Taxes Withheld?",
+          "value": "Y",
+          "secret": false,
+          "options": [
+            {
+              "label": "Yes",
+              "value": "Y"
+            },
+            {
+              "label": "No",
+              "value": "N"
+            }
+          ],
+          "required": true
+        },
+        {
+          "id": "frm0619E:txtTax14",
+          "line": "14",
+          "page": 1,
+          "part": "II",
+          "type": "text",
+          "error": "Please fill up Part II - Tax Remittance if item 4 is set to Yes.",
+          "label": "Amount of Remittance",
+          "value": "",
+          "secret": false,
+          "required": true
+        },
+        {
+          "id": "frm0619E:txtTax16",
+          "line": "16",
+          "page": 1,
+          "part": "II",
+          "type": "text",
+          "label": "Net Amount of Remittance",
+          "value": "0.00",
+          "secret": false,
+          "readOnly": true,
+          "required": false
+        }
+      ],
+      "plugin": "bir",
+      "status": "draft",
+      "formMode": true,
+      "fingerprint": "sha256:draft-0",
+      "instruction": ""
+    }
+  },
+  "threadId": "<threadId>",
+  "timestampMs": 0,
+  "requestCallId": "<requestCallId>"
+}
