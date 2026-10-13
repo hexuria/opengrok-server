@@ -47,6 +47,7 @@ hickory-resolver.workspace = true
 argon2.workspace = true
 opengrok-core = { path = "../opengrok-core" }
 opengrok-box = { path = "../opengrok-box" }
+opengrok-screen-ssh = { path = "../opengrok-screen-ssh" }
 opengrok-recipes = { path = "../opengrok-recipes" }
 opengrok-tools = { path = "../opengrok-tools" }
 opengrok-plugins = { path = "../opengrok-plugins" }

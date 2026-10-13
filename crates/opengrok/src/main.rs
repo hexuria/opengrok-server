@@ -5,6 +5,7 @@ mod kek;
 mod pins;
 mod purge;
 mod repair;
+mod screen_ssh;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -374,6 +375,7 @@ async fn main() -> anyhow::Result<()> {
         gateway.clone(),
     ));
 
+    screen_ssh::start(bind, state.clone()).await;
     let app = opengrok_server::router(state, gateway);
     let listener = tokio::net::TcpListener::bind(bind)
         .await

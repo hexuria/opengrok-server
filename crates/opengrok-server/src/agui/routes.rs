@@ -1147,6 +1147,10 @@ pub fn router(state: AgUiState) -> Router {
         )
         .route("/coworkers/{coworker_id}/screen", get(computer_screen))
         .route(
+            "/coworkers/{coworker_id}/computer/ssh",
+            post(super::screen_proxy::ssh_code),
+        )
+        .route(
             "/coworkers/{coworker_id}/computer/vnc/{ticket}/{*rest}",
             get(super::screen_proxy::serve),
         )
@@ -2286,7 +2290,7 @@ async fn list_templates(
 
 /// Is this coworker the caller's? `None` ⇒ 404: another account's coworker id must read as
 /// "no such coworker", never as an empty or refused one.
-pub(crate) async fn owned_coworker(
+pub async fn owned_coworker(
     state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
@@ -2302,7 +2306,7 @@ pub(crate) async fn owned_coworker(
 
 /// The caller and the coworker in the path, when it is the caller's own: 401 without a bearer,
 /// 404 for anyone else's — the opening of every owner-only coworker route.
-async fn owner_of(
+pub async fn owner_of(
     state: &AgUiState,
     headers: &axum::http::HeaderMap,
     coworker_id: String,
