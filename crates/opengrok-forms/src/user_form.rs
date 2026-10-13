@@ -29,7 +29,7 @@ pub const REQUEST_USER_FORM: &str = "request_user_form";
 /// Transcribed field types from official 0.29/0.30 `user-form/view.tsx`.
 pub const SECRET_TYPES: &[&str] = &["password", "otp"];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FormField {
     pub id: String,
     pub label: String,
@@ -46,6 +46,40 @@ pub struct FormField {
     /// after Facebook redrew its page with an error (21 Sep 2026).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<FieldAt>,
+    /// The choices of a radio or select box. Read only on a collect or form-mode card: a login
+    /// card's fields are typed into a page and have no choices of ours.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<FormOption>,
+    /// The value the plugin holds for this box now. FORM MODE ONLY: a collect card's prefill is
+    /// added by `sanitize_arguments`, which knows to leave a secret field empty, and a login card
+    /// keeps no value at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The one error to show under this box: the plugin's first error, never a list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Where the box is on the paper form: its page, its part, and its line (the BIR item).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    /// Computed by the plugin; the person cannot type into it.
+    #[serde(
+        default,
+        rename = "readOnly",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub read_only: bool,
+}
+
+/// One choice of a radio or select box.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FormOption {
+    pub value: String,
+    #[serde(default)]
+    pub label: String,
 }
 
 /// A point on the box's screen, as the model saw it.
@@ -106,6 +140,36 @@ pub struct FormRequest {
     /// with exactly one typed field, still Returns. Combined forms must set this explicitly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub submit: bool,
+    /// The chat box drives this card and a plugin holds its values (`crate::form_mode`). Every
+    /// key below is kept only when this is true, so a login card's shape does not change.
+    #[serde(
+        default,
+        rename = "formMode",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub form_mode: bool,
+    /// The plugin whose `extensions.formMode` names the card's tools. The tools come from the
+    /// plugin's manifest, never from here and never from the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<crate::form_mode::FormPage>,
+    /// Problems no box on the card can fix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The field id the card opens on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
+    /// The plugin's submission fingerprint of the draft the person sees. Submit sends it back,
+    /// so a draft that changed underneath the person is refused rather than sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// Which return this is. Every action carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<crate::form_mode::FormKey>,
+    /// The plugin's word for the draft: `draft`, `queued` or `sent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// What the model reads when the person hands the computer back after Open-the-screen.
@@ -177,6 +241,8 @@ pub fn fully_positioned(form: &FormRequest) -> bool {
 #[must_use]
 pub fn form_request_from(value: &Value) -> FormRequest {
     let source = form_source(value);
+    let form_mode = crate::form_mode::is_form_mode_source(source);
+    let chosen = form_mode || is_chat_collection(value);
     let fields = source
         .get("fields")
         .and_then(Value::as_array)
@@ -209,6 +275,7 @@ pub fn form_request_from(value: &Value) -> FormRequest {
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
                         at: field_at(field),
+                        ..crate::form_mode::field_extras(field, chosen, form_mode)
                     })
                 })
                 .collect()
@@ -254,6 +321,7 @@ pub fn form_request_from(value: &Value) -> FormRequest {
             .get("submit")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        ..crate::form_mode::request_extras(source, form_mode)
     }
 }
 
@@ -261,6 +329,11 @@ pub fn form_request_from(value: &Value) -> FormRequest {
 /// the model smuggled are dropped so a password cannot sit on the entry waiting for submit.
 #[must_use]
 pub fn sanitize_arguments(arguments: &Value) -> Value {
+    // A form-mode call names its return and nothing else: the card's boxes, values and
+    // fingerprint come from the plugin's card tool, never from the model.
+    if crate::form_mode::is_form_mode_source(form_source(arguments)) {
+        return crate::form_mode::sanitize_request(form_source(arguments));
+    }
     let form = form_request_from(arguments);
     let mut body = json!({
         "title": form.title,
