@@ -826,6 +826,11 @@ async fn a_card_saves_submits_on_one_press_and_then_only_shows() {
         .await
         .expect("body");
     assert!(calls.contains("bir.bir-mcp.bir_form_submit"), "{calls}");
+    // Which return and which boxes, never what is in them.
+    assert!(!calls.contains("123456789000"), "{calls}");
+    assert!(!calls.contains("12,500.00"), "{calls}");
+    assert!(calls.contains("***000") && calls.contains(TAX14), "{calls}");
+    assert!(calls.contains("q_0619E_2026-09"), "{calls}");
 }
 
 /// A model that calls the submit tool itself parks on a policy card: the plugin's alwaysAsk is

@@ -127,13 +127,10 @@ pub(crate) async fn run_plugin_tool(
         (true, _) => "ok",
         (false, _) => "failed",
     };
-    // The judge's redaction is JSON text, clipped with a stated cut when long; a clipped one no
-    // longer parses, and is kept as the string it is, as the door keeps it.
-    let redacted = opengrok_tools::redact_arguments(&tool_call.arguments);
     let row = opengrok_store::NewMcpCall {
         call_id: &tool_call.id,
         tool: &tool_call.name,
-        arguments: serde_json::from_str(&redacted).unwrap_or(Value::String(redacted.clone())),
+        arguments: audited(&tool_call.arguments, &result),
         outcome,
         request_id: call.request_id,
         at_ms: now_ms(),
@@ -142,6 +139,36 @@ pub(crate) async fn run_plugin_tool(
         tracing::error!(%error, tool = %tool_call.name, "a card's plugin call ran but its audit row was not written");
     }
     result
+}
+
+/// What a card's call leaves in `mcp_call_audit`: which return, and which boxes, never what is in
+/// them. A save runs on every blur, so the generic redaction would keep the TIN and every amount
+/// once per box the person leaves. The TIN keeps its last three digits, enough to tell two
+/// returns apart; a submit keeps the plugin's queue reference.
+fn audited(arguments: &Value, result: &ToolResult) -> Value {
+    let form = arguments.get("form").unwrap_or(&Value::Null);
+    let tin: Vec<char> = form
+        .get("tin")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .collect();
+    let last: String = tin[tin.len().saturating_sub(3)..].iter().collect();
+    let identity = json!({ "form": form.get("form"), "period": form.get("period"), "tin": format!("***{last}") });
+    let mut kept = json!({ "form": identity });
+    if let Some(values) = arguments.get("values").and_then(Value::as_object) {
+        kept["keys"] = json!(values.keys().collect::<Vec<_>>());
+    }
+    for key in ["mode", "page", "key", "inline", "fingerprint"] {
+        if let Some(value) = arguments.get(key) {
+            kept[key] = value.clone();
+        }
+    }
+    let reply = serde_json::from_str::<Value>(&result.content).unwrap_or_default();
+    if let Some(queue_ref) = reply.get("queue_ref").filter(|_| result.ok) {
+        kept["queueRef"] = queue_ref.clone();
+    }
+    kept
 }
 
 /// A plugin's answer as the JSON it sent, or why it is not one. A refusal's words are kept: they

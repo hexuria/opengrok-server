@@ -8,10 +8,11 @@
       "tool": "bir.bir-mcp.bir_form_submit",
       "arguments": {
         "form": {
-          "tin": "123456789000",
+          "tin": "***000",
           "form": "0619E",
           "period": "2026-09"
         },
+        "queueRef": "q_0619E_2026-09",
         "fingerprint": "sha256:draft-1"
       },
       "outcome": "ok",
@@ -20,57 +21,10 @@
     },
     {
       "callId": "form_0199bb4e000070008000000000000004",
-      "tool": "bir.bir-mcp.bir_form_focus",
-      "arguments": {
-        "key": "«redacted»",
-        "form": {
-          "tin": "123456789000",
-          "form": "0619E",
-          "period": "2026-09"
-        }
-      },
-      "outcome": "ok",
-      "requestId": "e_0199bb4e-0000-7000-8000-000000000003",
-      "atMs": 1790000001000
-    },
-    {
-      "callId": "form_0199bb4e000070008000000000000005",
-      "tool": "bir.bir-mcp.bir_form_preview",
-      "arguments": {
-        "form": {
-          "tin": "123456789000",
-          "form": "0619E",
-          "period": "2026-09"
-        },
-        "inline": true
-      },
-      "outcome": "ok",
-      "requestId": "e_0199bb4e-0000-7000-8000-000000000003",
-      "atMs": 1790000002000
-    },
-    {
-      "callId": "form_0199bb4e000070008000000000000006",
-      "tool": "bir.bir-mcp.bir_form_save",
-      "arguments": {
-        "form": {
-          "tin": "123456789000",
-          "form": "0619E",
-          "period": "2026-09"
-        },
-        "values": {
-          "frm0619E:txtTax14": "12,500.00"
-        }
-      },
-      "outcome": "ok",
-      "requestId": "e_0199bb4e-0000-7000-8000-000000000003",
-      "atMs": 1790000003000
-    },
-    {
-      "callId": "form_0199bb4e000070008000000000000007",
       "tool": "bir.bir-mcp.bir_form_card",
       "arguments": {
         "form": {
-          "tin": "123456789000",
+          "tin": "***000",
           "form": "0619E",
           "period": "2026-09"
         },
@@ -78,7 +32,69 @@
       },
       "outcome": "ok",
       "requestId": "e_0199bb4e-0000-7000-8000-000000000003",
+      "atMs": 1790000001000
+    },
+    {
+      "callId": "form_0199bb4e000070008000000000000005",
+      "tool": "bir.bir-mcp.bir_form_focus",
+      "arguments": {
+        "key": "«redacted»",
+        "form": {
+          "tin": "***000",
+          "form": "0619E",
+          "period": "2026-09"
+        }
+      },
+      "outcome": "ok",
+      "requestId": "e_0199bb4e-0000-7000-8000-000000000003",
+      "atMs": 1790000002000
+    },
+    {
+      "callId": "form_0199bb4e000070008000000000000006",
+      "tool": "bir.bir-mcp.bir_form_preview",
+      "arguments": {
+        "form": {
+          "tin": "***000",
+          "form": "0619E",
+          "period": "2026-09"
+        },
+        "inline": true
+      },
+      "outcome": "ok",
+      "requestId": "e_0199bb4e-0000-7000-8000-000000000003",
+      "atMs": 1790000003000
+    },
+    {
+      "callId": "form_0199bb4e000070008000000000000007",
+      "tool": "bir.bir-mcp.bir_form_save",
+      "arguments": {
+        "form": {
+          "tin": "***000",
+          "form": "0619E",
+          "period": "2026-09"
+        },
+        "keys": [
+          "frm0619E:txtTax14"
+        ]
+      },
+      "outcome": "ok",
+      "requestId": "e_0199bb4e-0000-7000-8000-000000000003",
       "atMs": 1790000004000
+    },
+    {
+      "callId": "form_0199bb4e000070008000000000000008",
+      "tool": "bir.bir-mcp.bir_form_card",
+      "arguments": {
+        "form": {
+          "tin": "***000",
+          "form": "0619E",
+          "period": "2026-09"
+        },
+        "mode": "index"
+      },
+      "outcome": "ok",
+      "requestId": "e_0199bb4e-0000-7000-8000-000000000003",
+      "atMs": 1790000005000
     }
   ]
 }
