@@ -1801,13 +1801,13 @@ impl UserFormSseHold {
     }
 
     /// The call and its sanitised arguments when `event` is the result of a held form-mode call
-    /// the executor accepted: the moment its card is to be minted. Its words are the executor's
-    /// own `FORM_OPEN`, so a refusal (a bad identity, an app that cannot draw the card) mints
-    /// nothing.
+    /// the executor accepted: the moment its card is to be minted. Read from the result's own
+    /// `ok`, never its words, so a refusal (a bad identity, an app that cannot draw the card)
+    /// mints nothing, and rewording the promise cannot stop every card.
     pub(crate) fn form_mode_call(&self, event: &Event) -> Option<(String, Value)> {
         use opengrok_tools::user_form::form_mode;
         if event.event_type != EventType::ToolCallResult
-            || event.extra.get("content").and_then(Value::as_str) != Some(form_mode::FORM_OPEN)
+            || event.extra.get("ok").and_then(Value::as_bool) != Some(true)
         {
             return None;
         }

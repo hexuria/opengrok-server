@@ -218,16 +218,21 @@ fn a_held_form_mode_call_is_found_by_its_accepted_result() {
         .with("toolCallId", "call-fm")
         .with("delta", args);
     assert!(hold.push(delta).is_none());
-    let result = |content: &str| {
+    let result = |content: &str, ok: bool| {
         Event::new(EventType::ToolCallResult, 3)
             .with("toolCallId", "call-fm")
             .with("content", content)
+            .with("ok", ok)
     };
     assert!(
-        hold.form_mode_call(&result(FORM_MODE_UNAVAILABLE))
+        hold.form_mode_call(&result(FORM_MODE_UNAVAILABLE, false))
             .is_none()
     );
-    let (call, arguments) = hold.form_mode_call(&result(FORM_OPEN)).unwrap();
+    // The result's `ok` decides, not its words: a refusal that quoted the promise mints nothing.
+    assert!(hold.form_mode_call(&result(FORM_OPEN, false)).is_none());
+    let (call, arguments) = hold
+        .form_mode_call(&result("reworded, still open", true))
+        .unwrap();
     assert_eq!(call, "call-fm");
     assert!(arguments.get("values").is_none(), "{arguments}");
     assert_eq!(arguments["form"]["form"], json!("0619E"));
@@ -236,7 +241,8 @@ fn a_held_form_mode_call_is_found_by_its_accepted_result() {
     assert!(hold.push(form_tool_args("call-login")).is_none());
     let login = Event::new(EventType::ToolCallResult, 3)
         .with("toolCallId", "call-login")
-        .with("content", FORM_OPEN);
+        .with("content", FORM_OPEN)
+        .with("ok", true);
     assert!(hold.form_mode_call(&login).is_none());
 }
 

@@ -53,6 +53,9 @@ struct Bir {
     saves: Mutex<u32>,
     queued: Mutex<Option<String>>,
     calls: Mutex<Vec<(String, Value)>>,
+    /// The card tool answers something that is not a card, as a plugin that cannot read BIR's
+    /// page would.
+    broken: Mutex<bool>,
 }
 
 impl Bir {
@@ -108,6 +111,7 @@ impl Bir {
             .push((tool.to_string(), arguments.clone()));
         let form = arguments.get("form").cloned().unwrap_or(Value::Null);
         match tool {
+            "bir_form_card" if *self.broken.lock().unwrap() => json!({ "error": "eFPS is down" }),
             "bir_form_card" => self.card(&form),
             "bir_form_save" => {
                 if let Some(values) = arguments.get("values").and_then(Value::as_object) {
@@ -1095,4 +1099,31 @@ async fn a_bot_without_a_computer_opens_and_submits_a_plugin_form() {
     let (status, submitted) = h.act(&entry_id, "submit", seen).await;
     assert_eq!(status, 200, "{submitted}");
     assert_eq!(h.bir.calls_to("bir_form_submit").len(), 1);
+}
+
+/// A card its plugin could not open keeps the plugin it was for, so a refresh (try again) asks
+/// that plugin and opens it once it can.
+#[tokio::test]
+async fn a_card_that_could_not_open_opens_on_refresh() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    *h.bir.broken.lock().unwrap() = true;
+    let (entry_id, _) = h.open_card("broken").await;
+    let entry = h.entry(&entry_id).await;
+    assert_eq!(entry["formResolution"], json!("fill_failed"), "{entry}");
+    assert_eq!(
+        entry["message"]["formRequest"]["plugin"],
+        json!("bir"),
+        "{entry}"
+    );
+
+    *h.bir.broken.lock().unwrap() = false;
+    let (status, opened) = h.act(&entry_id, "refresh", json!({})).await;
+    assert_eq!(status, 200, "{opened}");
+    let entry = h.entry(&entry_id).await;
+    assert!(entry.get("formResolution").is_none(), "{entry}");
+    assert_eq!(
+        entry["message"]["formRequest"]["fields"][1]["id"],
+        json!(TAX14)
+    );
 }

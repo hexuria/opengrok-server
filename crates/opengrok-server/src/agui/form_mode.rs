@@ -207,8 +207,12 @@ pub(crate) async fn mint(
     let entry_id = format!("e_{}", uuid::Uuid::now_v7());
     let key = arguments.get("form").cloned().unwrap_or(Value::Null);
     let named = arguments.get("plugin").and_then(Value::as_str);
+    // The plugin, once resolved, stays on a card it could not open: refresh (try again) is
+    // answered by that plugin, and without it the card names none and every press is refused.
+    let mut resolved = None;
     let card = match plugin_for(&host.agui, (account, coworker), named, Some(tagged)).await {
         Ok((plugin, tools)) => {
+            resolved = Some(plugin.clone());
             let call = PluginCall {
                 plugin: &plugin,
                 tool: tools.card_tool(&plugin),
@@ -238,6 +242,9 @@ pub(crate) async fn mint(
             let mut failed = form_mode::sanitize_request(arguments);
             failed["fields"] = json!([]);
             failed["notes"] = json!([format!("The form could not be opened: {why}")]);
+            if let Some(plugin) = resolved {
+                failed["plugin"] = json!(plugin);
+            }
             entry["message"]["formRequest"] = failed;
             entry["formResolution"] = json!("fill_failed");
         }
