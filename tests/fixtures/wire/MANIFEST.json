@@ -414,6 +414,22 @@
       "source": "streamed or replayed by /ag-ui, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
     },
     {
+      "file": "agui/custom/user-form/a_card_that_could_not_open_opens_on_refresh.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_card_that_could_not_open_opens_on_refresh (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/custom/user-form/a_switched_off_plugin_opens_no_card_unless_the_message_tags_it.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_switched_off_plugin_opens_no_card_unless_the_message_tags_it (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/custom/user-form/a_bot_without_a_computer_opens_and_submits_a_plugin_form.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test a_bot_without_a_computer_opens_and_submits_a_plugin_form (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "agui/custom/user-form/racing_presses_queue_a_return_once_and_never_unsubmit_it.json",
+      "source": "streamed or replayed by /ag-ui, recorded from the test racing_presses_queue_a_return_once_and_never_unsubmit_it (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
       "file": "events/computer.changed/a_reset_is_seen_by_a_second_viewer_and_heard_on_the_events_stream.json",
       "source": "streamed or replayed by /ag-ui/events, recorded from the test a_reset_is_seen_by_a_second_viewer_and_heard_on_the_events_stream (crates/opengrok-server/tests/against_a_screen_status.rs); ids and times are placeholders"
     },
@@ -2154,6 +2170,14 @@
       "source": "POST /ag-ui/user-form/dismiss, recorded from the test a_dismissed_card_keeps_its_draft_and_resumes (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/POST__ag-ui_user-form_dismiss/200-collect_dismiss_and_timeout_resume_without_fabricated_answers.json",
+      "source": "POST /ag-ui/user-form/dismiss, recorded from the test collect_dismiss_and_timeout_resume_without_fabricated_answers (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_dismiss/409-racing_presses_queue_a_return_once_and_never_unsubmit_it.json",
+      "source": "POST /ag-ui/user-form/dismiss, recorded from the test racing_presses_queue_a_return_once_and_never_unsubmit_it (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/POST__ag-ui_user-form_submit/200-collect_submit_returns_answers_without_computer_effects_and_retry_keeps_them.json",
       "source": "POST /ag-ui/user-form/submit, recorded from the test collect_submit_returns_answers_without_computer_effects_and_retry_keeps_them (crates/opengrok-server/tests/against_user_form.rs); ids and times are placeholders"
     },
@@ -2972,6 +2996,22 @@
     {
       "file": "rest/POST__ag-ui_user-form_action/409-a_card_saves_submits_on_one_press_and_then_only_shows.json",
       "source": "POST /ag-ui/user-form/action, recorded from the test a_card_saves_submits_on_one_press_and_then_only_shows (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/200-a_bot_without_a_computer_opens_and_submits_a_plugin_form.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_bot_without_a_computer_opens_and_submits_a_plugin_form (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/200-a_card_that_could_not_open_opens_on_refresh.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_card_that_could_not_open_opens_on_refresh (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/200-a_bot_without_a_computer_opens_and_submits_a_plugin_form-2.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_bot_without_a_computer_opens_and_submits_a_plugin_form (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/409-a_return_the_plugin_already_queued_is_not_submitted_again.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_return_the_plugin_already_queued_is_not_submitted_again (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
     }
   ],
   "unrecorded": []
