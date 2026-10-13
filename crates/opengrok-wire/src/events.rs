@@ -28,17 +28,19 @@ pub const RUN_STARTED: &str = "run.started";
 pub const RUN_WAITING: &str = "run.waiting";
 pub const RUN_FINISHED: &str = "run.finished";
 pub const ROUTINE_CHANGED: &str = "routine.changed";
+pub const COMPUTER_CHANGED: &str = "computer.changed";
 /// Not stored: the server's own answer to an id it cannot resume from, or to a stream that fell
 /// behind. The app forgets what it holds and reads it all again.
 pub const RESET: &str = "reset";
 
 /// Every name a block's `event:` can carry: what the wire corpus lists as sent.
-pub const EVENTS: [&str; 6] = [
+pub const EVENTS: [&str; 7] = [
     THREAD_CHANGED,
     RUN_STARTED,
     RUN_WAITING,
     RUN_FINISHED,
     ROUTINE_CHANGED,
+    COMPUTER_CHANGED,
     RESET,
 ];
 
@@ -107,6 +109,15 @@ pub enum Note<'a> {
         coworker_id: &'a str,
         change: Change,
     },
+    /// A Bot's computer or its screen changed what it is doing: it started, a restart, reset or
+    /// update began or moved on or ended, or its own screen came up (hexuria/opengrok-server#386).
+    /// The app reads `GET /coworkers/{coworkerId}/computer` again, for that Bot and for any open
+    /// screen whose `boxId` is this `boxId`: Bots that share a computer share its restarts.
+    /// `box_id` is `null`, and present, when the Bot has no computer at that moment (mid-reset).
+    ComputerChanged {
+        coworker_id: &'a str,
+        box_id: Option<&'a str>,
+    },
 }
 
 impl Note<'_> {
@@ -118,6 +129,7 @@ impl Note<'_> {
             Self::RunWaiting { .. } => RUN_WAITING,
             Self::RunFinished { .. } => RUN_FINISHED,
             Self::RoutineChanged { .. } => ROUTINE_CHANGED,
+            Self::ComputerChanged { .. } => COMPUTER_CHANGED,
         }
     }
 

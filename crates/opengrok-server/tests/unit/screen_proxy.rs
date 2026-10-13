@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use super::*;
+use axum::http::HeaderMap;
 use opengrok_box::viewer::STORAGE_SHIM;
 
 /// A request's headers as it arrives with `Host: host`, carrying `more` besides.

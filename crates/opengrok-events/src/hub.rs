@@ -86,6 +86,19 @@ impl Hub {
         &self.0.pool
     }
 
+    /// Write one note in a transaction of its own, for a change that is not a store write: a
+    /// computer starting or restarting lives on the provider, not in a row (`computer.changed`).
+    /// A note is a wake-up, so a caller that cannot write it loses latency, never data.
+    pub async fn announce(
+        &self,
+        account: &str,
+        note: &opengrok_wire::events::Note<'_>,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.0.pool.begin().await?;
+        crate::emit(&mut tx, account, std::slice::from_ref(note)).await?;
+        tx.commit().await
+    }
+
     fn rooms(&self) -> MutexGuard<'_, HashMap<String, broadcast::Sender<i64>>> {
         self.0.rooms.lock().unwrap_or_else(PoisonError::into_inner)
     }
