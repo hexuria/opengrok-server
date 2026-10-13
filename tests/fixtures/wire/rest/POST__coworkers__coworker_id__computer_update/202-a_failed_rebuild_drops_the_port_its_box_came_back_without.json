@@ -15,6 +15,8 @@
     },
     "image": null,
     "screen": "own",
+    "screenStatus": "updating",
+    "screenStatusText": "Updating Screen's computer: getting the newest image…",
     "isEgressTunnelAvailable": false,
     "shareScope": "user",
     "egressPolicy": "ask"

@@ -1,4 +1,5 @@
 use super::*;
+use opengrok_box::EgressTunnel;
 
 #[test]
 fn a_group_is_its_own_scope_whatever_the_sharing_mode() {

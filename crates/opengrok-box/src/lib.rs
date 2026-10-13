@@ -20,6 +20,8 @@ pub mod ascii;
 pub mod bundle;
 pub mod devtools;
 pub mod docker;
+pub mod pane;
+pub mod screen_status;
 pub mod viewer;
 
 pub use ascii::{AsciiBoxes, Client as AsciiClient};
@@ -539,6 +541,13 @@ pub trait Computer: Send + Sync {
     /// person's first look waits for it to come up. Default: nothing to start.
     async fn open_screen(&self, _box_id: &str, _screen: &Screen) -> BoxResult<()> {
         Ok(())
+    }
+
+    /// How far `screen` has come on this box, from this provider's own record of its last start:
+    /// read, never asked of the box, so a status can say a Bot's screen is starting without
+    /// waiting for it. Default: a provider with no own screens gives every Bot the one it has.
+    fn screen_progress(&self, _box_id: &str, _screen: &Screen) -> screen_status::ScreenProgress {
+        screen_status::ScreenProgress::Given
     }
 
     /// The image (or template) a box created now would run. Empty when the provider has no such

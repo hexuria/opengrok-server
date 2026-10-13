@@ -73,6 +73,25 @@ fn every_note_says_what_changed_in_ids_and_the_contracts_names() {
         data(&routine),
         json!({ "routineId": "sched_1", "coworkerId": "cw_1", "change": "paused" })
     );
+
+    let computer = Note::ComputerChanged {
+        coworker_id: "cw_1",
+        box_id: Some("og-box-1"),
+    };
+    assert_eq!(computer.event(), "computer.changed");
+    assert_eq!(
+        computer.data(),
+        r#"{"coworkerId":"cw_1","boxId":"og-box-1"}"#
+    );
+    let mid_reset = Note::ComputerChanged {
+        coworker_id: "cw_1",
+        box_id: None,
+    };
+    assert_eq!(
+        data(&mid_reset),
+        json!({ "coworkerId": "cw_1", "boxId": null }),
+        "a Bot with no computer this moment says so, present and null"
+    );
 }
 
 /// `routineId?` is left out, not null, for a run no routine fired: an app that reads a present
@@ -197,6 +216,7 @@ fn the_list_of_names_is_every_kind_and_the_reset() {
             "run.waiting",
             "run.finished",
             "routine.changed",
+            "computer.changed",
             "reset"
         ]
     );
