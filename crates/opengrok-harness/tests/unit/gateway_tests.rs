@@ -547,6 +547,48 @@ fn a_tool_round_is_sent_in_the_openai_dialect() {
     assert_eq!(messages.len(), 4);
 }
 
+fn call_with_raw_arguments(id: &str, raw: &str) -> crate::ToolCallRef {
+    crate::ToolCallRef {
+        id: id.to_string(),
+        name: "bir_list_apps".to_string(),
+        arguments: raw.to_string(),
+    }
+}
+
+/// Anthropic refuses a `tool_use.input` that is not an object, and the gateway passes valid JSON
+/// through: `"null"` and `"[1]"` answered 400 and ended the turn
+/// (`docs/verification/empty-tool-args`). A call's arguments are `null` when their text never
+/// parsed or when the approval was stored before a call with no text became `{}`, `""` from
+/// history, or anything a model wrote. Whatever is not a JSON object goes back as `{}`.
+#[test]
+fn arguments_that_are_not_an_object_are_sent_back_as_an_empty_object() {
+    let raws = ["", "   ", "null", "not json", "[1]", "1", "\u{a0}"];
+    let mut calls: Vec<_> = raws
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| call_with_raw_arguments(&format!("c{i}"), raw))
+        .collect();
+    calls.push(call("ok", "ls"));
+    let mut messages = vec![
+        ChatMessage::text("user", "go"),
+        ChatMessage::calls("", calls.clone()),
+    ];
+    messages.extend(calls.iter().map(|c| ChatMessage::tool_result(&c.id, "[]")));
+    let body = chat_body(&asking(messages));
+    let sent = &body["messages"][1]["tool_calls"];
+    for (i, raw) in raws.iter().enumerate() {
+        assert_eq!(
+            sent[i]["function"]["arguments"],
+            serde_json::json!("{}"),
+            "{raw:?} must go back as {{}}"
+        );
+    }
+    assert_eq!(
+        sent[raws.len()]["function"]["arguments"],
+        serde_json::json!("{\"command\":\"ls\"}")
+    );
+}
+
 /// A provider answers a `tool` message whose call it cannot see, or a call with no answer,
 /// with a 400 that fails the whole turn. Neither is dropped: the orphan result goes as the
 /// words the loop always wrote, and the unanswered call is told it has no result.

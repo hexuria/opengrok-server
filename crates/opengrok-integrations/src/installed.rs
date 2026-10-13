@@ -63,6 +63,47 @@ pub async fn list(store: &PgStore, account: &AccountId) -> StoreResult<Vec<Insta
         .await?;
     Ok(readable(rows))
 }
+/// The plugins in this server's own folder (`OG_PLUGINS_DIR`) as `GET /plugins/installations`
+/// lists them beside an account's installs: `"source": "server"`, every account's, and never
+/// uninstalled through the API. The fields an install has are all here, empty where a folder has
+/// no such thing (no registry, no pinned commit, no install time), so a client that reads every
+/// entry as an install still reads these.
+///
+/// ITS SERVERS ARE NAMED, NEVER CONFIGURED. `bundle.mcp` is empty and each server is a `parts`
+/// row: an operator's `mcp.json` is configuration and may hold the deployment's own keys, which
+/// no account is shown.
+pub fn server_listing(
+    operator: &std::collections::BTreeMap<String, opengrok_plugins::Plugin>,
+) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let part = |kind: &str, name: &str| json!({"kind": kind, "name": name, "supported": true, "reason": null});
+    operator
+        .values()
+        .map(|plugin| {
+            let servers = plugin.servers().map(|(name, _)| part("mcp", name));
+            let skills = plugin.skills.keys().map(|name| part("skill", name));
+            json!({
+                "name": plugin.manifest.name,
+                "source": "server",
+                "registry": "",
+                "registryRevision": "",
+                "repository": "",
+                "revision": plugin.manifest.version.clone().unwrap_or_default(),
+                "installedAtMs": 0,
+                "bundle": {
+                    "manifest": plugin.manifest,
+                    "mcp": {"mcpServers": {}},
+                    "skills": plugin.skills,
+                    "files": plugin.files,
+                    "parts": servers.chain(skills).collect::<Vec<_>>(),
+                },
+                "connectors": plugin.connector().into_iter().collect::<Vec<_>>(),
+                "accounts": [],
+            })
+        })
+        .collect()
+}
+
 /// Which of `account`'s pasted accounts each install holds, as `(plugin, connector, connection)`
 /// (#359): a token account is one install's, and `GET /connections` cannot say whose. Live accounts
 /// only, in a stable order.

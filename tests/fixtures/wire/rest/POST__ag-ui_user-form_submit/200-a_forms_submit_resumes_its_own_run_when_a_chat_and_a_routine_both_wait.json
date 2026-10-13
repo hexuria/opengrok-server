@@ -9,7 +9,7 @@
     "message": {
       "type": "user-form",
       "formRequest": {
-        "title": "Log in to Facebook",
+        "title": "Google account",
         "fields": [
           {
             "id": "email",
@@ -26,7 +26,7 @@
             "required": true
           }
         ],
-        "liveHost": "www.facebook.com",
+        "liveHost": "accounts.google.com",
         "instruction": ""
       }
     },
