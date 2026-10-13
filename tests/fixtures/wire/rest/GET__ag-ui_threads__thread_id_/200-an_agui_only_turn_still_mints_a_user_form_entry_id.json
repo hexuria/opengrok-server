@@ -81,7 +81,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "waiting for approval: Waiting for you",
             "timestamp": 100,
-            "durationMs": 6,
+            "durationMs": 0,
             "toolCallId": "mock-form-1"
           },
           {

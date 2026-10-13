@@ -13,7 +13,7 @@
     "screenStatus": "starting-computer",
     "screenStatusText": "Opening Raced's computer…",
     "isEgressTunnelAvailable": false,
-    "shareScope": "org",
+    "shareScope": "user",
     "egressPolicy": "ask"
   }
 }
