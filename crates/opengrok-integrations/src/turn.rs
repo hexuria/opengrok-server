@@ -296,17 +296,39 @@ pub async fn form_mode_plugins(
     let server = operator
         .values()
         .filter(|p| !p.manifest.name.contains('.'))
-        .filter_map(|p| Some((p.manifest.name.clone(), p.manifest.form_mode()?)));
+        .filter_map(|p| Some((p.manifest.name.clone(), p.form_mode()?)));
     let mut found: Vec<_> = server.collect();
     for installation in installed(store, account, bot).await {
         if operator.contains_key(&installation.name) || installation.name.contains('.') {
             continue;
         }
-        if let Some(tools) = installation.bundle.manifest.form_mode() {
+        if let Some(tools) = installation.bundle.form_mode() {
             found.push((installation.name, tools));
         }
     }
     found
+}
+
+/// Every tool of a plugin this Bot could reach that always asks a person first (#220), by
+/// internal name: `opengrok_plugins::form_mode::always_ask_tools`, over the plugins
+/// `form_mode_plugins` reads, card block usable or not. It only narrows, so nothing is skipped
+/// for being switched off.
+pub async fn always_ask_tools(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+    operator: &BTreeMap<String, Plugin>,
+) -> Vec<String> {
+    let server = operator.values().filter(|p| !p.manifest.name.contains('.'));
+    let mut tools: Vec<String> = server
+        .flat_map(|p| p.always_ask_tools(&p.manifest.name))
+        .collect();
+    for installation in installed(store, account, bot).await {
+        if !operator.contains_key(&installation.name) && !installation.name.contains('.') {
+            tools.extend(installation.bundle.always_ask_tools(&installation.name));
+        }
+    }
+    tools
 }
 
 /// The policy a turn of `bot` runs under, as the turn reads it (`policy_to_use`), so a skill is

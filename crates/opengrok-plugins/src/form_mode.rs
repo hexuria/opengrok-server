@@ -23,7 +23,8 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::Manifest;
+use crate::bundle::Bundle;
+use crate::{McpConfig, Plugin};
 
 /// The card actions a person's press can ask for. Anything else in `actions` is ignored, so a
 /// manifest cannot add a verb the server never reviewed.
@@ -38,8 +39,6 @@ pub struct FormModeTools {
     pub card: String,
     /// By action (`ACTIONS`): the tool a press runs.
     pub actions: BTreeMap<String, String>,
-    /// Tools that ask a person first, whatever the plugin's trust or the Bot's grant says.
-    pub always_ask: Vec<String>,
 }
 
 /// A remote tool or server name we will put into `<plugin>.<server>.<tool>`: a dot would read
@@ -54,45 +53,32 @@ fn usable(name: &str) -> bool {
 
 impl FormModeTools {
     /// `extensions.formMode`, or `None` when it is absent or unusable. A half-usable block is no
-    /// block: a card with a Save that goes nowhere is worse than no card.
+    /// block: a card with a Save that goes nowhere is worse than no card. Its `server` must be
+    /// one of the plugin's own (`mcp`), or every tool it names would be dialled nowhere.
     #[must_use]
-    pub fn from_extensions(extensions: Option<&Value>) -> Option<Self> {
+    pub fn from_extensions(extensions: Option<&Value>, mcp: &McpConfig) -> Option<Self> {
         let block = extensions?.get("formMode")?;
-        let text = |key: &str| {
-            block
-                .get(key)
-                .and_then(Value::as_str)
-                .filter(|name| usable(name))
-                .map(str::to_string)
-        };
-        let server = text("server")?;
-        let card = text("card")?;
-        let mut actions = BTreeMap::new();
-        for (action, tool) in block.get("actions")?.as_object()? {
-            if !ACTIONS.contains(&action.as_str()) {
-                continue;
+        let read = || {
+            let server = text(block, "server").filter(|name| mcp.servers.contains_key(name))?;
+            let card = text(block, "card")?;
+            let mut actions = BTreeMap::new();
+            for (action, tool) in block.get("actions")?.as_object()? {
+                if ACTIONS.contains(&action.as_str()) {
+                    let tool = tool.as_str().filter(|name| usable(name))?;
+                    actions.insert(action.clone(), tool.to_string());
+                }
             }
-            let tool = tool.as_str().filter(|name| usable(name))?;
-            actions.insert(action.clone(), tool.to_string());
-        }
-        let always_ask = block
-            .get("alwaysAsk")
-            .and_then(Value::as_array)
-            .map(|tools| {
-                tools
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .filter(|name| usable(name))
-                    .map(str::to_string)
-                    .collect()
+            Some(Self {
+                server,
+                card,
+                actions,
             })
-            .unwrap_or_default();
-        Some(Self {
-            server,
-            card,
-            actions,
-            always_ask,
-        })
+        };
+        let tools = read();
+        if tools.is_none() {
+            tracing::warn!("a plugin's formMode block is unusable; it opens no card");
+        }
+        tools
     }
 
     /// The tool an action runs, by the internal name the executor's policy decides on.
@@ -109,33 +95,92 @@ impl FormModeTools {
         self.qualified(plugin, &self.card)
     }
 
-    /// The tools that always ask, by internal name. The submit action's tool is among them
-    /// whether or not the manifest listed it: a press that sends a return is the case the yes is
-    /// for, and a manifest that forgot it must not make a model's call to it silent.
-    #[must_use]
-    pub fn always_ask_tools(&self, plugin: &str) -> Vec<String> {
-        let submit = self.actions.get("submit");
-        let mut tools: Vec<String> = self
-            .always_ask
-            .iter()
-            .chain(submit)
-            .map(|tool| self.qualified(plugin, tool))
-            .collect();
-        tools.sort();
-        tools.dedup();
-        tools
-    }
-
     fn qualified(&self, plugin: &str, tool: &str) -> String {
         format!("{plugin}.{}.{tool}", self.server)
     }
 }
 
-impl Manifest {
+fn text(block: &Value, key: &str) -> Option<String> {
+    let name = block.get(key).and_then(Value::as_str);
+    name.filter(|name| usable(name)).map(str::to_string)
+}
+
+/// The tools of `plugin` that always ask a person first, by internal name, whatever its trust or
+/// the Bot's grant says: `alwaysAsk`, and the submit action's tool whether or not it is listed
+/// (a press that sends a return is the case the yes is for).
+///
+/// READ APART FROM THE CARD BLOCK, AND FAILING CLOSED. A broken `actions` or `card` costs the
+/// plugin its card, never its gate: the tools are still its tools. A `server` that is missing or
+/// not one of the plugin's own gates the names on every server it has.
+#[must_use]
+pub fn always_ask_tools(plugin: &str, extensions: Option<&Value>, mcp: &McpConfig) -> Vec<String> {
+    let Some(block) = extensions.and_then(|e| e.get("formMode")) else {
+        return Vec::new();
+    };
+    let listed = block.get("alwaysAsk").and_then(Value::as_array);
+    let submit = block.pointer("/actions/submit");
+    let names: Vec<&str> = listed
+        .into_iter()
+        .flatten()
+        .chain(submit)
+        .filter_map(Value::as_str)
+        .collect();
+    let mut tools: Vec<&str> = names.iter().copied().filter(|name| usable(name)).collect();
+    if tools.len() != names.len() || (listed.is_none() && block.get("alwaysAsk").is_some()) {
+        tracing::warn!(
+            plugin,
+            "a plugin's formMode alwaysAsk names a tool that is not one; it is skipped"
+        );
+    }
+    let servers: Vec<&String> = match text(block, "server") {
+        Some(server) if mcp.servers.contains_key(&server) => {
+            mcp.servers.keys().filter(|name| **name == server).collect()
+        }
+        _ => {
+            tracing::warn!(
+                plugin,
+                "a plugin's formMode names no server of its own; its alwaysAsk tools ask on every server"
+            );
+            mcp.servers.keys().collect()
+        }
+    };
+    tools.sort_unstable();
+    tools.dedup();
+    let qualified = servers.iter().flat_map(|server| {
+        tools
+            .iter()
+            .map(move |tool| format!("{plugin}.{server}.{tool}"))
+    });
+    let mut qualified: Vec<String> = qualified.collect();
+    qualified.sort();
+    qualified
+}
+
+impl Plugin {
     /// This plugin's `extensions.formMode`, when it declares a usable one.
     #[must_use]
     pub fn form_mode(&self) -> Option<FormModeTools> {
-        FormModeTools::from_extensions(self.extensions.as_ref())
+        FormModeTools::from_extensions(self.manifest.extensions.as_ref(), &self.mcp)
+    }
+
+    /// This plugin's tools that always ask (`always_ask_tools`), named as `plugin`.
+    #[must_use]
+    pub fn always_ask_tools(&self, plugin: &str) -> Vec<String> {
+        always_ask_tools(plugin, self.manifest.extensions.as_ref(), &self.mcp)
+    }
+}
+
+impl Bundle {
+    /// This bundle's `extensions.formMode`, when it declares a usable one.
+    #[must_use]
+    pub fn form_mode(&self) -> Option<FormModeTools> {
+        FormModeTools::from_extensions(self.manifest.extensions.as_ref(), &self.mcp)
+    }
+
+    /// This bundle's tools that always ask (`always_ask_tools`), named as `plugin`.
+    #[must_use]
+    pub fn always_ask_tools(&self, plugin: &str) -> Vec<String> {
+        always_ask_tools(plugin, self.manifest.extensions.as_ref(), &self.mcp)
     }
 }
 
@@ -156,9 +201,23 @@ mod tests {
         }})
     }
 
+    fn servers(names: &[&str]) -> McpConfig {
+        let servers: serde_json::Map<String, Value> = names
+            .iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    json!({ "type": "streamable-http", "url": "https://bir.example/mcp" }),
+                )
+            })
+            .collect();
+        serde_json::from_value(json!({ "mcpServers": servers })).unwrap()
+    }
+
     #[test]
     fn the_contracts_block_reads_into_internal_tool_names() {
-        let tools = FormModeTools::from_extensions(Some(&bir())).expect("form mode");
+        let mcp = servers(&["bir-mcp"]);
+        let tools = FormModeTools::from_extensions(Some(&bir()), &mcp).expect("form mode");
         assert_eq!(tools.card_tool("bir"), "bir.bir-mcp.bir_form_card");
         assert_eq!(
             tools.action_tool("bir", "save").as_deref(),
@@ -167,7 +226,7 @@ mod tests {
         // A verb the server never reviewed is not an action, whatever the manifest says.
         assert_eq!(tools.action_tool("bir", "pay"), None);
         assert_eq!(
-            tools.always_ask_tools("bir"),
+            always_ask_tools("bir", Some(&bir()), &mcp),
             vec![
                 "bir.bir-mcp.bir_form_submit".to_string(),
                 "bir.bir-mcp.bir_queue_send_now".to_string()
@@ -179,31 +238,56 @@ mod tests {
     fn the_submit_tool_asks_even_when_the_manifest_forgot_it() {
         let mut block = bir();
         block["formMode"]["alwaysAsk"] = json!([]);
-        let tools = FormModeTools::from_extensions(Some(&block)).expect("form mode");
         assert_eq!(
-            tools.always_ask_tools("bir"),
+            always_ask_tools("bir", Some(&block), &servers(&["bir-mcp"])),
             vec!["bir.bir-mcp.bir_form_submit".to_string()]
         );
     }
 
+    /// A broken card block costs the plugin its card, never its gate.
     #[test]
-    fn an_unusable_block_is_no_block() {
-        assert!(FormModeTools::from_extensions(None).is_none());
-        assert!(FormModeTools::from_extensions(Some(&json!({}))).is_none());
-        let mut dotted = bir();
-        dotted["formMode"]["server"] = json!("bir.mcp");
-        assert!(FormModeTools::from_extensions(Some(&dotted)).is_none());
-        let mut bad_action = bir();
-        bad_action["formMode"]["actions"]["save"] = json!("other.server.tool");
-        assert!(FormModeTools::from_extensions(Some(&bad_action)).is_none());
+    fn a_broken_block_still_gates_the_submit_tool() {
+        let mcp = servers(&["bir-mcp"]);
+        for broken in [
+            json!("not an object"),
+            json!({ "save": "other.server.tool" }),
+        ] {
+            let mut block = bir();
+            block["formMode"]["actions"] = broken;
+            assert!(FormModeTools::from_extensions(Some(&block), &mcp).is_none());
+            assert!(
+                always_ask_tools("bir", Some(&block), &mcp)
+                    .contains(&"bir.bir-mcp.bir_form_submit".to_string()),
+                "{block}"
+            );
+        }
+    }
+
+    /// A server the plugin does not have opens no card, and its tools ask on every server.
+    #[test]
+    fn a_server_that_is_not_the_plugins_fails_closed() {
+        let mcp = servers(&["bir-mcp", "bir-other"]);
+        for server in [json!("elsewhere"), json!("bir.mcp"), Value::Null] {
+            let mut block = bir();
+            block["formMode"]["server"] = server;
+            assert!(FormModeTools::from_extensions(Some(&block), &mcp).is_none());
+            let asks = always_ask_tools("bir", Some(&block), &mcp);
+            assert!(
+                asks.contains(&"bir.bir-mcp.bir_form_submit".to_string()),
+                "{asks:?}"
+            );
+            assert!(
+                asks.contains(&"bir.bir-other.bir_form_submit".to_string()),
+                "{asks:?}"
+            );
+        }
     }
 
     #[test]
-    fn a_manifest_reads_its_own_block() {
-        let manifest: Manifest = serde_json::from_value(json!({
-            "$schema": crate::PLUGIN_SCHEMA, "name": "bir", "extensions": bir()
-        }))
-        .unwrap();
-        assert!(manifest.form_mode().is_some());
+    fn an_unusable_block_is_no_block() {
+        let mcp = servers(&["bir-mcp"]);
+        assert!(FormModeTools::from_extensions(None, &mcp).is_none());
+        assert!(FormModeTools::from_extensions(Some(&json!({})), &mcp).is_none());
+        assert!(always_ask_tools("bir", Some(&json!({})), &mcp).is_empty());
     }
 }

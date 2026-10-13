@@ -30,14 +30,9 @@ pub(crate) async fn always_asking(
     policy: opengrok_policy::Context,
 ) -> opengrok_policy::Context {
     let store = &state.auth.store;
-    let plugins =
-        opengrok_integrations::turn::form_mode_plugins(store, account, coworker, &state.plugins);
-    let tools: Vec<String> = plugins
-        .await
-        .iter()
-        .flat_map(|(plugin, tools)| tools.always_ask_tools(plugin))
-        .collect();
-    opengrok_policy::with_always_ask(policy, &tools)
+    let tools =
+        opengrok_integrations::turn::always_ask_tools(store, account, coworker, &state.plugins);
+    opengrok_policy::with_always_ask(policy, &tools.await)
 }
 
 /// The plugin a form-mode card is for: the one the call names, or the only one this Bot has that
