@@ -71,6 +71,10 @@ pub(crate) struct PluginCall<'a> {
     /// these arguments, as the person, and spent by the gate: the gate still runs, and a model's
     /// call to the same tool still parks on its own card.
     pub yes: bool,
+    /// A person's press, not the model's mint: the person chose this call, so the auto-review
+    /// judge, which weighs a model's choices, is not asked about it. A save on every blur
+    /// would otherwise be one judge call each.
+    pub pressed: bool,
     /// What the audit row is filed under: the card's entry id.
     pub request_id: &'a str,
 }
@@ -92,6 +96,7 @@ pub(crate) async fn run_plugin_tool(
     // `with_approved` releases. A remembered allow-once would be taken oldest first, and could
     // spend another call's yes while leaving this one's behind.
     let approved: Vec<String> = call.yes.then(|| id.clone()).into_iter().collect();
+    let chosen: Vec<String> = call.pressed.then(|| id.clone()).into_iter().collect();
     let asked = vec![call.plugin.to_string()];
     let mentioned =
         opengrok_integrations::turn::mentioned(store, account, coworker, &asked, &state.plugins);
@@ -99,7 +104,7 @@ pub(crate) async fn run_plugin_tool(
         mentioned: mentioned.await,
         ..Default::default()
     };
-    let gates: (&[String], &[String]) = (&approved, &[]);
+    let gates: (&[String], &[String]) = (&approved, &chosen);
     let patience = super::routes::TURN_WAKE_PATIENCE;
     let runner = super::routes::tools_for_turn(state, account, coworker, gates, patience, &turn);
     let tool_call = ToolCall {
@@ -176,6 +181,7 @@ pub(crate) async fn mint(
                 tool: tools.card_tool(&plugin),
                 arguments: json!({ "form": key, "mode": "index" }),
                 yes: false,
+                pressed: false,
                 request_id: &entry_id,
             };
             let lock = card_lock(coworker);
@@ -306,6 +312,7 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
         tool,
         arguments,
         yes: action == "submit",
+        pressed: true,
         request_id: &entry_id,
     };
     let result = run_plugin_tool(host, account, &coworker, call).await;
