@@ -87,25 +87,11 @@ pub(crate) async fn run_plugin_tool(
 ) -> ToolResult {
     let state = &host.agui;
     let store = &state.auth.store;
-    let mut id = format!("form_{}", uuid::Uuid::now_v7().simple());
-    let mut approved = Vec::new();
-    if call.yes {
-        let (tool, arguments) = (&call.tool, &call.arguments);
-        let owner = Some(account.as_str());
-        let remembered = crate::mcp_door::remember_mcp_allow_once(
-            store, coworker, owner, tool, arguments, &id, true,
-        )
-        .await;
-        if let Err(error) = remembered {
-            tracing::error!(%error, "a card's yes could not be recorded; nothing was sent");
-        }
-        let taken =
-            crate::mcp_door::take_mcp_allow_once_stamped(store, coworker, owner, tool, arguments);
-        if let Some((yes, true, _)) = taken.await {
-            id = yes;
-            approved.push(id.clone());
-        }
-    }
+    let id = format!("form_{}", uuid::Uuid::now_v7().simple());
+    // The press IS the yes, for this call and no other: its own fresh id is what the gate's
+    // `with_approved` releases. A remembered allow-once would be taken oldest first, and could
+    // spend another call's yes while leaving this one's behind.
+    let approved: Vec<String> = call.yes.then(|| id.clone()).into_iter().collect();
     let asked = vec![call.plugin.to_string()];
     let mentioned =
         opengrok_integrations::turn::mentioned(store, account, coworker, &asked, &state.plugins);
