@@ -3538,6 +3538,7 @@ async fn start_claimed_turn(
     ));
     // The HTTP body is the live sink. Awaiting the conversation first, then wrapping the
     // Vec in `stream::iter`, is what made NativeChat paint the whole reply at once.
+    let tagged = turn_plugins.mentioned.clone();
     tokio::spawn(async move {
         let _lease = lease;
         // Card mint + `entryId` stamp happen inside the sink, **before** the CUSTOM frame
@@ -3548,6 +3549,7 @@ async fn start_claimed_turn(
             coworker_id: journal.coworker_id.clone(),
             account_id: journal.account_id.clone(),
             thread_id: journal.thread_id.clone(),
+            tagged,
             form_hold: Mutex::new(crate::agui::user_form::UserFormSseHold::default()),
         };
         let _ = run_conversation_within(
@@ -5893,6 +5895,9 @@ struct AgUiSink {
     coworker_id: Option<CoworkerId>,
     account_id: Option<opengrok_core::id::AccountId>,
     thread_id: String,
+    /// The plugins this turn's message tagged: a form-mode card may be opened on one of them
+    /// although it is switched off, as its tools may be called.
+    tagged: Vec<String>,
     form_hold: Mutex<crate::agui::user_form::UserFormSseHold>,
 }
 
@@ -5972,7 +5977,7 @@ impl EventSink for AgUiSink {
                 (form_call, &self.coworker_id, &self.account_id)
             {
                 let who = (account, coworker);
-                let thread = self.thread_id.as_str();
+                let thread = (self.thread_id.as_str(), self.tagged.as_slice());
                 let entry =
                     super::form_mode::mint(&self.gateway, who, thread, &call_id, &arguments).await;
                 let entry_id = entry

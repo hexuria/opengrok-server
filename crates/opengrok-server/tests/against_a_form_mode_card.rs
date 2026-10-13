@@ -473,9 +473,17 @@ impl Harness {
 
     /// One AG-UI turn, its frames parsed.
     async fn turn(&self, thread: &str, text: &str, form_mode: bool) -> Vec<Value> {
+        self.turn_with(thread, text, json!({ "formMode": form_mode }))
+            .await
+    }
+
+    async fn turn_with(&self, thread: &str, text: &str, extra: Value) -> Vec<Value> {
         let mut props = json!({ "coworkerId": self.agent });
-        if form_mode {
-            props["formMode"] = json!(true);
+        if let (Some(props), Some(extra)) = (props.as_object_mut(), extra.as_object()) {
+            props.extend(extra.clone());
+        }
+        if props["formMode"] != json!(true) {
+            props.as_object_mut().map(|props| props.remove("formMode"));
         }
         let body = self
             .client
@@ -986,4 +994,41 @@ async fn racing_presses_queue_a_return_once_and_never_unsubmit_it() {
         !stale.await.expect("write"),
         "a write from a stale read stops at the row"
     );
+}
+
+/// A model's call opens a card only on a plugin switched on for the Bot or tagged in the message:
+/// a plugin the person switched off is not reached because the model named it.
+#[tokio::test]
+async fn a_switched_off_plugin_opens_no_card_unless_the_message_tags_it() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let only_forms = opengrok_policy::ToolSet::Only(["request_user_form".to_string()].into());
+    h.store
+        .grant_access(
+            &h.account,
+            &CoworkerId::from_stored(h.agent.clone()),
+            &opengrok_policy::ToolSet::All,
+            &only_forms,
+            &opengrok_policy::ToolSet::None,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .expect("switch bir off");
+
+    let (entry_id, _) = h.open_card("off").await;
+    let entry = h.entry(&entry_id).await;
+    assert_eq!(entry["formResolution"], json!("fill_failed"), "{entry}");
+    assert!(h.bir.calls_to("bir_form_card").is_empty());
+
+    let tagged = json!({ "formMode": true, "mentionedPlugins": ["bir"] });
+    let frames = h
+        .turn_with("tagged", "open my 0619-E for September", tagged)
+        .await;
+    let card = frames
+        .iter()
+        .find(|frame| frame["name"] == "user-form")
+        .unwrap_or_else(|| panic!("no card: {frames:#?}"));
+    let entry = h.entry(card["entryId"].as_str().expect("id")).await;
+    assert!(entry.get("formResolution").is_none(), "{entry}");
+    assert_eq!(h.bir.calls_to("bir_form_card").len(), 1);
 }

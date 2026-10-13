@@ -309,6 +309,29 @@ pub async fn form_mode_plugins(
     found
 }
 
+/// `form_mode_plugins`, less those this turn may not reach of its own accord: switched off for
+/// this Bot and not tagged in its message. What a model's call to open a card may be widened to;
+/// a person's press on a card already open is not narrowed by it.
+pub async fn form_mode_plugins_on(
+    (store, operator): (&PgStore, &BTreeMap<String, Plugin>),
+    account: &AccountId,
+    bot: &CoworkerId,
+    tagged: &[String],
+) -> Vec<(String, opengrok_plugins::FormModeTools)> {
+    let Some(policy) = turn_policy(store, account, bot).await else {
+        return Vec::new();
+    };
+    let on = |name: &str| match operator.contains_key(name) {
+        true => opengrok_policy::admits_plugin(account, bot, name, &policy),
+        false => switched_on(account, bot, name, &policy),
+    };
+    let plugins = form_mode_plugins(store, account, bot, operator).await;
+    plugins
+        .into_iter()
+        .filter(|(name, _)| tagged.contains(name) || on(name))
+        .collect()
+}
+
 /// Every tool of a plugin this Bot could reach that always asks a person first (#220), by
 /// internal name: `opengrok_plugins::form_mode::always_ask_tools`, over the plugins
 /// `form_mode_plugins` reads, card block usable or not. It only narrows, so nothing is skipped

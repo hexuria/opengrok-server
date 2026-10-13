@@ -37,16 +37,22 @@ pub(crate) async fn always_asking(
 
 /// The plugin a form-mode card is for: the one the call names, or the only one this Bot has that
 /// declares form mode. `Err` says why there is none, in words the person reads on the card.
+///
+/// `tagged` is the model's turn: only plugins switched on for the Bot or tagged in its message,
+/// so a model cannot open a card on a plugin the person switched off. `None` is a person's
+/// press on a card already open, which any of the Bot's plugins may answer.
 pub(crate) async fn plugin_for(
     state: &AgUiState,
-    account: &AccountId,
-    coworker: &CoworkerId,
+    (account, coworker): (&AccountId, &CoworkerId),
     named: Option<&str>,
+    tagged: Option<&[String]>,
 ) -> Result<(String, FormModeTools), String> {
-    let store = &state.auth.store;
-    let plugins =
-        opengrok_integrations::turn::form_mode_plugins(store, account, coworker, &state.plugins);
-    let mut plugins = plugins.await;
+    use opengrok_integrations::turn::{form_mode_plugins, form_mode_plugins_on};
+    let (store, operator) = (&state.auth.store, &state.plugins);
+    let mut plugins = match tagged {
+        Some(tagged) => form_mode_plugins_on((store, operator), account, coworker, tagged).await,
+        None => form_mode_plugins(store, account, coworker, operator).await,
+    };
     match named {
         Some(name) => plugins
             .into_iter()
@@ -167,14 +173,14 @@ pub(crate) fn reply_of(result: &ToolResult) -> Result<Value, String> {
 pub(crate) async fn mint(
     host: &HostState,
     (account, coworker): (&AccountId, &CoworkerId),
-    thread_id: &str,
+    (thread_id, tagged): (&str, &[String]),
     call_id: &str,
     arguments: &Value,
 ) -> Option<Value> {
     let entry_id = format!("e_{}", uuid::Uuid::now_v7());
     let key = arguments.get("form").cloned().unwrap_or(Value::Null);
     let named = arguments.get("plugin").and_then(Value::as_str);
-    let card = match plugin_for(&host.agui, account, coworker, named).await {
+    let card = match plugin_for(&host.agui, (account, coworker), named, Some(tagged)).await {
         Ok((plugin, tools)) => {
             let call = PluginCall {
                 plugin: &plugin,
@@ -299,7 +305,7 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
         Ok(arguments) => arguments,
         Err(why) => return (400, json!({ "error": why })),
     };
-    let tools = match plugin_for(&host.agui, account, &coworker, Some(&plugin)).await {
+    let tools = match plugin_for(&host.agui, (account, &coworker), Some(&plugin), None).await {
         Ok((_, tools)) => tools,
         Err(why) => return (409, json!({ "error": why })),
     };
