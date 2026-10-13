@@ -1,6 +1,6 @@
 {
   "method": "POST",
-  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/computer",
+  "path": "/coworkers/cw_0199bb4e-0000-7000-8000-000000000001/computer/reset",
   "status": 200,
   "body": {
     "agentId": "cw_0199bb4e-0000-7000-8000-000000000001",
@@ -13,7 +13,7 @@
     "screenStatus": "starting-computer",
     "screenStatusText": "Opening Raced's computer…",
     "isEgressTunnelAvailable": false,
-    "shareScope": "org",
+    "shareScope": "user",
     "egressPolicy": "ask"
   }
 }
