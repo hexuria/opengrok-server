@@ -25,10 +25,12 @@
 
 pub mod bundle;
 pub mod catalogue;
+pub mod form_mode;
 pub mod message;
 pub mod skill;
 
 pub use catalogue::{Admission, Catalogue, Entry, InstallError, Policy, Trust};
+pub use form_mode::FormModeTools;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

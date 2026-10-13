@@ -7,6 +7,7 @@ pub(crate) mod attachments;
 pub(crate) mod ceiling;
 pub mod chat_ui;
 pub mod credential;
+pub mod form_mode;
 pub(crate) mod history;
 pub mod passkeys;
 pub mod pending;

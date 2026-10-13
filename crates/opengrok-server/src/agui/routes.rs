@@ -576,6 +576,7 @@ pub(crate) async fn tools_for_turn(
             .await
             .ok()?;
         let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
+        let policy = super::form_mode::always_asking(state, account_id, &coworker_id, policy).await;
         let (plugins, off) = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
         if plugins.tools.is_empty() && plugins.unavailable.is_empty() && off.is_empty() {
             return None;
@@ -693,6 +694,7 @@ pub(crate) async fn tools_for_turn(
         .await
         .ok()?;
     let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
+    let policy = super::form_mode::always_asking(state, account_id, &coworker_id, policy).await;
 
     // The plugins this coworker may use, connected with its own credentials. On a shared
     // coworker that includes its `bot`-scoped connections, which its OWNER authorised: a member's

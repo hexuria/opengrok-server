@@ -283,6 +283,32 @@ pub async fn endpoints(
     endpoints
 }
 
+/// Every plugin this Bot could reach that declares `extensions.formMode` (#220), by name: this
+/// server's own first, then the account's installs, less any a server plugin shadows, as their
+/// servers are (`endpoints`). Whether one is switched on is not asked here: its `alwaysAsk`
+/// only narrows, and a card's actions are widened to its plugin by `mentioned`'s own rule.
+pub async fn form_mode_plugins(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+    operator: &BTreeMap<String, Plugin>,
+) -> Vec<(String, opengrok_plugins::FormModeTools)> {
+    let server = operator
+        .values()
+        .filter(|p| !p.manifest.name.contains('.'))
+        .filter_map(|p| Some((p.manifest.name.clone(), p.manifest.form_mode()?)));
+    let mut found: Vec<_> = server.collect();
+    for installation in installed(store, account, bot).await {
+        if operator.contains_key(&installation.name) || installation.name.contains('.') {
+            continue;
+        }
+        if let Some(tools) = installation.bundle.manifest.form_mode() {
+            found.push((installation.name, tools));
+        }
+    }
+    found
+}
+
 /// The policy a turn of `bot` runs under, as the turn reads it (`policy_to_use`), so a skill is
 /// never judged by a different answer than the tools beside it.
 async fn turn_policy(store: &PgStore, account: &AccountId, bot: &CoworkerId) -> Option<Context> {
