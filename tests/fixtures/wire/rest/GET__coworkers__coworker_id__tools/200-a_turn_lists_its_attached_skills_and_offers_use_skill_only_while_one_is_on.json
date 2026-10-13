@@ -152,7 +152,7 @@
       },
       {
         "name": "manage_computer",
-        "description": "Check, start, shut down, restart, reset and update this Bot's own computer, and set what it may reach on the network, when you ask in chat. Resetting, updating and the network setting always ask you first.",
+        "description": "Check, start, shut down, restart, reset and update this Bot's own computer, look at your other Bots' screens, and set what it may reach on the network, when you ask in chat. Resetting, updating and the network setting always ask you first.",
         "kind": "builtin",
         "tools": [
           {
@@ -162,6 +162,14 @@
             "mode": "always",
             "label": "Computer status",
             "summary": "Reads whether the Bot's computer is running."
+          },
+          {
+            "name": "look_at_screen",
+            "description": "See a picture of ANOTHER of the person's Bots' screens, named by its name or id (bot). Each Bot on a shared computer works on a screen of its own; use this to see what another Bot has open or how far it got. It only looks: it cannot click or type on that screen.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Look at another Bot's screen",
+            "summary": "Shows the Bot a picture of another of your Bots' screens, without touching it."
           },
           {
             "name": "start_computer",
@@ -214,7 +222,7 @@
         ],
         "enabled": true,
         "label": "Manage computer",
-        "summary": "Checks, starts, stops, restarts, resets and updates the Bot's own computer."
+        "summary": "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and looks at your other Bots' screens."
       }
     ]
   }

@@ -251,7 +251,11 @@ impl Computer for Gated {
         Ok(if running { "running" } else { "absent" }.to_string())
     }
     /// An update waits for its rebuilt box's screen; these have one at once.
-    async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+    async fn screen_url(
+        &self,
+        box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<Option<String>> {
         Ok(Some(format!("http://127.0.0.1:1/vnc.html?box={box_id}")))
     }
 }

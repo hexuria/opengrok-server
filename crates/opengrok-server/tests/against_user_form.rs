@@ -56,6 +56,14 @@ struct FillStub {
     /// How long the guest takes to answer `/v1/info`, and how often it was asked.
     egress_takes: Mutex<std::time::Duration>,
     egress_asked: Mutex<u32>,
+    /// The page the box reports in front of its browser; `None` is a box that cannot say, and
+    /// an empty page one that says no browser page is open.
+    front: Mutex<Option<String>>,
+    /// The screen each action went to (#376), and the screens started ahead of a turn.
+    screens: Mutex<Vec<opengrok_box::Screen>>,
+    opened: Mutex<Vec<opengrok_box::Screen>>,
+    /// The screen each screenshot was taken of.
+    shot_screens: Mutex<Vec<opengrok_box::Screen>>,
 }
 
 impl FillStub {
@@ -137,11 +145,52 @@ impl Computer for FillStub {
     async fn offers_a_screen(&self, _box_id: &str) -> bool {
         true
     }
-    async fn screen_url(&self, _box_id: &str) -> BoxResult<Option<String>> {
+    async fn screen_url(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<Option<String>> {
         Ok(Some("http://vnc.invalid".to_string()))
     }
-    async fn screenshot(&self, _box_id: &str) -> BoxResult<Screenshot> {
+    /// Every box a fill reaches is a password box, reported anew after each action: these
+    /// tests are about who may fill and where; which box has focus is `fill_into_focus`'s own
+    /// (opengrok-forms `tests/unit/user_form.rs`).
+    async fn focused_field(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<opengrok_box::Focus> {
+        let seq = self.acts.lock().expect("acts").len() as u64;
+        Ok(opengrok_box::Focus {
+            kind: Some("password".to_string()),
+            seq,
+        })
+    }
+    async fn open_screen(&self, _box_id: &str, screen: &opengrok_box::Screen) -> BoxResult<()> {
+        self.opened.lock().expect("opened").push(screen.clone());
+        Ok(())
+    }
+    async fn active_tab_url(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<Option<String>> {
+        match self.front.lock().expect("front").clone() {
+            None => Err(opengrok_box::BoxError::Unreachable("cannot say".into())),
+            Some(url) if url.is_empty() => Ok(None),
+            Some(url) => Ok(Some(url)),
+        }
+    }
+    async fn screenshot(
+        &self,
+        _box_id: &str,
+        screen: &opengrok_box::Screen,
+    ) -> BoxResult<Screenshot> {
         *self.shots.lock().expect("shots") += 1;
+        self.shot_screens
+            .lock()
+            .expect("shot screens")
+            .push(screen.clone());
         Ok(Screenshot {
             mime: "image/png".to_string(),
             png_base64: "iVBORw0KGgo=".to_string(),
@@ -149,8 +198,14 @@ impl Computer for FillStub {
             height: 800,
         })
     }
-    async fn act(&self, _box_id: &str, action: &CuaAction) -> BoxResult<()> {
+    async fn act(
+        &self,
+        _box_id: &str,
+        screen: &opengrok_box::Screen,
+        action: &CuaAction,
+    ) -> BoxResult<()> {
         self.acts.lock().expect("acts").push(action.clone());
+        self.screens.lock().expect("screens").push(screen.clone());
         Ok(())
     }
     async fn egress_tunnel(&self, box_id: &str) -> Option<EgressTunnel> {
@@ -213,14 +268,27 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 /// vault, and a fill's values come from the card, so no sealed secret is needed. Shared with
 /// `bot` when one is named.
 async fn seed_login(store: &PgStore, owner: &AccountId, id: &str, kind: &str, bot: Option<&str>) {
+    seed_login_at(store, owner, id, kind, bot, "example.com").await;
+}
+
+/// A saved login kept for `origin`, the site a fill of it must be on.
+async fn seed_login_at(
+    store: &PgStore,
+    owner: &AccountId,
+    id: &str,
+    kind: &str,
+    bot: Option<&str>,
+    origin: &str,
+) {
     sqlx::query(
         "insert into site_login (id, account_id, origin, username, kind, created_at_ms, updated_at_ms)
-         values ($1, $2, 'example.com', $3, $4, 1, 1)",
+         values ($1, $2, $5, $3, $4, 1, 1)",
     )
     .bind(id)
     .bind(owner.as_str())
     .bind(format!("{id}@example.com"))
     .bind(kind)
+    .bind(origin)
     .execute(store.pool())
     .await
     .expect("seed a login");
@@ -2080,6 +2148,9 @@ async fn a_saved_login_fills_only_a_dedicated_box() {
         .await
         .expect("per-bot");
     let own = h.hire(&token, "Bea").await;
+    // NativeChat names the saved login it fills from; this one is shared with Bea.
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    seed_login(&h.store, &h.account, &login, "password", Some(own.as_str())).await;
     h.turn(&token, &own, "sign in").await;
     let card = h.wait_for_form(&own).await;
     let (status, body) = h
@@ -2090,6 +2161,7 @@ async fn a_saved_login_fills_only_a_dedicated_box() {
                 "entryId": card["id"].as_str().expect("entry id"),
                 "agentId": own,
                 "savedLogin": true,
+                "savedLoginId": login,
                 "values": { "email": EMAIL, "password": SECRET }
             }),
         )
@@ -2212,6 +2284,16 @@ async fn a_saved_login_is_checked_before_touch_id_and_one_bot_can_get_its_own_co
         "the account's other Bots still share: {body}"
     );
 
+    // NativeChat names the saved login it fills from; this one is shared with Ada.
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    seed_login(
+        &h.store,
+        &h.account,
+        &login,
+        "password",
+        Some(agent.as_str()),
+    )
+    .await;
     h.turn(&token, &agent, "sign in").await;
     let card = h.wait_for_form(&agent).await;
     let (status, body) = h
@@ -2222,6 +2304,7 @@ async fn a_saved_login_is_checked_before_touch_id_and_one_bot_can_get_its_own_co
                 "entryId": card["id"].as_str().expect("entry id"),
                 "agentId": agent,
                 "savedLogin": true,
+                "savedLoginId": login,
                 "values": { "email": EMAIL, "password": SECRET }
             }),
         )
@@ -2337,6 +2420,396 @@ async fn a_saved_login_fills_only_for_a_bot_it_is_shared_with() {
     assert_eq!(status, 404);
 }
 
+/// With the person's "share my logins with all my Bots" switch on, a saved login fills on the
+/// computer their own Bots share, for a Bot it was never shared with one by one: no Bot needs a
+/// fresh computer (and loses the page it had open) to sign in. Off, it is refused as before,
+/// and a Bot shown to an org is refused either way (9 Oct 2026).
+#[tokio::test]
+async fn sharing_logins_with_all_bots_fills_on_the_computer_they_share() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-all-{}@og.local", uuid::Uuid::now_v7().simple());
+    let h = harness_with_door(
+        &database_url,
+        &email,
+        Arc::new(SiteLoginDoor("www.facebook.com")),
+    )
+    .await;
+    let token = h.access_token(&email);
+    let agent = h.hire(&token, "Ada").await;
+    let call = |method: reqwest::Method, path: String, body: Option<Value>| {
+        let mut req = h
+            .client
+            .request(method, format!("{}{path}", h.base))
+            .header("authorization", format!("Bearer {token}"));
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        async move {
+            let res = req.send().await.expect("call");
+            let status = res.status().as_u16();
+            (status, res.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let check = || {
+        call(
+            reqwest::Method::GET,
+            format!("/coworkers/{agent}/saved-login"),
+            None,
+        )
+    };
+    let all_bots = |on: bool| {
+        call(
+            reqwest::Method::PUT,
+            "/site-logins/sharing".to_string(),
+            Some(json!({ "allBots": on })),
+        )
+    };
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    let origin = "https://www.facebook.com";
+    seed_login_at(&h.store, &h.account, &login, "password", None, origin).await;
+
+    let (_, body) = call(reqwest::Method::GET, "/site-logins/sharing".into(), None).await;
+    assert_eq!(
+        body["allBots"], false,
+        "off until the person turns it on: {body}"
+    );
+    let (_, body) = check().await;
+    assert_eq!(body["reason"], "shared-computer", "{body}");
+    assert_eq!(
+        body["ownBotsOnly"], true,
+        "the switch would help here: {body}"
+    );
+
+    let (status, body) = all_bots(true).await;
+    assert_eq!(status, 200, "{body}");
+    let (_, body) = check().await;
+    assert_eq!(body["usable"], true, "{body}");
+    assert_eq!(
+        body["ownComputer"], false,
+        "no computer of its own was made: {body}"
+    );
+    let (_, shared) = call(
+        reqwest::Method::GET,
+        format!("/coworkers/{agent}/site-logins"),
+        None,
+    )
+    .await;
+    assert_eq!(shared["logins"], json!([login]), "{shared}");
+
+    h.turn(&token, &agent, "sign in").await;
+    let card = h.wait_for_form(&agent).await;
+    let fill = json!({
+        "entryId": card["id"].as_str().expect("entry id"),
+        "agentId": agent,
+        "savedLogin": true,
+        "savedLoginId": login,
+        "values": { "email": EMAIL, "password": SECRET }
+    });
+    // Another Bot on this computer brought its own page forward: nothing is typed into it.
+    *h.stub.front.lock().expect("front") = Some("https://www.youtube.com/".into());
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "wrong-page", "{body}");
+    assert!(
+        h.stub.acts().is_empty(),
+        "nothing typed into another Bot's page"
+    );
+    // A box that cannot say which page is in front is refused too, on a shared computer.
+    *h.stub.front.lock().expect("front") = None;
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "wrong-page", "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing typed blind");
+    // No browser page open: the keys would go to whatever else has focus.
+    *h.stub.front.lock().expect("front") = Some(String::new());
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "wrong-page", "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing typed into a terminal");
+    // A saved login fill that does not name its login is refused: its site cannot be read.
+    let mut unnamed = fill.clone();
+    unnamed
+        .as_object_mut()
+        .expect("a body")
+        .remove("savedLoginId");
+    *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
+    let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", unnamed).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        h.stub.acts().is_empty(),
+        "nothing typed for an unnamed login"
+    );
+    // The login's own site in front: the card, still open, fills.
+    *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
+    let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+    assert!(!h.stub.acts().is_empty(), "typed into the login's own page");
+
+    // Off again: back to the shares made one Bot at a time, of which this Bot has none.
+    assert_eq!(all_bots(false).await.0, 200);
+    let (_, body) = check().await;
+    assert_eq!(body["reason"], "shared-computer", "{body}");
+
+    // A Bot everyone in an org drives is never one a saved login fills for.
+    assert_eq!(all_bots(true).await.0, 200);
+    mark_org_visible(&h.store, &h.account, &agent).await;
+    let (_, body) = check().await;
+    assert_eq!(body["reason"], "shared-bot", "{body}");
+}
+
+/// A saved login is typed only on the site it was saved for. The card's `liveHost` is the
+/// model's word: a card for a Facebook login that names a look-alike page, with that page in
+/// front, used to pass the check and get the person's Facebook password typed into it.
+#[tokio::test]
+async fn a_saved_login_is_typed_only_on_the_site_it_was_saved_for() {
+    let database_url = database_or_skip!();
+    let email = format!("user-form-site-{}@og.local", uuid::Uuid::now_v7().simple());
+    let door = Arc::new(SiteLoginDoor("fb.evil.example"));
+    let h = harness_with_door(&database_url, &email, door).await;
+    let token = h.access_token(&email);
+    h.store
+        .set_sharing_mode("account", h.account.as_str(), "per-bot", 1)
+        .await
+        .expect("per-bot");
+    let agent = h.hire(&token, "Ada").await;
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    let origin = "https://www.facebook.com";
+    seed_login_at(
+        &h.store,
+        &h.account,
+        &login,
+        "password",
+        Some(agent.as_str()),
+        origin,
+    )
+    .await;
+    h.turn(&token, &agent, "sign in").await;
+    let card = h.wait_for_form(&agent).await;
+    let fill = json!({
+        "entryId": card["id"].as_str().expect("entry id"),
+        "agentId": agent,
+        "savedLogin": true,
+        "savedLoginId": login,
+        "values": { "email": EMAIL, "password": SECRET }
+    });
+
+    *h.stub.front.lock().expect("front") = Some("https://fb.evil.example/login".into());
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "wrong-page", "{body}");
+    assert!(
+        h.stub.acts().is_empty(),
+        "nothing typed into the look-alike"
+    );
+
+    // No browser page open, on the Bot's own computer: the keys would go to a terminal.
+    *h.stub.front.lock().expect("front") = Some(String::new());
+    let (status, body) = h
+        .agui(&token, "/ag-ui/user-form/submit", fill.clone())
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing typed with no page open");
+
+    // The login's own site in front: it fills, whatever host the card named.
+    *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
+    let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["formResolution"], "submitted", "{body}");
+}
+
+/// Bots that share a computer each work on a screen of their own, with no switch to flip (#376,
+/// the owner's call on 11 Oct 2026): one Bot's fill lands on its screen and the other's on its
+/// own, each Bot's computer says so, and each Bot's screen is started as its turn begins.
+#[tokio::test]
+async fn bots_that_share_a_computer_each_work_on_a_screen_of_their_own() {
+    let database_url = database_or_skip!();
+    let email = format!(
+        "user-form-screen-{}@og.local",
+        uuid::Uuid::now_v7().simple()
+    );
+    let door = Arc::new(SiteLoginDoor("www.facebook.com"));
+    let h = harness_with_door(&database_url, &email, door).await;
+    let token = h.access_token(&email);
+    let (ada, bea) = (h.hire(&token, "Ada").await, h.hire(&token, "Bea").await);
+    let status_of = |bot: String| {
+        let req = h
+            .client
+            .get(format!("{}/coworkers/{bot}/computer", h.base))
+            .header("authorization", format!("Bearer {token}"));
+        async move {
+            req.send()
+                .await
+                .expect("call")
+                .json::<Value>()
+                .await
+                .expect("json")
+        }
+    };
+
+    // Each Bot fills a card by hand on the page in front; the actions say whose screen.
+    *h.stub.front.lock().expect("front") = Some("https://www.facebook.com/login".into());
+    for bot in [&bea, &ada] {
+        h.turn(&token, bot, "sign in").await;
+        let card = h.wait_for_form(bot).await;
+        let fill = json!({
+            "entryId": card["id"].as_str().expect("entry id"),
+            "agentId": bot,
+            "values": { "email": EMAIL, "password": "typed-by-hand" }
+        });
+        let (status, body) = h.agui(&token, "/ag-ui/user-form/submit", fill).await;
+        assert_eq!(status, 200, "{body}");
+    }
+    let screens = h.stub.screens.lock().expect("screens").clone();
+    let on_bea = screens
+        .iter()
+        .take_while(|s| **s == opengrok_box::Screen::Own(bea.to_string()))
+        .count();
+    assert!(on_bea > 0, "Bea's fill is on her own screen: {screens:?}");
+    assert!(
+        on_bea < screens.len()
+            && screens[on_bea..]
+                .iter()
+                .all(|s| *s == opengrok_box::Screen::Own(ada.to_string())),
+        "Ada's fill is on her own screen, not Bea's or a shared one: {screens:?}"
+    );
+    for bot in [&ada, &bea] {
+        let body = status_of(bot.to_string()).await;
+        assert_eq!(body["screen"], "own", "{body}");
+    }
+    // Each Bot's screen was started as its turn began, not on its first action.
+    let opened = h.stub.opened.lock().expect("opened").clone();
+    for bot in [&ada, &bea] {
+        assert!(
+            opened.contains(&opengrok_box::Screen::Own(bot.to_string())),
+            "{bot}'s screen is started ahead of its turn: {opened:?}"
+        );
+    }
+}
+
+/// A BOT CAN LOOK AT ANOTHER BOT'S SCREEN (11 Oct 2026): with every Bot on its own screen, Ada
+/// asks to see Bea's, by her name, and is shown a picture taken of Bea's own screen, said to be
+/// look-only. A name none of the person's Bots has is refused with the names they do have.
+#[tokio::test]
+async fn a_bot_looks_at_another_bots_screen_by_its_name() {
+    let database_url = database_or_skip!();
+    let email = format!("look-screen-{}@og.local", uuid::Uuid::now_v7().simple());
+    let door = Arc::new(LookDoor);
+    let h = harness_with_door(&database_url, &email, door).await;
+    let token = h.access_token(&email);
+    let (ada, bea) = (h.hire(&token, "Ada").await, h.hire(&token, "Bea").await);
+
+    let sse = h.turn(&token, &ada, "look at bea").await;
+    let shots = h.stub.shot_screens.lock().expect("shot screens").clone();
+    assert_eq!(
+        shots.last(),
+        Some(&opengrok_box::Screen::Own(bea.to_string())),
+        "the picture is of Bea's own screen: {shots:?}"
+    );
+    assert!(sse.contains("cannot click or type there"), "{sse}");
+    assert!(
+        sse.contains("iVBORw0KGgo="),
+        "the picture rides the result: {sse}"
+    );
+
+    let before = h.stub.shot_screens.lock().expect("shot screens").len();
+    let sse = h.turn_on(&token, &ada, "look-zed", "look at zed").await;
+    assert!(sse.contains("no Bot called Zed"), "{sse}");
+    assert!(sse.contains("Ada") && sse.contains("Bea"), "{sse}");
+    assert_eq!(
+        h.stub.shot_screens.lock().expect("shot screens").len(),
+        before,
+        "no picture is taken for a Bot that is not there"
+    );
+}
+
+/// Calls `look_at_screen` on the Bot named in the person's message ("look at bea"), then answers.
+struct LookDoor;
+
+#[async_trait]
+impl ModelDoor for LookDoor {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let answered = request
+            .messages
+            .iter()
+            .any(|message| message.as_text().contains("[tool "));
+        let asked = request
+            .messages
+            .iter()
+            .rev()
+            .map(|message| message.as_text())
+            .find_map(|text| text.strip_prefix("look at ").map(str::to_string))
+            .unwrap_or_default();
+        let deltas = if answered {
+            vec![ModelDelta::Text("Looked.".into())]
+        } else {
+            let id = format!("look-{}", uuid::Uuid::now_v7().simple());
+            let mut bot = asked.trim().to_string();
+            if let Some(first) = bot.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            vec![
+                ModelDelta::ToolCallStart {
+                    id: id.clone(),
+                    name: "look_at_screen".into(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: id.clone(),
+                    delta: json!({ "bot": bot }).to_string(),
+                },
+                ModelDelta::ToolCallEnd { id },
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
+    }
+}
+
+/// Asks once for a login whose card names `.0` as its site, then answers.
+struct SiteLoginDoor(&'static str);
+
+#[async_trait]
+impl ModelDoor for SiteLoginDoor {
+    async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        let answered = request
+            .messages
+            .iter()
+            .any(|message| message.as_text().contains("[tool "));
+        let deltas = if answered {
+            vec![ModelDelta::Text("Signed in.".into())]
+        } else {
+            let id = format!("form-{}", uuid::Uuid::now_v7().simple());
+            vec![
+                ModelDelta::ToolCallStart {
+                    id: id.clone(),
+                    name: "request_user_form".into(),
+                },
+                ModelDelta::ToolCallArgs {
+                    id: id.clone(),
+                    delta: json!({
+                        "title": "Log in to Facebook",
+                        "fields": [
+                            {"id": "email", "label": "Email", "type": "email", "required": true},
+                            {"id": "password", "label": "Password", "type": "password", "required": true}
+                        ],
+                        "liveHost": self.0
+                    })
+                    .to_string(),
+                },
+                ModelDelta::ToolCallEnd { id },
+            ]
+        };
+        Ok(Box::pin(futures::stream::iter(deltas.into_iter().map(Ok))))
+    }
+}
+
 /// A passkey card typed nothing and asked the box for its DevTools pipe. The stub box has
 /// none, so the card settles as Not filled with the reason, and the bot is told not to type
 /// a password; on a shared box the card is refused before anything is asked.
@@ -2385,6 +2858,27 @@ async fn a_passkey_card_asks_the_box_for_its_pipe_and_settles_honestly_without_o
         )
         .await;
     assert_eq!(status, 403, "{body}");
+    // Sharing logins with all the person's Bots does not bring passkeys to that computer:
+    // readying one there restarts the browser every Bot on it is using.
+    let res = h
+        .client
+        .put(format!("{}/site-logins/sharing", h.base))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "allBots": true }))
+        .send()
+        .await
+        .expect("switch");
+    assert_eq!(res.status().as_u16(), 200);
+    let (status, body) = h
+        .agui(
+            &token,
+            "/ag-ui/user-form/submit",
+            json!({ "entryId": card["id"].as_str().expect("id"), "agentId": shared, "savedLoginId": "sl_x", "values": {} }),
+        )
+        .await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"], "shared-computer", "{body}");
+    assert!(h.stub.acts().is_empty(), "nothing done for the passkey");
 
     // Own box: the pipe is asked for; the stub has none; the card says so.
     h.store
@@ -2503,6 +2997,16 @@ async fn collect_saved_login_never_reaches_first_resumed_model_request() {
         .expect("per-bot");
     let token = h.access_token(&email);
     let agent = h.hire(&token, "Collect").await;
+    // NativeChat names the saved login it fills from; this one is shared with the Bot.
+    let login = format!("sl_{}", uuid::Uuid::now_v7().simple());
+    seed_login(
+        &h.store,
+        &h.account,
+        &login,
+        "password",
+        Some(agent.as_str()),
+    )
+    .await;
     h.turn(&token, &agent, "collect answers").await;
     let card = h.wait_for_form(&agent).await;
     let (status, body) = h
@@ -2511,6 +3015,7 @@ async fn collect_saved_login_never_reaches_first_resumed_model_request() {
             "/ag-ui/user-form/submit",
             json!({
                 "entryId": card["id"], "agentId": agent, "savedLogin": true,
+                "savedLoginId": login,
                 "values": {"email": EMAIL, "password": SECRET}
             }),
         )

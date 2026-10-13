@@ -308,6 +308,8 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("OG_MODEL").ok(),
         std::env::var("OG_AUTO_REVIEW_MODEL").ok(),
     );
+    // The saved record, not the defaults: a restart must not switch off what a person turned on.
+    let host_settings = opengrok_server::host_state::load_settings(&auth.store).await;
     let state = AgUiState {
         auth,
         door,
@@ -317,7 +319,7 @@ async fn main() -> anyhow::Result<()> {
         vault,
         connectors,
         plugins: Arc::new(plugins),
-        host_settings: None,
+        host_settings: Some(Arc::new(std::sync::Mutex::new(host_settings))),
     };
 
     tokio::spawn({
@@ -461,6 +463,7 @@ fn load_plugins() -> std::collections::BTreeMap<String, opengrok_plugins::Plugin
                 tracing::info!(
                     plugin = plugin.manifest.name,
                     servers = plugin.mcp.servers.len(),
+                    skills = plugin.skills.len(),
                     trust = ?plugin.trust,
                     "loaded a plugin"
                 );

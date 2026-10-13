@@ -97,30 +97,7 @@ impl Bundle {
                 .strip_prefix("skills/")
                 .and_then(|p| p.strip_suffix("/SKILL.md"))
             {
-                let parsed = crate::split_frontmatter(text);
-                let (body_cap, description_cap) =
-                    (MAX_SKILL_BODY_CHARS, MAX_SKILL_DESCRIPTION_CHARS);
-                // One reason each: a single catch-all left the one real plugin probed (Exa)
-                // reporting "invalid" with no way to tell which rule it broke.
-                let reason = if !crate::is_valid_name(name)
-                    || !crate::is_valid_name(&format!("{}.{name}", manifest.name))
-                {
-                    Some("skill name is not a valid name".to_string())
-                } else if !parsed.closed {
-                    Some("SKILL.md frontmatter has no closing fence".into())
-                } else if parsed.body.chars().count() > body_cap {
-                    Some(format!("skill body exceeds {body_cap} characters"))
-                } else if parsed
-                    .description
-                    .as_ref()
-                    .is_some_and(|d| d.chars().count() > description_cap)
-                {
-                    Some(format!(
-                        "skill description exceeds {description_cap} characters"
-                    ))
-                } else {
-                    None
-                };
+                let reason = skill_refusal(&manifest.name, name, text);
                 let good = reason.is_none();
                 parts.push(Part {
                     kind: "skill".into(),
@@ -159,11 +136,15 @@ impl Bundle {
             parts,
         })
     }
+    /// The plugin's identity and servers. Its skills stay on the bundle (`skills`, `files`): this
+    /// is read on every turn and ceiling read, and copying every body there would be for nothing.
     pub fn plugin(&self) -> Plugin {
         Plugin {
             root: Default::default(),
             manifest: self.manifest.clone(),
             mcp: self.mcp.clone(),
+            skills: BTreeMap::new(),
+            files: BTreeMap::new(),
             trust: Trust::Unverified,
         }
     }
@@ -206,6 +187,34 @@ impl Bundle {
                 .any(|named| named == connector),
             _ => false,
         })
+    }
+}
+
+/// Why `skills/<skill>/SKILL.md` of `plugin` is not taken, or `None` when it is. ONE RULE for a
+/// registry bundle and a plugin folder on this server (`Plugin::load`), so a skill refused from one
+/// is never taken from the other.
+///
+/// One reason each: a single catch-all left the one real plugin probed (Exa) reporting "invalid"
+/// with no way to tell which rule it broke.
+pub fn skill_refusal(plugin: &str, skill: &str, text: &str) -> Option<String> {
+    let parsed = crate::split_frontmatter(text);
+    let (body_cap, description_cap) = (MAX_SKILL_BODY_CHARS, MAX_SKILL_DESCRIPTION_CHARS);
+    if !crate::is_valid_name(skill) || !crate::is_valid_name(&format!("{plugin}.{skill}")) {
+        Some("skill name is not a valid name".to_string())
+    } else if !parsed.closed {
+        Some("SKILL.md frontmatter has no closing fence".into())
+    } else if parsed.body.chars().count() > body_cap {
+        Some(format!("skill body exceeds {body_cap} characters"))
+    } else if parsed
+        .description
+        .as_ref()
+        .is_some_and(|d| d.chars().count() > description_cap)
+    {
+        Some(format!(
+            "skill description exceeds {description_cap} characters"
+        ))
+    } else {
+        None
     }
 }
 

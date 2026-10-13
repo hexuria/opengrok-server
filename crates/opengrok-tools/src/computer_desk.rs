@@ -9,11 +9,14 @@
 //! the network setting (what the computer may reach). The rest just happen and are reported.
 //!
 //! THIS BOT'S OWN COMPUTER ONLY: the desk answers as the `ToolContext`'s account and coworker, and
-//! no argument names another Bot's computer.
+//! no argument names another Bot's computer, with one exception that only looks:
+//! `look_at_screen` shows a picture of another of the person's Bots' screens (11 Oct 2026, the
+//! owner's call, once every Bot on a shared computer got a screen of its own). Nothing here clicks
+//! or types on another Bot's screen.
 
 use serde_json::{Value, json};
 
-use crate::{ToolContext, ToolResult};
+use crate::{ToolContext, ToolImage, ToolResult};
 
 pub const COMPUTER_STATUS: &str = "computer_status";
 pub const START_COMPUTER: &str = "start_computer";
@@ -22,11 +25,13 @@ pub const RESTART_COMPUTER: &str = "restart_computer";
 pub const RESET_COMPUTER: &str = "reset_computer";
 pub const UPDATE_COMPUTER: &str = "update_computer";
 pub const SET_NETWORK: &str = "set_network";
+pub const LOOK_AT_SCREEN: &str = "look_at_screen";
 
 /// Every computer tool, in the order they are offered: reading first, then the switches, then
 /// what cannot be undone.
-pub const TOOLS: [&str; 7] = [
+pub const TOOLS: [&str; 8] = [
     COMPUTER_STATUS,
+    LOOK_AT_SCREEN,
     START_COMPUTER,
     SHUTDOWN_COMPUTER,
     RESTART_COMPUTER,
@@ -40,8 +45,9 @@ pub const TOOLS: [&str; 7] = [
 pub const ROW: &str = "manage_computer";
 pub const ROW_LABEL: &str = "Manage computer";
 pub const ROW_DESCRIPTION: &str = "Check, start, shut down, restart, reset and update this Bot's own \
-     computer, and set what it may reach on the network, when you ask in chat. Resetting, updating \
-     and the network setting always ask you first.";
+     computer, look at your other Bots' screens, and set what it may reach on the network, when \
+     you ask in chat. Resetting, updating and the network setting \
+     always ask you first.";
 
 pub fn is_computer_tool(name: &str) -> bool {
     TOOLS.contains(&name)
@@ -60,7 +66,13 @@ pub enum Ask {
     Restart,
     Reset,
     Update,
-    SetNetwork { mode: String },
+    SetNetwork {
+        mode: String,
+    },
+    /// A picture of another of the person's Bots' screens, named by its name or id.
+    LookAtScreen {
+        bot: String,
+    },
 }
 
 /// This Bot's computer, as the server keeps it. Every call is answered as `context`'s account and
@@ -71,6 +83,12 @@ pub trait ComputerDesk: Send + Sync {
     async fn answer(&self, context: &ToolContext, ask: Ask) -> Result<Value, String>;
     /// For a call that asks first, the card's sentence; `None` for one that just happens.
     async fn ask_first(&self, context: &ToolContext, ask: &Ask) -> Result<Option<String>, String>;
+    /// `look_at_screen`: what is said about the Bot looked at, and the picture of its screen.
+    async fn look_at_screen(
+        &self,
+        context: &ToolContext,
+        bot: &str,
+    ) -> Result<(Value, ToolImage), String>;
 }
 
 /// What `Executor::execute` holds before its gates, for a computer tool: the call read, and the
@@ -92,7 +110,16 @@ pub async fn run(
     call_id: &str,
     ask: Ask,
 ) -> ToolResult {
-    match desk.answer(context, ask).await {
+    let answer = match ask {
+        Ask::LookAtScreen { bot } => match desk.look_at_screen(context, &bot).await {
+            Ok((answer, shot)) => {
+                return ToolResult::ok(call_id, answer.to_string()).with_image(shot);
+            }
+            Err(why) => Err(why),
+        },
+        ask => desk.answer(context, ask).await,
+    };
+    match answer {
         Ok(answer) => ToolResult::ok(call_id, answer.to_string()),
         Err(why) => ToolResult::refused(call_id, why),
     }
@@ -111,6 +138,12 @@ fn read(name: &str, arguments: &Value) -> Result<Ask, String> {
                 mode: mode.to_string(),
             }),
             _ => Err("bad arguments: mode is always, ask or never".to_string()),
+        },
+        LOOK_AT_SCREEN => match arguments.get("bot").and_then(Value::as_str).map(str::trim) {
+            Some(bot) if !bot.is_empty() => Ok(Ask::LookAtScreen {
+                bot: bot.to_string(),
+            }),
+            _ => Err("bad arguments: bot is the name or id of the Bot to look at".to_string()),
         },
         other => Err(format!("there is no computer tool called {other}")),
     }
@@ -144,6 +177,12 @@ pub fn description(name: &str) -> Option<&'static str> {
             "Set what THIS BOT'S OWN computer may reach through the person's network: always, ask \
              each time, or never. It always asks the person first."
         }
+        LOOK_AT_SCREEN => {
+            "See a picture of ANOTHER of the person's Bots' screens, named by its name or id \
+             (bot). Each Bot on a shared computer works on a screen of its own; use this to see \
+             what another Bot has open or how far it got. It only looks: it cannot click or type \
+             on that screen."
+        }
         ROW => ROW_DESCRIPTION,
         _ => return None,
     })
@@ -157,6 +196,11 @@ pub fn schema(name: &str) -> Option<Value> {
             json!({ "mode": { "type": "string", "enum": NETWORK_MODES,
                 "description": "always, ask (each time) or never." } }),
             json!(["mode"]),
+        ),
+        LOOK_AT_SCREEN => (
+            json!({ "bot": { "type": "string",
+                "description": "The name or id of the person's Bot whose screen to see." } }),
+            json!(["bot"]),
         ),
         n if is_computer_tool(n) => (json!({}), json!([])),
         _ => return None,
@@ -185,5 +229,12 @@ mod tests {
         assert!(read(SET_NETWORK, &json!({ "mode": "sometimes" })).is_err());
         assert!(read(SET_NETWORK, &json!({})).is_err());
         assert_eq!(read(RESET_COMPUTER, &json!({})), Ok(Ask::Reset));
+        assert_eq!(
+            read(LOOK_AT_SCREEN, &json!({ "bot": " Coders " })),
+            Ok(Ask::LookAtScreen {
+                bot: "Coders".into()
+            })
+        );
+        assert!(read(LOOK_AT_SCREEN, &json!({ "bot": "  " })).is_err());
     }
 }

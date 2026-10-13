@@ -123,7 +123,12 @@ impl Computer for StubBox {
     async fn state(&self, _box_id: &str) -> BoxResult<String> {
         Ok("running".to_string())
     }
-    async fn run_recipe(&self, _box_id: &str, request: &Value) -> BoxResult<Value> {
+    async fn run_recipe(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+        request: &Value,
+    ) -> BoxResult<Value> {
         self.commands
             .lock()
             .unwrap()
@@ -236,6 +241,7 @@ async fn walk_with(
     let walker = Walker {
         computer,
         box_id: "bx_stub",
+        screen: &opengrok_box::Screen::Shared,
         recipes,
         coworker: &bot,
         allowed: &allowed,

@@ -42,7 +42,7 @@ pub use workflow::Workflow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use opengrok_box::{BoxError, Computer, CuaAction, Screenshot};
+use opengrok_box::{BoxError, Computer, CuaAction, Screen, Screenshot};
 use opengrok_core::coworker::Coworker;
 use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,10 @@ pub struct ToolContext {
     /// The conversation whose form or handoff holds the screen, when the hold is tied to a run.
     /// Named in the refusal: a turn held by another conversation cannot see why otherwise.
     pub screen_held_in: Option<String>,
+    /// Which of its computer's screens this Bot uses (#376): its own on a computer it shares, the
+    /// one screen on a computer of its own or a group's. One cell for every copy of the context a
+    /// turn makes.
+    pub screen: Arc<std::sync::Mutex<Screen>>,
 }
 
 /// The shared computer of the group a turn is spoken in.
@@ -94,6 +98,24 @@ impl ToolContext {
             group_box: None,
             screen_hold: false,
             screen_held_in: None,
+            screen: Arc::default(),
+        }
+    }
+
+    /// The screen this Bot's screen actions go to now.
+    #[must_use]
+    pub fn screen(&self) -> Screen {
+        self.screen.lock().map_or_else(
+            |poisoned| poisoned.into_inner().clone(),
+            |screen| screen.clone(),
+        )
+    }
+
+    /// Point this turn's screen actions at `screen` from now on.
+    pub fn set_screen(&self, screen: Screen) {
+        match self.screen.lock() {
+            Ok(mut cell) => *cell = screen,
+            Err(poisoned) => *poisoned.into_inner() = screen,
         }
     }
 
@@ -830,6 +852,10 @@ impl Computer for NoComputer {
         Ok("absent".to_string())
     }
 }
+
+/// Why a call whose arguments are not a JSON object (malformed JSON, an array, a number) is refused.
+pub const NOT_AN_OBJECT: &str = "your arguments were not a JSON object (malformed JSON, or not \
+     an object); call the tool again with one JSON object of its parameters";
 
 /// What a Bot with no computer is told when it calls a computer tool anyway.
 pub const NO_COMPUTER: &str =
@@ -1690,7 +1716,8 @@ impl Executor {
             routine::RUN_ROUTINE => ("Run routine", "Runs one of this Bot's routines now."),
             computer_desk::ROW => (
                 computer_desk::ROW_LABEL,
-                "Checks, starts, stops, restarts, resets and updates the Bot's own computer.",
+                "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and \
+                 looks at your other Bots' screens.",
             ),
             computer_desk::COMPUTER_STATUS => (
                 "Computer status",
@@ -1702,6 +1729,10 @@ impl Executor {
                 "Shuts the Bot's computer down, keeping its files.",
             ),
             computer_desk::RESTART_COMPUTER => ("Restart computer", "Restarts the Bot's computer."),
+            computer_desk::LOOK_AT_SCREEN => (
+                "Look at another Bot's screen",
+                "Shows the Bot a picture of another of your Bots' screens, without touching it.",
+            ),
             computer_desk::RESET_COMPUTER => (
                 "Reset computer",
                 "Deletes everything on the Bot's computer for good.",
@@ -2006,6 +2037,11 @@ impl Executor {
     /// is never re-judged), or when no active policy is attached. Then the ladder in
     /// `review::combine`, which is pure and table-tested. Only `Outcome::Run` reaches a dispatch.
     pub async fn execute(&self, context: &ToolContext, call: &ToolCall) -> ToolResult {
+        // Text that would not parse arrives as null. Run with defaults it is a different call
+        // from the one the model meant, so it is refused before identity, gates and cards.
+        if !call.arguments.is_object() {
+            return ToolResult::refused(&call.id, NOT_AN_OBJECT);
+        }
         // The identity rule, applied once, before anything reads an argument — including the judge
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
@@ -2287,6 +2323,13 @@ impl Executor {
         // coworker's own box. The model chooses this one, so it is read from the arguments
         // rather than stamped by `overwrite_identity`.
         let on_group = arguments.get("machine").and_then(Value::as_str) == Some("group");
+        // A room's computer has one screen, every member's; the Bot's own computer is on the
+        // screen the Bot uses (#376).
+        let screen = if on_group {
+            Screen::Shared
+        } else {
+            context.screen()
+        };
         let box_id = if on_group {
             match context.group_box.as_ref() {
                 Some(group) => &group.box_id,
@@ -2344,7 +2387,7 @@ impl Executor {
             RUN_RECIPE => match serde_json::from_value::<RunRecipeArgs>(arguments) {
                 Ok(args) => {
                     let values = args.values.unwrap_or_default();
-                    self.run_recipe(box_id, context, &call.id, &args.recipe, &values)
+                    self.run_recipe(box_id, &screen, context, &call.id, &args.recipe, &values)
                         .await
                 }
                 Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
@@ -2372,11 +2415,11 @@ impl Executor {
                 Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
             },
             "open_url" => match serde_json::from_value::<OpenUrlArgs>(arguments) {
-                Ok(args) => self.open_url(box_id, &call.id, args).await,
+                Ok(args) => self.open_url(box_id, &screen, &call.id, args).await,
                 Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
             },
             "computer" => match serde_json::from_value::<ComputerArgs>(arguments) {
-                Ok(args) => self.computer_use(box_id, &call.id, args).await,
+                Ok(args) => self.computer_use(box_id, &screen, &call.id, args).await,
                 Err(error) => ToolResult::refused(&call.id, format!("bad arguments: {error}")),
             },
             // A plugin's tool. Reached only AFTER the policy check above, so a connector is
@@ -2396,6 +2439,7 @@ impl Executor {
     async fn run_recipe(
         &self,
         box_id: &BoxId,
+        screen: &Screen,
         context: &ToolContext,
         call_id: &str,
         recipe_id: &str,
@@ -2450,7 +2494,11 @@ impl Executor {
         // learnt nothing. The observation is what lets it tell a run that landed where the tape
         // was taped from one that did not. See `crate::observe` for the level and its cost.
         crate::observe::ask(&mut request, self.observe);
-        let receipt = match self.computer.run_recipe(box_id.as_str(), &request).await {
+        let receipt = match self
+            .computer
+            .run_recipe(box_id.as_str(), screen, &request)
+            .await
+        {
             Ok(raw) => RecipeReceipt::from_value(raw),
             // The box may have played some of it before the connection went: a replay would
             // type on top of it. Counted as played, and the model is told to look first.
@@ -2519,11 +2567,21 @@ impl Executor {
         result
     }
 
-    async fn open_url(&self, box_id: &BoxId, call_id: &str, args: OpenUrlArgs) -> ToolResult {
+    async fn open_url(
+        &self,
+        box_id: &BoxId,
+        screen: &Screen,
+        call_id: &str,
+        args: OpenUrlArgs,
+    ) -> ToolResult {
         if !self.has_screen() {
             return ToolResult::refused(call_id, "this computer has no screen");
         }
-        match self.computer.open_url(box_id.as_str(), &args.url).await {
+        match self
+            .computer
+            .open_url(box_id.as_str(), screen, &args.url)
+            .await
+        {
             Ok(()) => ToolResult::ok(
                 call_id,
                 format!(
@@ -2537,7 +2595,13 @@ impl Executor {
 
     /// Act, then look: every action answers with a fresh screenshot, so the model sees what it
     /// did without a second call. A plain `screenshot` just looks.
-    async fn computer_use(&self, box_id: &BoxId, call_id: &str, args: ComputerArgs) -> ToolResult {
+    async fn computer_use(
+        &self,
+        box_id: &BoxId,
+        screen: &Screen,
+        call_id: &str,
+        args: ComputerArgs,
+    ) -> ToolResult {
         if !self.has_screen() {
             return ToolResult::refused(call_id, "this computer has no screen");
         }
@@ -2547,14 +2611,14 @@ impl Executor {
         };
         let mut said = String::new();
         if let Some(action) = &action {
-            if let Err(error) = self.computer.act(box_id.as_str(), action).await {
+            if let Err(error) = self.computer.act(box_id.as_str(), screen, action).await {
                 return ToolResult::refused(call_id, describe(error));
             }
             said = format!("{}; ", action.describe());
             // The display needs a moment to repaint after input before it is worth looking.
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         }
-        match self.computer.screenshot(box_id.as_str()).await {
+        match self.computer.screenshot(box_id.as_str(), screen).await {
             Ok(shot) => ToolResult::ok(
                 call_id,
                 format!(
@@ -2837,7 +2901,7 @@ pub fn overwrite_identity(arguments: &Value, context: &ToolContext) -> Value {
     let mut object = match arguments {
         Value::Object(map) => map.clone(),
         // A non-object argument carries no identity to overwrite, but must still not be able to
-        // smuggle one — it is replaced by an object with only ours.
+        // smuggle one — it is replaced by an object with only ours. `execute` refuses it first.
         _ => serde_json::Map::new(),
     };
 

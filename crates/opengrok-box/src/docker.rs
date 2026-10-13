@@ -462,9 +462,24 @@ impl Computer for DockerComputer {
         self.wants_desktop()
     }
 
-    /// `docker exec -i <box> box-chromium-pipe <url>`, held by this process.
-    async fn devtools(&self, box_id: &str, url: &str) -> BoxResult<crate::devtools::DevTools> {
-        crate::devtools::DevTools::spawn(box_id, url).await
+    /// `docker exec -i <box> box-chromium-pipe <url>`, held by this process; on a Bot's own
+    /// screen, that screen's browser and profile.
+    async fn devtools(
+        &self,
+        box_id: &str,
+        screen: &crate::Screen,
+        url: &str,
+    ) -> BoxResult<crate::devtools::DevTools> {
+        match self.own_screen(box_id, screen).await? {
+            None => crate::devtools::DevTools::spawn(box_id, url).await,
+            Some(own) => {
+                let env = [
+                    ("BOX_DISPLAY", own.display.as_str()),
+                    ("BOX_CHROME_PROFILE", own.profile.as_str()),
+                ];
+                crate::devtools::DevTools::spawn_with(box_id, &env, url).await
+            }
+        }
     }
 
     /// The desktop ports are published when the container is created and cannot change after,
@@ -804,10 +819,33 @@ impl Computer for DockerComputer {
         }
     }
 
+    async fn active_tab_url(
+        &self,
+        box_id: &str,
+        screen: &crate::Screen,
+    ) -> BoxResult<Option<String>> {
+        // A box with no screen, or an image from before the report (404), cannot say: an
+        // error. One that answers with no url has no browser page open: `None`, and nothing
+        // is typed, as there is no page to type into, only whatever else has focus.
+        let body = self
+            .guest_on(box_id, screen)
+            .await?
+            .active_tab()
+            .await
+            .map_err(guest_error)?;
+        let url = body.get("url").and_then(serde_json::Value::as_str);
+        Ok(url.filter(|url| !url.is_empty()).map(str::to_string))
+    }
+
+    async fn focused_field(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<crate::Focus> {
+        let guest = self.guest_on(box_id, screen).await?;
+        focus_in(&guest.active_tab().await.map_err(guest_error)?)
+    }
+
     /// The password is the box's own, read back from its environment like `BOX_TOKEN`, so a
     /// restart keeps it. A box without one has no screen here rather than a guessed password;
     /// boxes created before per-box passwords still carry theirs, and keep working.
-    async fn screen_url(&self, box_id: &str) -> BoxResult<Option<String>> {
+    async fn screen_url(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<Option<String>> {
         let seen = match self.inspect(box_id).await {
             Ok(seen) => seen,
             Err(BoxError::NoSuchBox) | Err(BoxError::Refused { .. }) => return Ok(None),
@@ -816,13 +854,38 @@ impl Computer for DockerComputer {
         let Some(port) = seen.port(6080) else {
             return Ok(None);
         };
-        Ok(env_from_inspect(&seen.env, "BOX_VNC_PASSWORD")
-            .map(|password| vnc_page_url(&format!("http://127.0.0.1:{port}"), &password)))
+        let Some(password) = env_from_inspect(&seen.env, "BOX_VNC_PASSWORD") else {
+            return Ok(None);
+        };
+        let page = vnc_page_url(&format!("http://127.0.0.1:{port}"), &password);
+        Ok(Some(match self.own_screen(box_id, screen).await? {
+            None => page,
+            Some(own) => format!("{page}&path={}", own_screen_path(&own.display)),
+        }))
     }
 
-    async fn screenshot(&self, box_id: &str) -> BoxResult<Screenshot> {
+    async fn open_url(&self, box_id: &str, screen: &crate::Screen, url: &str) -> BoxResult<()> {
+        let quoted = url.replace('\'', "'\\''");
+        let command = match self.own_screen(box_id, screen).await? {
+            None => format!("box-chromium '{quoted}'"),
+            Some(own) => {
+                format!(
+                    "BOX_DISPLAY='{}' BOX_CHROME_PROFILE='{}' box-chromium '{quoted}'",
+                    own.display, own.profile
+                )
+            }
+        };
+        self.start(box_id, &command).await?;
+        Ok(())
+    }
+
+    async fn open_screen(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<()> {
+        self.own_screen(box_id, screen).await.map(|_| ())
+    }
+
+    async fn screenshot(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<Screenshot> {
         let shot = self
-            .guest(box_id)
+            .guest_on(box_id, screen)
             .await?
             .screenshot()
             .await
@@ -838,17 +901,18 @@ impl Computer for DockerComputer {
     async fn run_recipe(
         &self,
         box_id: &str,
+        screen: &crate::Screen,
         request: &serde_json::Value,
     ) -> BoxResult<serde_json::Value> {
-        self.guest(box_id)
+        self.guest_on(box_id, screen)
             .await?
             .recipe(request)
             .await
             .map_err(recipe_error)
     }
 
-    async fn act(&self, box_id: &str, action: &CuaAction) -> BoxResult<()> {
-        let guest = self.guest(box_id).await?;
+    async fn act(&self, box_id: &str, screen: &crate::Screen, action: &CuaAction) -> BoxResult<()> {
+        let guest = self.guest_on(box_id, screen).await?;
         let done = match action {
             CuaAction::Click { x, y, button } => guest.click(*x, *y, *button).await,
             CuaAction::DoubleClick { x, y } => guest.double_click(*x, *y, None).await,
@@ -928,6 +992,110 @@ impl DockerComputer {
         let token = env_from_inspect(&seen.env, "BOX_TOKEN").ok_or_else(no_screen)?;
         grok_box::GrokBox::connect(exec_url, host_url, token).map_err(guest_error)
     }
+
+    /// The guest client on `screen`: the box's shared screen, or a Bot's own.
+    async fn guest_on(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<grok_box::GrokBox> {
+        let guest = self.guest(box_id).await?;
+        match self.own_screen(box_id, screen).await? {
+            None => Ok(guest),
+            Some(own) => Ok(guest.on(&own.display)),
+        }
+    }
+
+    /// The Bot's own screen on this box (`box-screen up`, asked before each use), or `None` for
+    /// the box's main screen. It is idempotent, and a screen a restart stopped comes back on the
+    /// next call rather than failing on a display that is gone.
+    async fn own_screen(
+        &self,
+        box_id: &str,
+        screen: &crate::Screen,
+    ) -> BoxResult<Option<OwnScreen>> {
+        let Some(bot) = screen.bot() else {
+            return Ok(None);
+        };
+        let bot = safe_bot(bot)?;
+        let out = self
+            .run(box_id, &format!("box-screen up '{bot}'"), 30)
+            .await?;
+        or_main_screen(own_screen_in(&out.stdout))
+    }
+}
+
+/// A Bot's own screen as `box-screen up` answered: its X display and its browser profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnScreen {
+    display: String,
+    profile: String,
+}
+
+/// A Bot id as a shell word: the box's `box-screen` takes letters, digits, `_` and `-` only, and
+/// so does this, before anything is run.
+fn safe_bot(bot: &str) -> BoxResult<&str> {
+    let ok = !bot.is_empty()
+        && bot.len() <= 80
+        && bot
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if ok {
+        Ok(bot)
+    } else {
+        Err(BoxError::Refused {
+            status: 400,
+            body: "a Bot id is letters, digits, _ and - only".to_string(),
+        })
+    }
+}
+
+/// `box-screen up`'s answer: `{"display":":N","profile":…}`, or `{"error":…}` (no room for
+/// another own screen, or an image from before own screens, which has no `box-screen`).
+fn own_screen_in(stdout: &str) -> BoxResult<OwnScreen> {
+    let body: serde_json::Value =
+        serde_json::from_str(stdout.trim()).map_err(|_| BoxError::Refused {
+            status: 501,
+            body:
+                "this computer cannot give a Bot a screen of its own; update it to the newest image"
+                    .to_string(),
+        })?;
+    if let Some(error) = body.get("error").and_then(serde_json::Value::as_str) {
+        return Err(BoxError::Refused {
+            status: 409,
+            body: error.to_string(),
+        });
+    }
+    let word = |name: &str| body.get(name).and_then(serde_json::Value::as_str);
+    match (word("display"), word("profile")) {
+        (Some(display), Some(profile)) => Ok(OwnScreen {
+            display: display.to_string(),
+            profile: profile.to_string(),
+        }),
+        _ => Err(BoxError::Unreachable(
+            "box-screen answered without a display".to_string(),
+        )),
+    }
+}
+
+/// A Bot works on the box's main screen when the box has no room for another own screen, or is
+/// on an image from before own screens: every Bot on a shared computer is on its own screen, so a
+/// refusal here would stop the Bot from doing anything at all.
+fn or_main_screen(own: BoxResult<OwnScreen>) -> BoxResult<Option<OwnScreen>> {
+    match own {
+        Ok(own) => Ok(Some(own)),
+        Err(BoxError::Refused {
+            status: 409 | 501,
+            body,
+        }) => {
+            tracing::warn!(%body, "a Bot works on the computer's main screen");
+            Ok(None)
+        }
+        Err(other) => Err(other),
+    }
+}
+
+/// noVNC's websocket path for a Bot's own screen: the box's viewer routes the token `s<N>` to
+/// display `:N` (hexuria/box `box-screen`); no token is the shared screen.
+fn own_screen_path(display: &str) -> String {
+    let slot = display.trim_start_matches(':');
+    format!("websockify%3Ftoken%3Ds{slot}")
 }
 
 /// Reading a box's volumes and moving its data — the pieces behind update and reset.
@@ -1036,6 +1204,18 @@ impl DockerComputer {
 }
 
 /// The guest's refusal, kept readable for the model: "HTTP 400: x=5000 exceeds width 1280".
+/// The focused box in the box's active-tab report. An image from before the report has no
+/// `seq`: it cannot say.
+fn focus_in(body: &serde_json::Value) -> BoxResult<crate::Focus> {
+    let seq = body.get("seq").and_then(serde_json::Value::as_u64);
+    let seq = seq.ok_or_else(|| BoxError::Unreachable("no focus report".to_string()))?;
+    let kind = body.get("focus").and_then(serde_json::Value::as_str);
+    Ok(crate::Focus {
+        kind: kind.map(str::to_string),
+        seq,
+    })
+}
+
 fn guest_error(error: grok_box::Error) -> BoxError {
     match error {
         grok_box::Error::Http {
@@ -1140,6 +1320,37 @@ fn uuid_like() -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// A Bot's own screen as hexuria/box `box-screen up` answers it; a box with no room for
+    /// another, or an image from before own screens (no `box-screen`, so no JSON), leaves the Bot
+    /// on the main screen rather than unable to act; and the viewer's token path.
+    #[test]
+    fn an_own_screen_is_read_from_box_screen() {
+        let up = r#"{"bot":"cw_1","slot":2,"display":":2","profile":"/home/box/chrome-profile/bots/cw_1","running":true}"#;
+        assert_eq!(
+            or_main_screen(own_screen_in(up)).unwrap(),
+            Some(OwnScreen {
+                display: ":2".into(),
+                profile: "/home/box/chrome-profile/bots/cw_1".into()
+            })
+        );
+        let full = r#"{"error":"this computer already runs 4 Bots' own screens"}"#;
+        assert_eq!(or_main_screen(own_screen_in(full)).unwrap(), None);
+        let old_image = "sh: 1: box-screen: not found";
+        assert_eq!(or_main_screen(own_screen_in(old_image)).unwrap(), None);
+        let no_display = r#"{"running":true}"#;
+        assert!(or_main_screen(own_screen_in(no_display)).is_err());
+        assert_eq!(own_screen_path(":2"), "websockify%3Ftoken%3Ds2");
+    }
+
+    /// A Bot id goes into a shell word only as letters, digits, `_` and `-`.
+    #[test]
+    fn only_a_plain_bot_id_names_a_screen() {
+        assert!(safe_bot("cw_01a0f94f-8784-78c0").is_ok());
+        for bad in ["", "a b", "x'; rm -rf / #", "../x", "$(id)"] {
+            assert!(safe_bot(bad).is_err(), "{bad:?}");
+        }
+    }
 
     /// Whether a failed recipe POST could have played: only a connect error or the guest's own
     /// status is known to have played nothing.
@@ -1502,5 +1713,25 @@ mod tests {
             }
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    /// The report as a box from hexuria/box `gol/focused-field` answered it live, Tab by Tab,
+    /// and one from an image before the report.
+    #[test]
+    fn the_focused_box_is_read_from_the_active_tab_report() {
+        let live = serde_json::json!({
+            "url": "http://127.0.0.1:8000/login.html", "atMs": 1_791_609_991_048_u64,
+            "focus": "password", "seq": 7
+        });
+        let focus = focus_in(&live).unwrap();
+        assert_eq!((focus.kind.as_deref(), focus.seq), (Some("password"), 7));
+        let unsaid = serde_json::json!({ "url": "https://www.facebook.com/", "seq": 2 });
+        assert_eq!(
+            focus_in(&unsaid).unwrap().kind,
+            None,
+            "the page has not said"
+        );
+        let old_image = serde_json::json!({ "url": "https://www.facebook.com/" });
+        assert!(focus_in(&old_image).is_err(), "cannot say");
     }
 }

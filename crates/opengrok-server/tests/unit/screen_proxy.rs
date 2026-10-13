@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use super::*;
+use opengrok_box::viewer::STORAGE_SHIM;
 
 /// A request's headers as it arrives with `Host: host`, carrying `more` besides.
 fn arriving(host: &str, more: &[(&str, &str)]) -> HeaderMap {
@@ -267,7 +268,11 @@ impl opengrok_box::Computer for OnePort {
     async fn state(&self, _: &str) -> opengrok_box::BoxResult<String> {
         Ok("running".to_string())
     }
-    async fn screen_url(&self, _: &str) -> opengrok_box::BoxResult<Option<String>> {
+    async fn screen_url(
+        &self,
+        _: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> opengrok_box::BoxResult<Option<String>> {
         Ok(Some(ONE_PORT_PAGE.to_string()))
     }
 }
@@ -378,7 +383,7 @@ async fn a_place_check_cut_short_leaves_the_next_request_to_check() {
     let ticket = page.split('/').nth(7).expect("the ticket").to_string();
     let cw = coworker.as_str();
     let first = upstream_for(&state, cw, &ticket).await;
-    assert_eq!(first.map(|(port, _)| port), Some(5999), "learned");
+    assert_eq!(first.map(|(port, _, _)| port), Some(5999), "learned");
     let long_ago = Duration::from_secs(60 * 60);
     if let Ok(mut known) = UPSTREAMS.lock()
         && let Some(upstream) = known.get_mut(&ticket)
@@ -425,4 +430,21 @@ async fn a_place_check_cut_short_leaves_the_next_request_to_check() {
         next, None,
         "the next request checked, and the box had moved"
     );
+}
+
+/// The websocket path a box's page names: a Bot's own screen's token (#376), else the shared
+/// screen's; nothing but those two shapes is passed on to the box.
+#[test]
+fn the_socket_path_is_the_shared_screens_or_one_bots_token() {
+    let page = "http://127.0.0.1:5999/vnc.html?autoconnect=true&password=pw";
+    assert_eq!(socket_path(page), "websockify");
+    let own = format!("{page}&path=websockify%3Ftoken%3Ds3");
+    assert_eq!(socket_path(&own), "websockify?token=s3");
+    for odd in [
+        "&path=../../etc",
+        "&path=websockify%3Ftoken%3Ds3%20x",
+        "&path=websockify%3Ftoken%3D",
+    ] {
+        assert_eq!(socket_path(&format!("{page}{odd}")), "websockify", "{odd}");
+    }
 }

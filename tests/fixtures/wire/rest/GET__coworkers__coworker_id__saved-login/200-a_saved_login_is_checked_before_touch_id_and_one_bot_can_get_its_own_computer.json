@@ -5,6 +5,7 @@
   "body": {
     "usable": true,
     "reason": null,
-    "ownComputer": true
+    "ownComputer": true,
+    "ownBotsOnly": false
   }
 }

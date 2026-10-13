@@ -143,7 +143,11 @@ impl Computer for TunnelBox {
     async fn offers_a_screen(&self, _box_id: &str) -> bool {
         true
     }
-    async fn screenshot(&self, _box_id: &str) -> BoxResult<Screenshot> {
+    async fn screenshot(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+    ) -> BoxResult<Screenshot> {
         self.note("screenshot");
         Ok(Screenshot {
             mime: "image/png".to_string(),
@@ -152,7 +156,12 @@ impl Computer for TunnelBox {
             height: 1,
         })
     }
-    async fn act(&self, _box_id: &str, _action: &CuaAction) -> BoxResult<()> {
+    async fn act(
+        &self,
+        _box_id: &str,
+        _screen: &opengrok_box::Screen,
+        _action: &CuaAction,
+    ) -> BoxResult<()> {
         self.note("act");
         Ok(())
     }

@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -122,11 +122,91 @@ fn page_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
+/// One pipe per browser (a box's shared screen, or a Bot's own screen on it), held by this process
+/// for as long as it runs (opengrok-server's passkeys ride on it).
+fn pipes() -> &'static Mutex<HashMap<String, Arc<DevTools>>> {
+    static PIPES: OnceLock<Mutex<HashMap<String, Arc<DevTools>>>> = OnceLock::new();
+    PIPES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The box's Chromium on the pipe: the one already held, or a fresh one. A browser started
+/// any other way (the dock, an earlier server) has no pipe and is replaced, tabs and all;
+/// the page is reopened by the caller. Nothing in the box is touched unless the computer
+/// offers a pipe at all. Returns the pipe and whether the browser was replaced.
+pub async fn held(
+    computer: &Arc<dyn crate::Computer>,
+    box_id: &str,
+    screen: &crate::Screen,
+) -> Result<(Arc<DevTools>, bool), String> {
+    if !computer.offers_a_pipe() {
+        return Err("this computer has no DevTools pipe".to_string());
+    }
+    let key = match screen.bot() {
+        None => box_id.to_string(),
+        Some(bot) => format!("{box_id}#{bot}"),
+    };
+    // The registry lock is held only to look, never across a call on the pipe: a hung pipe
+    // on one box must not stall every other box's passkey.
+    let held = pipes().lock().await.get(&key).cloned();
+    if let Some(held) = held
+        && held
+            .call("Browser.getVersion", serde_json::json!({}), None)
+            .await
+            .is_ok()
+    {
+        return Ok((held, false));
+    }
+    // Only this screen's browser is replaced: on a computer several Bots share, the other
+    // screens' browsers are other Bots' (#376), and `pkill -x chromium` closed them all.
+    let _ = computer.run(box_id, &replace_browser(screen)?, 15).await;
+    let fresh = computer
+        .devtools(box_id, screen, "about:blank")
+        .await
+        .map_err(|error| format!("the browser did not come up on the pipe: {error}"))?;
+    let fresh = Arc::new(fresh);
+    pipes().lock().await.insert(key, fresh.clone());
+    Ok((fresh, true))
+}
+
+/// The shell that stops `screen`'s browser and only it: the Chromium whose profile is that
+/// screen's (hexuria/box: the shared screen's is `BOX_CHROME_PROFILE`, a Bot's own is
+/// `bots/<bot>` under it, `box-screen`).
+fn replace_browser(screen: &crate::Screen) -> Result<String, String> {
+    let profile = match screen.bot() {
+        None => String::new(),
+        Some(bot) => {
+            let safe = bot
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+            if !safe || bot.is_empty() {
+                return Err("this Bot's id cannot name a browser profile".to_string());
+            }
+            format!("/bots/{bot}")
+        }
+    };
+    Ok(format!(
+        "p=\"${{BOX_CHROME_PROFILE:-$HOME/chrome-profile}}{profile}\"; \
+         pkill -f -- \"--user-data-dir=$p( |\\$)\" >/dev/null 2>&1 || true; sleep 1"
+    ))
+}
+
 impl DevTools {
     /// Run `docker exec -i <box> box-chromium-pipe <url>` and take its pipe.
     pub async fn spawn(box_id: &str, url: &str) -> BoxResult<Self> {
+        Self::spawn_with(box_id, &[], url).await
+    }
+
+    /// The same, with `env` set for the browser: a Bot's own screen's `BOX_DISPLAY` and
+    /// `BOX_CHROME_PROFILE`, so the pipe's Chromium is that Bot's (hexuria/box `box-screen`).
+    pub async fn spawn_with(box_id: &str, env: &[(&str, &str)], url: &str) -> BoxResult<Self> {
+        let mut args = vec!["exec".to_string(), "-i".to_string()];
+        for (name, value) in env {
+            args.push("-e".to_string());
+            args.push(format!("{name}={value}"));
+        }
+        args.extend([box_id, "box-chromium-pipe", url].map(str::to_string));
         let mut child = Command::new("docker")
-            .args(["exec", "-i", box_id, "box-chromium-pipe", url])
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

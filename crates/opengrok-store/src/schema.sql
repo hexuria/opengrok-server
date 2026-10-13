@@ -986,6 +986,13 @@ create table if not exists site_login_share (
     primary key (login_id, coworker_id)
 );
 create index if not exists site_login_share_coworker on site_login_share (account_id, coworker_id);
+-- The person's one switch over all of the above (9 Oct 2026): a row means every saved login
+-- of theirs counts as shared with every Bot of theirs, the way one computer is shared by all
+-- their Bots. No row ⇒ only the shares above, which is how it was before the switch existed.
+create table if not exists login_sharing (
+    account_id    text   primary key,
+    shared_at_ms  bigint not null
+);
 
 -- SKILLS. A named, versioned bundle of instructions a person invokes for one turn by typing
 -- `/name`: a SKILL.md body, plus whatever small files sit beside it. Owned by an account, visible
@@ -1471,3 +1478,12 @@ do $do$ begin
             add column target_connection text;
     end if;
 end $do$;
+
+-- The host settings record (`GET/PUT /ag-ui/host-settings`), kept so a restart does not quietly
+-- undo what a person switched — the route-traffic switch was lost on every restart while it
+-- lived in memory only. One host, one row; the record's shape is the server's (`default_settings`).
+create table if not exists host_settings (
+    id             text   primary key check (id = 'host'),
+    record         jsonb  not null,
+    updated_at_ms  bigint not null
+);

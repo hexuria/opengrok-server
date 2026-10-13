@@ -14,8 +14,7 @@
 //! Registration is the same dance without a key: an empty authenticator, the bot clicks the
 //! site's "add a passkey" button, the site makes one, and the new key is sealed into the vault.
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use opengrok_box::devtools::{DevTools, Passkey};
@@ -23,59 +22,11 @@ use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_store::{PasskeyWrite, SiteLoginWrite};
 use opengrok_tools::user_form::FormRequest;
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 use crate::host_state::HostState;
 
 /// How long a loaded key waits for the site to ask before it is taken out again.
 const ASSERTION_PATIENCE: Duration = Duration::from_secs(120);
-
-/// One pipe per box, held by the server for as long as it runs.
-fn pipes() -> &'static Mutex<HashMap<String, Arc<DevTools>>> {
-    static PIPES: OnceLock<Mutex<HashMap<String, Arc<DevTools>>>> = OnceLock::new();
-    PIPES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// The box's Chromium on the pipe: the one already held, or a fresh one. A browser started
-/// any other way (the dock, an earlier server) has no pipe and is replaced, tabs and all;
-/// the page is reopened by the caller. Nothing in the box is touched unless the computer
-/// offers a pipe at all. Returns the pipe and whether the browser was replaced.
-async fn ensure_devtools(
-    computer: &Arc<dyn opengrok_box::Computer>,
-    box_id: &str,
-) -> Result<(Arc<DevTools>, bool), String> {
-    if !computer.offers_a_pipe() {
-        return Err("this computer has no DevTools pipe".to_string());
-    }
-    // The registry lock is held only to look, never across a call on the pipe: a hung pipe
-    // on one box must not stall every other box's passkey.
-    let held = pipes().lock().await.get(box_id).cloned();
-    if let Some(held) = held
-        && held
-            .call("Browser.getVersion", serde_json::json!({}), None)
-            .await
-            .is_ok()
-    {
-        return Ok((held, false));
-    }
-    let _ = computer
-        .run(
-            box_id,
-            "pkill -x chromium >/dev/null 2>&1 || true; sleep 1",
-            15,
-        )
-        .await;
-    let fresh = computer
-        .devtools(box_id, "about:blank")
-        .await
-        .map_err(|error| format!("the browser did not come up on the pipe: {error}"))?;
-    let fresh = Arc::new(fresh);
-    pipes()
-        .lock()
-        .await
-        .insert(box_id.to_string(), fresh.clone());
-    Ok((fresh, true))
-}
 
 /// A page attached for one passkey, and what the bot has to be told about it.
 struct ReadyPage {
@@ -114,11 +65,11 @@ async fn page_session(
     )
     .await
     .ok_or_else(|| "this bot has no computer".to_string())?;
-    let (computer, box_id) = runner
+    let (computer, box_id, screen) = runner
         .fill_target()
         .ok_or_else(|| "this bot has no computer".to_string())?;
     runner.wake_fill_target().await?;
-    let (devtools, replaced) = ensure_devtools(&computer, &box_id).await?;
+    let (devtools, replaced) = opengrok_box::devtools::held(&computer, &box_id, &screen).await?;
     let host = form
         .live_host
         .as_deref()

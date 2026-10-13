@@ -524,6 +524,8 @@ fn as_words(message: &ChatMessage) -> serde_json::Value {
 ///
 /// A PICTURE CANNOT RIDE A TOOL RESULT in this dialect, so a round's screenshots follow its last
 /// result as one user message — never between a call and its answer, which would break the block.
+///
+/// A CALL'S ARGUMENTS GO BACK AS AN OBJECT ([`crate::ToolCallRef::provider_arguments`]).
 fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
     let mut out = Vec::with_capacity(request.messages.len() + 1);
     if let Some(system) = &request.system {
@@ -554,7 +556,7 @@ fn chat_messages(request: &ModelRequest) -> Vec<serde_json::Value> {
                 serde_json::json!({
                     "id": call.id,
                     "type": "function",
-                    "function": {"name": call.name, "arguments": call.arguments},
+                    "function": {"name": call.name, "arguments": call.provider_arguments()},
                 })
             })
             .collect();

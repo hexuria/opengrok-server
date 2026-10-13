@@ -55,6 +55,7 @@ impl Hub {
             replaying: resume.is_some(),
             gate: Instant::now(),
             window: tuning.window,
+            room: i64::try_from(tuning.room).unwrap_or(i64::MAX),
             ping: ticker(tuning.ping),
             poll: ticker(tuning.poll),
         };
@@ -91,6 +92,9 @@ struct Follow {
     /// The earliest the outbox is read again, once it has been read caught up.
     gate: Instant,
     window: Duration,
+    /// How many wakes the room holds: how far behind the head a stream that missed wakes may be
+    /// and still read on rather than be told `reset`.
+    room: i64,
     ping: Interval,
     poll: Interval,
 }
@@ -114,7 +118,7 @@ impl Follow {
             tokio::select! {
                 woke = self.wakes.recv() => match woke {
                     Ok(id) => self.dirty |= id > self.cursor,
-                    Err(RecvError::Lagged(_)) => self.lagged().await?,
+                    Err(RecvError::Lagged(_)) => self.missed_wakes().await?,
                     Err(RecvError::Closed) => return None,
                 },
                 () = sleep_until(self.gate), if self.dirty => {}
@@ -161,6 +165,20 @@ impl Follow {
             .iter()
             .map(|note| block(note.id, &note.kind, &note.payload.to_string()));
         self.ready.extend(blocks);
+        Some(())
+    }
+
+    /// The room dropped wakes this stream was too slow to take. A wake only says the outbox moved;
+    /// the notes are all still there. A stream at most a room's worth behind the head reads on:
+    /// the wakes it missed may have been for notes it has read already, come late from Postgres
+    /// after a reset or a poll covered them, and those used to reset it a second time for nothing.
+    /// One further behind is told `reset`, which is how a slow client costs the server nothing.
+    async fn missed_wakes(&mut self) -> Option<()> {
+        let (head, _) = outbox::bounds(self.hub.pool(), &self.account).await.ok()?;
+        if head - self.cursor > self.room {
+            return self.lagged().await;
+        }
+        self.dirty |= head > self.cursor;
         Some(())
     }
 

@@ -493,34 +493,15 @@ pub(super) async fn put_tool_mode(
     }
 }
 
-/// One installed plugin skill and whether it is on for this Bot.
+/// One installed plugin skill and whether it is on for this Bot (`turn::skill_rows`).
 async fn plugin_skill_rows(
     state: &AgUiState,
     account: &AccountId,
     bot: &CoworkerId,
 ) -> Result<Vec<Value>, Response> {
     let store = &state.auth.store;
-    let installs = opengrok_integrations::installed::skills_for_turn(store, account, bot)
-        .await
-        .map_err(|error| unavailable(&error))?;
-    let policy = store
-        .policy_for(account, bot)
-        .await
-        .map_err(|error| unavailable(&error))?;
-    let mut rows = Vec::new();
-    for (plugin, _revision, skills) in installs {
-        for (skill, text) in skills {
-            let front = opengrok_plugins::split_frontmatter(&text);
-            rows.push(json!({
-                "plugin": plugin,
-                "skill": skill,
-                "description": front.description.unwrap_or_default(),
-                "on": !opengrok_policy::skill_switched_off(&policy, &plugin, &skill),
-                "body": front.body,
-            }));
-        }
-    }
-    Ok(rows)
+    let rows = opengrok_integrations::turn::skill_rows(store, account, bot, &state.plugins);
+    rows.await.map_err(|error| unavailable(&error))
 }
 
 /// `GET /coworkers/{id}/plugin-skills`: every installed plugin's skills with their switch for this
@@ -642,7 +623,7 @@ pub(super) async fn put_plugin_skill(
 
 /// `GET /coworkers/{id}/saved-login`: whether a saved login can be filled for this Bot, asked by
 /// the app BEFORE Touch ID so a refusal never follows a fingerprint (8 Oct 2026).
-/// `{usable, reason, ownComputer}`; reason is `shared-computer` or `shared-bot`, or null.
+/// `{usable, reason, ownComputer, ownBotsOnly}`; reason is `shared-computer` or `shared-bot`, or null.
 pub(super) async fn get_saved_login(
     State(state): State<AgUiState>,
     headers: HeaderMap,
@@ -652,12 +633,15 @@ pub(super) async fn get_saved_login(
         Ok(found) => found,
         Err(refused) => return refused,
     };
-    let reason = super::user_form::saved_login_refusal(&state, &account, &bot).await;
-    let (_, _, _, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
+    let reason = super::user_form::saved_login_refusal(&state, &account, &bot, true).await;
+    let (_, _, scope, _, mode) = super::provision::scope_of(&state, &account, bot.as_str()).await;
     Json(json!({
         "usable": reason.is_none(),
         "reason": reason,
         "ownComputer": mode == opengrok_core::coworker::BoxMode::Dedicated,
+        // Only the person's own Bots use this computer, so "share my logins with all my Bots"
+        // would let a saved login fill here (9 Oct 2026).
+        "ownBotsOnly": scope == "account",
     }))
     .into_response()
 }
@@ -696,7 +680,14 @@ pub(super) async fn put_own_computer(
             .set_sharing_mode("bot", bot.as_str(), "per-bot", now_ms())
             .await
     } else {
-        store.clear_sharing_mode("bot", bot.as_str()).await
+        // Only its own computer is undone: a Bot on a screen of its own keeps that (#376).
+        match store.sharing_mode("bot", bot.as_str()).await {
+            Ok(Some(row)) if row == "per-bot" => {
+                store.clear_sharing_mode("bot", bot.as_str()).await
+            }
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        }
     };
     if let Err(error) = saved {
         return unavailable(&error);
