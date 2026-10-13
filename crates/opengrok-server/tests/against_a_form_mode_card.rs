@@ -636,6 +636,39 @@ async fn a_form_mode_card_is_minted_from_the_plugin_without_parking_the_turn() {
         .expect("awaiting");
     assert!(awaiting.is_empty(), "no run is parked: {awaiting:?}");
 
+    // A cold load draws what it drew live: the card once, and the call's frames joined to it.
+    let run_id = frames
+        .iter()
+        .find(|frame| frame["type"] == "RUN_STARTED")
+        .and_then(|frame| frame["runId"].as_str())
+        .expect("run id")
+        .to_string();
+    let replay: Value = h
+        .client
+        .get(format!("{}/ag-ui/runs/{run_id}", h.base))
+        .header("authorization", format!("Bearer {}", h.token))
+        .send()
+        .await
+        .expect("replay")
+        .json()
+        .await
+        .expect("replay json");
+    let events = replay["events"].as_array().expect("events");
+    let cards: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["name"] == "user-form")
+        .collect();
+    assert_eq!(cards.len(), 1, "{events:#?}");
+    assert_eq!(cards[0]["entryId"], json!(entry_id));
+    assert!(
+        events
+            .iter()
+            .filter(|event| event["type"] == "TOOL_CALL_START")
+            .all(|event| event["entryId"] == json!(entry_id)),
+        "the replayed call's frames carry the card's id: {events:#?}"
+    );
+    fixture("replay-card-frame", cards[0]);
+
     let entry = h.entry(&entry_id).await;
     assert!(entry.get("callId").is_none(), "{entry}");
     let card = &entry["message"]["formRequest"];

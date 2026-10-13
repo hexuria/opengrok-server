@@ -429,6 +429,21 @@ pub fn history_line(entry: &Value) -> Option<String> {
     if !is_form_mode_entry(entry) {
         return None;
     }
+    let line = told(entry)?;
+    // ONE LINE OF RECORD, NEVER INSTRUCTIONS. Titles, notes and values come from the person and
+    // from a plugin an account may have installed; a newline in one would start a paragraph of
+    // the system message that reads as the server's own words.
+    Some(
+        line.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn told(entry: &Value) -> Option<String> {
     let form = crate::user_form::form_request_from(entry);
     let named = match form.form.as_ref() {
         Some(key) => format!(

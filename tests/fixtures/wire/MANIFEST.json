@@ -762,6 +762,10 @@
       "source": "GET /ag-ui/runs/{run_id}, recorded from the test another_account_cannot_take_a_run_by_its_id (crates/opengrok-server/tests/against_a_retried_run.rs); ids and times are placeholders"
     },
     {
+      "file": "rest/GET__ag-ui_runs__run_id_/200-a_form_mode_card_is_minted_from_the_plugin_without_parking_the_turn.json",
+      "source": "GET /ag-ui/runs/{run_id}, recorded from the test a_form_mode_card_is_minted_from_the_plugin_without_parking_the_turn (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
       "file": "rest/GET__ag-ui_threads/200-the_thread_list_names_a_pairs_thread_and_its_two_bots.json",
       "source": "GET /ag-ui/threads, recorded from the test the_thread_list_names_a_pairs_thread_and_its_two_bots (crates/opengrok-server/tests/against_bot_messages.rs); ids and times are placeholders"
     },

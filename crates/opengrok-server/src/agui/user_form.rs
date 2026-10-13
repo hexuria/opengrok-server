@@ -1949,7 +1949,11 @@ pub(crate) fn hydrate_agui_events(
         if used.contains(id) {
             continue;
         }
-        if call_id_of(form).is_some_and(|call| !calls.contains(call)) {
+        // A form-mode card names no call, but keeps the model's call that asked for it
+        // (`requestCallId`): it belongs to the run that made that call and to no other.
+        let asked_by =
+            call_id_of(form).or_else(|| form.get("requestCallId").and_then(Value::as_str));
+        if asked_by.is_some_and(|call| !calls.contains(call)) {
             continue;
         }
         let at = form.get("timestampMs").and_then(Value::as_i64).unwrap_or(0);
@@ -1977,7 +1981,12 @@ fn stamp_tool_calls(events: &mut [Value]) {
         if !is_user_form_agui(event) {
             continue;
         }
-        let Some(call_id) = event.get("callId").and_then(Value::as_str) else {
+        // A form-mode card's frame has no `callId`; its frames are the call that asked for it.
+        let Some(call_id) = event.get("callId").and_then(Value::as_str).or_else(|| {
+            event
+                .pointer("/value/requestCallId")
+                .and_then(Value::as_str)
+        }) else {
             continue;
         };
         if let Some(entry_id) = user_form_event_id(event) {
