@@ -991,7 +991,7 @@ pub(crate) async fn saved_login_refusal(
     (mode != opengrok_core::coworker::BoxMode::Dedicated && !all_bots).then_some(SHARED_COMPUTER)
 }
 
-fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {
+pub(crate) fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {
     let entry_id = args.get("entryId").and_then(Value::as_str)?;
     let agent_id = args
         .get("agentId")
@@ -1015,7 +1015,7 @@ async fn may_use(state: &HostState, account_id: &AccountId, coworker: &CoworkerI
 
 /// Null stays the disclosure answer for a coworker the caller may not use. A stamped
 /// `entryId` that is missing from the transcript is an error — NativeChat collapses on Null.
-async fn load_owned_entry(
+pub(crate) async fn load_owned_entry(
     state: &HostState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,

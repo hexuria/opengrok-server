@@ -5,9 +5,14 @@
 //! with `formMode` mints without parking its run, and the card's actions, which a person's press
 //! runs through the same executor and gates as a model's call, with no turn in between.
 
+use axum::Router;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_plugins::FormModeTools;
-use opengrok_tools::user_form::form_mode;
+use opengrok_tools::user_form::{FormRequest, form_mode, form_request_from, submitted_values};
 use opengrok_tools::{ToolCall, ToolResult};
 use serde_json::{Value, json};
 
@@ -232,3 +237,159 @@ pub(crate) async fn mint(
         }
     }
 }
+
+/// `POST /ag-ui/user-form/action`: one press on a form-mode card. Authenticated like the card's
+/// other verbs (`/ag-ui/user-form/submit`): the account bearer, never a host or bot key.
+pub fn router(host: HostState) -> Router {
+    Router::new()
+        .route("/ag-ui/user-form/action", post(action_route))
+        .with_state(host)
+}
+
+async fn action_route(
+    State(host): State<HostState>,
+    headers: HeaderMap,
+    axum::Json(args): axum::Json<Value>,
+) -> Response {
+    let Some(account) = super::routes::account_from_bearer(&host.agui, &headers) else {
+        return (StatusCode::UNAUTHORIZED, "sign in first").into_response();
+    };
+    let (code, body) = act(&host, &args, &account).await;
+    let code = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (code, axum::Json(body)).into_response()
+}
+
+/// `{entryId, agentId, action: save|submit|view|focus|refresh, values?, fingerprint?, key?,
+/// page?}`. The action's tool comes from the card's plugin's manifest; the arguments are built
+/// here from the card as stored, so a press can name only the card's own return. Replies with
+/// the plugin's answer (`reply`) and, when it answered a CardReply, the card it makes.
+pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, Value) {
+    let Some((entry_id, coworker)) = super::user_form::named_entry(args) else {
+        return (400, json!({ "error": "entryId and agentId are required" }));
+    };
+    let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+    if !opengrok_plugins::form_mode::ACTIONS.contains(&action) {
+        let error = "action must be save, submit, view, focus or refresh";
+        return (400, json!({ "error": error }));
+    }
+    let loaded = super::user_form::load_owned_entry(host, account, &coworker, &entry_id).await;
+    let (seq, entry) = match loaded {
+        Ok(row) => row,
+        Err(reply) => return reply,
+    };
+    if !form_mode::is_form_mode_entry(&entry) {
+        return (
+            400,
+            json!({ "error": "that entry is not a form-mode card" }),
+        );
+    }
+    let form = form_request_from(&entry);
+    let (Some(plugin), Some(key)) = (form.plugin.clone(), form.form.clone()) else {
+        return (
+            409,
+            json!({ "error": "this card names no form; it cannot be acted on" }),
+        );
+    };
+    let arguments = match arguments_for(action, &form, &key, args) {
+        Ok(arguments) => arguments,
+        Err(why) => return (400, json!({ "error": why })),
+    };
+    let tools = match plugin_for(&host.agui, account, &coworker, Some(&plugin)).await {
+        Ok((_, tools)) => tools,
+        Err(why) => return (409, json!({ "error": why })),
+    };
+    let Some(tool) = tools.action_tool(&plugin, action) else {
+        let error = format!("the {plugin} plugin has no {action} action");
+        return (409, json!({ "error": error }));
+    };
+    let call = PluginCall {
+        plugin: &plugin,
+        tool,
+        arguments,
+        yes: action == "submit",
+        request_id: &entry_id,
+    };
+    let result = run_plugin_tool(host, account, &coworker, call).await;
+    if result.awaiting_approval {
+        let error = format!("this needs a person's yes first: {}", result.content);
+        return (409, json!({ "ok": false, "error": error }));
+    }
+    let reply = match reply_of(&result) {
+        Ok(reply) => reply,
+        Err(why) => return (502, json!({ "ok": false, "error": why })),
+    };
+    let mut body = json!({ "ok": true, "action": action, "reply": reply });
+    // A CardReply (save, refresh) is the card as it now is. Kept on the entry only on refresh,
+    // which is the card being (re)opened: a save runs on every blur, and the draft it saves is
+    // the plugin's to keep, not the transcript's.
+    if matches!(action, "save" | "refresh")
+        && let Ok(card) = form_mode::card_request(&plugin, &body["reply"])
+    {
+        body["formRequest"] = json!(card);
+        if action == "refresh" {
+            let mut opened = entry.clone();
+            opened["message"]["formRequest"] = json!(card);
+            if let Err(error) = host
+                .agui
+                .auth
+                .store
+                .update_gateway_entry(&coworker, account, seq, &opened)
+                .await
+            {
+                tracing::error!(%error, "a refreshed form-mode card could not be kept");
+            }
+        }
+    }
+    (200, body)
+}
+
+/// A press's arguments, built from the card as stored: its identity always, and from the press
+/// only what that action takes. Values are kept for the card's own boxes the person may type in;
+/// a key the card does not have, or a box the plugin computes, is dropped.
+fn arguments_for(
+    action: &str,
+    form: &FormRequest,
+    key: &form_mode::FormKey,
+    args: &Value,
+) -> Result<Value, &'static str> {
+    let identity = key.to_value();
+    Ok(match action {
+        "save" => {
+            let raw = args.get("values").unwrap_or(&Value::Null);
+            let values: serde_json::Map<String, Value> = submitted_values(form, raw)
+                .into_iter()
+                .filter(|(id, _)| form.fields.iter().any(|f| &f.id == id && !f.read_only))
+                .map(|(id, value)| (id, json!(value)))
+                .collect();
+            if values.is_empty() {
+                return Err("save needs values for the card's own boxes");
+            }
+            json!({ "form": identity, "values": values })
+        }
+        // The fingerprint the person saw: the plugin refuses a draft that has changed since.
+        "submit" => {
+            let seen = args.get("fingerprint").and_then(Value::as_str);
+            let Some(fingerprint) = seen.or(form.fingerprint.as_deref()) else {
+                return Err("submit needs the fingerprint of the draft the person saw");
+            };
+            json!({ "form": identity, "fingerprint": fingerprint })
+        }
+        "view" => json!({ "form": identity, "inline": true }),
+        "focus" => {
+            let field = args.get("key").and_then(Value::as_str);
+            let Some(field) = field.filter(|k| form.fields.iter().any(|f| f.id == *k)) else {
+                return Err("focus needs the key of one of the card's boxes");
+            };
+            json!({ "form": identity, "key": field })
+        }
+        _ => match args.get("page").and_then(Value::as_u64) {
+            Some(page) => json!({ "form": identity, "mode": "page", "page": page }),
+            None => json!({ "form": identity, "mode": "index" }),
+        },
+    })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[path = "../../tests/unit/form_mode.rs"]
+mod tests;
