@@ -10,6 +10,8 @@
     "update": null,
     "image": null,
     "screen": "own",
+    "screenStatus": "starting-screen",
+    "screenStatusText": "Starting computer-egress's screen…",
     "isEgressTunnelAvailable": false,
     "egress_tunnel": {
       "enabled": true,
