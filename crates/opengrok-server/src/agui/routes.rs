@@ -3290,6 +3290,14 @@ async fn start_claimed_turn(
         }
         _ => Vec::new(),
     };
+    // What this conversation's form-mode cards came to (#220): a card's call answered before
+    // the card had an outcome, so the Bot hears it here, on its next turn.
+    let form_lines = match (&account_id, &run_coworker) {
+        (Some(account), Some(coworker)) => {
+            super::form_mode::turn_line(&state, account, coworker, &input.thread_id).await
+        }
+        _ => String::new(),
+    };
     // No bearer, no identity, and therefore no computer tools.
     let tools = match (&account_id, &run_coworker) {
         (Some(account), Some(coworker)) => {
@@ -3396,7 +3404,7 @@ async fn start_claimed_turn(
                 &persona,
                 route.asks(&model),
                 Some(&format!(
-                    "{speaker}\n\n{}{}{}{}{}{}{}{}{}",
+                    "{speaker}\n\n{}{}{}{}{}{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -3412,6 +3420,7 @@ async fn start_claimed_turn(
                     crate::persona::preferred_tools_line(&preferred),
                     crate::persona::mentioned_plugins_line(&mentioned, &asked_plugins),
                     crate::persona::plugins_off_line(&plugins_off),
+                    form_lines,
                     // After what it may do, as the author's words they are, and before this
                     // message's own choices: a skill it may reach for on any turn.
                     tools

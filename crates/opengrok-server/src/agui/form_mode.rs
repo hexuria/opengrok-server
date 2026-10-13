@@ -319,6 +319,9 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
         Err(why) => return (502, json!({ "ok": false, "error": why })),
     };
     let mut body = json!({ "ok": true, "action": action, "reply": reply });
+    if action == "submit" {
+        return submitted(host, (account, &coworker), seq, entry, body).await;
+    }
     // A CardReply (save, refresh) is the card as it now is. Kept on the entry only on refresh,
     // which is the card being (re)opened: a save runs on every blur, and the draft it saves is
     // the plugin's to keep, not the transcript's.
@@ -340,6 +343,39 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
             }
         }
     }
+    (200, body)
+}
+
+/// A submit's answer: on a queued return the card is settled submitted, with the plugin's
+/// snapshot, before the person is told; on a refusal the card stays a draft and the first error
+/// goes back as the plugin said it.
+async fn submitted(
+    host: &HostState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    seq: i64,
+    entry: Value,
+    mut body: Value,
+) -> (u16, Value) {
+    let form_mode::SubmitOutcome::Queued {
+        queue_ref,
+        fingerprint,
+        values,
+    } = form_mode::submit_outcome(&body["reply"])
+    else {
+        body["ok"] = json!(false);
+        return (200, body);
+    };
+    let settled = settle_submitted(entry, &queue_ref, fingerprint.as_deref(), &values);
+    let store = &host.agui.auth.store;
+    if let Err(error) = store
+        .update_gateway_entry(coworker, account, seq, &settled)
+        .await
+    {
+        // The return IS queued: saying otherwise would invite a second press. The card is left a
+        // draft in the transcript, and the plugin's queue still refuses a second send.
+        tracing::error!(%error, %queue_ref, "a submitted form-mode card could not be settled");
+    }
+    body["entry"] = settled;
     (200, body)
 }
 
@@ -388,6 +424,69 @@ fn arguments_for(
         },
     })
 }
+/// The person's submit was queued: the card becomes its submitted self. The values the plugin
+/// says it queued are the snapshot the read-only view is drawn from from now on, never BIR
+/// again (a queued return may not reopen as a draft), and what the Bot is told on its next turn.
+pub(crate) fn settle_submitted(
+    mut entry: Value,
+    queue_ref: &str,
+    fingerprint: Option<&str>,
+    values: &serde_json::Map<String, Value>,
+) -> Value {
+    if let Some(fields) = entry
+        .pointer_mut("/message/formRequest/fields")
+        .and_then(Value::as_array_mut)
+    {
+        for field in fields {
+            let id = field.get("id").and_then(Value::as_str).unwrap_or_default();
+            if let Some(value) = values.get(id) {
+                field["value"] = value.clone();
+            }
+            field["readOnly"] = json!(true);
+            if let Some(map) = field.as_object_mut() {
+                map.remove("error");
+            }
+        }
+    }
+    if let Some(request) = entry.pointer_mut("/message/formRequest") {
+        request["status"] = json!("queued");
+    }
+    entry["formResolution"] = json!("submitted");
+    entry["formOutcome"] = json!({
+        "queueRef": queue_ref,
+        "fingerprint": fingerprint,
+        "values": values,
+        "atMs": now_ms(),
+    });
+    entry
+}
+
+/// What this thread's form-mode cards tell the Bot on its next turn (`form_mode::history_line`):
+/// the last few, oldest first. Empty when there are none, so a turn without a form is
+/// byte-for-byte the turn it was.
+pub(crate) async fn turn_line(
+    state: &AgUiState,
+    account: &AccountId,
+    coworker: &CoworkerId,
+    thread_id: &str,
+) -> String {
+    let Ok(entries) = state.auth.store.gateway_transcript(coworker, account).await else {
+        return String::new();
+    };
+    let lines: Vec<String> = entries
+        .iter()
+        .filter(|entry| entry.get("threadId").and_then(Value::as_str) == Some(thread_id))
+        .filter_map(form_mode::history_line)
+        .collect();
+    let recent = &lines[lines.len().saturating_sub(TURN_LINE_CARDS)..];
+    if recent.is_empty() {
+        return String::new();
+    }
+    format!("\n\nForms in this conversation:\n- {}", recent.join("\n- "))
+}
+
+/// How many of a thread's form-mode cards a turn is told about.
+const TURN_LINE_CARDS: usize = 3;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

@@ -733,6 +733,9 @@ fn collection_resolution(
 /// (the waiting tool result has not landed yet) and none for a non-form entry.
 #[must_use]
 pub fn history_line(entry: &Value) -> Option<String> {
+    if crate::form_mode::is_form_mode_entry(entry) {
+        return crate::form_mode::history_line(entry);
+    }
     if !is_user_form_entry(entry) {
         return None;
     }

@@ -413,6 +413,79 @@ pub fn submit_outcome(reply: &Value) -> SubmitOutcome {
     }
 }
 
+/// The most of a submitted return's values one line tells the model: a long return would
+/// otherwise become every later prompt.
+const OUTCOME_VALUES_CHARS: usize = 1_500;
+
+/// What the Bot is told about a form-mode card on its next turn: open, dismissed, submitted, or
+/// never opened. `None` for any other entry.
+///
+/// A form-mode card's call answered before the card had an outcome, so the outcome reaches the
+/// model the way a later turn reads the transcript (`user_form::history_line`), not as that
+/// call's result: writing a result into a finished run's log is a journal write the run
+/// protocol does not have.
+#[must_use]
+pub fn history_line(entry: &Value) -> Option<String> {
+    if !is_form_mode_entry(entry) {
+        return None;
+    }
+    let form = crate::user_form::form_request_from(entry);
+    let named = match form.form.as_ref() {
+        Some(key) => format!(
+            "\"{}\" ({} for TIN {}, {})",
+            form.title, key.form, key.tin, key.period
+        ),
+        None => format!("\"{}\"", form.title),
+    };
+    let outcome = entry.get("formOutcome").unwrap_or(&Value::Null);
+    let line = match entry.get("formResolution").and_then(Value::as_str) {
+        Some("submitted") => {
+            let queue_ref = text_of(outcome, "queueRef").unwrap_or_default();
+            let values = outcome
+                .get("values")
+                .and_then(Value::as_object)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|(key, value)| Some(format!("{key}={}", scalar(value)?)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let mut values: String = values.chars().take(OUTCOME_VALUES_CHARS).collect();
+            if values.is_empty() {
+                values = "none recorded".to_string();
+            }
+            format!(
+                "The person submitted the form {named}. It is queued to send as {queue_ref} at \
+                 the queue's next tick and can be cancelled until then; it is not paid and BIR \
+                 has not confirmed it. Values sent: {values}. Do not submit it again."
+            )
+        }
+        Some("dismissed") => {
+            let at = text_of(outcome, "lastFocus")
+                .map(|key| format!(" They were last on {key}."))
+                .unwrap_or_default();
+            format!(
+                "The person closed the form {named} without submitting it.{at} Its draft is \
+                 saved and they can resume it from the chat. Do not fill or submit it for them \
+                 unless they ask."
+            )
+        }
+        Some("fill_failed") => format!(
+            "The form {named} could not be opened: {}",
+            form.notes
+                .first()
+                .map_or("the plugin did not say why.", String::as_str)
+        ),
+        _ => format!(
+            "The form {named} is open in the chat and the person is filling it. Do not ask for \
+             its boxes in chat and do not fill or save it yourself."
+        ),
+    };
+    Some(line)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "../tests/unit/form_mode.rs"]

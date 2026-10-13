@@ -220,3 +220,62 @@ fn a_form_mode_card_holds_no_screen() {
     assert!(!crate::user_form::is_unresolved(&entry));
     assert!(!crate::user_form::holds_the_screen(&entry));
 }
+
+fn card_entry(extra: Value) -> Value {
+    let card = serde_json::to_value(card_request("bir", &card_reply()).expect("a card")).unwrap();
+    let mut entry = json!({"kind": "send-message", "id": "e_1",
+        "message": {"type": "user-form", "formRequest": card}});
+    if let (Some(entry), Some(extra)) = (entry.as_object_mut(), extra.as_object()) {
+        entry.extend(extra.clone());
+    }
+    entry
+}
+
+/// What the Bot is told on its next turn, by what became of the card: it never claims a return
+/// was sent to BIR or paid, and it names where a dismissed card was left.
+#[test]
+fn the_bot_hears_what_became_of_a_form_mode_card() {
+    let open = history_line(&card_entry(json!({}))).expect("open");
+    assert!(open.contains("is open in the chat"), "{open}");
+    assert!(open.contains("0619E") && open.contains("2026-09"), "{open}");
+
+    let submitted = history_line(&card_entry(json!({
+        "formResolution": "submitted",
+        "formOutcome": {"queueRef": "q_1", "fingerprint": "sha256:abc",
+                        "values": {"frm0619E:txtTax14": "12,500.00"}}
+    })))
+    .expect("submitted");
+    assert!(submitted.contains("q_1") && submitted.contains("frm0619E:txtTax14=12,500.00"));
+    assert!(submitted.contains("not paid") && submitted.contains("Do not submit it again"));
+
+    let dismissed = history_line(&card_entry(json!({
+        "formResolution": "dismissed", "widgetDismissed": true,
+        "formOutcome": {"lastFocus": "frm0619E:txtTax14"}
+    })))
+    .expect("dismissed");
+    assert!(dismissed.contains("without submitting") && dismissed.contains("frm0619E:txtTax14"));
+
+    // The login card's own line is unchanged and still goes through `user_form::history_line`.
+    let login = json!({"message": {"type": "user-form", "formRequest": {"title": "Log in"}},
+                       "formResolution": "dismissed"});
+    assert!(history_line(&login).is_none());
+    assert!(crate::user_form::history_line(&login).is_some());
+    assert_eq!(
+        crate::user_form::history_line(&card_entry(json!({}))),
+        Some(open)
+    );
+}
+
+/// A long return does not become every later prompt.
+#[test]
+fn a_submitted_returns_values_are_bounded() {
+    let values: serde_json::Map<String, Value> = (0..500)
+        .map(|n| (format!("frm:box{n}"), json!("1,000,000.00")))
+        .collect();
+    let line = history_line(&card_entry(json!({
+        "formResolution": "submitted",
+        "formOutcome": {"queueRef": "q_1", "values": values}
+    })))
+    .expect("submitted");
+    assert!(line.chars().count() < 2_000, "{}", line.len());
+}
