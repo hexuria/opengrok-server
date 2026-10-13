@@ -283,6 +283,21 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
             json!({ "error": "that entry is not a form-mode card" }),
         );
     }
+    // A submitted card only shows, from its snapshot: a queued return may not reopen as a draft.
+    // A dismissed one keeps its draft, so save and refresh (Resume) still work on it. One the
+    // plugin could not open may be refreshed, to try again.
+    let refusal = match (entry.get("formResolution").and_then(Value::as_str), action) {
+        (Some("submitted"), "view") => return (200, shown(&entry)),
+        (Some("submitted"), _) => "this return was submitted; it can only be viewed",
+        (None, _) | (Some("dismissed"), "save" | "refresh") | (Some("fill_failed"), "refresh") => {
+            ""
+        }
+        (Some("dismissed"), _) => "this form was closed; resume it first",
+        (Some(_), _) => "this form did not open; refresh it to try again",
+    };
+    if !refusal.is_empty() {
+        return (409, json!({ "error": refusal }));
+    }
     let form = form_request_from(&entry);
     let (Some(plugin), Some(key)) = (form.plugin.clone(), form.form.clone()) else {
         return (
@@ -330,8 +345,7 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
     {
         body["formRequest"] = json!(card);
         if action == "refresh" {
-            let mut opened = entry.clone();
-            opened["message"]["formRequest"] = json!(card);
+            let opened = reopened(entry.clone(), &card);
             if let Err(error) = host
                 .agui
                 .auth
@@ -377,6 +391,19 @@ async fn submitted(
     }
     body["entry"] = settled;
     (200, body)
+}
+
+/// A submitted card's view: the values it was submitted with, as its entry keeps them.
+fn shown(entry: &Value) -> Value {
+    let outcome = entry.get("formOutcome").unwrap_or(&Value::Null);
+    json!({
+        "ok": true,
+        "action": "view",
+        "submitted": true,
+        "queueRef": outcome.get("queueRef"),
+        "values": outcome.get("values"),
+        "formRequest": entry.pointer("/message/formRequest"),
+    })
 }
 
 /// A press's arguments, built from the card as stored: its identity always, and from the press
@@ -459,6 +486,61 @@ pub(crate) fn settle_submitted(
         "atMs": now_ms(),
     });
     entry
+}
+
+/// The person closed the card. Not a dead card: its draft is the plugin's and stays, `refresh`
+/// and `save` still work on it, and Resume is a `refresh`. Nothing resumes: no run waits on it.
+pub(crate) fn settle_dismissed(mut entry: Value, last_focus: Option<&str>) -> Value {
+    entry["formResolution"] = json!("dismissed");
+    entry["widgetDismissed"] = json!(true);
+    entry["formOutcome"] = json!({ "lastFocus": last_focus, "atMs": now_ms() });
+    entry
+}
+
+/// A card opened again (Resume, or a refresh of one the plugin could not open at first).
+fn reopened(mut entry: Value, card: &FormRequest) -> Value {
+    entry["message"]["formRequest"] = json!(card);
+    if let Some(map) = entry.as_object_mut() {
+        for key in ["formResolution", "widgetDismissed", "formOutcome"] {
+            map.remove(key);
+        }
+    }
+    entry
+}
+
+/// `dismissUserForm` on a form-mode card.
+pub(crate) async fn dismiss(
+    host: &HostState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    seq: i64,
+    entry: Value,
+    args: &Value,
+) -> (u16, Value) {
+    if entry.get("formResolution").and_then(Value::as_str) == Some("submitted") {
+        return (
+            409,
+            json!({ "error": "this return was submitted; it can only be viewed" }),
+        );
+    }
+    let form = form_request_from(&entry);
+    let focus = args
+        .get("focus")
+        .and_then(Value::as_str)
+        .filter(|key| form.fields.iter().any(|field| field.id == *key))
+        .map(str::to_string)
+        .or(form.focus);
+    let settled = settle_dismissed(entry, focus.as_deref());
+    let store = &host.agui.auth.store;
+    match store
+        .update_gateway_entry(coworker, account, seq, &settled)
+        .await
+    {
+        Ok(()) => (200, settled),
+        Err(error) => {
+            tracing::error!(%error, "could not dismiss a form-mode card");
+            (500, json!({ "error": "transcript unavailable" }))
+        }
+    }
 }
 
 /// What this thread's form-mode cards tell the Bot on its next turn (`form_mode::history_line`):

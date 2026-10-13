@@ -57,3 +57,47 @@ fn focus_view_and_refresh_take_what_their_tools_take() {
     let index = arguments_for("refresh", &card(), &key(), &json!({})).unwrap();
     assert_eq!(index["mode"], json!("index"));
 }
+
+fn entry() -> Value {
+    json!({"kind": "send-message", "id": "e_1", "threadId": "t",
+           "message": {"type": "user-form", "formRequest": serde_json::to_value(card()).unwrap()}})
+}
+
+/// A dismissed card is closed, not dead: Resume (a refresh) opens it again with the plugin's
+/// card, and nothing of its dismissal is left to read it as closed.
+#[test]
+fn a_dismissed_card_reopens_on_refresh() {
+    let dismissed = settle_dismissed(entry(), Some("tax14"));
+    assert_eq!(dismissed["formResolution"], json!("dismissed"));
+    assert_eq!(dismissed["widgetDismissed"], json!(true));
+    assert_eq!(dismissed["formOutcome"]["lastFocus"], json!("tax14"));
+    let mut fresh = card();
+    fresh.fingerprint = Some("sha256:fresh".to_string());
+    let opened = reopened(dismissed, &fresh);
+    for key in ["formResolution", "widgetDismissed", "formOutcome"] {
+        assert!(opened.get(key).is_none(), "{key}: {opened}");
+    }
+    assert_eq!(
+        opened["message"]["formRequest"]["fingerprint"],
+        json!("sha256:fresh")
+    );
+}
+
+/// A submitted card is drawn from what was queued: the plugin's values, every box read only, no
+/// error left, and the view answers from that snapshot.
+#[test]
+fn a_submitted_card_keeps_its_snapshot_and_shows_it() {
+    let values = json!({"tax14": "12,500.00"});
+    let values = values.as_object().unwrap();
+    let settled = settle_submitted(entry(), "q_1", Some("sha256:seen"), values);
+    assert_eq!(settled["formResolution"], json!("submitted"));
+    let fields = settled["message"]["formRequest"]["fields"]
+        .as_array()
+        .unwrap();
+    assert_eq!(fields[0]["value"], json!("12,500.00"));
+    assert!(fields.iter().all(|field| field["readOnly"] == json!(true)));
+    assert_eq!(settled["message"]["formRequest"]["status"], json!("queued"));
+    let view = shown(&settled);
+    assert_eq!(view["values"]["tax14"], json!("12,500.00"));
+    assert_eq!(view["queueRef"], json!("q_1"));
+}

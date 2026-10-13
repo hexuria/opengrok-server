@@ -380,8 +380,16 @@ pub async fn dismiss_user_form(
     if !is_user_form_entry(&entry) {
         return (400, json!({ "error": "that entry is not a user-form" }));
     }
+    // A form-mode card is closed, not settled: its draft stays and nothing resumes.
     if opengrok_tools::user_form::form_mode::is_form_mode_entry(&entry) {
-        return (409, json!({ "error": FORM_MODE_CARD }));
+        if resolution != FormResolution::Dismissed {
+            return (
+                400,
+                json!({ "error": "a form-mode card is only dismissed" }),
+            );
+        }
+        let who = (account_id, &coworker_id);
+        return super::form_mode::dismiss(state, who, seq, entry, args).await;
     }
     if !is_unresolved(&entry) {
         // Skip after Open the screen can land as dismissed on the *form* id while a
