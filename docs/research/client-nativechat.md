@@ -230,6 +230,7 @@ The coworker's computer, and the person's own machine (reverse-exec).
 | `/coworkers/{coworker_id}/computer` | GET POST | `agui/routes.rs:929` | the computer status record (live state, noVNC URL) | the handler's own doc names "NativeChat's Open button". NativeChat file: *unverified* |
 | `/coworkers/{coworker_id}/computer/egress-policy` | GET PUT | `agui/routes.rs:939` | GET: JSON policy; PUT: 204 (422 "unknown mode") | *unverified* |
 | `/coworkers/{coworker_id}/computer/reset` | POST | `agui/routes.rs:943` | the status record after the reset | *unverified* |
+| `/coworkers/{coworker_id}/computer/ssh` | POST | `agui/routes.rs:1150` | a one-time code that reaches this Bot's screen over SSH for fifteen minutes, the `ssh -L` command that uses it and the screen's VNC password; `{"error":…}` when SSH is off or the Bot has no screen (#386) | NativeChat `src/opengrok/client.rs` `screen_ssh` |
 | `/coworkers/{coworker_id}/computer/update` | POST | `agui/routes.rs:935` | 202 + the status record | *unverified* |
 | `/coworkers/{coworker_id}/computer/vnc/{ticket}/{*rest}` | GET | `agui/routes.rs:942` | the box's noVNC page, its files and its websocket, proxied for one ticket; every answer carries `Content-Security-Policy: sandbox allow-scripts allow-pointer-lock`, and a redirect from the box is refused with a 502 | the `vncUrl` of the computer status record points here (`docs/setup/environment.md`, `OG_DOCKER_IMAGE`). NativeChat file: *unverified* |
 | `/coworkers/{coworker_id}/screen` | GET | `agui/routes.rs:933` | JSON carrying a screenshot | *unverified* |
