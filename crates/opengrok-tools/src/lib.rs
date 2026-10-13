@@ -2815,7 +2815,7 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         REQUEST_USER_FORM => Some((
-            "Ask the person to fill a form in chat. Two uses. \
+            "Ask the person to fill a form in chat. Three uses. \
              A collect form (collect true) is how you ask for fields you do not have yet: a new \
              profile, a missing name, a TIN they must confirm. Put what they already told you \
              on each field as value, so the card is prefilled, and leave value off the fields \
@@ -2840,18 +2840,40 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
              verification on the same page), call this again with otp fields, \
              challengeKind \"otp\", the page host as liveHost and the field's `at`; \
              NativeChat offers the person's saved authenticator code for that site on the \
-             card. Never re-raise a form that already settled. A passkey prompt: call this with \
+             card. Never re-raise a sign-in form that already settled. A passkey prompt: call this with \
              challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site \
              offers to add one and the person asked), no fields, liveHost set; when the result \
              says it is loaded, click the site's passkey button. A captcha, or a page \
              outside this box, is not another password form: the person finishes on the \
              computer (Open the screen). If they dismiss or decline, continue without those \
-             credentials and do not loop.",
+             credentials and do not loop. \
+             A plugin form (formMode true) opens a return a plugin holds, such as a BIR form, \
+             as a card the person fills in chat: give only formMode, the form \
+             {form, tin, period} and, when more than one plugin has forms, plugin. The \
+             plugin draws the boxes: send fields as an empty list and no values. It answers \
+             at once: end \
+             your turn, and you are told on a later turn whether it was submitted or \
+             dismissed. A dismissed plugin form may be opened again when the person asks.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Short title shown on the card." },
                     "instruction": { "type": "string", "description": "What the person should do." },
+                    "formMode": {
+                        "type": "boolean",
+                        "description": "Open a plugin's form (a BIR return) as a card the person fills. Give form, and plugin when several plugins have forms; no fields."
+                    },
+                    "form": {
+                        "type": "object",
+                        "description": "With formMode: which return. form is the form number (0619E), tin 9 to 14 digits with no dashes, period YYYY-MM, YYYY-Qn or YYYY.",
+                        "properties": {
+                            "form": { "type": "string" },
+                            "tin": { "type": "string" },
+                            "period": { "type": "string" }
+                        },
+                        "required": ["form", "tin", "period"]
+                    },
+                    "plugin": { "type": "string", "description": "With formMode: the plugin whose form this is, e.g. bir." },
                     "collect": {
                         "type": "boolean",
                         "description": "Ask in chat and return the answers. Nothing is typed into a page. Set this when you need fields the person must supply or confirm. Prefill fields they already answered with value."
