@@ -16,9 +16,10 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
-use opengrok_core::id::AccountId;
+use opengrok_core::id::{AccountId, CoworkerId, DocSessionId};
 use opengrok_harness::ImagePart;
 use opengrok_wire::agui::{Message, RunAgentInput};
+use serde_json::json;
 
 use super::AgUiState;
 
@@ -38,9 +39,15 @@ const MAX_TEXT_CHARS: usize = 20_000;
 const MAX_TURN_IMAGES: usize = 8;
 const MAX_TURN_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
-/// What this turn's files became for the model, by artifact id.
+/// What this turn's files became for the model, by artifact id — plus the `opengrok.officeDoc`
+/// frames of Office files staged onto the bot's computer, carried on the turn's request so the
+/// run opens with them (journaled, so a replay paints them too) rather than a client learning
+/// of the document on a poll.
 #[derive(Debug, Default)]
-pub(crate) struct Attached(HashMap<String, Resolved>);
+pub(crate) struct Attached {
+    map: HashMap<String, Resolved>,
+    pub(crate) customs: Vec<(String, serde_json::Value)>,
+}
 
 #[derive(Debug)]
 enum Resolved {
@@ -106,14 +113,22 @@ pub(crate) async fn refuse_unowned(
 
 /// Read this turn's files for the model, and stamp each as sent in its message on this thread,
 /// so the conversation's replay can draw it (`GET /artifacts?threadId=`, `meta.messageId`).
+///
+/// An Office file is not read here at all: it is STAGED onto the bot's own computer, where an
+/// office_* tool opens it by path — send the document to the bot's computer, get the work back
+/// as an artifact. `run_coworker` names the box; a turn without one, or without a computer,
+/// leaves the file named-but-unreadable as before.
 pub(crate) async fn resolve(
     state: &AgUiState,
     account: &AccountId,
     input: &RunAgentInput,
+    run_coworker: Option<&CoworkerId>,
 ) -> Attached {
     let store = &state.auth.store;
     let mut attached = Attached::default();
     let (mut images, mut image_bytes) = (0usize, 0usize);
+    // The bot's own box, resolved lazily once: a turn with no Office file never pays the read.
+    let mut stage_in = None;
     for message in sent_now(input) {
         for file in message.content.iter().flat_map(|content| content.files()) {
             let found = match store.artifact_bytes(&file.artifact_id).await {
@@ -122,7 +137,7 @@ pub(crate) async fn resolve(
                 Err(error) => {
                     tracing::warn!(%error, artifact = %file.artifact_id, "could not read an attachment");
                     let name = one_line(file.filename.as_deref().unwrap_or(&file.artifact_id));
-                    attached.0.insert(
+                    attached.map.insert(
                         file.artifact_id.clone(),
                         Resolved::Words(format!(
                             "[The person attached {name}, but it could not be read just now.]"
@@ -144,19 +159,282 @@ pub(crate) async fn resolve(
             let fits =
                 images < MAX_TURN_IMAGES && image_bytes + bytes.len() <= MAX_TURN_IMAGE_BYTES;
             let size = bytes.len();
-            let resolved = if row.mime == "application/pdf" {
-                pdf(&one_line(&row.filename), size, bytes).await
-            } else {
-                read(&row.mime, &row.filename, &bytes, fits)
+            // An Office file is never read into the turn: it is STAGED onto the bot's own
+            // computer, where an office_* tool opens it by path — the model is told where it
+            // landed, and the session row's frame rides the run's opening so a watching client
+            // sees the document at once. A box that will not take it, or a turn without one,
+            // keeps the "cannot be shown" sentence — honestly renamed as "could not be placed"
+            // when the place itself was the problem.
+            let resolved = 'res: {
+                if let Some(kind) = opengrok_office::Kind::from_filename(&row.filename) {
+                    if stage_in.is_none() {
+                        stage_in = coworker_box(state, account, run_coworker).await;
+                    }
+                    if let Some((coworker_id, box_id)) = &stage_in {
+                        break 'res match stage(
+                            state,
+                            account,
+                            coworker_id,
+                            box_id,
+                            &row.id,
+                            &row.filename,
+                            kind,
+                            &bytes,
+                        )
+                        .await
+                        {
+                            Ok(staged) => {
+                                let session = staged.session().clone();
+                                attached.customs.push((
+                                    opengrok_tools::office_desk::OFFICE_DOC_EVENT.to_string(),
+                                    crate::office_desk::frame(
+                                        &session,
+                                        kind,
+                                        json!({ "type": "attached", "artifactId": row.id }),
+                                        Some(&row.id),
+                                    ),
+                                ));
+                                match staged {
+                                    Staged::Wrote(session) => Resolved::Words(format!(
+                                        "[The person attached {name} ({mime}, {size} bytes) — it is \
+                                         on your computer at {path}; open it with the office tools.]",
+                                        name = one_line(&row.filename),
+                                        mime = one_line(&row.mime),
+                                        size = size,
+                                        path = session.path,
+                                    )),
+                                    Staged::Kept(session) => Resolved::Words(format!(
+                                        "[The person attached {name} ({mime}, {size} bytes) again — \
+                                         the file at {path} is that document and carries the edits \
+                                         made since; the original upload is still artifact {artifact}.]",
+                                        name = one_line(&row.filename),
+                                        mime = one_line(&row.mime),
+                                        size = size,
+                                        path = session.path,
+                                        artifact = row.id,
+                                    )),
+                                }
+                            }
+                            Err(why) => Resolved::Words(format!(
+                                "[The person attached {name} ({mime}, {size} bytes): it cannot \
+                                 be shown to you here, and it could not be placed on your \
+                                 computer ({why}).]",
+                                name = one_line(&row.filename),
+                                mime = one_line(&row.mime),
+                                size = size,
+                            )),
+                        };
+                    }
+                }
+                if row.mime == "application/pdf" {
+                    pdf(&one_line(&row.filename), size, bytes).await
+                } else {
+                    read(&row.mime, &row.filename, &bytes, fits)
+                }
             };
             if matches!(resolved, Resolved::Image { .. }) {
                 images += 1;
                 image_bytes += size;
             }
-            attached.0.insert(row.id, resolved);
+            attached.map.insert(row.id, resolved);
         }
     }
     attached
+}
+
+/// Where a staged Office file lands on the bot's computer, before `$HOME` expansion — beside
+/// `~/office`, so `office_files` lists it with the documents it was meant for.
+const STAGE_DIR: &str = "~/office/inbox";
+
+/// The bot's own box for a stage-in, loaded once per turn and only when an Office file can use
+/// it: a turn with none never pays the read. `(coworker, box)` so the session row can name both.
+/// The box is the SCOPE's record, not `coworker.computer()` — that field is the first box ever
+/// given, which a reset leaves naming a destroyed one (see `provision::live_boxes`).
+async fn coworker_box(
+    state: &AgUiState,
+    account: &AccountId,
+    run_coworker: Option<&CoworkerId>,
+) -> Option<(CoworkerId, String)> {
+    state.computer.as_ref()?;
+    let id = run_coworker?;
+    let row = super::provision::scoped_box_row_for(state, account, id).await?;
+    Some((id.clone(), row.box_id))
+}
+
+/// A filename as it is safe to write under `STAGE_DIR`. The upload already refused a line break
+/// and a quote, but a name here is also a path: anything that is not a plain name character
+/// becomes an underscore, so `..` and `/` can never leave the inbox. Long names are cut to 80
+/// chars at the STEM, never the extension — `Kind::from_filename` reads it, and a truncated
+/// `.pptx` is a document no office tool recognizes.
+fn staged_name(filename: &str) -> String {
+    const LIMIT: usize = 80;
+    let name: String = filename
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || "._-".contains(ch) {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Every kept char is ASCII, so byte and char lengths agree from here on.
+    let name = name.trim_start_matches('.');
+    if name.is_empty() {
+        return "document".to_string();
+    }
+    if name.len() <= LIMIT {
+        return name.to_string();
+    }
+    match name.rfind('.') {
+        // The extension only survives when it fits whole — a dot tail longer than the
+        // limit is no extension anyway, and a stem that leaves none is the old cut.
+        Some(dot) if name.len() - dot <= LIMIT => {
+            format!("{}{}", &name[..LIMIT - (name.len() - dot)], &name[dot..])
+        }
+        _ => name[..LIMIT].to_string(),
+    }
+}
+
+/// What `stage` did with the bytes: `Wrote` — they landed (a new file, or one the box had
+/// lost); `Kept` — the session already there still holds its file, edits included, so the
+/// re-sent upload changes nothing on the box.
+enum Staged {
+    Wrote(opengrok_store::DocSessionRow),
+    Kept(opengrok_store::DocSessionRow),
+}
+
+impl Staged {
+    fn session(&self) -> &opengrok_store::DocSessionRow {
+        match self {
+            Staged::Wrote(row) | Staged::Kept(row) => row,
+        }
+    }
+}
+
+/// Write an attached Office file into the bot's `~/office/inbox` and open its `doc_session`, so
+/// the first office_* call on the path sees the same document rather than a stranger. The
+/// returned row is what the turn's opening frame announces; `Err` is the sentence the model is
+/// told instead, the attachment falling back to named-but-unplaced.
+#[allow(clippy::too_many_arguments)]
+async fn stage(
+    state: &AgUiState,
+    account: &AccountId,
+    coworker_id: &CoworkerId,
+    box_id: &str,
+    artifact_id: &str,
+    filename: &str,
+    kind: opengrok_office::Kind,
+    bytes: &[u8],
+) -> Result<Staged, String> {
+    let computer = state.computer.as_deref().ok_or("there is no computer")?;
+
+    // The turn's own wake patience, spent once up front: the file cannot land on a box that is
+    // not running, and the sentence a sleeping box would earn belongs to the model, not a hang.
+    let state_of = computer
+        .state(box_id)
+        .await
+        .map_err(|error| format!("its computer cannot be reached ({error})"))?;
+    if state_of != "running" {
+        let reached = computer
+            .wake(box_id, super::routes::TURN_WAKE_PATIENCE)
+            .await
+            .map_err(|error| format!("its computer could not be woken ({error})"))?;
+        if reached != "running" {
+            return Err(format!("its computer is {reached}"));
+        }
+    }
+
+    let dir = crate::office_desk::expand_home(computer, box_id, STAGE_DIR).await?;
+    let path = format!("{dir}/{artifact_id}-{}", staged_name(filename));
+    let store = &state.auth.store;
+
+    // A re-sent artifact names the same path and the session already there IS the document:
+    // the file it has is the person's work — edits made since the upload included — not this
+    // upload again. Writing over it would erase the accepted changes the version chain
+    // recorded. Only a file that went missing gets the bytes rewritten; a probe that cannot
+    // say is not "missing".
+    let existing = store
+        .doc_session_by_path(box_id, &path)
+        .await
+        .ok()
+        .flatten();
+    if let Some(row) = &existing {
+        match crate::office_desk::file_exists(computer, box_id, &path).await {
+            Some(true) => return Ok(Staged::Kept(row.clone())),
+            Some(false) => {}
+            None => {
+                return Err("its computer could not say whether the file is there".to_string());
+            }
+        }
+    }
+
+    computer
+        .write_file_bytes(box_id, &path, bytes)
+        .await
+        .map_err(|error| format!("it could not be written to the computer ({error})"))?;
+
+    // The staged file's session: an existing row for the path wins (a re-sent artifact names
+    // the same path), a lost insert race is re-read by path — and either way the row's hash is
+    // brought to the bytes now on disk, because whatever the file was before, it is these
+    // bytes now. Without that the first office_* read would look like drift somebody caused.
+    let hash = crate::office_desk::sha256_hex(bytes);
+    let now = crate::now_ms();
+    let mut row = match existing {
+        Some(existing) => existing,
+        None => {
+            let fresh = opengrok_store::DocSessionRow {
+                id: DocSessionId::new().to_string(),
+                account_id: account.as_str().to_string(),
+                coworker_id: coworker_id.as_str().to_string(),
+                box_id: box_id.to_string(),
+                path: path.clone(),
+                kind: kind.extension().to_string(),
+                content_sha256: hash.clone(),
+                version: 0,
+                proposals: json!([]),
+                created_at_ms: now,
+                updated_at_ms: now,
+            };
+            // A lost insert race leaves the winner's row to re-read. Neither stored nor
+            // re-readable means there is no session, and handing back `fresh` would let the
+            // turn key proposals on a row the table never held.
+            match store.put_doc_session(&fresh).await {
+                Ok(()) => fresh,
+                Err(error) => store
+                    .doc_session_by_path(box_id, &path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| format!("its document session could not be stored ({error})"))?,
+            }
+        }
+    };
+    if row.content_sha256 != hash {
+        store
+            .save_doc_session(
+                &row.id,
+                row.version,
+                &hash,
+                row.version + 1,
+                &row.proposals,
+                now,
+            )
+            .await
+            .map_err(|error| format!("its document session could not be updated ({error})"))?;
+        row.content_sha256 = hash;
+        row.version += 1;
+    }
+    // The upload IS the session's first version — its bytes were written before the session
+    // existed, so no snapshot() ran. Marking it keeps the version chain whole without a
+    // second copy of the same bytes.
+    if let Err(error) = store
+        .mark_artifact_doc_version(artifact_id, &row.id, row.version, "office_open")
+        .await
+    {
+        tracing::warn!(%error, artifact = %artifact_id, "a staged file's version could not be marked");
+    }
+    Ok(Staged::Wrote(row))
 }
 
 /// Whether `ch` ends a line for a reader: every control character (CR, LF, NEL), and the two
@@ -380,7 +658,7 @@ impl Attached {
                 .filename
                 .clone()
                 .unwrap_or_else(|| file.artifact_id.clone());
-            match self.0.get(&file.artifact_id) {
+            match self.map.get(&file.artifact_id) {
                 Some(Resolved::Image { filename, image }) => {
                     lines.push(format!("[The person attached the image {filename}.]"));
                     images.push(image.clone());

@@ -666,6 +666,668 @@
             ]
           }
         }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_files",
+          "description": "List DOCX, XLSX, and PPTX files and subdirectories under a directory on THIS BOT'S OWN computer (defaults to ~/office), plus open document IDs. Start here when the path is unknown.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "directory": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Directory to list; defaults to ~/office."
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_open",
+          "description": "Open an Office file on this Bot's computer and return its document ID, format, and capabilities.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Absolute path on the bot's own box."
+              },
+              "adoptKeptCopy": {
+                "type": "boolean",
+                "description": "When the file is a kept copy of an older version — the session's head was lost with the old computer — adopt it as the new head rather than staying refused as a stale copy."
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_create",
+          "description": "Create a NEW .docx, .xlsx, or .pptx on this Bot's computer; existing files are never overwritten. A new path is a new document with its own history — to REVISE a file, open it and use office_propose + office_accept instead: the same path updates in place and becomes the next version of the SAME document, which is what the person sees in their version history. Format comes from the path extension and requires the matching payload: docx.paragraphs [{text, style: title|heading1|heading2|normal, bold, italic}]; xlsx.rows string[][] of raw inputs (\"42\" number, \"=SUM(A1:A3)\" formula, other text); pptx.slides [{title, bullets: string[], notes}]. The parent directory must exist.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Absolute path on the bot's own box."
+              },
+              "docx": {
+                "type": "object",
+                "properties": {
+                  "paragraphs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5000,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "text": {
+                          "type": "string",
+                          "maxLength": 16000
+                        },
+                        "style": {
+                          "type": "string",
+                          "enum": [
+                            "title",
+                            "heading1",
+                            "heading2",
+                            "normal"
+                          ]
+                        },
+                        "bold": {
+                          "type": "boolean"
+                        },
+                        "italic": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              },
+              "xlsx": {
+                "type": "object",
+                "properties": {
+                  "rows": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 4096,
+                    "items": {
+                      "type": "array",
+                      "maxItems": 256,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 16000
+                      }
+                    }
+                  }
+                },
+                "additionalProperties": false
+              },
+              "pptx": {
+                "type": "object",
+                "properties": {
+                  "slides": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 200,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "title": {
+                          "type": "string",
+                          "maxLength": 16000
+                        },
+                        "bullets": {
+                          "type": "array",
+                          "maxItems": 50,
+                          "items": {
+                            "type": "string",
+                            "maxLength": 16000
+                          }
+                        },
+                        "notes": {
+                          "type": "string",
+                          "maxLength": 16000
+                        }
+                      },
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_outline",
+          "description": "List DOCX paragraphs, PPTX slide paragraphs, or XLSX sheets (sheetId and name). Filter story; headingsOnly is DOCX-only. Paginate with nextOffset.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "story": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "DOCX: only 'body'. PPTX: a slide id. XLSX: a sheetId."
+              },
+              "headingsOnly": {
+                "type": "boolean"
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              }
+            },
+            "required": [
+              "document"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_grep",
+          "description": "Find literal text with bounded context. DOCX/PPTX return match IDs for office_propose; XLSX returns cell handles for office_propose_cells, searching displayed values case-sensitively. story filters a DOCX/PPTX story or XLSX sheetId. Follow nextCursor; if truncated remains true, narrow query or story.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "caseSensitive": {
+                "type": "boolean"
+              },
+              "story": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              },
+              "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "required": [
+              "document",
+              "query"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_read",
+          "description": "Read a ref from outline/grep/cells: a DOCX/PPTX paragraph or XLSX cell display text. Default 4000 UTF-16 units; follow nextStart. field selects displayText (default), formula, or value for XLSX.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "start": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "length": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 16000
+              },
+              "field": {
+                "type": "string",
+                "enum": [
+                  "displayText",
+                  "formula",
+                  "value"
+                ],
+                "description": "XLSX only."
+              }
+            },
+            "required": [
+              "document",
+              "ref"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_cells",
+          "description": "XLSX only: read a rectangular A1 range on a sheetId from office_outline. Includes empty cells, inputs, formula flags, and cell handles. Follow nextOffset.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "sheet": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "range": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40,
+                "description": "A1 range such as A1:D20."
+              },
+              "offset": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100
+              }
+            },
+            "required": [
+              "document",
+              "sheet",
+              "range"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_render",
+          "description": "Render a page as PNG using the document engine. page is one-based: a DOCX page, a PPTX slide, or an XLSX sheet index. Supply proposal to see its proposed result without changing the live document. Returns pageCount where the format has pages.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "page": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100000
+              },
+              "proposal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Proposal ID returned by office_propose or office_propose_cells."
+              }
+            },
+            "required": [
+              "document"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_verify",
+          "description": "Save and reopen the current document or a pending proposal in memory. Reports completed checks explicitly; does not assert semantic or visual correctness.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "proposal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Proposal ID returned by office_propose or office_propose_cells."
+              }
+            },
+            "required": [
+              "document"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_close",
+          "description": "Release an open document and its proposals. Export any work you want to keep first.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              }
+            },
+            "required": [
+              "document"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_propose",
+          "description": "DOCX/PPTX: stage 1-32 text replacements without changing the document. XLSX uses office_propose_cells. First grep for the exact text you want to replace, then copy the desired occurrence's match ID. Supply edits [{match: ID_FROM_GREP, newText: REPLACEMENT}]. To change part of a sentence, grep that part; do not reuse a match for the whole sentence. New text inherits formatting at its start. No paragraph/embedded-content/tracked-change crossings.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "author": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "edits": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "match": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "description": "A match handle from office_grep."
+                    },
+                    "newText": {
+                      "type": "string",
+                      "maxLength": 16000
+                    }
+                  },
+                  "required": [
+                    "match",
+                    "newText"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "document",
+              "edits"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_propose_cells",
+          "description": "XLSX only: stage 1-32 whole-cell inputs using cell handles copied from office_cells, office_read, or office_grep. input is what a user types: 123 for a number, =SUM(A1:A3) for a formula, or text. Empty input clears a cell. Review before accepting/exporting.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "author": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "edits": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "cell": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128,
+                      "description": "A cell handle from office_cells, office_read or office_grep."
+                    },
+                    "input": {
+                      "type": "string",
+                      "maxLength": 16000,
+                      "description": "What a user types: 123, =SUM(A1:A3), or text. Empty clears the cell."
+                    }
+                  },
+                  "required": [
+                    "cell",
+                    "input"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "document",
+              "edits"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_review",
+          "description": "List proposals, or supply proposal to inspect exact before/after changes, attribution, status, and staleness. A stale proposal must be re-created from fresh reads.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "proposal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Proposal ID returned by office_propose or office_propose_cells."
+              }
+            },
+            "required": [
+              "document"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_accept",
+          "description": "Apply a proposal to the open document atomically and write the file back — the SAME path now holds the next version; no new file is made. Stale targets are rejected. Export afterwards to hand the person a copy.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "proposal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Proposal ID returned by office_propose or office_propose_cells."
+              },
+              "tracked": {
+                "type": "boolean",
+                "description": "DOCX only: write the replacements as Word tracked changes."
+              }
+            },
+            "required": [
+              "document",
+              "proposal"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_reject",
+          "description": "Discard a pending proposal without editing the document.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "proposal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Proposal ID returned by office_propose or office_propose_cells."
+              }
+            },
+            "required": [
+              "document",
+              "proposal"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "office_export",
+          "description": "Write a file of the opened format (.docx, .xlsx, .pptx) on this Bot's computer and attach it to your reply for the person — a copy: editing continues on the open document, not the copy. Existing files are never overwritten except a path this session itself exported before, so re-shipping the latest state keeps the same filename instead of inventing -v2 copies. Supply proposal to export a proposed result without accepting it; omit proposal to export accepted edits.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "document": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Open document ID returned by office_open."
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "Absolute path on the bot's own box."
+              },
+              "proposal": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "description": "Proposal ID returned by office_propose or office_propose_cells."
+              }
+            },
+            "required": [
+              "document",
+              "path"
+            ],
+            "additionalProperties": false
+          }
+        }
       }
     ],
     "tool_choice": "auto"

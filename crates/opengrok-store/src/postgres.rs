@@ -2436,6 +2436,31 @@ impl PgStore {
         Ok(())
     }
 
+    /// The scope row that claims `box_id` now — (scope, scope_id, kind, org_id). A shared
+    /// computer is recorded under its own scope, so this is how a document session's stored
+    /// box resolves to the provider that can say whether the box still exists; a box no
+    /// scope claims was replaced, and the document's own scope's kind answers instead.
+    pub async fn scoped_computer_of_box(
+        &self,
+        box_id: &str,
+    ) -> StoreResult<Option<(String, String, String, Option<String>)>> {
+        let row = sqlx::query(
+            "select scope, scope_id, kind, org_id from scoped_computer where box_id = $1",
+        )
+        .bind(box_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok((
+                row.try_get::<String, _>("scope")?,
+                row.try_get::<String, _>("scope_id")?,
+                row.try_get::<String, _>("kind")?,
+                row.try_get::<Option<String>, _>("org_id")?,
+            ))
+        })
+        .transpose()
+    }
+
     /// A scoped computer with its idle state — (box_id, kind, stopped).
     pub async fn scoped_computer_full(
         &self,
@@ -3713,6 +3738,99 @@ impl PgStore {
             Ok((artifact, bytes))
         })
         .transpose()
+    }
+
+    /// One row per kept version of a doc session, newest first — the chain the document
+    /// window's version picker lists and `/office/docs/{id}/…?version=` resolves through.
+    /// A version's bytes are the artifact's: `snapshot` writes them under `via`
+    /// `office_open`/`office_accept`/`external`, and an attached file's session marks its
+    /// upload as v0. Export artifacts carry the same meta keys but are derivatives — a
+    /// proposal's would-be bytes or a copy of a version already listed — never a version
+    /// themselves, which is why the `via` filter keeps them out. Two artifacts on one
+    /// version keep the earliest: the first snapshot is the canonical one.
+    ///
+    /// Scoped to the session's account: `docSessionId` is a meta key anybody's upload could
+    /// name, and a chain that answered across accounts would let a stranger graft a version
+    /// onto — or read a version out of — a document that is not theirs.
+    pub async fn doc_version_artifacts(
+        &self,
+        account_id: &str,
+        doc_session_id: &str,
+    ) -> StoreResult<Vec<ArtifactRow>> {
+        let rows = sqlx::query(
+            "select distinct on ((meta->>'version')::bigint)
+                    id, account_id, kind, mime, filename, size_bytes, recipe_id, run_id,
+                    step_index, thread_id, meta, created_at_ms, deleted_at_ms
+               from artifact
+              where meta->>'docSessionId' = $1
+                and account_id = $2
+                and meta ? 'version'
+                and meta->>'via' in ('office_open', 'office_accept', 'external',
+                                     'office_restore')
+                and deleted_at_ms is null
+              order by (meta->>'version')::bigint desc, created_at_ms asc",
+        )
+        .bind(doc_session_id)
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(artifact_row).collect()
+    }
+
+    /// Record that an artifact IS a version of a doc session — the upload an attached
+    /// Office file's session started on, which was written before the session existed and
+    /// so never went through `snapshot`. A merge, not a set: `messageId` and any later
+    /// keys survive.
+    pub async fn mark_artifact_doc_version(
+        &self,
+        id: &str,
+        doc_session_id: &str,
+        version: i64,
+        via: &str,
+    ) -> StoreResult<()> {
+        sqlx::query(
+            "update artifact
+                set meta = coalesce(meta, '{}'::jsonb)
+                         || jsonb_build_object('docSessionId', to_jsonb($2::text),
+                                               'version', to_jsonb($3::bigint),
+                                               'via', to_jsonb($4::text))
+              where id = $1 and deleted_at_ms is null",
+        )
+        .bind(id)
+        .bind(doc_session_id)
+        .bind(version)
+        .bind(via)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The paths a doc session has `office_export`ed to. Export's "may rewrite its own copy"
+    /// check reads this: the artifact already holds every copy ever shipped to the path, so
+    /// a re-export there loses nothing and the delivered file keeps one name.
+    ///
+    /// Scoped to the session's account like `doc_version_artifacts`: `exportPath` is the
+    /// claim that lets export rewrite a file, and a claim another account could plant must
+    /// not count.
+    pub async fn doc_export_paths(
+        &self,
+        account_id: &str,
+        doc_session_id: &str,
+    ) -> StoreResult<Vec<String>> {
+        let rows: Vec<(Option<String>,)> = sqlx::query_as(
+            "select distinct meta->>'exportPath'
+               from artifact
+              where meta->>'docSessionId' = $1
+                and account_id = $2
+                and meta->>'via' = 'office_export'
+                and meta ? 'exportPath'
+                and deleted_at_ms is null",
+        )
+        .bind(doc_session_id)
+        .bind(account_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().filter_map(|(path,)| path).collect())
     }
 
     /// Every artifact produced by a recipe run, ordered by step then creation time.

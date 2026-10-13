@@ -91,6 +91,14 @@
         "enabled": true,
         "summary": "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and looks at your other Bots' screens.",
         "label": "Manage computer"
+      },
+      {
+        "name": "office",
+        "kind": "builtin",
+        "description": "Create, read, search, edit and export .docx, .xlsx and .pptx files on this Bot's own computer, as proposals you can review before they are written.",
+        "enabled": true,
+        "summary": "Create, read, search, edit and export .docx, .xlsx and .pptx files on this Bot's own computer, as proposals you can review before they are written.",
+        "label": "Office documents"
       }
     ],
     "version": 0

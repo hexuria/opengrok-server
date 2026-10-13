@@ -81,7 +81,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "waiting for approval: Waiting for you",
             "timestamp": 100,
-            "durationMs": 6,
+            "durationMs": 0,
             "toolCallId": "mock-form-1"
           },
           {
@@ -231,7 +231,7 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  8077
+                  12327
                 ]
               },
               "model_ms": [

@@ -1200,6 +1200,21 @@ pub async fn update_scope_box(
         }
     }
     tracing::info!(scope, scope_id = %scope_id, old = %old_box_id, new = %new_box_id, "computer: rebuilt on the newest image");
+    // The rebuilt box runs on the old one's volumes, so its office documents are the same
+    // files: the sessions move with it now, rather than waiting for a fetch to rehydrate them
+    // while the agent's own office tools answer "not found" for its documents.
+    match store
+        .move_doc_sessions_box(&old_box_id, &new_box_id, at_ms)
+        .await
+    {
+        Ok(moved) if moved > 0 => {
+            tracing::info!(old = %old_box_id, new = %new_box_id, moved, "computer: office documents followed the rebuild");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, old = %old_box_id, new = %new_box_id, "computer: office documents did not follow the rebuild; the next read rehydrates them");
+        }
+    }
 
     let _ = store
         .set_box_update_phase(scope, &scope_id, UPDATE_STARTING, None, at_ms)

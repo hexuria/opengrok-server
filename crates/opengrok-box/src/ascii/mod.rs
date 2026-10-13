@@ -178,6 +178,11 @@ impl Computer for AsciiBoxes {
         Ok(())
     }
 
+    async fn write_file_bytes(&self, box_id: &str, path: &str, bytes: &[u8]) -> BoxResult<()> {
+        let _ = self.client.write_file_bytes(box_id, path, bytes).await?;
+        Ok(())
+    }
+
     async fn expose_port(&self, box_id: &str, port: u16, title: &str) -> BoxResult<String> {
         let hosted = self.client.host_port(box_id, port, title).await?;
         hosted

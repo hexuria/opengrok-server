@@ -131,6 +131,7 @@ async fn seed_account(store: &PgStore, email: &str) -> AccountId {
 /// A turn as `conversation.rs` builds one: the coworker's own key attached, whatever its limits.
 fn a_turn(coworker: &CoworkerId, payer: &AccountId) -> ModelRequest {
     ModelRequest {
+        customs: Vec::new(),
         gateway_key: Some(GatewayKey::new("oag_live_deadbeef000000")),
         spend_scope: Some(coworker.as_str().to_string()),
         spend_actor: Some(payer.as_str().to_string()),

@@ -22,11 +22,22 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0098" },
     { id = "RUSTSEC-2026-0104", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0098" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 1.0.4 is unmaintained with no upgrade; typesafe-sdk 0.1.2 pulls it through reqwest 0.11" },
-    # pdf-extract 0.12 (a person's PDF attachments, #229) pulls in lopdf 0.42, which requires
-    # ttf-parser. Unmaintained, and the advisory notes algorithmic-complexity issues left unfixed,
-    # with no upgrade. It is only ever run in the `opengrok-pdf-text` process: killed at 10
-    # seconds, capped in memory on Linux, and never inside the server.
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1 is unmaintained, with unfixed algorithmic-complexity issues and no upgrade; only lopdf 0.42 under pdf-extract reaches it, in the separate, killable opengrok-pdf-text process" },
+    # ttf-parser now has two reaches. (1) lopdf 0.42 under pdf-extract 0.12 (a person's PDF
+    # attachments, #229): it is only ever run in the `opengrok-pdf-text` process — killed at 10
+    # seconds, capped in memory on Linux, never inside the server. (2) rustybuzz under
+    # betteroffice-ooxml-text (opengrok-office): in-process, but its only input is the vendored
+    # substitute fonts the crate registers at session build — document-embedded font parts are
+    # preserved for round-trip by betteroffice's parser but never enter its font store, so
+    # attacker TTF bytes do not reach this parser.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1 is unmaintained with unfixed algorithmic-complexity issues and no upgrade; the lopdf/pdf-extract reach stays in the killable opengrok-pdf-text process, and the rustybuzz/betteroffice reach parses only vendored fonts registered by opengrok-office" },
+    # betteroffice's text engine (betteroffice-ooxml-text, reached by all three office facades)
+    # shapes text through rustybuzz, whose maintainer has declared it unmaintained. There is no
+    # upgrade from this side — the shaper is betteroffice's choice and the office work takes the
+    # dependency as upstream ships it; the advisory names no vulnerability, only maintenance.
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz 0.20.1 is pinned by betteroffice-ooxml-text under all three office facades; unmaintained (no vulnerability named) with no alternative until betteroffice swaps shapers" },
+    # yrs 0.27 — the CRDT replica every betteroffice editing session is built on — pulls
+    # smallstr. No safe upgrade exists and the advisory is unmaintained-only.
+    { id = "RUSTSEC-2026-0215", reason = "smallstr 0.3.1 is pinned by yrs 0.27.4 under betteroffice's *-edit crates; unmaintained with no upgrade" },
     # jsonwebtoken 11 with `rust_crypto` links rsa whatever algorithm is used. Our tokens are HS256
     # only, and every Validation is built with Algorithm::HS256, which refuses an RS* token before
     # any RSA code runs (crates/opengrok-server/src/auth/token.rs). rsa has no fixed release.

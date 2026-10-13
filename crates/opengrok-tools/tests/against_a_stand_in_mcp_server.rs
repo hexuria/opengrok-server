@@ -782,6 +782,8 @@ async fn call_with(
         screen_hold: false,
         screen_held_in: None,
         screen: Default::default(),
+        thread_id: None,
+        run_id: None,
     };
     let call = opengrok_tools::ToolCall {
         id: "call_1".to_string(),

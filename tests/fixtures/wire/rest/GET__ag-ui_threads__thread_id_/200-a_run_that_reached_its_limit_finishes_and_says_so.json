@@ -78,7 +78,7 @@
             "type": "TOOL_CALL_RESULT",
             "content": "ran",
             "timestamp": 100,
-            "durationMs": 1,
+            "durationMs": 2,
             "toolCallId": "c1"
           },
           {
@@ -323,14 +323,14 @@
                 "limit": 128000,
                 "left_out": 0,
                 "estimated": [
-                  7143,
-                  7161,
-                  7179,
-                  7197,
-                  7215,
-                  7233,
-                  7251,
-                  7269,
+                  11393,
+                  11411,
+                  11429,
+                  11447,
+                  11465,
+                  11483,
+                  11501,
+                  11519,
                   1334
                 ]
               },
