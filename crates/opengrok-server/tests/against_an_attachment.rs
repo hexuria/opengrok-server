@@ -934,6 +934,9 @@ struct StagedBox {
     /// a racing writer the caller's own optimistic save must then lose to. Deterministic
     /// instead of two tasks hoping to interleave.
     race: Mutex<Option<(PgStore, String)>>,
+    /// Paths a write to fails on (the box refused): an accept that claimed its version then
+    /// could not land the bytes is the CAS-first fix's second half — the claim must revert.
+    unwritable: Mutex<std::collections::BTreeSet<String>>,
 }
 
 impl StagedBox {
@@ -1022,6 +1025,12 @@ impl Computer for StagedBox {
         Ok(())
     }
     async fn write_file_bytes(&self, _box_id: &str, path: &str, bytes: &[u8]) -> BoxResult<()> {
+        if self.unwritable.lock().expect("unwritable").contains(path) {
+            return Err(opengrok_box::BoxError::Refused {
+                status: 503,
+                body: "the disk is full".to_string(),
+            });
+        }
         self.written
             .lock()
             .expect("written")
@@ -1086,6 +1095,7 @@ async fn an_office_file_is_staged_onto_the_bots_computer() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("docx").await;
@@ -1176,6 +1186,7 @@ async fn a_staged_files_first_version_stays_viewable() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("pptx").await;
@@ -1321,6 +1332,7 @@ async fn a_document_follows_the_computer_when_its_box_is_replaced() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("orphan").await;
@@ -1473,6 +1485,7 @@ async fn the_agents_documents_follow_a_replaced_computer() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("follow").await;
@@ -1661,6 +1674,7 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("rexport").await;
@@ -1906,6 +1920,7 @@ async fn another_accounts_upload_cannot_graft_onto_a_documents_chain() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("owner").await;
@@ -2040,6 +2055,7 @@ async fn a_document_on_a_live_shared_box_is_not_moved() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("shared").await;
@@ -2134,6 +2150,7 @@ async fn an_attachment_stages_on_the_scoped_computer() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("rescoped").await;
@@ -2210,6 +2227,7 @@ async fn an_accept_that_loses_the_version_race_writes_nothing() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("racer").await;
@@ -2298,6 +2316,7 @@ async fn a_stale_kept_copy_refuses_until_adopted() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("stale").await;
@@ -2523,6 +2542,7 @@ async fn a_create_refuses_when_the_existence_probe_cannot_answer() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("blind").await;
@@ -2571,6 +2591,7 @@ async fn a_resent_attachment_keeps_the_edited_document() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("resend").await;
@@ -2681,6 +2702,7 @@ async fn a_download_names_an_international_file_safely() {
         gone: Mutex::default(),
         blind: Mutex::default(),
         race: Mutex::new(None),
+        unwritable: Mutex::default(),
     });
     let h = Harness::start_with(&database_url, Some(computer.clone())).await;
     let ada = h.person("named").await;
@@ -2741,4 +2763,483 @@ async fn a_download_names_an_international_file_safely() {
         format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"),
         "{disposition}"
     );
+}
+
+/// The person answers a staged edit from the document window, not only the Bot: a reject
+/// discards it untouched, an accept applies it to the file and bumps the version — through the
+/// same desk verbs, so a second answer to the same proposal is refused in the desk's words,
+/// and another account's request is "no such document".
+#[tokio::test]
+async fn a_person_accepts_and_rejects_a_bots_proposal_from_the_window() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+        unwritable: Mutex::default(),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("verdict").await;
+    let eve = h.person("verdict-eve").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+    let deck_path = format!(
+        "/home/bot/office/verdict-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(deck_path.clone(), DEMO_DECK.to_vec());
+
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let ask = |ask: opengrok_tools::office_desk::Ask| async {
+        match desk_ask(&tools, &computer, &context, &box_id, ask).await {
+            Ok(reply) => reply.result,
+            Err(refused) => panic!("the desk refused: {refused}"),
+        }
+    };
+    let opened = ask(opengrok_tools::office_desk::Ask::Open {
+        path: deck_path.clone(),
+        adopt_kept_copy: false,
+    })
+    .await;
+    let document = opened["document"].as_str().expect("id").to_string();
+    // Two proposals on the same words, the Bot's way: grep for a handle, then propose.
+    let mut proposals = Vec::new();
+    for new_text in ["Files, without the office.", "Office files, at last,"] {
+        proposals.push(
+            propose_for(
+                &tools,
+                &computer,
+                &context,
+                &box_id,
+                &document,
+                "Office files,",
+                new_text,
+            )
+            .await,
+        );
+    }
+
+    let verdict = |who: &Person, proposal: &str, verdict: &str| {
+        h.client
+            .post(format!(
+                "{}/office/docs/{document}/proposals/{proposal}/{verdict}",
+                h.base
+            ))
+            .header("authorization", format!("Bearer {}", who.token))
+            .send()
+    };
+
+    // Another account cannot answer it, and is not told the document exists.
+    let response = verdict(&eve, &proposals[0], "accept").await.expect("eve");
+    assert_eq!(response.status().as_u16(), 404);
+
+    // The person rejects the first: the file is untouched and the proposal is no longer pending.
+    let response = verdict(&ada, &proposals[0], "reject")
+        .await
+        .expect("reject");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        computer.written.lock().expect("written").get(&deck_path),
+        Some(&DEMO_DECK.to_vec()),
+        "a reject leaves the file alone"
+    );
+    let again = verdict(&ada, &proposals[0], "accept").await.expect("again");
+    assert_eq!(
+        again.status().as_u16(),
+        409,
+        "a rejected proposal is not pending"
+    );
+    let refused: Value = again.json().await.expect("the desk's refusal");
+    assert_eq!(refused["code"], "STALE_PROPOSAL", "{refused}");
+
+    // And accepts the second: the file changes on the computer and the version moves.
+    let response = verdict(&ada, &proposals[1], "accept")
+        .await
+        .expect("accept");
+    assert_eq!(response.status().as_u16(), 200);
+    let accepted: Value = response.json().await.expect("the accept");
+    assert_eq!(accepted["accepted"], json!(true), "{accepted}");
+    assert_ne!(
+        computer.written.lock().expect("written").get(&deck_path),
+        Some(&DEMO_DECK.to_vec()),
+        "an accept writes the file"
+    );
+    let detail = h.get(&ada, &format!("/office/docs/{document}")).await;
+    assert_eq!(detail["version"], json!(1), "{detail}");
+
+    // A verb that is neither is no route at all.
+    let response = verdict(&ada, &proposals[1], "approve")
+        .await
+        .expect("approve");
+    assert_eq!(response.status().as_u16(), 404);
+}
+
+// ---------- the window's proposal verdict ----------
+
+/// A proposal the document does not hold is a 404 in the desk's JSON shape — `code` carries
+/// what the status already said, so the window reads one place.
+#[tokio::test]
+async fn an_unknown_proposal_gets_a_json_404() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+        unwritable: Mutex::default(),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("unknown").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+    let deck_path = format!(
+        "/home/bot/office/unknown-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(deck_path.clone(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Open {
+            path: deck_path.clone(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"].as_str().expect("id");
+
+    let response = h
+        .client
+        .post(format!(
+            "{}/office/docs/{document}/proposals/prp_nope/accept",
+            h.base
+        ))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("verdict");
+    assert_eq!(response.status().as_u16(), 404);
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/json")
+    );
+    let refused: Value = response.json().await.expect("the refusal");
+    assert_eq!(refused["code"], json!("NOT_FOUND"), "{refused}");
+    assert!(refused["message"].is_string(), "{refused}");
+}
+
+/// The verdict claims the version BEFORE the write: a write the box refuses unwinds the
+/// claim and answers the desk's words as a 503 JSON refusal, the file and version exactly
+/// as they were.
+#[tokio::test]
+async fn a_failed_write_reverts_the_claimed_version_and_answers_503() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+        unwritable: Mutex::default(),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("diskfull").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+    let deck_path = format!(
+        "/home/bot/office/diskfull-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(deck_path.clone(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Open {
+            path: deck_path.clone(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"].as_str().expect("id");
+    let proposal = propose_for(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        document,
+        "Office files,",
+        "Nope",
+    )
+    .await;
+    computer
+        .unwritable
+        .lock()
+        .expect("unwritable")
+        .insert(deck_path.clone());
+
+    let response = h
+        .client
+        .post(format!(
+            "{}/office/docs/{document}/proposals/{proposal}/accept",
+            h.base
+        ))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("verdict");
+    assert_eq!(response.status().as_u16(), 503);
+    let refused: Value = response.json().await.expect("the refusal");
+    assert_eq!(refused["code"], json!("COMPUTER_ERROR"), "{refused}");
+
+    // The claim was unwound: the file is the old bytes and the row still says so.
+    assert_eq!(
+        computer.written.lock().expect("written").get(&deck_path),
+        Some(&DEMO_DECK.to_vec()),
+        "the failed write still rewrote the file"
+    );
+    let row = h
+        .store
+        .doc_session(document)
+        .await
+        .expect("read")
+        .expect("the row");
+    assert_eq!(row.version, 0, "the claimed version was not reverted");
+    let detail = h.get(&ada, &format!("/office/docs/{document}")).await;
+    assert_eq!(detail["version"], json!(0), "{detail}");
+}
+
+/// A document whose old box held only an older kept copy is a 409 STALE_COPY at the route —
+/// the same code, message and details the desk gives for the same file, not a generic
+/// refusal.
+#[tokio::test]
+async fn a_stale_copy_document_refuses_the_verdict_409() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+        unwritable: Mutex::default(),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("staleverdict").await;
+    let (coworker, box_id) = hired_on(&h, &ada).await;
+    let deck_path = format!(
+        "/home/bot/office/stale-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(deck_path.clone(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let context = desk_context(&ada, &coworker, &box_id);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        opengrok_tools::office_desk::Ask::Open {
+            path: deck_path.clone(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open");
+    let document = opened.result["document"].as_str().expect("id").to_string();
+    for (query, new_text) in [("WASM", "WASMX"), ("CRDT", "CRDTX")] {
+        let proposal = propose_for(
+            &tools, &computer, &context, &box_id, &document, query, new_text,
+        )
+        .await;
+        desk_ask(
+            &tools,
+            &computer,
+            &context,
+            &box_id,
+            opengrok_tools::office_desk::Ask::Accept {
+                document: document.clone(),
+                proposal,
+                tracked: false,
+            },
+        )
+        .await
+        .expect("accept");
+    }
+    let pending = propose_for(
+        &tools,
+        &computer,
+        &context,
+        &box_id,
+        &document,
+        "LOCAL-FIRST",
+        "LOCAL",
+    )
+    .await;
+    // The head's snapshot never made it — the newest kept version is v1 — and the box is
+    // destroyed: rehydrate can only put v1 back.
+    let v2_artifact = h
+        .store
+        .doc_version_artifacts(ada.account.as_str(), &document)
+        .await
+        .expect("the chain")
+        .into_iter()
+        .find(|a| a.meta["version"].as_i64() == Some(2))
+        .expect("v2 was kept");
+    h.store
+        .soft_delete_artifact(&v2_artifact.id, now_ms())
+        .await
+        .expect("the head snapshot was lost");
+    computer.gone.lock().expect("gone").insert(box_id.clone());
+    computer.written.lock().expect("written").remove(&deck_path);
+    h.store
+        .claim_scoped_computer(
+            "account",
+            ada.account.as_str(),
+            Some(&box_id),
+            "bx_next",
+            "local-docker",
+            None,
+            now_ms(),
+        )
+        .await
+        .expect("the scope's computer was replaced");
+
+    let response = h
+        .client
+        .post(format!(
+            "{}/office/docs/{document}/proposals/{pending}/accept",
+            h.base
+        ))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("verdict");
+    assert_eq!(response.status().as_u16(), 409);
+    let refused: Value = response.json().await.expect("the refusal");
+    assert_eq!(refused["code"], json!("STALE_COPY"), "{refused}");
+    assert_eq!(refused["details"]["keptVersion"], json!(1), "{refused}");
+    assert_eq!(refused["details"]["headVersion"], json!(2), "{refused}");
+    let row = h
+        .store
+        .doc_session(&document)
+        .await
+        .expect("read")
+        .expect("the row");
+    assert_eq!(row.version, 2, "the verdict moved the stale copy");
+}
+
+/// A document opened on a live box that is not the scope's — the room's shared computer —
+/// takes its verdict THERE: the box's own provider runs it, the row keeps naming the shared
+/// box, and the scoped box is never written.
+#[tokio::test]
+async fn a_verdict_on_a_live_shared_box_writes_there() {
+    let database_url = database_or_skip!();
+    let computer = Arc::new(StagedBox {
+        written: Mutex::new(BTreeMap::new()),
+        gone: Mutex::default(),
+        blind: Mutex::default(),
+        race: Mutex::new(None),
+        unwritable: Mutex::default(),
+    });
+    let h = Harness::start_with(&database_url, Some(computer.clone())).await;
+    let ada = h.person("sharedverdict").await;
+    let (coworker, scoped_box) = hired_on(&h, &ada).await;
+    assert_eq!(scoped_box, "bx_staged");
+    h.store
+        .claim_scoped_computer(
+            "bot",
+            &format!("cw_room_{}", uuid::Uuid::now_v7().simple()),
+            None,
+            "bx_shared",
+            "local-docker",
+            None,
+            now_ms(),
+        )
+        .await
+        .expect("the shared box was claimed");
+    let deck_path = format!(
+        "/home/bot/office/shared-{}.pptx",
+        uuid::Uuid::now_v7().simple()
+    );
+    computer
+        .written
+        .lock()
+        .expect("written")
+        .insert(deck_path.clone(), DEMO_DECK.to_vec());
+    let tools = desk(&h);
+    let opened = desk_ask(
+        &tools,
+        &computer,
+        &desk_context(&ada, &coworker, "bx_shared"),
+        "bx_shared",
+        opengrok_tools::office_desk::Ask::Open {
+            path: deck_path.clone(),
+            adopt_kept_copy: false,
+        },
+    )
+    .await
+    .expect("open on the shared box");
+    let document = opened.result["document"].as_str().expect("id").to_string();
+    let proposal = propose_for(
+        &tools,
+        &computer,
+        &desk_context(&ada, &coworker, "bx_shared"),
+        "bx_shared",
+        &document,
+        "Office files,",
+        "Verdict",
+    )
+    .await;
+
+    let response = h
+        .client
+        .post(format!(
+            "{}/office/docs/{document}/proposals/{proposal}/accept",
+            h.base
+        ))
+        .header("authorization", format!("Bearer {}", ada.token))
+        .send()
+        .await
+        .expect("verdict");
+    assert_eq!(response.status().as_u16(), 200);
+    let accepted: Value = response.json().await.expect("the accept");
+    assert_eq!(accepted["accepted"], json!(true), "{accepted}");
+    assert_ne!(
+        computer.written.lock().expect("written").get(&deck_path),
+        Some(&DEMO_DECK.to_vec()),
+        "the verdict wrote the shared box's file"
+    );
+    let row = h
+        .store
+        .doc_session(&document)
+        .await
+        .expect("read")
+        .expect("the row");
+    assert_eq!(row.box_id, "bx_shared", "the session was repointed");
+    assert_eq!(row.version, 1);
 }

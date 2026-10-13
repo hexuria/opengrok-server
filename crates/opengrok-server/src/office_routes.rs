@@ -14,7 +14,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use opengrok_core::id::CoworkerId;
 use opengrok_office::Session;
@@ -30,7 +30,152 @@ pub fn router(state: AgUiState) -> Router {
         .route("/office/docs/{id}", get(detail))
         .route("/office/docs/{id}/bytes", get(bytes))
         .route("/office/docs/{id}/pages/{*page}", get(page_png))
+        .route(
+            "/office/docs/{id}/proposals/{proposal}/{verdict}",
+            post(proposal_verdict),
+        )
         .with_state(state)
+}
+
+/// `POST /office/docs/{id}/proposals/{proposal}/accept` (or `/reject`) — the person's own
+/// answer to an edit the Bot staged, from the document window. Answered by the same desk verbs
+/// the Bot's `office_accept`/`office_reject` call, as the document's account and coworker on
+/// the box that actually holds the file — the scope's, or a live shared computer the session
+/// was opened on — so a person's accept is checked against the fresh file, re-based on drift
+/// and snapshotted exactly like the Bot's. A refusal — the desk's or this route's — always
+/// answers as the desk's `{code, message, details?}` JSON with the status the code maps to.
+///
+/// No turn scopes it, so nothing is filed under a thread and no frame is streamed: the window
+/// that asked re-reads the detail, and the Bot sees the proposal's new status on its next read.
+/// A document whose box was replaced gets it back first — or, when only an older kept copy
+/// could be restored, the desk's own stale-copy refusal; one with no live box left cannot
+/// take an accept, which writes the file.
+async fn proposal_verdict(
+    State(state): State<AgUiState>,
+    headers: HeaderMap,
+    Path((id, proposal, verdict)): Path<(String, String, String)>,
+) -> Response {
+    use opengrok_tools::office_desk::{Ask, OfficeDesk as _};
+    let (row, box_live) = match row_for(&state, &headers, &id).await {
+        Ok(found) => found,
+        Err(response) => return response,
+    };
+    let ask = match verdict.as_str() {
+        "accept" => Ask::Accept {
+            document: row.id.clone(),
+            proposal,
+            tracked: false,
+        },
+        "reject" => Ask::Reject {
+            document: row.id.clone(),
+            proposal,
+        },
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let account = opengrok_core::id::AccountId::from_stored(row.account_id.clone());
+    let coworker = CoworkerId::from_stored(row.coworker_id.clone());
+    let scoped = provision::scoped_box_row_for(&state, &account, &coworker).await;
+
+    // A live stored box gets the verdict where the document IS — a room's shared computer it
+    // was opened on counts — and its own scope's provider answers for it. Only a box the
+    // provider itself says is gone moves the session, onto the scope's new box.
+    let (run_box, provider) = if box_live {
+        let Some(provider) = provider_for_row_box(&state, &row, scoped.as_ref()).await else {
+            return refusal_response("no provider for the document's computer".to_string());
+        };
+        (row.box_id.clone(), provider)
+    } else {
+        let Some(scoped) = &scoped else {
+            return refusal_response("this document's Bot has no computer".to_string());
+        };
+        let recovered = match rehydrate(&state, &row).await {
+            Some(recovered) => recovered,
+            None => {
+                return refusal_response(
+                    "this document's computer is gone; it can be read from its kept copy but not changed"
+                        .to_string(),
+                );
+            }
+        };
+        // The new box only got an older kept copy: answering the proposal on it would write
+        // a version behind the head — the desk's own refusal for the same file.
+        if recovered.stale {
+            return refusal_response(crate::office_desk::stale_copy_refusal(
+                &row.path,
+                recovered.version,
+                row.version,
+            ));
+        }
+        let Some(provider) =
+            provision::provider_for(&state, scoped.org_id.as_deref(), &scoped.kind).await
+        else {
+            return refusal_response("no provider for the document's computer".to_string());
+        };
+        (scoped.box_id.clone(), provider)
+    };
+    // The desk only answers on a RUNNING computer — anything else is a refusal with the
+    // provider's word for the state, not a document that vanished.
+    match provider
+        .wake(&run_box, std::time::Duration::from_secs(60))
+        .await
+    {
+        Ok(state) if state == "running" => {}
+        Ok(state) => {
+            return refusal_response(format!("the computer is {state}"));
+        }
+        Err(error) => {
+            return refusal_response(format!("the computer could not be woken: {error}"));
+        }
+    }
+    // `ToolContext::from_coworker` does not fit — it fills box_id from `coworker.computer()`,
+    // the first box ever given, and this route just spent its checks choosing the live one.
+    let context = opengrok_tools::ToolContext {
+        account_id: account,
+        coworker_id: coworker,
+        box_id: Some(opengrok_core::id::BoxId::from_stored(run_box.clone())),
+        group_box: None,
+        screen_hold: false,
+        screen_held_in: None,
+        screen: std::sync::Arc::new(std::sync::Mutex::new(opengrok_box::Screen::Shared)),
+        thread_id: None,
+        run_id: None,
+    };
+    let desk = crate::office_desk::Tools {
+        state: state.clone(),
+    };
+    match desk
+        .answer(&context, provider.as_ref(), &run_box, ask)
+        .await
+    {
+        Ok(reply) => Json(reply.result).into_response(),
+        Err(refusal) => refusal_response(refusal),
+    }
+}
+
+/// A refusal as the route answers it: the desk already speaks `{code, message, details?}`
+/// JSON, and anything that is not an object with a string `code` — a bare message — is
+/// wrapped as COMPUTER_ERROR, so a client never pattern-matches text. The status is the
+/// code's: NOT_FOUND 404; the stale/conflict family 409; engine and computer failures 503;
+/// everything else 422.
+fn refusal_response(refusal: String) -> Response {
+    let body = match serde_json::from_str::<Value>(&refusal) {
+        Ok(value) if value.is_object() && value.get("code").and_then(Value::as_str).is_some() => {
+            value
+        }
+        _ => json!({ "code": "COMPUTER_ERROR", "message": refusal }),
+    };
+    let status = match body["code"].as_str().unwrap_or_default() {
+        "NOT_FOUND" => StatusCode::NOT_FOUND,
+        "STALE_PROPOSAL" | "CONFLICT" | "EEXIST" | "STALE_COPY" => StatusCode::CONFLICT,
+        "COMPUTER_ERROR" | "ENGINE_ERROR" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    (
+        status,
+        [(CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 /// The MIME a kind's bytes are served as.
