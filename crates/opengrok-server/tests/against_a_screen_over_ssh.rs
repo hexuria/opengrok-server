@@ -267,7 +267,6 @@ impl Harness {
         assert_eq!(res.status().as_u16(), 200);
         res.json().await.expect("computer json")
     }
-
 }
 
 impl Harness {
