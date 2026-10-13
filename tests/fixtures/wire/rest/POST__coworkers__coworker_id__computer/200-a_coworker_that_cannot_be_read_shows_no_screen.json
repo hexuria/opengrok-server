@@ -10,6 +10,8 @@
     "update": null,
     "image": null,
     "screen": "shared",
+    "screenStatus": "ready",
+    "screenStatusText": "",
     "isEgressTunnelAvailable": false,
     "shareScope": "group",
     "groupId": "cw_0199bb4e-0000-7000-8000-000000000001",

@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tokio::process::Command;
 
+use crate::screen_status::ScreenProgress;
 use crate::{
     BoxError, BoxResult, CommandOutput, Computer, CuaAction, EgressTunnel, ImageStatus, Screenshot,
     StartedCommand, no_screen,
@@ -163,6 +164,9 @@ struct Seen {
     latest: tokio::sync::Mutex<HashMap<String, (Instant, String)>>,
     /// Each box's `Computer::generation`: one more at every stop, start, rebuild and removal.
     generations: Mutex<HashMap<String, u64>>,
+    /// Each (box, Bot)'s own screen as its last `box-screen up` left it, under the generation it
+    /// was asked in: a stop, start or rebuild since makes it not asked again.
+    screens: Mutex<HashMap<(String, String), (u64, ScreenProgress)>>,
 }
 
 /// Opaque, so a `DockerComputer` printed with `{:?}` never carries a box's secrets into a log.
@@ -917,6 +921,21 @@ impl Computer for DockerComputer {
         self.own_screen(box_id, screen).await.map(|_| ())
     }
 
+    fn screen_progress(&self, box_id: &str, screen: &crate::Screen) -> ScreenProgress {
+        let Some(bot) = screen.bot() else {
+            return ScreenProgress::Given;
+        };
+        let generation = self.generation(box_id);
+        let screens = self.seen.screens.lock();
+        let found = screens
+            .ok()
+            .and_then(|screens| screens.get(&(box_id.to_string(), bot.to_string())).copied());
+        match found {
+            Some((of, progress)) if of == generation => progress,
+            _ => ScreenProgress::NotAsked,
+        }
+    }
+
     async fn screenshot(&self, box_id: &str, screen: &crate::Screen) -> BoxResult<Screenshot> {
         let shot = self
             .guest_on(box_id, screen)
@@ -1048,10 +1067,50 @@ impl DockerComputer {
             return Ok(None);
         };
         let bot = safe_bot(bot)?;
-        let out = self
+        let key = (box_id.to_string(), bot.to_string());
+        self.begin_screen(&key, screen);
+        let own = match self
             .run(box_id, &format!("box-screen up '{bot}'"), 30)
-            .await?;
-        or_main_screen(own_screen_in(&out.stdout))
+            .await
+        {
+            Ok(out) => own_screen_in(&out.stdout),
+            Err(error) => Err(error),
+        };
+        self.note_screen(&key, progress_of(&own));
+        or_main_screen(own)
+    }
+
+    /// A `box-screen up` is about to run. Only a screen not up yet is starting: every screenshot,
+    /// click and page asks again (it brings back a screen a restart stopped), and marking an up
+    /// screen as starting for each of those had the pane read "Starting Ada's screen…" every
+    /// other poll while the screen worked.
+    fn begin_screen(&self, key: &(String, String), screen: &crate::Screen) {
+        if self.screen_progress(&key.0, screen) == ScreenProgress::NotAsked {
+            self.note_screen(key, Some(ScreenProgress::Starting));
+        }
+    }
+
+    /// Keep what a `box-screen up` came to for `screen_progress`; `None` forgets it, so a failure
+    /// that was not an answer (the box unreachable) is asked again rather than remembered.
+    fn note_screen(&self, key: &(String, String), progress: Option<ScreenProgress>) {
+        let generation = self.generation(&key.0);
+        if let Ok(mut screens) = self.seen.screens.lock() {
+            match progress {
+                Some(progress) => screens.insert(key.clone(), (generation, progress)),
+                None => screens.remove(key),
+            };
+        }
+    }
+}
+
+/// What a `box-screen up` answer means for the Bot's screen: its own, the main one because the
+/// image has no own screens (501) or the box has no room (409), or no answer to remember.
+fn progress_of(own: &BoxResult<OwnScreen>) -> Option<ScreenProgress> {
+    match own {
+        Ok(_) => Some(ScreenProgress::Given),
+        Err(BoxError::Refused { status: 501, .. }) => Some(ScreenProgress::OldImage),
+        Err(BoxError::Refused { status: 409, .. }) => Some(ScreenProgress::Full),
+        Err(_) => None,
     }
 }
 
@@ -1375,6 +1434,88 @@ mod tests {
         let no_display = r#"{"running":true}"#;
         assert!(or_main_screen(own_screen_in(no_display)).is_err());
         assert_eq!(own_screen_path(":2"), "websockify%3Ftoken%3Ds2");
+    }
+
+    /// The status reads how a Bot's own screen came out without asking the box: an old image or a
+    /// full box is remembered as such (the pane said `own` for both), a failure that was not an
+    /// answer is forgotten, and a stop, start or rebuild since makes it not asked again.
+    #[test]
+    fn how_an_own_screen_came_out_is_remembered_for_the_status() {
+        let docker = DockerComputer::new();
+        let own = crate::Screen::Own("cw_1".into());
+        let key = ("box_a".to_string(), "cw_1".to_string());
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::NotAsked
+        );
+        assert_eq!(
+            docker.screen_progress("box_a", &crate::Screen::Shared),
+            ScreenProgress::Given
+        );
+        let answers = [
+            (
+                own_screen_in(r#"{"display":":2","profile":"/p"}"#),
+                Some(ScreenProgress::Given),
+            ),
+            (
+                own_screen_in("sh: 1: box-screen: not found"),
+                Some(ScreenProgress::OldImage),
+            ),
+            (
+                own_screen_in(r#"{"error":"no room"}"#),
+                Some(ScreenProgress::Full),
+            ),
+            (Err(BoxError::Unreachable("docker".into())), None),
+        ];
+        for (answer, expected) in answers {
+            assert_eq!(progress_of(&answer), expected);
+        }
+        docker.note_screen(&key, Some(ScreenProgress::OldImage));
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::OldImage
+        );
+        assert_eq!(
+            docker.screen_progress("box_b", &own),
+            ScreenProgress::NotAsked
+        );
+        docker.forget("box_a");
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::NotAsked
+        );
+        docker.note_screen(&key, Some(ScreenProgress::Starting));
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::Starting
+        );
+        docker.note_screen(&key, None);
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::NotAsked
+        );
+    }
+
+    /// A screen already up stays up while it is asked again (the pane's screenshot does every two
+    /// seconds): reading it as starting meanwhile flickered the pane's cover on a working screen.
+    #[test]
+    fn asking_again_for_a_screen_that_is_up_does_not_make_it_starting() {
+        let docker = DockerComputer::new();
+        let own = crate::Screen::Own("cw_1".into());
+        let key = ("box_a".to_string(), "cw_1".to_string());
+        docker.begin_screen(&key, &own);
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::Starting,
+            "first ask"
+        );
+        docker.note_screen(&key, Some(ScreenProgress::Given));
+        docker.begin_screen(&key, &own);
+        assert_eq!(
+            docker.screen_progress("box_a", &own),
+            ScreenProgress::Given,
+            "asked again"
+        );
     }
 
     /// A Bot id goes into a shell word only as letters, digits, `_` and `-`.

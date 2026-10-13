@@ -10,6 +10,8 @@
     "update": null,
     "image": null,
     "screen": "own",
+    "screenStatus": "starting-screen",
+    "screenStatusText": "Starting Hosted's screen…",
     "isEgressTunnelAvailable": false,
     "shareScope": "user",
     "egressPolicy": "ask"

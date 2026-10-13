@@ -15,6 +15,8 @@
     },
     "image": null,
     "screen": "own",
+    "screenStatus": "ready",
+    "screenStatusText": "",
     "isEgressTunnelAvailable": false,
     "shareScope": "user",
     "egressPolicy": "ask"

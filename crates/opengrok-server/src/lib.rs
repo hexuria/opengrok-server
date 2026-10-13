@@ -58,6 +58,7 @@ pub mod skills;
 pub mod spend;
 pub(crate) mod tape_lesson;
 pub mod templates;
+pub mod triage;
 pub mod workflows;
 
 pub use agui::AgUiState;
