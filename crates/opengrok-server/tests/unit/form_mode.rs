@@ -89,7 +89,7 @@ fn a_dismissed_card_reopens_on_refresh() {
 fn a_submitted_card_keeps_its_snapshot_and_shows_it() {
     let values = json!({"tax14": "12,500.00"});
     let values = values.as_object().unwrap();
-    let settled = settle_submitted(entry(), "q_1", Some("sha256:seen"), values);
+    let settled = settle_submitted(entry(), Some("q_1"), Some("sha256:seen"), values);
     assert_eq!(settled["formResolution"], json!("submitted"));
     let fields = settled["message"]["formRequest"]["fields"]
         .as_array()

@@ -376,8 +376,10 @@ pub fn card_request(plugin: &str, reply: &Value) -> Result<FormRequest, String> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitOutcome {
     /// In the plugin's queue: it goes at the queue's next tick unless cancelled first.
+    /// `queue_ref` is what the plugin named it, when it did: `queued: true` alone is still a
+    /// queued return, and reading it as a refusal would offer a second Submit.
     Queued {
-        queue_ref: String,
+        queue_ref: Option<String>,
         fingerprint: Option<String>,
         values: serde_json::Map<String, Value>,
     },
@@ -393,12 +395,9 @@ pub enum SubmitOutcome {
 #[must_use]
 pub fn submit_outcome(reply: &Value) -> SubmitOutcome {
     let fingerprint = text_of(reply, "fingerprint");
-    match (
-        reply.get("queued").and_then(Value::as_bool),
-        text_of(reply, "queue_ref"),
-    ) {
-        (Some(true), Some(queue_ref)) => SubmitOutcome::Queued {
-            queue_ref,
+    match reply.get("queued").and_then(Value::as_bool) {
+        Some(true) => SubmitOutcome::Queued {
+            queue_ref: text_of(reply, "queue_ref"),
             fingerprint,
             values: reply
                 .get("values")
@@ -455,7 +454,18 @@ fn told(entry: &Value) -> Option<String> {
     let outcome = entry.get("formOutcome").unwrap_or(&Value::Null);
     let line = match entry.get("formResolution").and_then(Value::as_str) {
         Some("submitted") => {
-            let queue_ref = text_of(outcome, "queueRef").unwrap_or_default();
+            let queue_ref = text_of(outcome, "queueRef")
+                .map(|queue_ref| format!(" as {queue_ref}"))
+                .unwrap_or_default();
+            // Queued, but the chat could not keep its record (`recordSaved: false`): the Bot is
+            // told so, as the card may yet show it as a draft.
+            let unsaved = match outcome.get("recordSaved") {
+                Some(Value::Bool(false)) => {
+                    " This chat could not save its record of the submit, \
+                    so the card may still look like a draft; it is queued all the same."
+                }
+                _ => "",
+            };
             let values = outcome
                 .get("values")
                 .and_then(Value::as_object)
@@ -472,9 +482,9 @@ fn told(entry: &Value) -> Option<String> {
                 values = "none recorded".to_string();
             }
             format!(
-                "The person submitted the form {named}. It is queued to send as {queue_ref} at \
-                 the queue's next tick and can be cancelled until then; it is not paid and BIR \
-                 has not confirmed it. Values sent: {values}. Do not submit it again."
+                "The person submitted the form {named}. It is queued to send{queue_ref} at the \
+                 queue's next tick and can be cancelled until then; it is not paid and BIR has \
+                 not confirmed it. Values sent: {values}.{unsaved} Do not submit it again."
             )
         }
         Some("dismissed") => {

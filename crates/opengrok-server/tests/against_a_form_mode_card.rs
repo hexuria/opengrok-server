@@ -1032,3 +1032,34 @@ async fn a_switched_off_plugin_opens_no_card_unless_the_message_tags_it() {
     assert!(entry.get("formResolution").is_none(), "{entry}");
     assert_eq!(h.bir.calls_to("bir_form_card").len(), 1);
 }
+
+/// A return the plugin already holds as queued is not sent again, though the transcript still
+/// shows the draft (another replica's Submit, or a record that could not be written): the card
+/// is asked for first, and settled from what the plugin says.
+#[tokio::test]
+async fn a_return_the_plugin_already_queued_is_not_submitted_again() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (entry_id, _) = h.open_card(&h.agent.clone()).await;
+    let (status, _) = h
+        .act(
+            &entry_id,
+            "save",
+            json!({ "values": { TAX14: "12,500.00" } }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    *h.bir.queued.lock().unwrap() = Some("q_elsewhere".to_string());
+
+    let seen = json!({ "fingerprint": h.bir.fingerprint() });
+    let (status, refused) = h.act(&entry_id, "submit", seen).await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(h.bir.calls_to("bir_form_submit").is_empty());
+    let entry = h.entry(&entry_id).await;
+    assert_eq!(entry["formResolution"], json!("submitted"), "{entry}");
+    assert_eq!(
+        entry["formOutcome"]["values"][TAX14],
+        json!("12,500.00"),
+        "{entry}"
+    );
+}

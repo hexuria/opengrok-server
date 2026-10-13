@@ -273,6 +273,7 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
         Ok(row) => row,
         Err(reply) => return reply,
     };
+    let entry = unsaved_or(host, (account, &coworker), seq, entry).await;
     if !form_mode::is_form_mode_entry(&entry) {
         return (
             400,
@@ -313,6 +314,13 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
         let error = format!("the {plugin} plugin has no {action} action");
         return (409, json!({ "error": error }));
     };
+    if action == "submit" {
+        let card = (plugin.as_str(), &tools, &key);
+        if let Some(refused) = already_queued(host, (account, &coworker), card, (seq, &entry)).await
+        {
+            return refused;
+        }
+    }
     let call = PluginCall {
         plugin: &plugin,
         tool,
@@ -377,12 +385,21 @@ async fn submitted(
         body["ok"] = json!(false);
         return (200, body);
     };
-    let settle = |entry| settle_submitted(entry, &queue_ref, fingerprint.as_deref(), &values);
+    let queue_ref = queue_ref.as_deref();
+    let settle = |entry| settle_submitted(entry, queue_ref, fingerprint.as_deref(), &values);
     let settled = match record(host, (account, coworker), (seq, entry), settle).await {
         Ok(settled) => settled,
-        Err(settled) => {
-            // The return IS queued: saying otherwise would invite a second press.
-            tracing::error!(%queue_ref, "a submitted form-mode card could not be settled");
+        Err(mut settled) => {
+            // The return IS queued: saying otherwise would invite a second press. Kept here as
+            // queued with its record unsaved, so this process refuses a second Submit and tells
+            // the Bot; another replica's Submit is refused by `already_queued`.
+            tracing::error!(
+                ?queue_ref,
+                "a submitted form-mode card could not be settled"
+            );
+            settled["formOutcome"]["recordSaved"] = json!(false);
+            unsaved().insert(entry_id_of(&settled), settled.clone());
+            body["recordSaved"] = json!(false);
             settled
         }
     };
@@ -400,11 +417,7 @@ async fn record(
     settle: impl Fn(Value) -> Value,
 ) -> Result<Value, Value> {
     let store = &host.agui.auth.store;
-    let entry_id = was
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let entry_id = entry_id_of(&was);
     for _ in 0..2 {
         let settled = settle(was.clone());
         let written =
@@ -421,6 +434,104 @@ async fn record(
         }
     }
     Err(settle(was))
+}
+
+fn entry_id_of(entry: &Value) -> String {
+    entry
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Submitted cards this process could not record: queued, but the transcript still holds the
+/// draft. Process-local, as it can only be: the write that would have shared it is the one that
+/// failed. The plugin's own card (`already_queued`) is what every replica can read.
+fn unsaved() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Value>> {
+    static UNSAVED: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<String, Value>>,
+    > = std::sync::LazyLock::new(Default::default);
+    UNSAVED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The card as it is: its unsaved submit when this process holds one, written again now (and
+/// forgotten once it lands), else the card as read.
+async fn unsaved_or(
+    host: &HostState,
+    who: (&AccountId, &CoworkerId),
+    seq: i64,
+    read: Value,
+) -> Value {
+    let id = entry_id_of(&read);
+    let Some(mut held) = unsaved().get(&id).cloned() else {
+        return read;
+    };
+    if let Some(outcome) = held["formOutcome"].as_object_mut() {
+        outcome.remove("recordSaved");
+    }
+    let store = &host.agui.auth.store;
+    if let Ok(true) = store
+        .update_gateway_entry_if((who.1, who.0), (seq, Some(&read)), &held)
+        .await
+    {
+        unsaved().remove(&id);
+        return held;
+    }
+    held["formOutcome"]["recordSaved"] = json!(false);
+    held
+}
+
+/// Before a Submit, the plugin is asked for the card as it is now, and a return it already holds
+/// as queued or sent is refused: the transcript may not know (another replica's submit, or a
+/// record that could not be written). The card is then settled from what the plugin says. If the
+/// plugin cannot be asked, nothing is sent.
+async fn already_queued(
+    host: &HostState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    (plugin, tools, key): (&str, &FormModeTools, &form_mode::FormKey),
+    (seq, entry): (i64, &Value),
+) -> Option<(u16, Value)> {
+    let entry_id = entry_id_of(entry);
+    let call = PluginCall {
+        plugin,
+        tool: tools.card_tool(plugin),
+        arguments: json!({ "form": key.to_value(), "mode": "index" }),
+        yes: false,
+        pressed: true,
+        request_id: &entry_id,
+    };
+    let result = run_plugin_tool(host, account, coworker, call).await;
+    let reply = match reply_of(&result) {
+        Ok(reply) => reply,
+        Err(why) => {
+            let error = format!("the return could not be checked before sending: {why}");
+            return Some((502, json!({ "ok": false, "error": error })));
+        }
+    };
+    let status = reply
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(status, "queued" | "sent") {
+        return None;
+    }
+    let values: serde_json::Map<String, Value> = form_mode::card_request(plugin, &reply)
+        .map(|card| {
+            card.fields
+                .into_iter()
+                .map(|f| (f.id, json!(f.value)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let queue_ref = reply.get("queue_ref").and_then(Value::as_str);
+    let fingerprint = reply.get("fingerprint").and_then(Value::as_str);
+    let settle = |entry| settle_submitted(entry, queue_ref, fingerprint, &values);
+    let settled = record(host, (account, coworker), (seq, entry.clone()), settle).await;
+    let entry = settled.unwrap_or_else(|unwritten| unwritten);
+    let error = format!("this return is already {status}; it can only be viewed");
+    Some((409, json!({ "ok": false, "error": error, "entry": entry })))
 }
 
 fn is_submitted(entry: &Value) -> bool {
@@ -496,7 +607,7 @@ fn arguments_for(
 /// again (a queued return may not reopen as a draft), and what the Bot is told on its next turn.
 pub(crate) fn settle_submitted(
     mut entry: Value,
-    queue_ref: &str,
+    queue_ref: Option<&str>,
     fingerprint: Option<&str>,
     values: &serde_json::Map<String, Value>,
 ) -> Value {
@@ -563,6 +674,7 @@ pub(crate) async fn dismiss(
             Ok(row) => row,
             Err(reply) => return reply,
         };
+    let entry = unsaved_or(host, (account, coworker), seq, entry).await;
     if is_submitted(&entry) {
         return (
             409,
@@ -609,7 +721,13 @@ pub(crate) async fn turn_line(
     let lines: Vec<String> = entries
         .iter()
         .filter(|entry| entry.get("threadId").and_then(Value::as_str) == Some(thread_id))
-        .filter_map(form_mode::history_line)
+        .map(|entry| {
+            unsaved()
+                .get(&entry_id_of(entry))
+                .cloned()
+                .unwrap_or_else(|| entry.clone())
+        })
+        .filter_map(|entry| form_mode::history_line(&entry))
         .collect();
     let recent = &lines[lines.len().saturating_sub(TURN_LINE_CARDS)..];
     if recent.is_empty() {
