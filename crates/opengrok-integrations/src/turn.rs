@@ -36,6 +36,9 @@ async fn installed(store: &PgStore, account: &AccountId, bot: &CoworkerId) -> Ve
 pub struct TurnPlugins {
     pub mentioned: Vec<String>,
     pub chosen: BTreeMap<String, BTreeMap<String, String>>,
+    /// Whether the app that sent this turn draws a plugin's form card (`forwardedProps.formMode`,
+    /// #220); `None` when no app sent it (a routine, a run carried on after a card).
+    pub form_mode: Option<bool>,
 }
 
 impl TurnPlugins {

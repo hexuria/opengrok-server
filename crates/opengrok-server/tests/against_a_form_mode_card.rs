@@ -368,6 +368,11 @@ struct Harness {
 }
 
 async fn harness(database_url: &str) -> Harness {
+    harness_with(database_url, true).await
+}
+
+/// `computer: false` hires a Bot with no computer: the server has none to give it.
+async fn harness_with(database_url: &str, computer: bool) -> Harness {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect(database_url)
@@ -391,7 +396,7 @@ async fn harness(database_url: &str) -> Harness {
         door: Arc::new(FormModeModel),
         model: "oag/cheap".to_string(),
         auto_review_model: "oag/cheap".to_string(),
-        computer: Some(Arc::new(IdleBox)),
+        computer: computer.then(|| Arc::new(IdleBox) as Arc<dyn Computer>),
         vault: None,
         connectors: Connectors {
             providers: Arc::new(BTreeMap::new()),
@@ -1067,4 +1072,27 @@ async fn a_return_the_plugin_already_queued_is_not_submitted_again() {
         json!("12,500.00"),
         "{entry}"
     );
+}
+
+/// A plugin's form needs no computer: BIR runs on the person's own machine through its plugin,
+/// so a Bot without one opens, saves and submits the card all the same.
+#[tokio::test]
+async fn a_bot_without_a_computer_opens_and_submits_a_plugin_form() {
+    let database_url = database_or_skip!();
+    let h = harness_with(&database_url, false).await;
+    let (entry_id, _) = h.open_card("boxless").await;
+    let entry = h.entry(&entry_id).await;
+    assert!(entry.get("formResolution").is_none(), "{entry}");
+    let (status, _) = h
+        .act(
+            &entry_id,
+            "save",
+            json!({ "values": { TAX14: "12,500.00" } }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let seen = json!({ "fingerprint": h.bir.fingerprint() });
+    let (status, submitted) = h.act(&entry_id, "submit", seen).await;
+    assert_eq!(status, 200, "{submitted}");
+    assert_eq!(h.bir.calls_to("bir_form_submit").len(), 1);
 }

@@ -1671,6 +1671,7 @@ async fn a_tagged_plugin_with_two_accounts_asks_which_before_the_model_is_asked(
             [("demo".to_string(), ids[1].clone())].into(),
         )]
         .into(),
+        ..Default::default()
     };
     let (store, vault) = (&h.store, h.agui.vault.as_deref());
     let asked = ["demo".to_string()];
@@ -1734,7 +1735,7 @@ async fn a_bot_manages_its_persons_plugins_and_asks_first_where_it_cannot_be_und
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
-        form_mode: false,
+        form_mode: None,
         screen: Default::default(),
     };
     let (desk, context) = (&desk, &context);

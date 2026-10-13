@@ -163,16 +163,56 @@ it and every change saves itself. You will be told when it is submitted or dismi
 pub const FORM_MODE_UNAVAILABLE: &str = "Form mode is not available in this app, so no form \
 was opened. Ask for what you need in chat, or use the plugin's own tools.";
 
+/// Said when no app sent this turn: a routine, or a run carried on after a card was answered.
+pub const FORM_MODE_NOT_LIVE: &str = "No form was opened: a plugin's form opens only on a turn \
+the person sent from the chat, and this one is a routine or a run carried on after a card. Tell \
+the person the form is ready to fill and that they can ask you to open it in the chat.";
+
 /// The answer to a form-mode call (already sanitised), or why it is refused. `drawn` is whether
-/// the client that sent the turn draws form-mode cards.
-pub fn open_answer(arguments: &Value, drawn: bool) -> Result<&'static str, &'static str> {
-    if !drawn {
-        return Err(FORM_MODE_UNAVAILABLE);
+/// the client that sent the turn draws form-mode cards; `None` when no client sent it.
+pub fn open_answer(arguments: &Value, drawn: Option<bool>) -> Result<&'static str, &'static str> {
+    match drawn {
+        Some(true) => {}
+        Some(false) => return Err(FORM_MODE_UNAVAILABLE),
+        None => return Err(FORM_MODE_NOT_LIVE),
     }
     match arguments.get("form").map(FormKey::parse) {
         Some(Ok(_)) => Ok(FORM_OPEN),
         _ => Err(BAD_FORM_KEY),
     }
+}
+
+/// `request_user_form` as a Bot with no computer is offered it: a plugin's form, and nothing a
+/// sign-in card takes, since there is no page to type into.
+#[must_use]
+pub fn boxless_spec() -> Option<(&'static str, Value)> {
+    Some((
+        "Open a plugin's form, such as a BIR return, as a card the person fills in chat. Give \
+         formMode true, the form {form, tin, period} and, when more than one plugin has forms, \
+         plugin. The plugin draws the boxes: send fields as an empty list and no values. It \
+         answers at once: end your turn, and you are told on a later turn whether it was \
+         submitted or dismissed.",
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "formMode": { "type": "boolean", "enum": [true] },
+                "title": { "type": "string" },
+                "fields": { "type": "array", "maxItems": 0 },
+                "form": {
+                    "type": "object",
+                    "description": "form is the form number (0619E), tin 9 to 14 digits with no dashes, period YYYY-MM, YYYY-Qn or YYYY.",
+                    "properties": {
+                        "form": { "type": "string" },
+                        "tin": { "type": "string" },
+                        "period": { "type": "string" }
+                    },
+                    "required": ["form", "tin", "period"]
+                },
+                "plugin": { "type": "string" }
+            },
+            "required": ["formMode", "title", "fields", "form"],
+        }),
+    ))
 }
 
 /// A string, number or bool as text. Objects are not a box's value.

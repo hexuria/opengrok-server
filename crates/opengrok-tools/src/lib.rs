@@ -73,10 +73,11 @@ pub struct ToolContext {
     /// The conversation whose form or handoff holds the screen, when the hold is tied to a run.
     /// Named in the refusal: a turn held by another conversation cannot see why otherwise.
     pub screen_held_in: Option<String>,
-    /// The client that sent this turn draws form-mode cards (`forwardedProps.formMode`, #220).
-    /// Without it a `request_user_form` with `formMode` is refused in words: an app that cannot
-    /// draw the card would show the person nothing while the model is told the form is open.
-    pub form_mode: bool,
+    /// Whether the client that sent this turn draws form-mode cards (`forwardedProps.formMode`,
+    /// #220); `None` when no client sent it (a routine, a run resumed after a card). Without a
+    /// yes a `request_user_form` with `formMode` is refused in words: a card nobody can draw
+    /// would show the person nothing while the model is told the form is open.
+    pub form_mode: Option<bool>,
     /// Which of its computer's screens this Bot uses (#376): its own on a computer it shares, the
     /// one screen on a computer of its own or a group's. One cell for every copy of the context a
     /// turn makes.
@@ -102,7 +103,7 @@ impl ToolContext {
             group_box: None,
             screen_hold: false,
             screen_held_in: None,
-            form_mode: false,
+            form_mode: None,
             screen: Arc::default(),
         }
     }
@@ -792,6 +793,9 @@ pub struct Executor {
     /// offered, and one called anyway is refused in words rather than sent to a box that is not
     /// there.
     boxless: bool,
+    /// On a Bot with no computer: offer `request_user_form` for a plugin's form only (#220),
+    /// which never touches a box. Set when the turn's app draws the card and a plugin has one.
+    form_cards: bool,
 }
 
 /// The box a Bot with no computer is given so its plugin tools can run: every box call is
@@ -985,6 +989,7 @@ impl Executor {
             computer_desk: None,
             switched_off: Vec::new(),
             boxless: false,
+            form_cards: false,
         }
     }
 
@@ -1004,6 +1009,13 @@ impl Executor {
             boxless: true,
             ..Self::with_policy(Arc::new(NoComputer), policy)
         }
+    }
+
+    /// Offer a Bot with no computer `request_user_form` for plugin forms (`form_cards`).
+    #[must_use]
+    pub fn with_form_cards(mut self, offered: bool) -> Self {
+        self.form_cards = offered;
+        self
     }
 
     /// Whether a box stands behind this executor.
@@ -1624,7 +1636,7 @@ impl Executor {
         Self::builtin_tool_names()
             .iter()
             .copied()
-            .filter(move |_| !self.boxless)
+            .filter(move |name| !self.boxless || (self.form_cards && *name == REQUEST_USER_FORM))
             .filter(move |name| self.screen || !SCREEN_TOOLS.contains(name))
             .filter(move |name| {
                 !self.network_off() || !BROWSER_TOOLS.contains(name) || *name == REQUEST_USER_FORM
@@ -1872,8 +1884,12 @@ impl Executor {
         };
         let mut schemas = Vec::new();
         for name in self.offered_builtins() {
+            let spec = match self.boxless {
+                true => user_form::form_mode::boxless_spec(),
+                false => builtin_tool_spec(name),
+            };
             if permitted(name)
-                && let Some((description, mut parameters)) = builtin_tool_spec(name)
+                && let Some((description, mut parameters)) = spec
             {
                 if let Some(group) = &self.group_box_name
                     && let Some(properties) = parameters
@@ -2051,7 +2067,13 @@ impl Executor {
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
         let tool_name = self.internal_tool_name(&call.name);
-        if self.boxless && Self::builtin_tool_names().contains(&tool_name.as_str()) {
+        // A plugin's form is the one built-in a Bot with no computer may use: it never touches a
+        // box. Every other, and a sign-in form, is refused in words.
+        let plugin_form = tool_name == REQUEST_USER_FORM
+            && self.form_cards
+            && user_form::form_mode::is_form_mode_source(&arguments);
+        if self.boxless && Self::builtin_tool_names().contains(&tool_name.as_str()) && !plugin_form
+        {
             return ToolResult::refused(&call.id, NO_COMPUTER);
         }
         // grok-box:local has neither binary (checked 22 Sep 2026). A box shell that names
@@ -2192,10 +2214,11 @@ impl Executor {
         // hand-off cards below: a login card raised for a box that cannot browse would have
         // the person type a password that is then thrown away.
         if self.network_off() && BROWSER_TOOLS.contains(&tool_name.as_str()) {
-            // A collect card never touches the box. A login card on a machine that
-            // cannot browse would take a password and throw it away.
-            let collect =
-                tool_name == REQUEST_USER_FORM && user_form::is_chat_collection(&call.arguments);
+            // A collect card and a plugin's form never touch the box. A login card on a
+            // machine that cannot browse would take a password and throw it away.
+            let collect = tool_name == REQUEST_USER_FORM
+                && (user_form::is_chat_collection(&call.arguments)
+                    || user_form::form_mode::is_form_mode_source(&call.arguments));
             if !collect {
                 return ToolResult::refused(&call.id, NETWORK_OFF);
             }
@@ -2356,6 +2379,12 @@ impl Executor {
             }
         } else {
             let Some(box_id) = context.box_id.as_ref() else {
+                // A plugin's tool is the person's account at a service, not a program on a box
+                // (#359): a Bot with no computer still runs it, and a plugin's form card (#220)
+                // is nothing but such calls. Its gates have all been passed above.
+                if !needs_the_box(&tool_name) {
+                    return self.call_plugin_tool(&call.id, &tool_name, arguments).await;
+                }
                 return ToolResult::refused(
                     &call.id,
                     "this coworker has no computer yet, so nothing can be run",

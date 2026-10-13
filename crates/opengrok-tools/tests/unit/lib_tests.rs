@@ -656,7 +656,7 @@ fn without_a_computer_the_models_box_id_is_removed_not_kept() {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
-        form_mode: false,
+        form_mode: None,
         screen: Default::default(),
     };
     let overwritten = overwrite_identity(&json!({"box_id": "box_elsewhere"}), &context);
@@ -676,7 +676,7 @@ async fn a_coworker_without_a_computer_is_refused_not_crashed() {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
-        form_mode: false,
+        form_mode: None,
         screen: Default::default(),
     };
     let result = executor
@@ -1354,7 +1354,7 @@ fn no_box_context() -> ToolContext {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
-        form_mode: false,
+        form_mode: None,
         screen: Default::default(),
     }
 }
@@ -3459,7 +3459,7 @@ async fn a_form_mode_call_answers_at_once_and_parks_nothing() {
     let executor = allowing(spy.clone());
     let form = json!({"formMode": true, "form": {"form": "0619E", "tin": "123456789000", "period": "2026-09"}});
     let mut drawn = context_with_box("box_mine");
-    drawn.form_mode = true;
+    drawn.form_mode = Some(true);
     drawn.screen_hold = true;
     let open = executor
         .execute(&drawn, &call(REQUEST_USER_FORM, form.clone()))
@@ -3469,15 +3469,28 @@ async fn a_form_mode_call_answers_at_once_and_parks_nothing() {
     let undrawn = executor
         .execute(
             &context_with_box("box_mine"),
-            &call(REQUEST_USER_FORM, form),
+            &call(REQUEST_USER_FORM, form.clone()),
         )
         .await;
+    // No client sent this turn (a routine, a run carried on after a card): said so, not "this
+    // app", which would send the person looking for a setting.
     assert!(!undrawn.ok && !undrawn.awaiting_approval, "{undrawn:?}");
     assert!(
         undrawn
             .content
-            .ends_with(opengrok_forms::form_mode::FORM_MODE_UNAVAILABLE),
+            .ends_with(opengrok_forms::form_mode::FORM_MODE_NOT_LIVE),
         "{undrawn:?}"
+    );
+    let mut app = context_with_box("box_mine");
+    app.form_mode = Some(false);
+    let unable = executor
+        .execute(&app, &call(REQUEST_USER_FORM, form.clone()))
+        .await;
+    assert!(
+        unable
+            .content
+            .ends_with(opengrok_forms::form_mode::FORM_MODE_UNAVAILABLE),
+        "{unable:?}"
     );
     let nameless =
         json!({"formMode": true, "form": {"form": "0619E", "tin": "12-3", "period": "2026"}});
@@ -3735,4 +3748,51 @@ async fn a_tool_whose_arguments_are_not_an_object_is_refused_before_it_runs() {
         .await;
     assert!(listed.ok, "{listed:?}");
     assert_eq!(awake.ran(), 1, "a real object still runs");
+}
+
+/// A plugin's form never touches a box (#220): a Bot with no computer is offered
+/// `request_user_form` for it alone, in a schema with nothing a sign-in takes, and a box whose
+/// network is off still opens one.
+#[tokio::test]
+async fn a_plugin_form_needs_no_computer_and_no_network() {
+    let form = json!({"formMode": true, "title": "0619-E", "fields": [],
+                      "form": {"form": "0619E", "tin": "123456789000", "period": "2026-09"}});
+    let mut drawn = context_with_box("box_mine");
+    drawn.form_mode = Some(true);
+
+    let boxless = Executor::without_a_computer(permissive());
+    assert!(boxless.tool_names().is_empty());
+    let boxless = boxless.with_form_cards(true);
+    assert_eq!(boxless.tool_names(), [REQUEST_USER_FORM]);
+    let (account, coworker) = (
+        AccountId::from_stored("acct_1"),
+        CoworkerId::from_stored("cw_1"),
+    );
+    let schemas = boxless.tool_schemas(&account, &coworker);
+    let schema = schemas[0].to_string();
+    assert!(
+        schema.contains("formMode") && !schema.contains("samePage"),
+        "{schema}"
+    );
+    let open = boxless
+        .execute(&drawn, &call(REQUEST_USER_FORM, form.clone()))
+        .await;
+    assert!(open.ok, "{open:?}");
+    let sign_in = json!({"title": "Log in", "fields": [{"id": "password", "label": "Password", "type": "password"}]});
+    let refused = boxless
+        .execute(&drawn, &call(REQUEST_USER_FORM, sign_in))
+        .await;
+    assert!(!refused.ok && !refused.awaiting_approval, "{refused:?}");
+
+    let spy = Arc::new(SpyComputer::default());
+    let offline = allowing(spy.clone())
+        .with_screen(true)
+        .with_egress_tunnel(true)
+        .with_egress_policy(EgressPolicy::Never);
+    assert!(offline.network_off());
+    let open = offline
+        .execute(&drawn, &call(REQUEST_USER_FORM, form))
+        .await;
+    assert!(open.ok, "{open:?}");
+    assert_eq!(spy.last_box(), None);
 }

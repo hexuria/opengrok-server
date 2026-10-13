@@ -578,15 +578,30 @@ pub(crate) async fn tools_for_turn(
         let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
         let policy = super::form_mode::always_asking(state, account_id, &coworker_id, policy).await;
         let (plugins, off) = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
-        if plugins.tools.is_empty() && plugins.unavailable.is_empty() && off.is_empty() {
+        // A plugin's form needs no computer (#220): offered when the app draws its card and a
+        // plugin the model may reach has one.
+        let form_cards = turn.form_mode == Some(true) && {
+            let reach = (&state.auth.store, &*state.plugins);
+            let on = opengrok_integrations::turn::form_mode_plugins_on;
+            !on(reach, account_id, &coworker_id, &turn.mentioned)
+                .await
+                .is_empty()
+        };
+        if plugins.tools.is_empty()
+            && plugins.unavailable.is_empty()
+            && off.is_empty()
+            && !form_cards
+        {
             return None;
         }
-        let context = opengrok_tools::ToolContext::from_coworker(
+        let mut context = opengrok_tools::ToolContext::from_coworker(
             account_id.clone(),
             coworker_id.clone(),
             &coworker,
         );
+        context.form_mode = turn.form_mode;
         let executor = opengrok_tools::Executor::without_a_computer(policy)
+            .with_form_cards(form_cards)
             .with_plugins(plugins)
             .with_switched_off(off)
             .with_plugin_desk(plugin_desk(state))
@@ -764,6 +779,7 @@ pub(crate) async fn tools_for_turn(
     let held_in = form_hold_thread(state, account_id, &coworker_id).await;
     context.screen_hold = transcript_hold || held_in.is_some();
     context.screen_held_in = held_in;
+    context.form_mode = turn.form_mode;
 
     // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
     let recipes = if screen {
@@ -3255,7 +3271,11 @@ async fn start_claimed_turn(
     // The plugins this message named, kept to those its driving account installed on a Bot it
     // owns; read once, so the tools and the sentence naming them cannot disagree.
     let asked_plugins = mentioned_plugins_from(&input);
+    // Provenance: an app that draws form-mode cards sends `forwardedProps.formMode: true` (#220,
+    // Tier 1); without it no form-mode card is ever minted.
+    let drawn = input.forwarded_props.get("formMode") == Some(&serde_json::json!(true));
     let mut turn_plugins = opengrok_integrations::turn::TurnPlugins {
+        form_mode: Some(drawn),
         chosen: plugin_accounts_from(&input),
         ..Default::default()
     };
@@ -3305,10 +3325,6 @@ async fn start_claimed_turn(
             let gates: (&[String], &[String]) = (&[], &[]);
             let runner =
                 tools_for_turn(&state, account, coworker, gates, patience, &turn_plugins).await;
-            // Provenance: an app that draws form-mode cards sends `forwardedProps.formMode:
-            // true` (#220, Tier 1); without it no form-mode card is ever minted.
-            let drawn = input.forwarded_props.get("formMode") == Some(&serde_json::json!(true));
-            let runner = runner.map(|runner| runner.with_form_mode(drawn));
             match (runner, chosen.clone()) {
                 (Some(runner), Some((recipe, values))) => {
                     Some(runner.with_chosen_recipe(recipe, values))
