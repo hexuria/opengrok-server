@@ -19,10 +19,10 @@
       },
       "lastRun": {
         "runId": "run_0199bb4e-0000-7000-8000-000000000003",
-        "status": "finished",
+        "status": "running",
         "startedAtMs": 1790000001000,
-        "finishedAtMs": 1790000002000,
-        "summary": "Routine Weekly ran: from the mac",
+        "finishedAtMs": null,
+        "summary": "Routine Weekly is running.",
         "cause": "clock",
         "by": null
       },
