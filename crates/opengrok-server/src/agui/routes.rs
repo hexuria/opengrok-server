@@ -3297,6 +3297,10 @@ async fn start_claimed_turn(
             let gates: (&[String], &[String]) = (&[], &[]);
             let runner =
                 tools_for_turn(&state, account, coworker, gates, patience, &turn_plugins).await;
+            // Provenance: an app that draws form-mode cards sends `forwardedProps.formMode:
+            // true` (#220, Tier 1); without it no form-mode card is ever minted.
+            let drawn = input.forwarded_props.get("formMode") == Some(&serde_json::json!(true));
+            let runner = runner.map(|runner| runner.with_form_mode(drawn));
             match (runner, chosen.clone()) {
                 (Some(runner), Some((recipe, values))) => {
                     Some(runner.with_chosen_recipe(recipe, values))
@@ -3534,6 +3538,7 @@ async fn start_claimed_turn(
             gateway,
             coworker_id: journal.coworker_id.clone(),
             account_id: journal.account_id.clone(),
+            thread_id: journal.thread_id.clone(),
             form_hold: Mutex::new(crate::agui::user_form::UserFormSseHold::default()),
         };
         let _ = run_conversation_within(
@@ -5878,6 +5883,7 @@ struct AgUiSink {
     gateway: crate::host_state::HostState,
     coworker_id: Option<CoworkerId>,
     account_id: Option<opengrok_core::id::AccountId>,
+    thread_id: String,
     form_hold: Mutex<crate::agui::user_form::UserFormSseHold>,
 }
 
@@ -5942,6 +5948,40 @@ impl EventSink for AgUiSink {
                     }
                 }
                 if !self.send(event) {
+                    return;
+                }
+                continue;
+            }
+            // A form-mode call answered at once: its card is minted now, from the plugin, and
+            // its held frames go out carrying the card's id, then the card itself.
+            let form_call = self
+                .form_hold
+                .lock()
+                .ok()
+                .and_then(|h| h.form_mode_call(&event));
+            if let (Some((call_id, arguments)), Some(coworker), Some(account)) =
+                (form_call, &self.coworker_id, &self.account_id)
+            {
+                let who = (account, coworker);
+                let thread = self.thread_id.as_str();
+                let entry =
+                    super::form_mode::mint(&self.gateway, who, thread, &call_id, &arguments).await;
+                let entry_id = entry
+                    .as_ref()
+                    .and_then(|e| e.get("id"))
+                    .and_then(|id| id.as_str());
+                let mut out = self.release_form(&call_id, entry_id);
+                if let Some(id) = entry_id {
+                    event
+                        .extra
+                        .insert("entryId".to_string(), serde_json::json!(id));
+                }
+                out.push(event);
+                let frame = entry
+                    .as_ref()
+                    .map(crate::agui::user_form::agui_user_form_frame);
+                out.extend(frame.and_then(|frame| serde_json::from_value(frame).ok()));
+                if !out.into_iter().all(|event| self.send(event)) {
                     return;
                 }
                 continue;

@@ -73,6 +73,10 @@ pub struct ToolContext {
     /// The conversation whose form or handoff holds the screen, when the hold is tied to a run.
     /// Named in the refusal: a turn held by another conversation cannot see why otherwise.
     pub screen_held_in: Option<String>,
+    /// The client that sent this turn draws form-mode cards (`forwardedProps.formMode`, #220).
+    /// Without it a `request_user_form` with `formMode` is refused in words: an app that cannot
+    /// draw the card would show the person nothing while the model is told the form is open.
+    pub form_mode: bool,
     /// Which of its computer's screens this Bot uses (#376): its own on a computer it shares, the
     /// one screen on a computer of its own or a group's. One cell for every copy of the context a
     /// turn makes.
@@ -98,6 +102,7 @@ impl ToolContext {
             group_box: None,
             screen_hold: false,
             screen_held_in: None,
+            form_mode: false,
             screen: Arc::default(),
         }
     }
@@ -2202,6 +2207,15 @@ impl Executor {
         if tool_name == REQUEST_USER_FORM {
             if let Gate::Deny(why) = &gate {
                 return ToolResult::refused(&call.id, why.as_str());
+            }
+            // NOT A PARK. A form-mode card is answered by the person's presses, each of which
+            // runs on its own, so the turn ends at once and the server mints the card from the
+            // plugin's card tool. It is not on the box either, so no screen hold stops it.
+            if user_form::form_mode::is_form_mode_source(&call.arguments) {
+                return match user_form::form_mode::open_answer(&call.arguments, context.form_mode) {
+                    Ok(said) => ToolResult::ok(&call.id, said),
+                    Err(why) => ToolResult::refused(&call.id, why),
+                };
             }
             if context.screen_hold {
                 return ToolResult::refused(

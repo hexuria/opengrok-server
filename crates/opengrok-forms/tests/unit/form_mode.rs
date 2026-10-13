@@ -209,3 +209,14 @@ fn a_card_entry_is_told_from_a_login_card() {
         "formRequest": {"title": "Log in"}}});
     assert!(!is_form_mode_entry(&login));
 }
+
+/// No run waits on a form-mode card and it is not on the box: it never holds the screen, and the
+/// hold sweep, which reads `is_unresolved`, leaves it alone.
+#[test]
+fn a_form_mode_card_holds_no_screen() {
+    let card = serde_json::to_value(card_request("bir", &card_reply()).expect("a card")).unwrap();
+    let entry =
+        json!({"kind": "send-message", "message": {"type": "user-form", "formRequest": card}});
+    assert!(!crate::user_form::is_unresolved(&entry));
+    assert!(!crate::user_form::holds_the_screen(&entry));
+}

@@ -152,6 +152,29 @@ pub fn sanitize_request(source: &Value) -> Value {
     body
 }
 
+/// What a form-mode `request_user_form` answers at once: the turn is to end, and the card is the
+/// person's. The model is told not to fill or save behind the card, which would race the
+/// person's own saves, and that it hears the outcome on a later turn.
+pub const FORM_OPEN: &str = "The form is open in the chat. End your turn now. Do not ask for its \
+boxes in chat and do not call bir_form_fill or bir_form_save while it is open; the person fills \
+it and every change saves itself. You will be told when it is submitted or dismissed.";
+
+/// Said when the app that sent this turn cannot draw a form-mode card.
+pub const FORM_MODE_UNAVAILABLE: &str = "Form mode is not available in this app, so no form \
+was opened. Ask for what you need in chat, or use the plugin's own tools.";
+
+/// The answer to a form-mode call (already sanitised), or why it is refused. `drawn` is whether
+/// the client that sent the turn draws form-mode cards.
+pub fn open_answer(arguments: &Value, drawn: bool) -> Result<&'static str, &'static str> {
+    if !drawn {
+        return Err(FORM_MODE_UNAVAILABLE);
+    }
+    match arguments.get("form").map(FormKey::parse) {
+        Some(Ok(_)) => Ok(FORM_OPEN),
+        _ => Err(BAD_FORM_KEY),
+    }
+}
+
 /// A string, number or bool as text. Objects are not a box's value.
 fn scalar(value: &Value) -> Option<String> {
     match value {

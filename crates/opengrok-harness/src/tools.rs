@@ -63,6 +63,17 @@ impl ToolRunner {
         self
     }
 
+    /// Whether the client that sent this turn draws form-mode cards (`forwardedProps.formMode`).
+    /// Set by the live turn only: a resumed run or a routine has no client to say so, and its
+    /// form-mode call is refused in words rather than shown to nobody.
+    #[must_use]
+    pub fn with_form_mode(mut self, drawn: bool) -> Self {
+        if let Some((_, context)) = self.executor.as_mut() {
+            context.form_mode = drawn;
+        }
+        self
+    }
+
     /// Offer `use_skill` for `offers`, read through `source` — and nothing for none, so the tool
     /// is on offer exactly when `skills_line` lists a skill (`opengrok_tools::skill`).
     #[must_use]

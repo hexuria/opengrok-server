@@ -781,6 +781,7 @@ async fn call_with(
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        form_mode: false,
         screen: Default::default(),
     };
     let call = opengrok_tools::ToolCall {

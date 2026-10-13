@@ -656,6 +656,7 @@ fn without_a_computer_the_models_box_id_is_removed_not_kept() {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        form_mode: false,
         screen: Default::default(),
     };
     let overwritten = overwrite_identity(&json!({"box_id": "box_elsewhere"}), &context);
@@ -675,6 +676,7 @@ async fn a_coworker_without_a_computer_is_refused_not_crashed() {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        form_mode: false,
         screen: Default::default(),
     };
     let result = executor
@@ -1352,6 +1354,7 @@ fn no_box_context() -> ToolContext {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        form_mode: false,
         screen: Default::default(),
     }
 }
@@ -3445,6 +3448,47 @@ async fn request_user_form_awaits_and_does_not_type() {
     assert!(result.image.is_none(), "{result:?}");
     assert_eq!(spy.last_box(), None, "await must not type");
     assert!(!result.content.contains("s3cret"), "{result:?}");
+}
+
+/// A form-mode call parks nothing and touches no box (#220): the turn ends with the card's
+/// promise, and only an app that draws the card gets one. A screen hold does not stop it, since
+/// the form is the plugin's and not on the box.
+#[tokio::test]
+async fn a_form_mode_call_answers_at_once_and_parks_nothing() {
+    let spy = Arc::new(SpyComputer::default());
+    let executor = allowing(spy.clone());
+    let form = json!({"formMode": true, "form": {"form": "0619E", "tin": "123456789000", "period": "2026-09"}});
+    let mut drawn = context_with_box("box_mine");
+    drawn.form_mode = true;
+    drawn.screen_hold = true;
+    let open = executor
+        .execute(&drawn, &call(REQUEST_USER_FORM, form.clone()))
+        .await;
+    assert!(open.ok && !open.awaiting_approval, "{open:?}");
+    assert_eq!(open.content, opengrok_forms::form_mode::FORM_OPEN);
+    let undrawn = executor
+        .execute(
+            &context_with_box("box_mine"),
+            &call(REQUEST_USER_FORM, form),
+        )
+        .await;
+    assert!(!undrawn.ok && !undrawn.awaiting_approval, "{undrawn:?}");
+    assert!(
+        undrawn
+            .content
+            .ends_with(opengrok_forms::form_mode::FORM_MODE_UNAVAILABLE),
+        "{undrawn:?}"
+    );
+    let nameless =
+        json!({"formMode": true, "form": {"form": "0619E", "tin": "12-3", "period": "2026"}});
+    let bad = executor
+        .execute(&drawn, &call(REQUEST_USER_FORM, nameless))
+        .await;
+    assert!(
+        !bad.ok && bad.content.contains("tin is 9 to 14 digits"),
+        "{bad:?}"
+    );
+    assert_eq!(spy.last_box(), None);
 }
 
 #[tokio::test]

@@ -144,6 +144,11 @@ pub async fn submit_user_form(
     if !is_user_form_entry(&entry) {
         return (400, json!({ "error": "that entry is not a user-form" }));
     }
+    // No run waits on a form-mode card, so this verb's resume would answer whichever sign-in is
+    // parked; its presses have their own route.
+    if opengrok_tools::user_form::form_mode::is_form_mode_entry(&entry) {
+        return (409, json!({ "error": FORM_MODE_CARD }));
+    }
     if !is_unresolved(&entry) {
         return heal_or_already(state, account_id, &coworker_id, &entry).await;
     }
@@ -374,6 +379,9 @@ pub async fn dismiss_user_form(
     };
     if !is_user_form_entry(&entry) {
         return (400, json!({ "error": "that entry is not a user-form" }));
+    }
+    if opengrok_tools::user_form::form_mode::is_form_mode_entry(&entry) {
+        return (409, json!({ "error": FORM_MODE_CARD }));
     }
     if !is_unresolved(&entry) {
         // Skip after Open the screen can land as dismissed on the *form* id while a
@@ -931,6 +939,9 @@ fn call_id_of(entry: &Value) -> Option<&str> {
         .and_then(Value::as_str)
         .filter(|id| !id.is_empty())
 }
+
+/// Said when a login card's verb is sent for a form-mode card.
+pub const FORM_MODE_CARD: &str = "form-mode card: use /ag-ui/user-form/action";
 
 /// The wire word NativeChat reads when a saved login is refused.
 pub const SHARED_COMPUTER: &str = "shared-computer";
@@ -1779,6 +1790,30 @@ impl UserFormSseHold {
             }
             _ => Some(event),
         }
+    }
+
+    /// The call and its sanitised arguments when `event` is the result of a held form-mode call
+    /// the executor accepted: the moment its card is to be minted. Its words are the executor's
+    /// own `FORM_OPEN`, so a refusal (a bad identity, an app that cannot draw the card) mints
+    /// nothing.
+    pub(crate) fn form_mode_call(&self, event: &Event) -> Option<(String, Value)> {
+        use opengrok_tools::user_form::form_mode;
+        if event.event_type != EventType::ToolCallResult
+            || event.extra.get("content").and_then(Value::as_str) != Some(form_mode::FORM_OPEN)
+        {
+            return None;
+        }
+        let call_id = Self::tool_call_id(event).filter(|id| self.form_ids.contains(*id))?;
+        let text: String = self
+            .held
+            .iter()
+            .filter(|held| held.event_type == EventType::ToolCallArgs)
+            .filter(|held| Self::tool_call_id(held) == Some(call_id))
+            .filter_map(|held| held.extra.get("delta").and_then(Value::as_str))
+            .collect();
+        let arguments =
+            opengrok_tools::user_form::sanitize_arguments(&serde_json::from_str(&text).ok()?);
+        form_mode::is_form_mode_source(&arguments).then(|| (call_id.to_string(), arguments))
     }
 
     /// Frames for this `toolCallId`, now carrying the gateway `entryId`.

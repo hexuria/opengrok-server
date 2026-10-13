@@ -206,6 +206,40 @@ fn live_sse_holds_stacked_form_tool_calls_until_each_has_a_gateway_entry_id() {
     );
 }
 
+/// A form-mode call accepted by the executor is the moment its card is minted; a refused one,
+/// or a login card's result, is not (#220). The model's smuggled values never reach the mint.
+#[test]
+fn a_held_form_mode_call_is_found_by_its_accepted_result() {
+    use opengrok_tools::user_form::form_mode::{FORM_MODE_UNAVAILABLE, FORM_OPEN};
+    let mut hold = UserFormSseHold::default();
+    assert!(hold.push(form_tool_start("call-fm")).is_none());
+    let args = r#"{"formMode":true,"values":{"k":"1"},"form":{"form":"0619E","tin":"123456789000","period":"2026-09"}}"#;
+    let delta = Event::new(EventType::ToolCallArgs, 2)
+        .with("toolCallId", "call-fm")
+        .with("delta", args);
+    assert!(hold.push(delta).is_none());
+    let result = |content: &str| {
+        Event::new(EventType::ToolCallResult, 3)
+            .with("toolCallId", "call-fm")
+            .with("content", content)
+    };
+    assert!(
+        hold.form_mode_call(&result(FORM_MODE_UNAVAILABLE))
+            .is_none()
+    );
+    let (call, arguments) = hold.form_mode_call(&result(FORM_OPEN)).unwrap();
+    assert_eq!(call, "call-fm");
+    assert!(arguments.get("values").is_none(), "{arguments}");
+    assert_eq!(arguments["form"]["form"], json!("0619E"));
+    // A login card's call is never minted here, whatever its result says.
+    assert!(hold.push(form_tool_start("call-login")).is_none());
+    assert!(hold.push(form_tool_args("call-login")).is_none());
+    let login = Event::new(EventType::ToolCallResult, 3)
+        .with("toolCallId", "call-login")
+        .with("content", FORM_OPEN);
+    assert!(hold.form_mode_call(&login).is_none());
+}
+
 #[test]
 fn shell_tool_calls_pass_through_the_user_form_hold() {
     let mut hold = UserFormSseHold::default();

@@ -485,9 +485,14 @@ pub fn is_user_form_entry(entry: &Value) -> bool {
 }
 
 /// Unresolved iff `formResolution` is absent and `widgetDismissed` is not true — official 0.30.
+///
+/// A FORM-MODE CARD IS NEVER UNRESOLVED IN THIS SENSE. Unresolved means a run is parked on the
+/// card and the box's screen is held for it; a form-mode card parks nothing and is not on the
+/// box. Read as unresolved, it held every screen tool for as long as it was open, and the hold
+/// sweep timed it out after ten minutes and answered whichever sign-in happened to be parked.
 #[must_use]
 pub fn is_unresolved(entry: &Value) -> bool {
-    if !is_user_form_entry(entry) {
+    if !is_user_form_entry(entry) || crate::form_mode::is_form_mode_entry(entry) {
         return false;
     }
     if entry
