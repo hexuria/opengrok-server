@@ -3806,3 +3806,112 @@ async fn a_plugin_form_needs_no_computer_and_no_network() {
     assert!(open.ok, "{open:?}");
     assert_eq!(spy.last_box(), None);
 }
+
+/// An office desk that answers every verb and counts the calls that reached it.
+#[derive(Default)]
+struct CountingDesk {
+    answered: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingDesk {
+    fn reply(&self) -> Result<crate::office_desk::Reply, String> {
+        self.answered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::office_desk::Reply {
+            result: json!({ "files": [] }),
+            customs: Vec::new(),
+            image: None,
+        })
+    }
+
+    fn answered(&self) -> usize {
+        self.answered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl crate::office_desk::OfficeDesk for CountingDesk {
+    async fn answer(
+        &self,
+        _context: &ToolContext,
+        _box_io: &dyn Computer,
+        _box_id: &str,
+        _ask: crate::office_desk::Ask,
+    ) -> Result<crate::office_desk::Reply, String> {
+        self.reply()
+    }
+
+    async fn close(
+        &self,
+        _context: &ToolContext,
+        _document: &str,
+    ) -> Result<crate::office_desk::Reply, String> {
+        self.reply()
+    }
+}
+
+/// A Bot with no computer has no office desk (it is attached only where a box is): its office
+/// tools are not offered, and one called anyway, `office_close` included, is refused in words.
+/// Since #220 a computerless Bot runs a call that does not need the box through its plugins;
+/// an office call must never take that road.
+#[tokio::test]
+async fn a_bot_without_a_computer_is_refused_its_office_tools() {
+    use crate::office_desk::{OFFICE_CLOSE, OFFICE_FILES};
+    let executor = Executor::without_a_computer(permissive()).with_form_cards(true);
+    assert!(
+        executor
+            .tool_names()
+            .iter()
+            .all(|name| !crate::office_desk::is_office_tool(name)),
+        "{:?}",
+        executor.tool_names()
+    );
+    let boxless = ToolContext {
+        box_id: None,
+        ..context_with_box("box_mine")
+    };
+    for (name, arguments) in [
+        (OFFICE_FILES, json!({})),
+        (OFFICE_CLOSE, json!({ "document": "doc_1" })),
+    ] {
+        let result = executor.execute(&boxless, &call(name, arguments)).await;
+        assert!(
+            !result.ok && !result.awaiting_approval,
+            "{name}: {result:?}"
+        );
+        assert!(
+            result
+                .content
+                .contains("office documents are not on offer here"),
+            "{name}: {result:?}"
+        );
+    }
+}
+
+/// An office call on a Bot with a computer passes the auto-review judge like any other tool:
+/// with a judge that blocks, the desk is never reached; with one that allows, it is, once.
+#[tokio::test]
+async fn an_office_call_is_judged_by_auto_review() {
+    use crate::office_desk::OFFICE_FILES;
+    let spy = Arc::new(SpyComputer::default());
+    for (verdict, reached) in [(ReviewVerdict::Block, 0), (ReviewVerdict::Allow, 1)] {
+        let desk = Arc::new(CountingDesk::default());
+        let judge = CountingJudge::new(verdict);
+        let executor = allowing(spy.clone())
+            .with_office_desk(desk.clone())
+            .with_auto_review(blocking_policy(), judge.clone());
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call(OFFICE_FILES, json!({})),
+            )
+            .await;
+        assert_eq!(
+            judge.calls(),
+            1,
+            "{verdict:?}: the judge was asked: {result:?}"
+        );
+        assert_eq!(desk.answered(), reached, "{verdict:?}: {result:?}");
+        assert_eq!(result.ok, reached == 1, "{verdict:?}: {result:?}");
+    }
+}
