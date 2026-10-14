@@ -3,23 +3,20 @@
   "path": "/account/inference-source",
   "status": 200,
   "body": {
-    "kind": "local_proxy",
-    "via": "mac",
-    "baseUrl": "http://127.0.0.1:1447",
-    "localModel": "gpt-5.5",
-    "healthy": true,
-    "hasApiKey": true,
+    "kind": "gateway",
+    "via": "loopback",
+    "baseUrl": null,
+    "localModel": null,
+    "healthy": false,
+    "hasApiKey": false,
     "relay": {
       "connected": false,
       "machineId": null,
       "machineLabel": null,
-      "localModel": "gpt-5.5"
+      "localModel": null
     },
     "newBotDefault": null,
-    "relayEnabled": true,
-    "planFallback": {
-      "model": "oag/cheap",
-      "effort": "high"
-    }
+    "relayEnabled": false,
+    "planFallback": null
   }
 }

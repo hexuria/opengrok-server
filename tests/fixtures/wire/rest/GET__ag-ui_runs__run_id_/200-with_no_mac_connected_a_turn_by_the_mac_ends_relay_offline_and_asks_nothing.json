@@ -7,7 +7,7 @@
     "threadId": "thr-0199bb4e000070008000000000000002",
     "status": "failed",
     "startedAtMs": 1790000000000,
-    "failure": "Your Mac isn't connected, so your plan can't answer this turn. Connect it, or switch this turn to the gateway.",
+    "failure": "Your computer isn't connected, so your plan can't answer this turn. Connect it, or switch this turn to the gateway.",
     "finishReason": null,
     "pending": null,
     "events": [
@@ -83,7 +83,7 @@
         "code": "relay_offline",
         "type": "RUN_ERROR",
         "runId": "0199bb4e-0000-7000-8000-000000000001",
-        "message": "Your Mac isn't connected, so your plan can't answer this turn. Connect it, or switch this turn to the gateway.",
+        "message": "Your computer isn't connected, so your plan can't answer this turn. Connect it, or switch this turn to the gateway.",
         "threadId": "thr-0199bb4e000070008000000000000002",
         "timestamp": 100
       }

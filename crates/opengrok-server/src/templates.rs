@@ -1,7 +1,9 @@
 //! Coworker templates (`docs/plan-spend-policy.md` §4): a coworker type the org admin writes
 //! once — model pin, tool ceiling, what needs a human yes, points limits — that members hire
 //! from. Applied at hire by COPY: the coworker gets the template's grant and its own
-//! `points_limit` row, and remembers the template id. Nothing links them after that.
+//! `points_limit` row, and remembers the template id. Nothing links them after that — a
+//! template edited later does not reach coworkers hired from it, so an admin's edit cannot
+//! undo switches a coworker's owner made (#284's question, answered: the copy is intended).
 //!
 //! A template names only tools this server implements, and only asks approval for tools inside
 //! its own ceiling — the same rule the policy layer enforces at run time, refused here at the

@@ -1,0 +1,8 @@
+{
+  "method": "PUT",
+  "path": "/account/inference-source",
+  "status": 400,
+  "body": {
+    "error": "relayEnabled must be true or false"
+  }
+}

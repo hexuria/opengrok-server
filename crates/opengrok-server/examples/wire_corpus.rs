@@ -413,6 +413,61 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "a_person_writes_an_ask_first_list_and_reads_it_back_stored_and_resolved",
         "/auto-review/effective",
     ),
+    // #284: the records NativeChat's own tests `include_str!` by name. Each is one record of a
+    // shape other tests can share, so without a pin a re-record could keep a neighbour's under
+    // a different name and the client's vendored path would go missing. Each test makes one
+    // call of each kind on the route it is kept for.
+    (
+        "a_turn_skips_a_computer_switched_off_while_another_serves",
+        "/account/inference-source",
+    ),
+    (
+        "the_relay_switch_moves_no_way_and_a_fallback_is_kept_until_cleared",
+        "/account/inference-source",
+    ),
+    (
+        "a_chat_turns_card_is_placed_by_its_coworker",
+        "/ag-ui/approvals",
+    ),
+    (
+        "a_healthy_local_vm_does_not_wear_another_scopes_failure",
+        "/coworkers/{coworker_id}/computer",
+    ),
+    (
+        "a_hosted_hire_whose_ascii_create_fails_records_why_and_makes_no_box",
+        "/coworkers/{coworker_id}/computer",
+    ),
+    (
+        "a_self_hosted_takeover_keeps_the_fallback_and_says_so",
+        "/coworkers/{coworker_id}/computer",
+    ),
+    (
+        "a_second_pasted_account_is_added_beside_the_first_and_each_bot_uses_its_own",
+        "/plugins/installations",
+    ),
+    (
+        "a_plan_bots_routine_run_by_a_bot_keeps_its_plans_rules",
+        "/schedules/{id}/runs",
+    ),
+    (
+        "a_plan_bots_routine_is_skipped_while_the_relay_is_off_with_no_fallback",
+        "/schedules/{id}/run",
+    ),
+    (
+        "a_bot_on_its_own_plan_answers_on_the_fallback_while_the_relay_is_off",
+        "/account/inference-source",
+    ),
+    (
+        "a_bot_on_its_own_plan_is_skipped_while_the_relay_is_off_with_no_fallback",
+        "/account/inference-source",
+    ),
+    // The client's `a_caller_that_prefers_not_to_wait_gets_the_run_id_at_once` name went with the
+    // test's rename; this is its record under the test's own name. NativeChat's path follows on
+    // its next vendor.
+    (
+        "a_recipe_run_returns_its_id_before_the_box_finishes_by_default",
+        "/recipes/{id}",
+    ),
 ];
 
 const REDACTED: &str = "«redacted»";
