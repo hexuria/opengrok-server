@@ -242,8 +242,11 @@ pub(crate) async fn mint(
             let mut failed = form_mode::sanitize_request(arguments);
             failed["fields"] = json!([]);
             failed["notes"] = json!([format!("The form could not be opened: {why}")]);
-            if let Some(plugin) = resolved {
-                failed["plugin"] = json!(plugin);
+            // Only a plugin this turn could reach: the model's own name for one switched off
+            // would otherwise ride the card, and its Try again (a press, not narrowed) open it.
+            match resolved {
+                Some(plugin) => failed["plugin"] = json!(plugin),
+                None => _ = failed.as_object_mut().map(|card| card.remove("plugin")),
             }
             entry["message"]["formRequest"] = failed;
             entry["formResolution"] = json!("fill_failed");

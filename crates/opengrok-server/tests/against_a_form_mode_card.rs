@@ -267,6 +267,12 @@ impl ModelDoor for FormModeModel {
                 "bir_bir-mcp_bir_form_submit",
                 json!({ "form": form_key(), "fingerprint": "sha256:draft-1" }),
             )
+        } else if asked.contains("bir's 0619") {
+            call(
+                "request_user_form",
+                json!({ "formMode": true, "title": "BIR 0619-E", "form": form_key(),
+                        "plugin": "bir" }),
+            )
         } else if asked.contains("0619") {
             call(
                 "request_user_form",
@@ -1047,6 +1053,26 @@ async fn a_switched_off_plugin_opens_no_card_unless_the_message_tags_it() {
     let (entry_id, _) = h.open_card("off").await;
     let entry = h.entry(&entry_id).await;
     assert_eq!(entry["formResolution"], json!("fill_failed"), "{entry}");
+    assert!(h.bir.calls_to("bir_form_card").is_empty());
+
+    // Named by the model, a switched-off plugin is still not reached, and the failed card does
+    // not carry the name: its Try again, a person's press, must not open it either.
+    let frames = h
+        .turn("off-named", "open bir's 0619-E for September", true)
+        .await;
+    let card = frames
+        .iter()
+        .find(|frame| frame["name"] == "user-form")
+        .unwrap_or_else(|| panic!("no card: {frames:#?}"));
+    let named = card["entryId"].as_str().expect("id").to_string();
+    let entry = h.entry(&named).await;
+    assert_eq!(entry["formResolution"], json!("fill_failed"), "{entry}");
+    assert!(
+        entry["message"]["formRequest"].get("plugin").is_none(),
+        "{entry}"
+    );
+    let (status, retried) = h.act(&named, "refresh", json!({})).await;
+    assert_eq!(status, 409, "{retried}");
     assert!(h.bir.calls_to("bir_form_card").is_empty());
 
     let tagged = json!({ "formMode": true, "mentionedPlugins": ["bir"] });
