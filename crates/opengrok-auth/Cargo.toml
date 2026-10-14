@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+http.workspace = true
 opengrok-core = { path = "../opengrok-core" }
 jsonwebtoken.workspace = true
 rand.workspace = true

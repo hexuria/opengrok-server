@@ -5,7 +5,6 @@
 
 pub mod bot_keys;
 pub mod budget;
-pub mod cookies;
 pub mod identity;
 pub mod oauth_mcp;
 pub mod pages;
@@ -14,6 +13,7 @@ pub mod password_reset;
 pub mod refresh_grace;
 pub mod routes;
 pub use opengrok_auth as token;
+pub use opengrok_auth::cookies;
 pub use opengrok_auth::resend;
 
 pub use routes::{AuthState, router};
