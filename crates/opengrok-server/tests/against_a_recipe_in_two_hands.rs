@@ -290,6 +290,11 @@ impl Harness {
             _ => panic!("no such method in this harness: {method}"),
         }
         .header("authorization", format!("Bearer {}", who.token));
+        let request = if method == "POST" && path.ends_with("/run") {
+            request.header("prefer", "wait")
+        } else {
+            request
+        };
         let request = match body {
             Some(body) => request.json(&body),
             None => request,
@@ -603,7 +608,7 @@ async fn a_run_whose_caller_hung_up_still_lands_in_history_with_its_pictures() {
 }
 
 #[tokio::test]
-async fn a_caller_that_prefers_not_to_wait_gets_the_run_id_at_once() {
+async fn a_recipe_run_returns_its_id_before_the_box_finishes_by_default() {
     let database_url = database_or_skip!();
     let h = gated(&database_url).await;
     let owner = h.person().await;
@@ -615,7 +620,6 @@ async fn a_caller_that_prefers_not_to_wait_gets_the_run_id_at_once() {
         h.client
             .post(format!("{}/recipes/{id}/run", h.base))
             .header("authorization", format!("Bearer {}", owner.token))
-            .header("prefer", "respond-async")
             .json(&json!({ "coworkerId": bot }))
             .send(),
     )

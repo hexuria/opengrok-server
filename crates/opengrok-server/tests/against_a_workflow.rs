@@ -248,14 +248,16 @@ impl Harness {
     }
 
     async fn post(&self, path: &str, body: Value) -> (u16, Value) {
-        let res = self
+        let request = self
             .client
             .post(format!("{}{path}", self.base))
-            .header("authorization", format!("Bearer {}", self.token()))
-            .json(&body)
-            .send()
-            .await
-            .expect("post");
+            .header("authorization", format!("Bearer {}", self.token()));
+        let request = if path.ends_with("/run") {
+            request.header("prefer", "wait")
+        } else {
+            request
+        };
+        let res = request.json(&body).send().await.expect("post");
         let status = res.status().as_u16();
         let text = res.text().await.expect("body");
         (
@@ -536,17 +538,41 @@ async fn a_whole_walk_goes_through_the_route_and_comes_back_as_a_run_anybody_can
 
     // THE SWITCH: run it deterministically on purpose. No Jev is configured here either, and the
     // two are told apart in the receipt by the sentence, not by the outcome.
-    let (status, ran) = h
-        .post(
-            &format!("/workflows/{id}/run"),
-            json!({ "coworkerId": bot, "values": { "term": "kabisado" }, "jev": false }),
-        )
+    let response = h
+        .client
+        .post(format!("{}/workflows/{id}/run", h.base))
+        .header("authorization", format!("Bearer {}", h.token()))
+        .json(&json!({
+            "coworkerId": bot,
+            "values": { "term": "kabisado" },
+            "jev": false,
+        }))
+        .send()
         .await;
-    assert_eq!(status, 200, "{ran}");
-    // The reply says WHICH workflow, not only which shape of body it was written in.
-    assert_eq!(ran["workflow"], id.as_str());
+    let response = response.expect("send workflow run");
+    assert_eq!(response.status().as_u16(), 202);
+    let accepted: Value = response.json().await.expect("accepted workflow run");
+    assert_eq!(accepted["workflow"], id.as_str());
+    assert!(accepted["runId"].as_str().is_some());
+    assert_eq!(accepted["state"], "running");
+
+    let runs = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let runs = h.store.recipe_runs(&id, 10).await.expect("runs");
+            if runs
+                .first()
+                .is_some_and(|run| run.receipt["outcome"] == "done")
+            {
+                return runs;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("workflow finished");
+    let ran = &runs[0].receipt;
     assert_eq!(ran["shape"], 1);
-    assert_eq!(ran["ok"], true);
+    assert!(runs[0].ok);
     assert_eq!(ran["ending"], "stopped");
     assert_eq!(ran["outcome"], "done");
     assert_eq!(ran["say"], "searched once");
@@ -589,7 +615,6 @@ async fn a_whole_walk_goes_through_the_route_and_comes_back_as_a_run_anybody_can
     );
 
     // The walk is a run of the workflow row; each recipe it played is a run of its own row.
-    let runs = h.store.recipe_runs(&id, 10).await.expect("runs");
     assert_eq!(runs.len(), 1);
     assert!(runs[0].ok);
     assert!(runs[0].stopped_at.is_none());
