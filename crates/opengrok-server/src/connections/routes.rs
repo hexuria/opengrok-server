@@ -655,7 +655,7 @@ pub async fn disconnect(
 }
 
 /// Disconnect commits its event before deleting secrets. This check therefore sees it, or the delete
-/// follows these writes.
+/// follows these writes; a failed read is not evidence of a disconnect.
 pub async fn store_refreshed(
     store: &opengrok_store::PgStore,
     id: &str,
@@ -677,8 +677,8 @@ pub async fn store_refreshed(
     let connected = match store.load_connection(id).await {
         Ok((connection, _)) => connection.connected && !connection.disconnected,
         Err(error) => {
-            tracing::error!(%error, connection = id, "cannot verify a refreshed connection");
-            false
+            tracing::warn!(%error, connection = id, "could not verify connection after refresh; keeping credentials");
+            return true;
         }
     };
     if connected {
