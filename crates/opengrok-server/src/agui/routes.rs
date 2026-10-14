@@ -1871,18 +1871,23 @@ pub async fn hire(
         Ok(events) => events,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
-    // The template's standing role, in the SAME append as the hire: a second write could fail
-    // after the coworker exists, leaving a coworker the template promised a role and did not get.
-    if let Some(role) = template.as_ref().and_then(|t| t.role.clone())
-        && let Ok(more) = coworker.decide(CoworkerCommand::SetRole {
-            role: Some(role),
-            at_ms,
-        })
-    {
-        events.extend(more);
-    }
     for event in &events {
         coworker.apply(event);
+    }
+    // The template's standing role, in the SAME append as the hire: a second write could fail
+    // after the coworker exists, leaving a coworker the template promised a role and did not get.
+    if let Some(role) = template.as_ref().and_then(|t| t.role.clone()) {
+        let more = match coworker.decide(CoworkerCommand::SetRole {
+            role: Some(role),
+            at_ms,
+        }) {
+            Ok(more) => more,
+            Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        };
+        for event in &more {
+            coworker.apply(event);
+        }
+        events.extend(more);
     }
     // Born on the whole default when it gave the pin: its door and effort, in this same append.
     if let Some(default) = &default {

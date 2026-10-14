@@ -497,6 +497,7 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         "name": "Researcher",
         "description": "Reads and reports; never writes.",
         "model": "oag/cheap",
+        "role": "Checks every report before sharing it.",
         "tools": ["shell", "read_file"],
         "needsApproval": ["shell"],
         "points": { "monthPoints": 5_000_000 },
@@ -590,7 +591,7 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         "nothing failed to land: {hired}"
     );
     // The reply is the roster row the member will list, built from the profile the template
-    // wrote: its blank title reads as none, not as "".
+    // wrote, including the template's standing role.
     let roster: Value = h
         .client
         .get(format!("{}/coworkers", h.base))
@@ -610,7 +611,11 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
     reply.remove("computerError");
     reply.remove("templateNote");
     assert_eq!(Value::Object(reply), row, "{hired} vs {row}");
-    assert!(hired["title"].is_null(), "{hired}");
+    assert_eq!(
+        hired["role"],
+        json!("Checks every report before sharing it."),
+        "{hired}"
+    );
     let coworker = CoworkerId::from_stored(hired["id"].as_str().expect("id").to_string());
     let policy = store
         .policy_for(&member_id, &coworker)
@@ -709,6 +714,52 @@ async fn a_member_hires_from_the_admins_template_and_gets_what_it_says() {
         limits.limit.month_points,
         Some(5_000_000),
         "the copy outlives the template"
+    );
+}
+
+#[tokio::test]
+async fn a_template_with_an_invalid_role_refuses_the_hire_in_words() {
+    let database_url = database_or_skip!();
+    let tag = now_ms().to_string();
+    let domain = format!("invalid-role-{tag}.test");
+    let store = store_from(&database_url).await;
+    let (org_id, admin_email) = seed_org(&store, &domain, "adminpass1").await;
+    let member_email = format!("member-{tag}@{domain}");
+    let member_id = seed_account(&store, &member_email, "password1", Some(org_id.as_str())).await;
+    let h = harness(&database_url, &admin_email).await;
+    let template_id = format!("tpl-{}", uuid::Uuid::now_v7());
+    store
+        .put_template(&opengrok_store::CoworkerTemplate {
+            id: template_id.clone(),
+            org_id: org_id.to_string(),
+            name: "Malformed".to_string(),
+            description: String::new(),
+            model: Some("oag/cheap".to_string()),
+            tool_ceiling: opengrok_policy::ToolSet::None,
+            needs_approval: opengrok_policy::ToolSet::None,
+            points: opengrok_store::PointsLimit::default(),
+            role: Some("x".repeat(opengrok_core::coworker::MAX_ROLE_CHARS + 1)),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+        })
+        .await
+        .expect("persist malformed template");
+    let member = h.access_token(&member_id, &member_email);
+
+    let response = h
+        .client
+        .post(format!("{}/coworkers", h.base))
+        .header("Authorization", format!("Bearer {member}"))
+        .json(&json!({ "name": "Ada", "templateId": template_id }))
+        .send()
+        .await
+        .expect("hire");
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body.contains("a role may be at most"),
+        "the refusal explains the invalid role: {body}"
     );
 }
 
