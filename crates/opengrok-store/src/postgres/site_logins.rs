@@ -298,19 +298,6 @@ impl PgStore {
             passkey_key,
         }))
     }
-
-    /// Open a connection's credential. The one place a token is ever in plaintext.
-    pub async fn open_credential(&self, vault: &Vault, id: &str) -> StoreResult<Option<String>> {
-        let row = sqlx::query("select nonce, ciphertext, key_id from secret_store where id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(|row| {
-            crate::vault_rows::sealed_of(&row)
-                .and_then(|sealed| vault.open(id, &sealed).map_err(Into::into))
-        })
-        .transpose()
-    }
 }
 
 /// One saved site login as the settings list shows it. Never a secret.

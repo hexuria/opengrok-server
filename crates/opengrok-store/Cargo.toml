@@ -17,8 +17,6 @@ opengrok-events = { path = "../opengrok-events" }
 sqlx.workspace = true
 opengrok-testdb = { path = "../opengrok-testdb" }
 sha2.workspace = true
-base64.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true

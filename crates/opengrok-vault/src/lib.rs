@@ -220,7 +220,5 @@ impl Vault {
 }
 
 // Calls only the tests make, kept beside them like `tests/unit/*`: nothing the server serves asks.
-
-// Calls only the tests make, kept beside them like `tests/unit/*`: nothing the server serves asks.
 #[path = "../tests/support/vault_seam.rs"]
 mod vault_seam;
