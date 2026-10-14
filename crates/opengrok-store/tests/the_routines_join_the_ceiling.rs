@@ -5,7 +5,9 @@
 //! from before #314 too gains `message_bot` and the routines on the same boot, each pass under
 //! its own marker, so neither pass's record stands in for the other's. `run_routine` (#337) is the
 //! row's fifth tool: a Bot whose row is on gains it ONCE, on its own pass, and one whose row its
-//! owner switched off does not.
+//! owner switched off does not. A pass that reaches a CHOSEN ceiling bumps `version`, so a write
+//! made against the older set is refused rather than undoing the gain; an unchosen ceiling only
+//! follows the built-ins, and the same pass moves no version on it (#284).
 //!
 //! Its own test binary, so its own database: it forgets the pass and boots again, which touches
 //! every ceiling in the database, and nothing else may be running beside it.
@@ -121,13 +123,21 @@ async fn every_bot_from_before_gains_the_routines_once_and_one_switched_off_stay
     );
     for (bot, tools) in [
         (&hired, ToolSet::only(BEFORE)),
-        (&chosen, ToolSet::only(["shell"])),
+        (&chosen, ToolSet::only(["shell", "read_file"])),
         (&everything, ToolSet::All),
         (&nothing, ToolSet::None),
     ] {
         let granted = store.grant_access(&account, bot, &tools, &tools, &ToolSet::None, 1);
         granted.await.expect("grant");
     }
+    // `chosen`'s own ceiling: its owner narrowed it once, as the ceiling route does, so a pass
+    // that reaches it bumps the version a screen writes against — while a ceiling nobody chose
+    // only follows the built-ins, and the same pass leaves its version alone (#284).
+    let picked = store
+        .set_ceiling(&account, &chosen, &ToolSet::only(["shell"]), None, 1)
+        .await
+        .expect("narrow it")
+        .expect("a version");
     let (_, version) = stored(&store, &hired).await;
 
     boot(&store, &[BOTS, PASS, RUN]).await;
@@ -136,19 +146,20 @@ async fn every_bot_from_before_gains_the_routines_once_and_one_switched_off_stay
     }
 
     // Every list gains them, chosen or not, ceiling and profile alike, sorted as the store writes
-    // a set; the ceiling's version moves once for each pass, so a screen that read it before is
-    // refused. The Bots' row is the ceiling's alone, as #314 wrote it: it needed no profile.
+    // a set. A CHOSEN ceiling's version moves once for each pass, so a screen that read it before
+    // is refused rather than undoing the gain; an UNCHOSEN one's stays — nothing its owner picked
+    // changed, and bumping it would refuse a pane's write over nothing (#284). The Bots' row is
+    // the ceiling's alone, as #314 wrote it: it needed no profile.
     let (tools, moved) = stored(&store, &hired).await;
     assert_eq!(tools, json(&with_both(&BEFORE)));
-    assert_eq!(moved, version + 3);
+    assert_eq!(moved, version);
     assert_eq!(
         profile(&store, &account, &hired).await,
         with_routines(&BEFORE)
     );
-    assert_eq!(
-        stored(&store, &chosen).await.0,
-        json(&with_both(&["shell"]))
-    );
+    let (set, cv) = stored(&store, &chosen).await;
+    assert_eq!(set, json(&with_both(&["shell"])));
+    assert_eq!(cv, picked + 3);
     assert_eq!(
         profile(&store, &account, &chosen).await,
         with_routines(&["shell"])
@@ -168,14 +179,14 @@ async fn every_bot_from_before_gains_the_routines_once_and_one_switched_off_stay
     }
 
     // A Bot from #316's time, its row on with the four, gains `run_routine` on #337's pass alone,
-    // in its ceiling and its owner's profile.
+    // in its ceiling and its owner's profile; unchosen as it is, the gain moves no version (#284).
     let sixteen = coworker("sixteen");
     let four = ToolSet::only(BEFORE.into_iter().chain(ROUTINES));
     let granted = store.grant_access(&account, &sixteen, &four, &four, &ToolSet::None, 3);
     granted.await.expect("grant");
     let (_, before_run) = stored(&store, &sixteen).await;
     boot(&store, &[RUN]).await;
-    let ran = (json(&with_routines(&BEFORE)), before_run + 1);
+    let ran = (json(&with_routines(&BEFORE)), before_run);
     assert_eq!(stored(&store, &sixteen).await, ran);
     let profiled = profile(&store, &account, &sixteen).await;
     assert_eq!(profiled, with_routines(&BEFORE));

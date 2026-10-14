@@ -6,7 +6,7 @@
     "v": 1,
     "id": "pum_0199bb4e-0000-7000-8000-000000000001",
     "heldFor": "relay_offline",
-    "message": "Your Mac isn't connected, so this message stays queued and goes when it reconnects.",
+    "message": "Your computer isn't connected, so this message stays queued and goes when it reconnects.",
     "event": {
       "type": "CUSTOM",
       "timestamp": 100,
