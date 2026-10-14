@@ -30,7 +30,7 @@ pub mod replica;
 pub mod skills;
 pub mod spend;
 pub mod templates;
-pub mod vault;
+pub use opengrok_vault as vault;
 pub mod vault_rows;
 
 pub use autonomy::{DueSchedule, FiredBy, HookRow, LogEvent};
@@ -56,6 +56,15 @@ pub use spend::SpendLimit;
 pub use templates::CoworkerTemplate;
 pub use vault::{Sealed, Vault};
 pub use vault_rows::{ResealReport, VaultCheck};
+
+impl From<opengrok_vault::VaultError> for StoreError {
+    fn from(error: opengrok_vault::VaultError) -> Self {
+        match error {
+            opengrok_vault::VaultError::Corrupt(why) => StoreError::Corrupt(why),
+            opengrok_vault::VaultError::Unopenable(why) => StoreError::Unopenable(why),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

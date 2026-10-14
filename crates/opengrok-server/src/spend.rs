@@ -163,7 +163,7 @@ pub async fn ensure_key_for(
     let id = secret_id(coworker_id, account_id);
     let stored = match vault.seal(&id, &minted.key) {
         Ok(sealed) => store.put_secret(&id, &sealed, at_ms).await,
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     };
     if let Err(error) = stored {
         // A key we cannot keep is a key nobody can use: revoke it rather than leave a live
