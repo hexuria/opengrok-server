@@ -29,9 +29,6 @@ Each doc is long because the detail is the point. These four are the ones that c
 - **open-connector's OAuth is open, not paywalled** — an earlier audit had this backwards, and
   believing it would have bought a hosted tier we do not need (`connectors-open-connector.md`).
 
-The removed client's per-version protocol survey (0.18 to 0.30) is archived as
-[`../archive/client-versions-0.18-0.30.md`](../archive/client-versions-0.18-0.30.md).
-
 ## Keeping them honest
 
 A reference doc that has drifted is worse than none, because it is trusted. If you find a claim that

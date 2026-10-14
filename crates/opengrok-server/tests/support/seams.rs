@@ -138,13 +138,15 @@ impl TxtLookup for StaticDns {
     }
 }
 
-/// Every port the screen proxy remembers, made due its place check now, as if `PLACE_FOR` had
-/// passed: what a test does instead of waiting it out.
-pub fn screen_tickets_due() {
+/// The ports the screen proxy remembers for `box_id`, made due its place check now, as if
+/// `PLACE_FOR` had passed: what a test does instead of waiting it out.
+pub fn screen_tickets_due(box_id: &str) {
     let long_ago = std::time::Duration::from_secs(60 * 60);
     if let Ok(mut known) = crate::agui::screen_proxy::UPSTREAMS.lock() {
         for upstream in known.values_mut() {
-            upstream.3 = upstream.3.checked_sub(long_ago).unwrap_or(upstream.3);
+            if upstream.0.as_str() == box_id {
+                upstream.3 = upstream.3.checked_sub(long_ago).unwrap_or(upstream.3);
+            }
         }
     }
 }
