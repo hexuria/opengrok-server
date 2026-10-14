@@ -77,7 +77,7 @@ async fn relay_requests(State(host): State<HostState>, headers: HeaderMap) -> An
     let held = crate::agui::pending::drain_held(host.clone(), AccountId::from_stored(account));
     tokio::spawn(held);
     let frames = frames.map(|frame| Ok::<_, Infallible>(Event::default().data(frame)));
-    Ok(Sse::new(frames).into_response())
+    Ok(Sse::new(crate::shutdown::until_shutdown(frames)).into_response())
 }
 
 /// `POST /inference-relay/responses/{request_id}` — the answer to one frame, from the machine it

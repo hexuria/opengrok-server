@@ -2770,6 +2770,7 @@ dependencies = [
  "opengrok-server",
  "opengrok-store",
  "rand 0.10.2",
+ "reqwest 0.13.4",
  "rustls 0.23.45",
  "serde_json",
  "sqlx",
@@ -2788,11 +2789,13 @@ dependencies = [
  "jsonwebtoken",
  "opengrok-core",
  "rand 0.10.2",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

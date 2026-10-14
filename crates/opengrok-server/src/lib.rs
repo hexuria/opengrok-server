@@ -54,6 +54,7 @@ pub mod recovery;
 // Test seams, kept beside the tests like `tests/unit/*`: every caller is a test.
 #[path = "../tests/support/seams.rs"]
 mod seams;
+pub mod shutdown;
 pub mod skills;
 pub mod spend;
 pub(crate) mod tape_lesson;
