@@ -422,10 +422,6 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "/account/inference-source",
     ),
     (
-        "the_relay_switch_moves_no_way_and_a_fallback_is_kept_until_cleared",
-        "/account/inference-source",
-    ),
-    (
         "a_chat_turns_card_is_placed_by_its_coworker",
         "/ag-ui/approvals",
     ),
@@ -469,6 +465,17 @@ const ALSO_KEEP: &[(&str, &str)] = &[
         "/recipes/{id}",
     ),
 ];
+
+/// Like `ALSO_KEEP`, but the LAST record of each status the pinned test makes on the route is the
+/// one kept, where `ALSO_KEEP` keeps the first. A pin names what NativeChat `include_str!`s, and
+/// the client's fixtures are the state a test ends on: the relay-switch test reads
+/// `/account/inference-source` before AND after the switch, so its first read is a baseline the
+/// client's card checks would fail against (#284's review). Pin here only the tests that read a
+/// route more than once at a status; the rest stay first-of-status.
+const KEEP_LAST: &[(&str, &str)] = &[(
+    "the_relay_switch_moves_no_way_and_a_fallback_is_kept_until_cleared",
+    "/account/inference-source",
+)];
 
 const REDACTED: &str = "«redacted»";
 
@@ -719,9 +726,15 @@ fn build(record_dir: &Path, out: &Path, sha: &str) {
             });
         }
         let pinned = record.status.is_some()
-            && ALSO_KEEP
+            && (ALSO_KEEP
                 .iter()
-                .any(|(test, route)| record.test == *test && record.route == *route);
+                .any(|(test, route)| record.test == *test && record.route == *route)
+                || KEEP_LAST
+                    .iter()
+                    .any(|(test, route)| record.test == *test && record.route == *route));
+        let last = KEEP_LAST
+            .iter()
+            .any(|(test, route)| record.test == *test && record.route == *route);
         let key = if pinned {
             (
                 record.dir.clone(),
@@ -731,9 +744,10 @@ fn build(record_dir: &Path, out: &Path, sha: &str) {
         } else {
             (record.dir.clone(), record.status, shape(&content))
         };
-        let keep = chosen
-            .get(&key)
-            .is_none_or(|kept| (&record.test, &record.binary) < (&kept.test, &kept.binary));
+        let keep = last
+            || chosen
+                .get(&key)
+                .is_none_or(|kept| (&record.test, &record.binary) < (&kept.test, &kept.binary));
         if keep {
             chosen.insert(key, Record { content, ..record });
         }
