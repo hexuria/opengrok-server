@@ -237,6 +237,16 @@ struct FormModeModel;
 #[async_trait]
 impl ModelDoor for FormModeModel {
     async fn stream(&self, request: ModelRequest) -> Result<DeltaStream, ModelError> {
+        // The auto-review judge, when an account has it on, blocks everything: what it is asked
+        // about must never run.
+        if request
+            .system
+            .as_deref()
+            .is_some_and(|system| system.starts_with(opengrok_harness::JUDGE_MARKER))
+        {
+            let block = vec![Ok(ModelDelta::Text("block".to_string()))];
+            return Ok(Box::pin(stream::iter(block)));
+        }
         let last = request.messages.last();
         let asked = request
             .messages
@@ -247,6 +257,11 @@ impl ModelDoor for FormModeModel {
             .unwrap_or_default();
         let script = if last.is_some_and(|message| message.role == "tool") {
             vec![ModelDelta::Text("The form is open.".to_string())]
+        } else if asked.contains("preview it yourself") {
+            call(
+                "bir_bir-mcp_bir_form_preview",
+                json!({ "form": form_key(), "inline": true }),
+            )
         } else if asked.contains("submit it yourself") {
             call(
                 "bir_bir-mcp_bir_form_submit",
@@ -1126,4 +1141,37 @@ async fn a_card_that_could_not_open_opens_on_refresh() {
         entry["message"]["formRequest"]["fields"][1]["id"],
         json!(TAX14)
     );
+}
+
+/// A Bot with no computer is judged like one with a computer: with auto-review on and a judge
+/// that blocks, neither its own plugin call nor its card's mint reaches the plugin.
+#[tokio::test]
+async fn auto_review_judges_a_bot_without_a_computer() {
+    let database_url = database_or_skip!();
+    let h = harness_with(&database_url, false).await;
+    h.store
+        .set_auto_review_policy(
+            h.account.as_str(),
+            "global",
+            "",
+            Some(true),
+            None,
+            None,
+            Some("never touch a tax return"),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .await
+        .expect("auto-review on");
+
+    let (entry_id, _) = h.open_card("judged").await;
+    let entry = h.entry(&entry_id).await;
+    assert_eq!(entry["formResolution"], json!("fill_failed"), "{entry}");
+    assert!(h.bir.calls_to("bir_form_card").is_empty());
+
+    let frames = h.turn("judged-2", "preview it yourself", false).await;
+    assert!(
+        frames.iter().any(|frame| frame["type"] == "RUN_FINISHED"),
+        "{frames:#?}"
+    );
+    assert!(h.bir.calls_to("bir_form_preview").is_empty(), "{frames:#?}");
 }

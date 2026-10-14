@@ -607,6 +607,7 @@ pub(crate) async fn tools_for_turn(
             .with_plugin_desk(plugin_desk(state))
             .with_approved(approved.iter().cloned())
             .with_review_approved(review_approved.iter().cloned());
+        let executor = with_auto_review(state, account_id, &coworker_id, executor).await;
         return Some(ToolRunner::new(executor, context));
     }
     // Resolve the provider for this coworker's computer by its account's effective sharing mode and
@@ -825,6 +826,19 @@ pub(crate) async fn tools_for_turn(
             }));
     }
 
+    let executor = with_auto_review(state, account_id, &coworker_id, executor).await;
+    Some(ToolRunner::new(executor, context))
+}
+
+/// `executor` under this Bot's auto-review, when its account has it on: the judge every call
+/// a Bot's tools make passes, with a computer or without one. A Bot without a computer still runs
+/// plugin tools (#359, #220), from its turns and from the MCP door, and those are judged too.
+async fn with_auto_review(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+    executor: opengrok_tools::Executor,
+) -> opengrok_tools::Executor {
     // THE TIER WALK HAPPENS HERE, ONCE PER RUN (docs/AUTO-REVIEW.md §3). Per tool call the check
     // is one in-memory test on the runner; a run that started before a PUT keeps the policy it
     // started with, and a resumed run rebuilds its runner through this function and re-resolves.
@@ -848,12 +862,11 @@ pub(crate) async fn tools_for_turn(
                 .for_coworker(
                     coworker_id.as_str(),
                     account_id.as_str(),
-                    crate::spend::key_for(state, &coworker_id, account_id).await,
+                    crate::spend::key_for(state, coworker_id, account_id).await,
                 );
-        executor = executor.with_auto_review(policy, Arc::new(judge));
+        return executor.with_auto_review(policy, Arc::new(judge));
     }
-
-    Some(ToolRunner::new(executor, context))
+    executor
 }
 
 /// The desk a turn's plugin tools answer through, on the registry the Plugins routes serve.
