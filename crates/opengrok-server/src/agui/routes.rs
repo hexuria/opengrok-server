@@ -933,29 +933,24 @@ async fn live_token(
 
             // Sealed before it is returned, so a crash between here and the next request does not
             // leave the old token in the database and the new one only in memory.
-            if let Ok(sealed) = vault.seal(&chosen.id, &token.access_token) {
-                let _ = state
-                    .auth
-                    .store
-                    .put_secret(&chosen.id, &sealed, at_ms)
-                    .await;
-            }
+            let access_sealed = vault.seal(&chosen.id, &token.access_token).ok();
             // Google omits the refresh token on a refresh, so the stored one is kept.
-            if let Some(rotated) = token.refresh_token_to_store(Some(&refresh_token))
-                && rotated != refresh_token
-                && let Ok(sealed) = vault.seal(&format!("{}_refresh", chosen.id), &rotated)
+            let refresh_sealed = token
+                .refresh_token_to_store(Some(&refresh_token))
+                .filter(|rotated| rotated != &refresh_token)
+                .and_then(|rotated| vault.seal(&format!("{}_refresh", chosen.id), &rotated).ok());
+            if !crate::connections::routes::store_refreshed(
+                &state.auth.store,
+                &chosen.id,
+                access_sealed.as_ref(),
+                refresh_sealed.as_ref(),
+                expires_at,
+                at_ms,
+            )
+            .await
             {
-                let _ = state
-                    .auth
-                    .store
-                    .put_secret(&format!("{}_refresh", chosen.id), &sealed, at_ms)
-                    .await;
+                return None;
             }
-            let _ = state
-                .auth
-                .store
-                .touch_expiry(&chosen.id, expires_at, at_ms)
-                .await;
 
             tracing::info!(
                 connector = chosen.connector,

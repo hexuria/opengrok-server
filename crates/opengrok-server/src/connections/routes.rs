@@ -654,6 +654,45 @@ pub async fn disconnect(
     .await
 }
 
+/// Disconnect commits its event before deleting secrets. This check therefore sees it, or the delete
+/// follows these writes.
+pub async fn store_refreshed(
+    store: &opengrok_store::PgStore,
+    id: &str,
+    access_sealed: Option<&opengrok_store::Sealed>,
+    refresh_sealed: Option<&opengrok_store::Sealed>,
+    expires_at_ms: Option<i64>,
+    at_ms: i64,
+) -> bool {
+    if let Some(sealed) = access_sealed {
+        let _ = store.put_secret(id, sealed, at_ms).await;
+    }
+    if let Some(sealed) = refresh_sealed {
+        let _ = store
+            .put_secret(&format!("{id}_refresh"), sealed, at_ms)
+            .await;
+    }
+    let _ = store.touch_expiry(id, expires_at_ms, at_ms).await;
+
+    let connected = match store.load_connection(id).await {
+        Ok((connection, _)) => connection.connected && !connection.disconnected,
+        Err(error) => {
+            tracing::error!(%error, connection = id, "cannot verify a refreshed connection");
+            false
+        }
+    };
+    if connected {
+        return true;
+    }
+
+    for secret_id in [id.to_string(), format!("{id}_refresh")] {
+        if let Err(error) = store.delete_secret(&secret_id).await {
+            tracing::error!(%error, connection = id, secret = %secret_id, "cannot remove a disconnected credential");
+        }
+    }
+    false
+}
+
 /// A refusal as `{"error": sentence}`: an app reads a bare-text body as coming from a proxy in
 /// front of the server, and the person loses the sentence (#262, asked again by NativeChat for
 /// these routes in #267).

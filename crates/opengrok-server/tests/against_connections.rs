@@ -20,7 +20,7 @@ use opengrok_server::agui::AgUiState;
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::flow::verify_state;
 use opengrok_server::connections::oauth::ProviderConfig;
-use opengrok_server::connections::routes::Connectors;
+use opengrok_server::connections::routes::{Connectors, store_refreshed};
 use opengrok_server::host_state::HostState;
 use opengrok_store::{PgStore, Vault};
 use serde_json::{Value, json};
@@ -558,6 +558,56 @@ async fn a_disconnected_connection_can_be_connected_again() {
             .expect("open new refresh credential"),
         None,
         "a sign-in with no new refresh token does not carry one forward"
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_that_finishes_after_disconnect_keeps_no_credentials() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (_, token) = h.account("late-refresh").await;
+    let connected = h.connect_through_the_browser(&token, "first").await;
+    assert_eq!(connected.status().as_u16(), 200);
+    let listed = h.list(&token).await;
+    let id = listed[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &format!("{id}_refresh"))
+            .await
+            .expect("open refresh credential")
+            .as_deref(),
+        Some("refresh-for-first")
+    );
+    assert_eq!(h.disconnect(&token, &id).await.status().as_u16(), 204);
+
+    let access = h.vault.seal(&id, "late-access").expect("seal late access");
+    let refresh = h
+        .vault
+        .seal(&format!("{id}_refresh"), "late-refresh")
+        .expect("seal late refresh");
+    store_refreshed(
+        &h.store,
+        &id,
+        Some(&access),
+        Some(&refresh),
+        Some(now_ms() + 3_600_000),
+        now_ms(),
+    )
+    .await;
+
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &id)
+            .await
+            .expect("open disconnected access credential"),
+        None
+    );
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &format!("{id}_refresh"))
+            .await
+            .expect("open disconnected refresh credential"),
+        None
     );
 }
 
