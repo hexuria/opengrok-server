@@ -3353,7 +3353,11 @@ async fn start_claimed_turn(
     let system = match (account_id.as_ref(), run_coworker.as_ref()) {
         (Some(account_id), Some(coworker_id)) => {
             let persona = crate::persona::of(&state, coworker_id, coworker_role).await;
-            let has_computer = tools.is_some();
+            let has_computer = tools.as_ref().is_some_and(|runner| {
+                runner.executor().is_some_and(|(_, context)| {
+                    context.box_id.is_some() || context.group_box.is_some()
+                })
+            });
             let reaches_user_machine = tools.as_ref().is_some_and(|runner| {
                 runner
                     .tool_schemas()

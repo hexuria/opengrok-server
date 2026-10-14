@@ -278,6 +278,27 @@ async fn the_system_message_names_who_is_speaking_and_today() {
     );
 }
 
+#[tokio::test]
+async fn a_computerless_coworker_is_told_it_has_no_computer() {
+    let url = database_or_skip!();
+    let h = harness(&url).await;
+    let person = h.person("Juana", "Cruz", None).await;
+    let bot = h.hire(&person.token).await;
+    h.turn(
+        &person.token,
+        &bot,
+        "thr-computerless",
+        json!([{ "id": "m1", "role": "user", "content": "hi" }]),
+    )
+    .await;
+
+    let system = system_of(&h.asked()[0]);
+    assert!(
+        system.contains("You do NOT currently have a computer"),
+        "the persona must describe the coworker's actual computer binding: {system}"
+    );
+}
+
 /// Nobody gave a name: the address the account signed up with is what the person is called.
 #[tokio::test]
 async fn a_person_with_no_name_is_named_by_their_email() {
