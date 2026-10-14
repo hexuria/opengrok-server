@@ -73,9 +73,9 @@ pub(crate) struct PluginCall<'a> {
     pub plugin: &'a str,
     pub tool: String,
     pub arguments: Value,
-    /// The press is the person's yes (Submit). Stamped as an allow-once for exactly this tool and
-    /// these arguments, as the person, and spent by the gate: the gate still runs, and a model's
-    /// call to the same tool still parks on its own card.
+    /// The press is the person's yes (Submit). Its call's own fresh id goes to the executor's
+    /// `with_approved`, which releases the gate's ask for that call and no other; the gate still
+    /// runs, and a model's call to the same tool still parks on its own card.
     pub yes: bool,
     /// A person's press, not the model's mint: the person chose this call, so the auto-review
     /// judge, which weighs a model's choices, is not asked about it. A save on every blur
@@ -426,7 +426,11 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
                 store.update_gateway_entry_if((&coworker, account), (seq, Some(&entry)), &opened);
             match kept.await {
                 Ok(true) => {}
-                Ok(false) => tracing::warn!("a form-mode card changed while it was refreshed"),
+                Ok(false) => {
+                    // As a Dismiss that loses: the person retries against the card as it is.
+                    let error = "the form changed meanwhile; try again";
+                    return (409, json!({ "error": error }));
+                }
                 Err(error) => {
                     tracing::error!(%error, "a refreshed form-mode card could not be kept")
                 }

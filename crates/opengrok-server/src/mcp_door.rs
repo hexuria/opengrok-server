@@ -52,7 +52,7 @@ use rmcp::transport::streamable_http_server::tower::{
 };
 use rmcp::{ErrorData as McpError, ServerHandler};
 
-use crate::agui::routes::{BearerRefusal, principal_from_bearer, tools_for_coworker};
+use crate::agui::routes::{BearerRefusal, principal_from_bearer};
 /// The take without its stamp, which only tests ask for (`tests/support/seams.rs`).
 pub use crate::seams::take_mcp_allow_once;
 
@@ -234,13 +234,22 @@ impl McpDoor {
         if coworker.computer().is_none() {
             return Toolbox::NoComputer;
         }
-        match tools_for_coworker(
-            &self.state.agui,
-            &principal.account,
-            &principal.coworker,
-            gate_yes,
-            review_yes,
+        // A door caller is an app (Claude Code), and one that draws no plugin form card: its
+        // model is told so (`FORM_MODE_UNAVAILABLE`), not that no app sent the turn.
+        let turn = opengrok_integrations::turn::TurnPlugins {
+            form_mode: Some(false),
+            ..Default::default()
+        };
+        let gates = (gate_yes, review_yes);
+        let (state, account, coworker) =
+            (&self.state.agui, &principal.account, &principal.coworker);
+        match crate::agui::routes::tools_for_turn(
+            state,
+            account,
+            coworker,
+            gates,
             MCP_WAKE_PATIENCE,
+            &turn,
         )
         .await
         {
