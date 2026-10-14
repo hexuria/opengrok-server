@@ -2786,11 +2786,13 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "jsonwebtoken",
+ "opengrok-core",
  "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

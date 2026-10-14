@@ -1,5 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
+use opengrok_core::REFRESH_GRACE_MS;
+use opengrok_core::id::{AccountId, SessionId};
 use std::sync::Arc;
 
 fn slot(refresh: &str) -> GraceSlot {

@@ -31,7 +31,7 @@ opengrok-jev:
     | axum sqlx
 opengrok-local-exec:
     | axum sqlx
-opengrok-auth:
+opengrok-auth: opengrok-core
     | axum sqlx
 opengrok-box: opengrok-core
     | axum sqlx

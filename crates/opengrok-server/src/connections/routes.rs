@@ -611,12 +611,19 @@ pub async fn lend(
     Json(request): Json<LendRequest>,
 ) -> Response {
     let coworker = CoworkerId::from_stored(request.coworker_id);
-    mutate(state, headers, id, Some(&coworker), false, |connection, at_ms| {
-        connection.decide(ConnectionCommand::Lend {
-            coworker: coworker.clone(),
-            at_ms,
-        })
-    })
+    mutate(
+        state,
+        headers,
+        id,
+        Some(&coworker),
+        false,
+        |connection, at_ms| {
+            connection.decide(ConnectionCommand::Lend {
+                coworker: coworker.clone(),
+                at_ms,
+            })
+        },
+    )
     .await
 }
 
