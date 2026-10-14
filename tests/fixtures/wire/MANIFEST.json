@@ -3012,6 +3012,14 @@
     {
       "file": "rest/POST__ag-ui_user-form_action/409-a_return_the_plugin_already_queued_is_not_submitted_again.json",
       "source": "POST /ag-ui/user-form/action, recorded from the test a_return_the_plugin_already_queued_is_not_submitted_again (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/502-a_submits_claim_is_cleared_only_by_a_plain_refusal.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_submits_claim_is_cleared_only_by_a_plain_refusal (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
+    },
+    {
+      "file": "rest/POST__ag-ui_user-form_action/502-a_card_with_no_status_is_not_submitted.json",
+      "source": "POST /ag-ui/user-form/action, recorded from the test a_card_with_no_status_is_not_submitted (crates/opengrok-server/tests/against_a_form_mode_card.rs); ids and times are placeholders"
     }
   ],
   "unrecorded": []
