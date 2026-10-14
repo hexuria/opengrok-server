@@ -25,8 +25,10 @@ const SCHEMA: &str = include_str!("schema.sql");
 /// replaying `SCHEMA` on every boot deadlock against live reads. A CEILING ITS OWNER CHOSE
 /// (`chosen`, #268) IS NEVER WIDENED, nor the grants on that coworker: a choice that equals an
 /// older set is a choice, and widening it at the next boot would switch back on what its owner
-/// switched off, or leave a profile wider than the ceiling it was set equal to. Every change
-/// bumps `version`, so a write made against the old one is refused rather than undoing this.
+/// switched off, or leave a profile wider than the ceiling it was set equal to. A change TO A
+/// CHOSEN CEILING bumps `version`, so a write made against the old one is refused rather than
+/// undoing this; an UNCHOSEN ceiling's widening does not — the set is nobody's choice, and
+/// bumping it would refuse a pane's write over nothing its owner decided (#284).
 const EVERY_BOOT: &str = include_str!("every_boot.sql");
 
 /// Apply the schema. Safe to call on every boot and from every replica.

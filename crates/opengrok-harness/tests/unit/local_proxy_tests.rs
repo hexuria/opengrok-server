@@ -465,7 +465,7 @@ async fn a_turn_by_the_mac_is_relayed_for_its_run_on_the_macs_own_model() {
     assert!(
         matches!(&endpoint,
             Some(ModelEndpoint::Unavailable { why, via: Some(Via::Mac), unset: true })
-                if why.starts_with("Choose a model for your Mac first")),
+                if why.starts_with("Choose a model for your computer first")),
         "{endpoint:?}"
     );
 }

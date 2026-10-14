@@ -702,8 +702,8 @@ create table if not exists spend_limit (
 -- Coworker templates (`store/templates.rs`): a coworker TYPE an org admin writes once — model
 -- pin, tool ceiling, what needs a human yes, spend limits — that members hire from. What a
 -- template says is COPIED to the coworker at hire (`coworker_template_use` remembers which);
--- editing a template changes no running coworker unless the admin applies it, and deleting
--- one leaves its coworkers exactly as hired.
+-- editing a template changes no coworker already hired — a live link would let a later edit
+-- undo switches each coworker's owner made — and deleting one leaves its coworkers as hired.
 create table if not exists coworker_template (
     id             text   primary key,
     org_id         text   not null,
