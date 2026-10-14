@@ -4400,7 +4400,7 @@ async fn events_for_client(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    crate::agui::user_form::hydrate_agui_events(
+    opengrok_tools::user_form::replay::hydrate_agui_events(
         run.emitted.clone(),
         &forms,
         started_at_ms,
@@ -4568,7 +4568,7 @@ pub async fn replay_thread(
             };
             Some(super::history::with_prompt_frames(
                 &run,
-                crate::agui::user_form::hydrate_agui_events(
+                opengrok_tools::user_form::replay::hydrate_agui_events(
                     run.emitted.clone(),
                     &forms,
                     summary.started_at_ms,
@@ -6017,7 +6017,7 @@ impl EventSink for AgUiSink {
                 out.push(event);
                 let frame = entry
                     .as_ref()
-                    .map(crate::agui::user_form::agui_user_form_frame);
+                    .map(opengrok_tools::user_form::replay::agui_user_form_frame);
                 out.extend(frame.and_then(|frame| serde_json::from_value(frame).ok()));
                 if !out.into_iter().all(|event| self.send(event)) {
                     return;

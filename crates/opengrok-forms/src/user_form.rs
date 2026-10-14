@@ -1060,6 +1060,57 @@ pub fn overall_resolution(outcomes: &[FieldOutcome]) -> FormResolution {
     }
 }
 
+/// The call a card answers: its `callId`, when it has a non-empty one.
+pub fn call_id_of(entry: &Value) -> Option<&str> {
+    entry
+        .get("callId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// A `sand://box` handoff entry: one that carries a `boxRequestId`.
+pub fn is_handoff_entry(entry: &Value) -> bool {
+    entry
+        .get("boxRequestId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+}
+
+/// A user-form the person escalated to the computer.
+pub fn is_escalated_form(entry: &Value) -> bool {
+    is_user_form_entry(entry)
+        && entry.get("formResolution").and_then(Value::as_str) == Some("escalated")
+}
+
+/// An escalated form whose handoff's end is not on it yet.
+pub fn awaits_its_handoff(entry: &Value) -> bool {
+    is_escalated_form(entry)
+        && entry
+            .get("boxResolution")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+}
+
+/// A handoff entry, or the escalated form it answers, with how the handoff ended.
+pub fn settle_handoff(mut entry: Value, resolution: &str, timed_out: bool) -> Value {
+    if let Some(map) = entry.as_object_mut() {
+        map.insert("boxResolution".to_string(), json!(resolution));
+        if timed_out {
+            map.insert("timedOut".to_string(), json!(true));
+        }
+    }
+    entry
+}
+
+/// How a handoff ends: the word stamped on the box and on its escalated form, and the sentence
+/// the model is answered with. One table both ways, so the replay reads an old answer back into
+/// exactly the word this verb wrote it for.
+pub static HANDOFF_ENDINGS: [(&str, &str); 3] = [
+    ("handed_back", HAND_BACK_TOOL_RESULT),
+    ("declined", HANDOFF_DECLINED_TOOL_RESULT),
+    ("timed_out", HOLD_TIMED_OUT_TOOL_RESULT),
+];
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "../tests/unit/user_form.rs"]

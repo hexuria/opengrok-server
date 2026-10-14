@@ -5,5 +5,6 @@
 
 pub mod form_mode;
 pub mod front_page;
+pub mod replay;
 pub mod user_form;
 pub use user_form::*;
