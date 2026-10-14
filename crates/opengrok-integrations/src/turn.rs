@@ -357,6 +357,36 @@ pub async fn always_ask_tools(
     tools
 }
 
+/// The policy a Bot's tools run under on one turn, as every turn and the MCP door build it: the
+/// Bot's own (`policy_to_use`), widened to the plugins this message tagged
+/// (`opengrok_policy::with_mentioned`), and narrowed by every form-mode plugin's `alwaysAsk`
+/// (`form_mode::always_asking`). `None` when the Bot's policy could not be read.
+pub async fn tools_policy(
+    (store, operator): (&PgStore, &BTreeMap<String, Plugin>),
+    account: &AccountId,
+    bot: &CoworkerId,
+    mentioned: &[String],
+) -> Option<Context> {
+    let policy = store.policy_to_use(account, bot).await.ok()?;
+    let policy = opengrok_policy::with_mentioned(policy, mentioned);
+    let reach = (store, operator);
+    Some(crate::form_mode::always_asking(reach, account, bot, policy).await)
+}
+
+/// Whether a Bot is offered `request_user_form` for a plugin's form (#220): the app that sent
+/// the turn draws the card, and a plugin the model may reach (switched on, or tagged) has one.
+pub async fn offers_form_cards(
+    reach: (&PgStore, &BTreeMap<String, Plugin>),
+    account: &AccountId,
+    bot: &CoworkerId,
+    turn: &TurnPlugins,
+) -> bool {
+    turn.form_mode == Some(true)
+        && !form_mode_plugins_on(reach, account, bot, &turn.mentioned)
+            .await
+            .is_empty()
+}
+
 /// The policy a turn of `bot` runs under, as the turn reads it (`policy_to_use`), so a skill is
 /// never judged by a different answer than the tools beside it.
 async fn turn_policy(store: &PgStore, account: &AccountId, bot: &CoworkerId) -> Option<Context> {

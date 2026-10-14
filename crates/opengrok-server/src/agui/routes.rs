@@ -568,31 +568,14 @@ pub(crate) async fn tools_for_turn(
     // tool the model is told about but that always refuses is a dead end it keeps trying. Its
     // plugins are another matter: they are the person's accounts at services, not programs on a
     // box, so a Bot without a computer still gets those (#359).
+    let reach = (&state.auth.store, &*state.plugins);
     if coworker.computer().is_none() {
-        let policy = state
-            .auth
-            .store
-            .policy_to_use(account_id, &coworker_id)
-            .await
-            .ok()?;
-        let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
-        let policy = opengrok_integrations::form_mode::always_asking(
-            (&state.auth.store, &*state.plugins),
-            account_id,
-            &coworker_id,
-            policy,
-        )
-        .await;
+        let policy = opengrok_integrations::turn::tools_policy;
+        let policy = policy(reach, account_id, &coworker_id, &turn.mentioned).await?;
         let (plugins, off) = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
-        // A plugin's form needs no computer (#220): offered when the app draws its card and a
-        // plugin the model may reach has one.
-        let form_cards = turn.form_mode == Some(true) && {
-            let reach = (&state.auth.store, &*state.plugins);
-            let on = opengrok_integrations::turn::form_mode_plugins_on;
-            !on(reach, account_id, &coworker_id, &turn.mentioned)
-                .await
-                .is_empty()
-        };
+        // A plugin's form needs no computer (#220).
+        let offers = opengrok_integrations::turn::offers_form_cards;
+        let form_cards = offers(reach, account_id, &coworker_id, turn).await;
         if plugins.tools.is_empty()
             && plugins.unavailable.is_empty()
             && off.is_empty()
@@ -709,20 +692,8 @@ pub(crate) async fn tools_for_turn(
     // The policy a turn runs under, so a member of the org talking to a shared coworker gets the
     // tools its owner's grant allows — the same answer the run door's gate just gave. Callers
     // that must be the owner (routines, the tool listing) gate on that before they get here.
-    let policy = state
-        .auth
-        .store
-        .policy_to_use(account_id, &coworker_id)
-        .await
-        .ok()?;
-    let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
-    let policy = opengrok_integrations::form_mode::always_asking(
-        (&state.auth.store, &*state.plugins),
-        account_id,
-        &coworker_id,
-        policy,
-    )
-    .await;
+    let policy = opengrok_integrations::turn::tools_policy;
+    let policy = policy(reach, account_id, &coworker_id, &turn.mentioned).await?;
 
     // The plugins this coworker may use, connected with its own credentials. On a shared
     // coworker that includes its `bot`-scoped connections, which its OWNER authorised: a member's
