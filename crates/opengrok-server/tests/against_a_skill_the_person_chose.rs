@@ -420,8 +420,8 @@ async fn the_skill_comes_after_everything_that_says_what_the_bot_may_do() {
         .expect("the framing");
     for policy in [
         "You are Ada",
-        "You have your OWN computer",
-        "cannot reach their machine",
+        "You do NOT currently have a computer",
+        "cannot run shell commands",
     ] {
         let at = system
             .find(policy)
