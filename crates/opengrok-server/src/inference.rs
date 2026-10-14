@@ -340,7 +340,7 @@ async fn seal(state: &AgUiState, account: &AccountId, key: &str) -> Result<(), R
     let (id, at_ms) = (key_id(account), chrono::Utc::now().timestamp_millis());
     let kept = match vault.seal(&id, key) {
         Ok(sealed) => state.auth.store.put_secret(&id, &sealed, at_ms).await,
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     };
     kept.map_err(|error| {
         tracing::error!(%error, "a proxy key could not be sealed");

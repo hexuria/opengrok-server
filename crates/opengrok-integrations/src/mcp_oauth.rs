@@ -369,7 +369,11 @@ pub async fn client(
         Some(secret) => {
             let id = client_secret_id(&metadata.issuer, redirect_uri);
             store
-                .put_secret(&id, &vault.seal(&id, secret)?, at_ms)
+                .put_secret(
+                    &id,
+                    &vault.seal(&id, secret).map_err(StoreError::from)?,
+                    at_ms,
+                )
                 .await?;
             Some(id)
         }
@@ -611,7 +615,9 @@ pub async fn connect(
     }
     // Sealed under the account's own id, which its binding names as its secret: the turn reads it
     // through the binding as it reads a pasted token, and a disconnect deletes it by that id.
-    let sealed = vault.seal(&id, &token.access_token)?;
+    let sealed = vault
+        .seal(&id, &token.access_token)
+        .map_err(StoreError::from)?;
     let update =
         opengrok_store::CredentialUpdate::sealed(&sealed, token.expires_at_ms(at_ms), at_ms);
     PgStore::append_connection_in(&mut tx, &id, seq, &events, &connection, &update).await?;
@@ -651,7 +657,13 @@ pub async fn connect(
         .flatten();
     if let Some(refresh) = token.refresh_token_to_store(previous.as_deref()) {
         store
-            .put_secret(&refresh_id, &vault.seal(&refresh_id, &refresh)?, at_ms)
+            .put_secret(
+                &refresh_id,
+                &vault
+                    .seal(&refresh_id, &refresh)
+                    .map_err(StoreError::from)?,
+                at_ms,
+            )
             .await?;
     }
     Ok(Some(id))
@@ -711,14 +723,24 @@ pub async fn refresh_due(
             Ok(token) => {
                 let saved = async {
                     store
-                        .put_secret(&id, &vault.seal(&id, &token.access_token)?, now_ms)
+                        .put_secret(
+                            &id,
+                            &vault
+                                .seal(&id, &token.access_token)
+                                .map_err(StoreError::from)?,
+                            now_ms,
+                        )
                         .await?;
                     store
                         .touch_expiry(&id, token.expires_at_ms(now_ms), now_ms)
                         .await?;
                     if let Some(next) = token.refresh_token_to_store(Some(&refresh)) {
                         store
-                            .put_secret(&refresh_id, &vault.seal(&refresh_id, &next)?, now_ms)
+                            .put_secret(
+                                &refresh_id,
+                                &vault.seal(&refresh_id, &next).map_err(StoreError::from)?,
+                                now_ms,
+                            )
                             .await?;
                     }
                     StoreResult::Ok(())

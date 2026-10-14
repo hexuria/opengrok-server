@@ -222,7 +222,7 @@ fn a_row_sealed_before_key_ids_still_opens() {
 #[test]
 fn a_blob_from_a_key_this_server_does_not_have_says_so() {
     let sealed = other().seal("conn_1", "x").unwrap();
-    let error = vault().open("conn_1", &sealed).unwrap_err();
+    let error: StoreError = vault().open("conn_1", &sealed).unwrap_err().into();
     assert!(matches!(error, StoreError::Unopenable(_)), "{error:?}");
     let text = error.to_string();
     assert!(

@@ -22,6 +22,7 @@ members = [
   "crates/opengrok-jev",       # the typed classifier client
   "crates/opengrok-local-exec", # the approved command transport
   "crates/opengrok-auth",       # access and refresh token primitives
+  "crates/opengrok-vault",      # the credential vault: sealed blobs and the keys that open them
   "crates/opengrok-policy",  # what a principal may make a coworker do
   "crates/opengrok-events",  # the account events stream's outbox: notes written with the change they describe
   "crates/opengrok-store",   # Postgres: coworkers, transcripts, runs, the fan-out ledger
