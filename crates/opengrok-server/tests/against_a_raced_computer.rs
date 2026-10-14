@@ -28,7 +28,7 @@ use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerView};
 use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 use opengrok_harness::MockDoor;
 use opengrok_server::agui::AgUiState;
-use opengrok_server::agui::provision::{live_boxes, update_scope_box};
+use opengrok_server::agui::provision::{begin_update_for_coworker, live_boxes, update_scope_box};
 use opengrok_server::auth::{AuthState, TokenMinter};
 use opengrok_server::connections::routes::Connectors;
 use opengrok_server::host_state::HostState;
@@ -868,6 +868,40 @@ async fn a_rebuilt_box_whose_record_fails_is_left_running_with_its_files() {
         Some(old),
         "the write never landed"
     );
+}
+
+#[tokio::test]
+async fn a_dropped_update_reply_still_starts_the_recorded_work() {
+    let database_url = database_or_skip!();
+    let s = server(
+        &database_url,
+        Gated::holding_rebuilds(Hold::BeforeRemovingOld),
+    )
+    .await;
+    let member = s.member(None).await;
+    s.share("account", member.id.as_str(), "per-account").await;
+    let coworker = s.coworker(&member.id, None).await;
+    let scope = ("account", member.id.as_str());
+    let old = s.first_box(&member, &coworker).await;
+
+    let start = begin_update_for_coworker(&s.state, &member.id, &coworker)
+        .await
+        .expect("begin update");
+    drop(start);
+
+    let rebuilt = s.stub.held(1).await.remove(0);
+    let (phase, _, _, _) = s
+        .store()
+        .box_update(scope.0, scope.1)
+        .await
+        .expect("read update")
+        .expect("update remains recorded while rebuilding");
+    assert_eq!(phase, "transferring", "the cancelled request started work");
+
+    s.stub.open(&rebuilt);
+    assert_eq!(s.update_ended(scope).await, None);
+    assert_eq!(s.scope_box(scope.0, scope.1).await, Some(rebuilt));
+    assert_ne!(s.scope_box(scope.0, scope.1).await, Some(old));
 }
 
 /// Two updates of one box (a second Update before the first one's record is in) rebuild it twice

@@ -2674,7 +2674,7 @@ async fn computer_update(
         Err((status, message)) => return (status, message).into_response(),
     };
     let accepted = provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await;
-    tokio::spawn(update);
+    let _ = update.send(());
     (StatusCode::ACCEPTED, Json(accepted)).into_response()
 }
 
