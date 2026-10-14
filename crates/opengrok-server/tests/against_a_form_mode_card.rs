@@ -1201,3 +1201,76 @@ async fn auto_review_judges_a_bot_without_a_computer() {
     );
     assert!(h.bir.calls_to("bir_form_preview").is_empty(), "{frames:#?}");
 }
+
+/// A Submit claims its card in the row before the plugin is asked to send, so a Submit on
+/// another replica, which read the same draft, finds the claim and sends nothing. A claim that
+/// never settled (a crash, a timeout) is cleared by a later refresh once the plugin says the
+/// return is not queued, and never by sending it again.
+#[tokio::test]
+async fn a_card_claimed_for_submit_is_not_submitted_twice() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (entry_id, _) = h.open_card(&h.agent.clone()).await;
+    let coworker = CoworkerId::from_stored(h.agent.clone());
+    let claim = |at: i64| {
+        let (h, coworker, entry_id) = (&h, &coworker, &entry_id);
+        async move {
+            let (seq, read) = h
+                .store
+                .find_gateway_entry(coworker, &h.account, entry_id)
+                .await
+                .expect("entry")
+                .expect("row");
+            let mut claimed = read.clone();
+            claimed["formSubmitting"] = json!(at);
+            let who = (coworker, &h.account);
+            let written = h
+                .store
+                .update_gateway_entry_if(who, (seq, Some(&read)), &claimed);
+            assert!(written.await.expect("claim"));
+        }
+    };
+    claim(chrono::Utc::now().timestamp_millis()).await;
+    let before = h.bir.calls.lock().unwrap().len();
+    let seen = json!({ "fingerprint": h.bir.fingerprint() });
+    let (status, refused) = h.act(&entry_id, "submit", seen.clone()).await;
+    assert_eq!(status, 409, "{refused}");
+    assert_eq!(
+        h.bir.calls.lock().unwrap().len(),
+        before,
+        "no plugin call at all"
+    );
+    let (status, _) = h
+        .post(
+            "/ag-ui/user-form/dismiss",
+            &json!({ "entryId": entry_id, "agentId": h.agent, "mode": "dismissed" }),
+        )
+        .await;
+    assert_eq!(status, 409);
+
+    // A young claim is a Submit in flight: a refresh asks the plugin and waits.
+    let (status, _) = h.act(&entry_id, "refresh", json!({})).await;
+    assert_eq!(status, 409);
+    assert!(h.bir.calls_to("bir_form_submit").is_empty());
+
+    // An old one never landed: the plugin holds no queued return, so it is cleared.
+    let mut stale = h.entry(&entry_id).await;
+    stale["formSubmitting"] = json!(0);
+    let (seq, read) = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &entry_id)
+        .await
+        .expect("entry")
+        .expect("row");
+    let who = (&coworker, &h.account);
+    assert!(
+        h.store
+            .update_gateway_entry_if(who, (seq, Some(&read)), &stale)
+            .await
+            .expect("age")
+    );
+    let (status, opened) = h.act(&entry_id, "refresh", json!({})).await;
+    assert_eq!(status, 200, "{opened}");
+    assert!(h.entry(&entry_id).await.get("formSubmitting").is_none());
+    assert!(h.bir.calls_to("bir_form_submit").is_empty());
+}
