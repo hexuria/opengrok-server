@@ -933,29 +933,24 @@ async fn live_token(
 
             // Sealed before it is returned, so a crash between here and the next request does not
             // leave the old token in the database and the new one only in memory.
-            if let Ok(sealed) = vault.seal(&chosen.id, &token.access_token) {
-                let _ = state
-                    .auth
-                    .store
-                    .put_secret(&chosen.id, &sealed, at_ms)
-                    .await;
-            }
+            let access_sealed = vault.seal(&chosen.id, &token.access_token).ok();
             // Google omits the refresh token on a refresh, so the stored one is kept.
-            if let Some(rotated) = token.refresh_token_to_store(Some(&refresh_token))
-                && rotated != refresh_token
-                && let Ok(sealed) = vault.seal(&format!("{}_refresh", chosen.id), &rotated)
+            let refresh_sealed = token
+                .refresh_token_to_store(Some(&refresh_token))
+                .filter(|rotated| rotated != &refresh_token)
+                .and_then(|rotated| vault.seal(&format!("{}_refresh", chosen.id), &rotated).ok());
+            if !crate::connections::routes::store_refreshed(
+                &state.auth.store,
+                &chosen.id,
+                access_sealed.as_ref(),
+                refresh_sealed.as_ref(),
+                expires_at,
+                at_ms,
+            )
+            .await
             {
-                let _ = state
-                    .auth
-                    .store
-                    .put_secret(&format!("{}_refresh", chosen.id), &sealed, at_ms)
-                    .await;
+                return None;
             }
-            let _ = state
-                .auth
-                .store
-                .touch_expiry(&chosen.id, expires_at, at_ms)
-                .await;
 
             tracing::info!(
                 connector = chosen.connector,
@@ -1871,18 +1866,23 @@ pub async fn hire(
         Ok(events) => events,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
-    // The template's standing role, in the SAME append as the hire: a second write could fail
-    // after the coworker exists, leaving a coworker the template promised a role and did not get.
-    if let Some(role) = template.as_ref().and_then(|t| t.role.clone())
-        && let Ok(more) = coworker.decide(CoworkerCommand::SetRole {
-            role: Some(role),
-            at_ms,
-        })
-    {
-        events.extend(more);
-    }
     for event in &events {
         coworker.apply(event);
+    }
+    // The template's standing role, in the SAME append as the hire: a second write could fail
+    // after the coworker exists, leaving a coworker the template promised a role and did not get.
+    if let Some(role) = template.as_ref().and_then(|t| t.role.clone()) {
+        let more = match coworker.decide(CoworkerCommand::SetRole {
+            role: Some(role),
+            at_ms,
+        }) {
+            Ok(more) => more,
+            Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        };
+        for event in &more {
+            coworker.apply(event);
+        }
+        events.extend(more);
     }
     // Born on the whole default when it gave the pin: its door and effort, in this same append.
     if let Some(default) = &default {
@@ -2669,7 +2669,7 @@ async fn computer_update(
         Err((status, message)) => return (status, message).into_response(),
     };
     let accepted = provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await;
-    tokio::spawn(update);
+    let _ = update.send(());
     (StatusCode::ACCEPTED, Json(accepted)).into_response()
 }
 
@@ -3353,7 +3353,11 @@ async fn start_claimed_turn(
     let system = match (account_id.as_ref(), run_coworker.as_ref()) {
         (Some(account_id), Some(coworker_id)) => {
             let persona = crate::persona::of(&state, coworker_id, coworker_role).await;
-            let has_computer = tools.is_some();
+            let has_computer = tools.as_ref().is_some_and(|runner| {
+                runner.executor().is_some_and(|(_, context)| {
+                    context.box_id.is_some() || context.group_box.is_some()
+                })
+            });
             let reaches_user_machine = tools.as_ref().is_some_and(|runner| {
                 runner
                     .tool_schemas()

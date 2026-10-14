@@ -15,10 +15,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 [ -f .env ] || { echo "no .env — copy .env.example and fill it (docs/setup/environment.md)" >&2; exit 1; }
+caller_exports="$(export -p)"
 set -a
 # shellcheck disable=SC1091
 source ./.env
 set +a
+# .env supplies defaults; one-off caller overrides remain authoritative.
+# shellcheck disable=SC2294
+eval "$caller_exports"
+unset caller_exports
 
 # A leftover OG_BOX_API_KEY must not force ascii on a laptop. Empty OG_COMPUTER
 # here means local Docker, so NativeChat can get Shell without a working ascii box.

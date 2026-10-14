@@ -8,7 +8,8 @@ curl -fsS http://127.0.0.1:1447/health   # {"ok":true,…}
 ```
 
 `serve.sh` sources `.env`, builds `target/debug/opengrok`, safely stops an already-running
-server, and starts the new binary. It refuses to run when `OG_DATABASE_URL` points at the
+server, and starts the new binary. Variables passed on the command line take precedence over
+`.env`. It refuses to run when `OG_DATABASE_URL` points at the
 gate's database (`…/opengrok_gate`) — a dev server there would race the smoke suite's sweeps.
 
 A server that answers `/health` still has **nobody who can sign in to it** and no proven model

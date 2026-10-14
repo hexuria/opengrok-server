@@ -183,7 +183,11 @@ async fn list_daemons(
 /// own switch; `connected` is its command stream and `relaying` its relay stream, each as this
 /// replica holds it now.
 async fn row(state: &AuthState, account: &str, machine: Daemon) -> serde_json::Value {
-    let connected = !machine.revoked && state.local_exec.has_provider(&machine.machine_id).await;
+    let connected = !machine.revoked
+        && state
+            .local_exec
+            .has_provider(account, &machine.machine_id)
+            .await;
     let relaying = state.relay.relaying(account, &machine.machine_id);
     serde_json::json!({ "machineId": machine.machine_id, "label": machine.label,
         "enrolledAtMs": machine.enrolled_at_ms, "revoked": machine.revoked, "connected": connected,
@@ -488,7 +492,15 @@ pub async fn enqueue_and_wait(
                 "allow"
             };
             audit(word, None).await;
-            run_on_machine(state, machine_id, &request_id, approval_id, command).await
+            run_on_machine(
+                state,
+                account_id,
+                machine_id,
+                &request_id,
+                approval_id,
+                command,
+            )
+            .await
         }
     }
 }
@@ -533,6 +545,7 @@ fn user_machine_shell_message(
 /// row with the outcome case. Assumes the gate already said yes and the row already exists.
 async fn run_on_machine(
     state: &AuthState,
+    account_id: &str,
     machine_id: &str,
     request_id: &str,
     approval_id: &str,
@@ -548,7 +561,13 @@ async fn run_on_machine(
     );
     let rx = match state
         .local_exec
-        .dispatch(machine_id, request_id, approval_id, server_message)
+        .dispatch(
+            account_id,
+            machine_id,
+            request_id,
+            approval_id,
+            server_message,
+        )
         .await
     {
         Ok(rx) => rx,
@@ -565,7 +584,10 @@ async fn run_on_machine(
         Ok(Ok(outcome)) => outcome,
         Ok(Err(_)) => ExecOutcome::malformed("the request was dropped before a result arrived"),
         Err(_) => {
-            state.local_exec.cancel(machine_id, request_id).await;
+            state
+                .local_exec
+                .cancel(account_id, machine_id, request_id)
+                .await;
             ExecOutcome::timed_out("no result within the command timeout")
         }
     };
@@ -671,7 +693,7 @@ async fn post_responses(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    let Some((_account_id, machine_id, _)) = daemon_from_bearer(&state, &headers).await else {
+    let Some((account_id, machine_id, _)) = daemon_from_bearer(&state, &headers).await else {
         return (StatusCode::UNAUTHORIZED, "enrol this machine first").into_response();
     };
     // The daemon POSTs a BATCH (local-exec-provider.ts flushes an outbox): a top-level `providerId`
@@ -679,7 +701,7 @@ async fn post_responses(
     // POST can carry several results, and a backlog after a retry. A `client` frame carries one
     // command's `ExecClientMessage` in `message`; everything else is acknowledged. The result is
     // resolved against THIS machine (the broker rejects a mismatch), not the untrusted `providerId`.
-    let (broker, machine) = (&state.local_exec, machine_id.as_str());
+    let (broker, account, machine) = (&state.local_exec, account_id.as_str(), machine_id.as_str());
     if let Some(frames) = body.get("frames").and_then(|value| value.as_array()) {
         for frame in frames {
             let kind = frame.get("kind").and_then(|value| value.as_str());
@@ -691,21 +713,25 @@ async fn post_responses(
                 (Some("client"), Some(id), Some(message)) => {
                     if message.get("shellResult").is_some() {
                         let outcome = wire::outcome_from_client_message(message);
-                        broker.resolve(machine, id, outcome).await;
+                        broker.resolve(account, machine, id, outcome).await;
                     } else if let Some(action) = wire::stream_action(message) {
                         use wire::StreamAction::{Exit, Ignore, Stderr, Stdout, Terminal};
                         match action {
-                            Stdout(out) => broker.accumulate(machine, id, false, &out).await,
-                            Stderr(err) => broker.accumulate(machine, id, true, &err).await,
+                            Stdout(out) => {
+                                broker.accumulate(account, machine, id, false, &out).await
+                            }
+                            Stderr(err) => {
+                                broker.accumulate(account, machine, id, true, &err).await
+                            }
                             Exit(code) => {
                                 let case = if code == 0 { "success" } else { "failure" };
                                 broker
-                                    .finish_stream(machine, id, case, Some(code), "")
+                                    .finish_stream(account, machine, id, case, Some(code), "")
                                     .await;
                             }
                             Terminal { case, detail } => {
                                 broker
-                                    .finish_stream(machine, id, &case, None, &detail)
+                                    .finish_stream(account, machine, id, &case, None, &detail)
                                     .await
                             }
                             Ignore => {}
@@ -720,7 +746,7 @@ async fn post_responses(
                         let reason = thrown.get("error").and_then(|value| value.as_str());
                         let reason = reason.unwrap_or("the machine refused or errored the command");
                         broker
-                            .resolve(machine, id, ExecOutcome::malformed(reason))
+                            .resolve(account, machine, id, ExecOutcome::malformed(reason))
                             .await;
                     }
                     // streamClose / heartbeat carry no result — nothing to resolve.

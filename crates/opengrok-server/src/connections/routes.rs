@@ -611,12 +611,19 @@ pub async fn lend(
     Json(request): Json<LendRequest>,
 ) -> Response {
     let coworker = CoworkerId::from_stored(request.coworker_id);
-    mutate(state, headers, id, Some(&coworker), |connection, at_ms| {
-        connection.decide(ConnectionCommand::Lend {
-            coworker: coworker.clone(),
-            at_ms,
-        })
-    })
+    mutate(
+        state,
+        headers,
+        id,
+        Some(&coworker),
+        false,
+        |connection, at_ms| {
+            connection.decide(ConnectionCommand::Lend {
+                coworker: coworker.clone(),
+                at_ms,
+            })
+        },
+    )
     .await
 }
 
@@ -627,7 +634,7 @@ pub async fn revoke(
     Path(id): Path<String>,
     Json(request): Json<LendRequest>,
 ) -> Response {
-    mutate(state, headers, id, None, |connection, at_ms| {
+    mutate(state, headers, id, None, false, |connection, at_ms| {
         connection.decide(ConnectionCommand::Revoke {
             coworker: CoworkerId::from_stored(request.coworker_id.clone()),
             at_ms,
@@ -641,10 +648,49 @@ pub async fn disconnect(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    mutate(state, headers, id, None, |connection, at_ms| {
+    mutate(state, headers, id, None, true, |connection, at_ms| {
         connection.decide(ConnectionCommand::Disconnect { at_ms })
     })
     .await
+}
+
+/// Disconnect commits its event before deleting secrets. This check therefore sees it, or the delete
+/// follows these writes; a failed read is not evidence of a disconnect.
+pub async fn store_refreshed(
+    store: &opengrok_store::PgStore,
+    id: &str,
+    access_sealed: Option<&opengrok_store::Sealed>,
+    refresh_sealed: Option<&opengrok_store::Sealed>,
+    expires_at_ms: Option<i64>,
+    at_ms: i64,
+) -> bool {
+    if let Some(sealed) = access_sealed {
+        let _ = store.put_secret(id, sealed, at_ms).await;
+    }
+    if let Some(sealed) = refresh_sealed {
+        let _ = store
+            .put_secret(&format!("{id}_refresh"), sealed, at_ms)
+            .await;
+    }
+    let _ = store.touch_expiry(id, expires_at_ms, at_ms).await;
+
+    let connected = match store.load_connection(id).await {
+        Ok((connection, _)) => connection.connected && !connection.disconnected,
+        Err(error) => {
+            tracing::warn!(%error, connection = id, "could not verify connection after refresh; keeping credentials");
+            return true;
+        }
+    };
+    if connected {
+        return true;
+    }
+
+    for secret_id in [id.to_string(), format!("{id}_refresh")] {
+        if let Err(error) = store.delete_secret(&secret_id).await {
+            tracing::error!(%error, connection = id, secret = %secret_id, "cannot remove a disconnected credential");
+        }
+    }
+    false
 }
 
 /// A refusal as `{"error": sentence}`: an app reads a bare-text body as coming from a proxy in
@@ -664,6 +710,7 @@ async fn mutate<F>(
     headers: HeaderMap,
     id: String,
     lend_to: Option<&CoworkerId>,
+    delete_secrets: bool,
     decide: F,
 ) -> Response
 where
@@ -737,6 +784,15 @@ where
         .await
     {
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+
+    if delete_secrets {
+        let refresh_id = format!("{id}_refresh");
+        for secret_id in [&id, &refresh_id] {
+            if let Err(error) = state.auth.store.delete_secret(secret_id).await {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        }
     }
 
     // The connection as `GET /connections` lists it, so one client type reads both (#267). A

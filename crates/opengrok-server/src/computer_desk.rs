@@ -121,9 +121,10 @@ impl ComputerDesk for Tools {
                 let update = provision::begin_update_for_coworker(state, account, coworker)
                     .await
                     .map_err(|(_, message)| message)?;
-                tokio::spawn(update);
-                Ok(json!({ "updating": true,
-                    "note": "the computer is being rebuilt on the newest image; its files are kept" }))
+                let accepted = json!({ "updating": true,
+                    "note": "the computer is being rebuilt on the newest image; its files are kept" });
+                let _ = update.send(());
+                Ok(accepted)
             }
             Ask::LookAtScreen { bot } => self
                 .look_at_screen(context, &bot)
