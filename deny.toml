@@ -22,6 +22,8 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0098" },
     { id = "RUSTSEC-2026-0104", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0098" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile 1.0.4 is unmaintained with no upgrade; typesafe-sdk 0.1.2 pulls it through reqwest 0.11" },
+    { id = "RUSTSEC-2026-0346", reason = "rustls 0.21.12 has no backport; only typesafe-sdk 0.1.2's reqwest 0.11 reaches it, and every other client runs the patched 0.23 line" },
+    { id = "RUSTSEC-2026-0349", reason = "same typesafe-sdk 0.1.2 / reqwest 0.11 pin as RUSTSEC-2026-0346" },
     # ttf-parser now has two reaches. (1) lopdf 0.42 under pdf-extract 0.12 (a person's PDF
     # attachments, #229): it is only ever run in the `opengrok-pdf-text` process — killed at 10
     # seconds, capped in memory on Linux, never inside the server. (2) rustybuzz under
