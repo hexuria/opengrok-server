@@ -126,13 +126,13 @@ pub fn always_ask_tools(plugin: &str, extensions: Option<&Value>, mcp: &McpConfi
         .filter_map(Value::as_str)
         .collect();
     let mut tools: Vec<&str> = names.iter().copied().filter(|name| usable(name)).collect();
-    // NOTHING NAMED TO ASK ABOUT IS NOT "NOTHING ASKS". A form-mode plugin whose actions cannot
-    // be read and that lists no alwaysAsk could have its submit tool under any name: every one of
-    // its tools asks (`<plugin>.*`), until the manifest says which.
-    if tools.is_empty() {
+    // NO SUBMIT NAMED IS NOT "NOTHING SENDS". A form-mode plugin whose submit action cannot be
+    // read could send a return under any of its tools' names, whatever else alwaysAsk lists:
+    // every one of its tools asks (`<plugin>.*`), until the manifest says which is the submit.
+    if !submit.and_then(Value::as_str).is_some_and(usable) {
         tracing::warn!(
             plugin,
-            "a plugin's formMode names no tool to ask about; every one of its tools asks"
+            "a plugin's formMode names no usable submit tool; every one of its tools asks"
         );
         return vec![format!("{plugin}.*")];
     }
@@ -265,10 +265,11 @@ mod tests {
             let mut block = bir();
             block["formMode"]["actions"] = broken;
             assert!(FormModeTools::from_extensions(Some(&block), &mcp).is_none());
+            let asks = always_ask_tools("bir", Some(&block), &mcp);
             assert!(
-                always_ask_tools("bir", Some(&block), &mcp)
-                    .contains(&"bir.bir-mcp.bir_form_submit".to_string()),
-                "{block}"
+                asks.contains(&"bir.bir-mcp.bir_form_submit".to_string())
+                    || asks == ["bir.*".to_string()],
+                "{block}: {asks:?}"
             );
         }
     }
@@ -301,25 +302,24 @@ mod tests {
         assert!(always_ask_tools("bir", Some(&json!({})), &mcp).is_empty());
     }
 
-    /// A formMode block whose actions cannot be read and that lists nothing to ask about could
-    /// have its submit under any name: all of the plugin's tools ask.
+    /// A formMode block whose submit action cannot be read could send a return under any of its
+    /// tools' names: all of them ask, whatever else alwaysAsk lists.
     #[test]
-    fn a_block_that_names_nothing_to_ask_about_gates_the_whole_plugin() {
+    fn a_block_with_no_usable_submit_gates_the_whole_plugin() {
         let mcp = servers(&["bir-mcp"]);
+        let whole = vec!["bir.*".to_string()];
         let mut block = bir();
         block["formMode"]["actions"] = json!("not an object");
+        assert_eq!(always_ask_tools("bir", Some(&block), &mcp), whole);
         block["formMode"]["alwaysAsk"] = json!([]);
-        assert_eq!(
-            always_ask_tools("bir", Some(&block), &mcp),
-            vec!["bir.*".to_string()]
-        );
-        block["formMode"]
+        assert_eq!(always_ask_tools("bir", Some(&block), &mcp), whole);
+        let mut renamed = bir();
+        renamed["formMode"]["actions"]["submit"] = json!("other.server.tool");
+        assert_eq!(always_ask_tools("bir", Some(&renamed), &mcp), whole);
+        renamed["formMode"]["actions"]
             .as_object_mut()
             .unwrap()
-            .remove("alwaysAsk");
-        assert_eq!(
-            always_ask_tools("bir", Some(&block), &mcp),
-            vec!["bir.*".to_string()]
-        );
+            .remove("submit");
+        assert_eq!(always_ask_tools("bir", Some(&renamed), &mcp), whole);
     }
 }
