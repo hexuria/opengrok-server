@@ -1379,3 +1379,38 @@ async fn two_cards_for_one_return_cannot_both_send_it() {
     assert!(h.bir.calls_to("bir_form_submit").is_empty());
     assert!(h.entry(&second).await.get("formSubmitting").is_none());
 }
+
+/// A claim no deadline can be read from (a value no build wrote, or a row damaged by hand) is
+/// not held forever: a save asks the plugin, and on a plain "draft" the claim is cleared and the
+/// save goes on.
+#[tokio::test]
+async fn an_unreadable_claim_is_cleared_once_the_plugin_says_draft() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (entry_id, _) = h.open_card(&h.agent.clone()).await;
+    let coworker = CoworkerId::from_stored(h.agent.clone());
+    let (seq, read) = h
+        .store
+        .find_gateway_entry(&coworker, &h.account, &entry_id)
+        .await
+        .expect("entry")
+        .expect("row");
+    let mut garbled = read.clone();
+    garbled["formSubmitting"] = json!("garbage");
+    let who = (&coworker, &h.account);
+    let written = h
+        .store
+        .update_gateway_entry_if(who, (seq, Some(&read)), &garbled);
+    assert!(written.await.expect("write"));
+
+    let (status, saved) = h
+        .act(
+            &entry_id,
+            "save",
+            json!({ "values": { TAX14: "12,500.00" } }),
+        )
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert!(h.entry(&entry_id).await.get("formSubmitting").is_none());
+    assert!(h.bir.calls_to("bir_form_submit").is_empty());
+}

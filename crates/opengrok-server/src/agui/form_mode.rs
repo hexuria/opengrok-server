@@ -536,10 +536,28 @@ pub fn claim_hold_ms(deadlines: opengrok_tools::mcp::Deadlines) -> i64 {
     i64::try_from(deadlines.longest_call().as_millis().saturating_mul(2)).unwrap_or(i64::MAX)
 }
 
-fn claim_until(entry: &Value) -> Option<i64> {
-    entry
-        .pointer(&format!("/{SUBMITTING}/until"))
-        .and_then(Value::as_i64)
+/// When this card's Submit claim lapses, in database ms; `None` when it has no claim. THE ONE
+/// READING every check uses (`claim_live`), so a claim one check holds another never ignores:
+/// - `{until}`, as `claim` stamps it;
+/// - a bare integer, the claim time an earlier build stamped, held for `claim_hold_ms` from it;
+/// - anything else has lapsed: no deadline can be read from it, and holding it would hold the
+///   card forever. A press then goes through `already_queued`, and only a plain "draft" from
+///   the plugin clears it (`submitting`).
+pub(crate) fn claim_until(entry: &Value) -> Option<i64> {
+    let claim = entry.get(SUBMITTING)?;
+    let hold = || claim_hold_ms(opengrok_tools::mcp::Deadlines::from_env());
+    Some(
+        match (claim.get("until").and_then(Value::as_i64), claim.as_i64()) {
+            (Some(until), _) => until,
+            (None, Some(stamped)) => stamped.saturating_add(hold()),
+            (None, None) => i64::MIN,
+        },
+    )
+}
+
+/// Whether this card holds a Submit claim that has not lapsed at `now` (the database's clock).
+pub(crate) fn claim_live(entry: &Value, now: i64) -> bool {
+    claim_until(entry).is_some_and(|until| now < until)
 }
 
 /// Claim the card for a Submit, on the database's clock, against the card as read. Refused while
@@ -566,7 +584,7 @@ async fn claim(
         entry_id_of(card) != id
             && form_mode::is_form_mode_entry(card)
             && form_request_from(card).form.as_ref() == Some(key)
-            && claim_until(card).is_some_and(|until| until > now)
+            && claim_live(card, now)
     });
     if other_live {
         return Err((409, json!({ "error": BEING_SUBMITTED })));
@@ -596,8 +614,7 @@ async fn submitting(
         tracing::error!(%error, "the database clock could not be read");
         (500, json!({ "error": "transcript unavailable" }))
     })?;
-    // A claim with no readable deadline is held, never guessed at.
-    if claim_until(&entry).is_none_or(|until| now < until) {
+    if claim_live(&entry, now) {
         return Err((409, json!({ "error": BEING_SUBMITTED })));
     }
     match unclaim(host, who, seq, &entry).await {
@@ -887,7 +904,15 @@ pub(crate) async fn dismiss(
             json!({ "error": "this return was submitted; it can only be viewed" }),
         );
     }
-    if entry.get(SUBMITTING).is_some() {
+    // Only a live claim refuses: a lapsed one is checked with the plugin by the next press.
+    let now = match host.agui.auth.store.clock_ms().await {
+        Ok(now) => now,
+        Err(error) => {
+            tracing::error!(%error, "the database clock could not be read");
+            return (500, json!({ "error": "transcript unavailable" }));
+        }
+    };
+    if claim_live(&entry, now) {
         return (409, json!({ "error": BEING_SUBMITTED }));
     }
     let form = form_request_from(&entry);

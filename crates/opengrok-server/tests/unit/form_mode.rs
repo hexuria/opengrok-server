@@ -123,3 +123,33 @@ fn a_claim_outlasts_the_longest_call() {
         claim_hold_ms(slower)
     );
 }
+
+/// Every check reads a claim the same way: `{until}` as stamped, a bare number as an earlier
+/// build's claim time held for the claim's hold, and anything else as lapsed, so no shape can
+/// hold a card forever.
+#[test]
+fn a_claim_reads_one_way_whatever_its_shape() {
+    let hold = claim_hold_ms(opengrok_tools::mcp::Deadlines::from_env());
+    let card = |claim: Value| json!({ "id": "e_1", "formSubmitting": claim });
+    assert_eq!(claim_until(&json!({ "id": "e_1" })), None);
+    assert!(!claim_live(&json!({ "id": "e_1" }), 0));
+
+    let stamped = card(json!({ "until": 10_000 }));
+    assert_eq!(claim_until(&stamped), Some(10_000));
+    assert!(claim_live(&stamped, 9_999) && !claim_live(&stamped, 10_000));
+
+    let old = card(json!(10_000));
+    assert_eq!(claim_until(&old), Some(10_000 + hold));
+    assert!(claim_live(&old, 10_000 + hold - 1) && !claim_live(&old, 10_000 + hold));
+
+    for garbage in [
+        json!("soon"),
+        json!({ "until": "later" }),
+        json!(null),
+        json!([1]),
+    ] {
+        let card = card(garbage.clone());
+        assert_eq!(claim_until(&card), Some(i64::MIN), "{garbage}");
+        assert!(!claim_live(&card, 0), "{garbage}");
+    }
+}
