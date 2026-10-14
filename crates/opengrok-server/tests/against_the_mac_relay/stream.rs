@@ -135,7 +135,8 @@ async fn with_no_mac_connected_a_turn_by_the_mac_ends_relay_offline_and_asks_not
     assert_eq!(end["code"], "relay_offline", "{end}");
     let said = end["message"].as_str().unwrap();
     assert!(
-        said.contains("your Mac isn't connected") || said.contains("Your Mac isn't connected"),
+        said.contains("your computer isn't connected")
+            || said.contains("Your computer isn't connected"),
         "{said}"
     );
     assert_eq!(

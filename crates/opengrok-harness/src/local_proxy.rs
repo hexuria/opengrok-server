@@ -356,8 +356,8 @@ pub async fn route(
             let model = captured.or(setting.relay_model).unwrap_or_default();
             let endpoint = if model.is_empty() {
                 refused(
-                    "Choose a model for your Mac first: your inference source names none for it, \
-                     so the turn was not sent. Pick one your Mac's opencodex serves",
+                    "Choose a model for your computer first: your inference source names none for it, \
+                     so the turn was not sent. Pick one your computer's opencodex serves",
                     Via::Mac,
                 )
             } else {

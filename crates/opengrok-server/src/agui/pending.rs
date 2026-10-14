@@ -519,7 +519,7 @@ pub async fn consume_for_turn(
         {
             let mut event = custom_event("edited", thread_id, Some(&row));
             event["value"]["message"]["heldFor"] = json!(HELD_FOR);
-            let why = "Your Mac isn't connected, so this message stays queued and goes when it \
+            let why = "Your computer isn't connected, so this message stays queued and goes when it \
                        reconnects.";
             let body = json!({ "v": PAYLOAD_V, "id": row.id, "heldFor": HELD_FOR, "message": why,
                                "event": event });
