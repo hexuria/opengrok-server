@@ -2877,7 +2877,6 @@ dependencies = [
  "opengrok-box",
  "opengrok-core",
  "opengrok-policy",
- "opengrok-store",
  "opengrok-tools",
  "opengrok-wire",
  "reqwest 0.13.4",
