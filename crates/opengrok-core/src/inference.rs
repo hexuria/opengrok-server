@@ -65,6 +65,9 @@ impl SourceKind {
 pub enum Via {
     #[default]
     Loopback,
+    /// `computer` reads as `mac` but never writes it (#324): replies keep the old word until every
+    /// client reads both.
+    #[serde(alias = "computer")]
     Mac,
 }
 
@@ -84,11 +87,11 @@ impl Via {
             Some(word) => match word.as_str() {
                 Some("") => Ok(None),
                 Some("loopback") => Ok(Some(Self::Loopback)),
-                Some("mac") => Ok(Some(Self::Mac)),
+                Some("mac") | Some("computer") => Ok(Some(Self::Mac)),
                 Some("helper") => {
                     Err("\"helper\" is not built yet (#293); use \"loopback\" or \"mac\"")
                 }
-                _ => Err("must be \"loopback\" or \"mac\""),
+                _ => Err("must be \"loopback\", \"mac\" or \"computer\""),
             },
         }
     }

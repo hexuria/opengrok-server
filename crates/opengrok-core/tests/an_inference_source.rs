@@ -699,3 +699,24 @@ fn an_account_keeps_an_iana_time_zone_and_refuses_any_other() {
         Err(AccountError::NotRegistered)
     );
 }
+
+#[test]
+fn computer_reads_as_mac_but_writes_mac() {
+    // #324: "computer" is accepted wherever via is read — the manual parse and serde alike —
+    // while every reply still emits "mac" so older clients keep working.
+    assert_eq!(
+        Via::named(Some(&json!("computer"))),
+        Ok(Some(Via::Mac)),
+        "the request word"
+    );
+    assert_eq!(
+        serde_json::from_value::<Via>(json!("computer")).unwrap(),
+        Via::Mac,
+        "a stored row"
+    );
+    assert_eq!(
+        serde_json::to_value(Via::Mac).unwrap(),
+        json!("mac"),
+        "writes keep the old word"
+    );
+}

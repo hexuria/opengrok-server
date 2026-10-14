@@ -1032,7 +1032,7 @@ impl Executor {
                 "Runs a task you taught on the Bot's computer.",
             ),
             USER_MACHINE_SHELL => (
-                "Your Mac's shell",
+                "Your computer's shell",
                 "Runs commands on this Mac, when you allow it.",
             ),
             message_bot::MESSAGE_BOT => {

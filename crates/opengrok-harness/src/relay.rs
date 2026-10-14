@@ -295,7 +295,7 @@ impl RelayBroker {
         let offline = || {
             relay(
                 "relay_offline",
-                "Your Mac isn't connected, so your plan can't answer this turn. Connect it, or \
+                "Your computer isn't connected, so your plan can't answer this turn. Connect it, or \
                  switch this turn to the gateway.",
             )
         };
@@ -307,7 +307,7 @@ impl RelayBroker {
             let busy = state.asks.values().filter(|ask| ask.machine == *machine);
             if busy.count() >= MAX_IN_FLIGHT {
                 return Err(ModelError::Proxy(format!(
-                    "Your Mac is already carrying {MAX_IN_FLIGHT} calls, so this one was not \
+                    "Your computer is already carrying {MAX_IN_FLIGHT} calls, so this one was not \
                      sent; try again when one finishes."
                 )));
             }
@@ -495,7 +495,7 @@ impl Call {
                 let long = crate::budget::spoken(limit);
                 return Err(relay(
                     "relay_timeout",
-                    format!("Your Mac {how} {long}, so the turn stopped there; it was told to cancel."),
+                    format!("Your computer {how} {long}, so the turn stopped there; it was told to cancel."),
                 ));
             }
         };
@@ -504,7 +504,7 @@ impl Call {
             None => None,
             Some(Piece::Failed(why)) => Some(bounded(&why)),
             Some(Piece::Json(_)) => {
-                Some("Your Mac answered with something other than a stream.".to_string())
+                Some("Your computer answered with something other than a stream.".to_string())
             }
         };
         self.finished = true;
@@ -536,14 +536,14 @@ impl Answering {
         let (mut seen, mut whole) = (0usize, Vec::new());
         while let Some(chunk) = body.next().await {
             let Ok(chunk) = chunk else {
-                let why = "Your Mac's answer broke off before it ended.";
+                let why = "Your computer's answer broke off before it ended.";
                 let _ = self.answer.send(Piece::Failed(why.to_string())).await;
                 return Piped::Accepted;
             };
             seen += chunk.as_ref().len();
             if seen > MAX_ANSWER_BYTES {
                 let why = format!(
-                    "Your Mac's answer passed {} MiB, so it was cut off there.",
+                    "Your computer's answer passed {} MiB, so it was cut off there.",
                     MAX_ANSWER_BYTES >> 20
                 );
                 let _ = self.answer.send(Piece::Failed(why)).await;
@@ -568,7 +568,7 @@ impl Answering {
                     Some(why) => Piece::Failed(why.to_string()),
                     None => Piece::Json(said),
                 },
-                Err(_) => Piece::Failed("Your Mac's answer could not be read.".to_string()),
+                Err(_) => Piece::Failed("Your computer's answer could not be read.".to_string()),
             };
             let _ = self.answer.send(piece).await;
         }
