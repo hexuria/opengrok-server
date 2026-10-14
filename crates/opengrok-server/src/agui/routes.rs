@@ -4780,7 +4780,9 @@ pub async fn account_events(State(state): State<AgUiState>, headers: HeaderMap) 
     let last = headers.get("last-event-id").and_then(|id| id.to_str().ok());
     let followed = state.auth.store.events.follow(account.as_str(), last);
     match followed.await {
-        Ok(frames) => streaming(axum::body::Body::from_stream(frames)),
+        Ok(frames) => streaming(axum::body::Body::from_stream(
+            crate::shutdown::until_shutdown(frames),
+        )),
         Err(error) => unavailable(error),
     }
 }
@@ -6019,7 +6021,9 @@ where
         })
     });
 
-    streaming(axum::body::Body::from_stream(body))
+    streaming(axum::body::Body::from_stream(
+        crate::shutdown::until_shutdown(body),
+    ))
 }
 
 /// An SSE response. Without these headers a proxy may buffer the whole run and deliver it at the

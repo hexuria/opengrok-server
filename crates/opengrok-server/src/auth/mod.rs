@@ -13,8 +13,8 @@ pub mod password;
 pub mod password_reset;
 pub mod refresh_grace;
 pub mod routes;
-pub use opengrok_auth::resend;
 pub use opengrok_auth as token;
+pub use opengrok_auth::resend;
 
 pub use routes::{AuthState, router};
 pub use token::{TokenMinter, hash_refresh_token, mint_refresh_token};

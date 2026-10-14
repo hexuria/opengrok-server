@@ -681,7 +681,11 @@ async fn poll_requests(State(state): State<AuthState>, headers: HeaderMap) -> Re
         (header::CONTENT_TYPE, "text/event-stream"),
         (header::CACHE_CONTROL, "no-cache"),
     ];
-    (sse, axum::body::Body::from_stream(opening.chain(frames))).into_response()
+    (
+        sse,
+        axum::body::Body::from_stream(crate::shutdown::until_shutdown(opening.chain(frames))),
+    )
+        .into_response()
 }
 
 /// `POST /local-exec/responses` — the daemon posts back on this. A `client` frame carries one
