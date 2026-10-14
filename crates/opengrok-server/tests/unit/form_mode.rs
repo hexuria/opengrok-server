@@ -101,3 +101,25 @@ fn a_submitted_card_keeps_its_snapshot_and_shows_it() {
     assert_eq!(view["values"]["tax14"], json!("12,500.00"));
     assert_eq!(view["queueRef"], json!("q_1"));
 }
+
+/// A claim holds for twice the longest a plugin call can take, and grows with it: a deployment
+/// that gives its plugins longer (`OG_PLUGIN_CALL_TIMEOUT_MS`) holds its claims longer, so a
+/// Submit still sending is never taken for one that never landed.
+#[test]
+fn a_claim_outlasts_the_longest_call() {
+    use std::time::Duration;
+    let defaults = opengrok_tools::mcp::Deadlines::default();
+    let held = claim_hold_ms(defaults);
+    let longest = i64::try_from(defaults.longest_call().as_millis()).unwrap();
+    assert!(held >= 2 * longest, "{held} < 2 x {longest}");
+    assert!(held > 2 * (5_000 + 60_000), "{held}");
+    let slower = opengrok_tools::mcp::Deadlines {
+        call: Duration::from_secs(300),
+        ..defaults
+    };
+    assert!(
+        claim_hold_ms(slower) > held + 400_000,
+        "{}",
+        claim_hold_ms(slower)
+    );
+}

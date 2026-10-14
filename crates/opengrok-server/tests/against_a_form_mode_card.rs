@@ -56,6 +56,10 @@ struct Bir {
     /// The card tool answers something that is not a card, as a plugin that cannot read BIR's
     /// page would.
     broken: Mutex<bool>,
+    /// What the card's `status` says instead of draft or queued; `Null` leaves it out.
+    status: Mutex<Option<Value>>,
+    /// What the submit tool answers instead of queueing; `{"rpcError": true}` fails the call.
+    submit_reply: Mutex<Option<Value>>,
 }
 
 impl Bir {
@@ -100,7 +104,11 @@ impl Bir {
             ],
             "first_error": first_error,
             "notes": [],
-            "status": if self.queued.lock().unwrap().is_some() { "queued" } else { "draft" },
+            "status": match self.status.lock().unwrap().clone() {
+                Some(status) => status,
+                None if self.queued.lock().unwrap().is_some() => json!("queued"),
+                None => json!("draft"),
+            },
         })
     }
 
@@ -123,6 +131,12 @@ impl Bir {
                 *self.saves.lock().unwrap() += 1;
                 self.card(&form)
             }
+            "bir_form_submit" if self.submit_reply.lock().unwrap().is_some() => self
+                .submit_reply
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default(),
             "bir_form_submit" => {
                 let seen = arguments.get("fingerprint").and_then(Value::as_str);
                 if seen != Some(self.fingerprint().as_str()) {
@@ -177,6 +191,11 @@ async fn start_bir(bir: Arc<Bir>) -> String {
                         let name = request["params"]["name"].as_str().unwrap_or_default();
                         let arguments = request["params"]["arguments"].clone();
                         let reply = bir.answer(name, &arguments);
+                        if reply["rpcError"] == json!(true) {
+                            let error = json!({ "code": -32603, "message": "eFPS hung up" });
+                            let body = json!({ "jsonrpc": "2.0", "id": id, "error": error });
+                            return axum::Json(body).into_response();
+                        }
                         json!({
                             "content": [{ "type": "text", "text": reply.to_string() }],
                             "isError": false
@@ -1202,44 +1221,55 @@ async fn auto_review_judges_a_bot_without_a_computer() {
     assert!(h.bir.calls_to("bir_form_preview").is_empty(), "{frames:#?}");
 }
 
+impl Harness {
+    /// Write a Submit's claim on a card as another replica would: `until` on the database's clock.
+    async fn claim_until(&self, entry_id: &str, until: i64) {
+        let coworker = CoworkerId::from_stored(self.agent.clone());
+        let (seq, read) = self
+            .store
+            .find_gateway_entry(&coworker, &self.account, entry_id)
+            .await
+            .expect("entry")
+            .expect("row");
+        let mut claimed = read.clone();
+        claimed["formSubmitting"] = json!({ "until": until });
+        let who = (&coworker, &self.account);
+        let written = self
+            .store
+            .update_gateway_entry_if(who, (seq, Some(&read)), &claimed);
+        assert!(written.await.expect("claim"));
+    }
+
+    async fn clock(&self) -> i64 {
+        self.store.clock_ms().await.expect("clock")
+    }
+}
+
 /// A Submit claims its card in the row before the plugin is asked to send, so a Submit on
-/// another replica, which read the same draft, finds the claim and sends nothing. A claim that
-/// never settled (a crash, a timeout) is cleared by a later refresh once the plugin says the
-/// return is not queued, and never by sending it again.
+/// another replica, which read the same draft, finds the claim and sends nothing. A claim is
+/// held until its deadline on the database's clock, however plainly the plugin says "draft":
+/// the Submit may still be on its way. Only one that has lapsed is cleared, and a Submit on it
+/// then goes through the same check and sends once.
 #[tokio::test]
 async fn a_card_claimed_for_submit_is_not_submitted_twice() {
     let database_url = database_or_skip!();
     let h = harness(&database_url).await;
     let (entry_id, _) = h.open_card(&h.agent.clone()).await;
-    let coworker = CoworkerId::from_stored(h.agent.clone());
-    let claim = |at: i64| {
-        let (h, coworker, entry_id) = (&h, &coworker, &entry_id);
-        async move {
-            let (seq, read) = h
-                .store
-                .find_gateway_entry(coworker, &h.account, entry_id)
-                .await
-                .expect("entry")
-                .expect("row");
-            let mut claimed = read.clone();
-            claimed["formSubmitting"] = json!(at);
-            let who = (coworker, &h.account);
-            let written = h
-                .store
-                .update_gateway_entry_if(who, (seq, Some(&read)), &claimed);
-            assert!(written.await.expect("claim"));
-        }
-    };
-    claim(chrono::Utc::now().timestamp_millis()).await;
+    let (status, _) = h
+        .act(
+            &entry_id,
+            "save",
+            json!({ "values": { TAX14: "12,500.00" } }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    let hold =
+        opengrok_server::agui::form_mode::claim_hold_ms(opengrok_tools::mcp::Deadlines::from_env());
+    h.claim_until(&entry_id, h.clock().await + hold).await;
     let before = h.bir.calls.lock().unwrap().len();
     let seen = json!({ "fingerprint": h.bir.fingerprint() });
     let (status, refused) = h.act(&entry_id, "submit", seen.clone()).await;
     assert_eq!(status, 409, "{refused}");
-    assert_eq!(
-        h.bir.calls.lock().unwrap().len(),
-        before,
-        "no plugin call at all"
-    );
     let (status, _) = h
         .post(
             "/ag-ui/user-form/dismiss",
@@ -1247,30 +1277,105 @@ async fn a_card_claimed_for_submit_is_not_submitted_twice() {
         )
         .await;
     assert_eq!(status, 409);
-
-    // A young claim is a Submit in flight: a refresh asks the plugin and waits.
+    // Asked, the plugin says draft; the claim is young, so it holds all the same.
     let (status, _) = h.act(&entry_id, "refresh", json!({})).await;
     assert_eq!(status, 409);
-    assert!(h.bir.calls_to("bir_form_submit").is_empty());
-
-    // An old one never landed: the plugin holds no queued return, so it is cleared.
-    let mut stale = h.entry(&entry_id).await;
-    stale["formSubmitting"] = json!(0);
-    let (seq, read) = h
-        .store
-        .find_gateway_entry(&coworker, &h.account, &entry_id)
-        .await
-        .expect("entry")
-        .expect("row");
-    let who = (&coworker, &h.account);
+    assert!(h.entry(&entry_id).await.get("formSubmitting").is_some());
+    let calls = h.bir.calls.lock().unwrap()[before..].to_vec();
     assert!(
-        h.store
-            .update_gateway_entry_if(who, (seq, Some(&read)), &stale)
-            .await
-            .expect("age")
+        calls.iter().all(|(tool, _)| tool == "bir_form_card"),
+        "only the card was asked for: {calls:?}"
     );
-    let (status, opened) = h.act(&entry_id, "refresh", json!({})).await;
-    assert_eq!(status, 200, "{opened}");
-    assert!(h.entry(&entry_id).await.get("formSubmitting").is_none());
+
+    // Lapsed on the database's clock: a Submit on it checks, clears it, and sends once.
+    h.claim_until(&entry_id, 0).await;
+    let (status, sent) = h.act(&entry_id, "submit", seen).await;
+    assert_eq!(status, 200, "{sent}");
+    assert_eq!(h.bir.calls_to("bir_form_submit").len(), 1);
+    let entry = h.entry(&entry_id).await;
+    assert_eq!(entry["formResolution"], json!("submitted"), "{entry}");
+    assert!(entry.get("formSubmitting").is_none(), "{entry}");
+}
+
+/// A pre-check whose card says nothing about its status is not a draft: nothing is claimed or
+/// sent.
+#[tokio::test]
+async fn a_card_with_no_status_is_not_submitted() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (entry_id, _) = h.open_card(&h.agent.clone()).await;
+    *h.bir.status.lock().unwrap() = Some(Value::Null);
+    let seen = json!({ "fingerprint": h.bir.fingerprint() });
+    let (status, refused) = h.act(&entry_id, "submit", seen).await;
+    assert_eq!(status, 502, "{refused}");
     assert!(h.bir.calls_to("bir_form_submit").is_empty());
+    assert!(h.entry(&entry_id).await.get("formSubmitting").is_none());
+}
+
+/// What a Submit's answer does to its claim. A plain refusal (queued: false and why) clears it
+/// and the draft stays; an answer that says neither, or a call that failed, may have queued the
+/// return, so the claim stays and a second Submit sends nothing.
+#[tokio::test]
+async fn a_submits_claim_is_cleared_only_by_a_plain_refusal() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (entry_id, _) = h.open_card(&h.agent.clone()).await;
+    let (status, _) = h
+        .act(
+            &entry_id,
+            "save",
+            json!({ "values": { TAX14: "12,500.00" } }),
+        )
+        .await;
+    assert_eq!(status, 200);
+
+    // A fingerprint the plugin no longer has: refused, with its error.
+    let (status, refused) = h
+        .act(&entry_id, "submit", json!({ "fingerprint": "sha256:old" }))
+        .await;
+    assert_eq!(status, 200, "{refused}");
+    assert_eq!(refused["ok"], json!(false));
+    assert!(h.entry(&entry_id).await.get("formSubmitting").is_none());
+
+    for (answer, what) in [
+        (json!({ "fingerprint": "sha256:x" }), "an unclear answer"),
+        (json!({ "rpcError": true }), "a failed call"),
+    ] {
+        let (other, _) = h.open_card(&format!("{}-{what}", h.agent)).await;
+        *h.bir.submit_reply.lock().unwrap() = Some(answer);
+        let sent_before = h.bir.calls_to("bir_form_submit").len();
+        let seen = json!({ "fingerprint": h.bir.fingerprint() });
+        let (status, held) = h.act(&other, "submit", seen.clone()).await;
+        assert_eq!(status, 502, "{what}: {held}");
+        assert!(
+            h.entry(&other).await.get("formSubmitting").is_some(),
+            "{what}"
+        );
+        let (status, _) = h.act(&other, "submit", seen).await;
+        assert_eq!(status, 409, "{what}");
+        assert_eq!(
+            h.bir.calls_to("bir_form_submit").len(),
+            sent_before + 1,
+            "{what}"
+        );
+        *h.bir.submit_reply.lock().unwrap() = None;
+        // Lapsed, so the next card for this return is not refused by this one's claim.
+        h.claim_until(&other, 0).await;
+    }
+}
+
+/// The claim is the return's, not one card's: a second card for the same return cannot send it
+/// while the first holds a live claim.
+#[tokio::test]
+async fn two_cards_for_one_return_cannot_both_send_it() {
+    let database_url = database_or_skip!();
+    let h = harness(&database_url).await;
+    let (first, _) = h.open_card("first").await;
+    let (second, _) = h.open_card("second").await;
+    h.claim_until(&first, h.clock().await + 600_000).await;
+    let seen = json!({ "fingerprint": h.bir.fingerprint() });
+    let (status, refused) = h.act(&second, "submit", seen).await;
+    assert_eq!(status, 409, "{refused}");
+    assert!(h.bir.calls_to("bir_form_submit").is_empty());
+    assert!(h.entry(&second).await.get("formSubmitting").is_none());
 }

@@ -58,16 +58,13 @@ impl PgStore {
         entry_id: &str,
         entry: &Value,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "update gateway_entry set entry = $3
-              where coworker_id = $1 and entry->>'id' = $2 and account_id = $4",
-        )
-        .bind(coworker.as_str())
-        .bind(entry_id)
-        .bind(entry)
-        .bind(account.as_str())
-        .execute(self.pool())
-        .await?;
+        let sql = "update gateway_entry set entry = $3
+              where coworker_id = $1 and entry->>'id' = $2 and account_id = $4";
+        let query = sqlx::query(sql)
+            .bind(coworker.as_str())
+            .bind(entry_id)
+            .bind(entry);
+        query.bind(account.as_str()).execute(self.pool()).await?;
         Ok(())
     }
 
@@ -81,23 +78,20 @@ impl PgStore {
         entry_id: &str,
         status: &str,
     ) -> StoreResult<Option<Value>> {
-        let row = sqlx::query(
-            "update gateway_entry
+        let sql = "update gateway_entry
                 set entry = jsonb_set(entry::jsonb, '{message,approval,status}', to_jsonb($3::text))::jsonb
               where coworker_id = $1 and entry->>'id' = $2 and account_id = $4
                 and entry->'message'->'approval' is not null
-              returning entry",
-        )
-        .bind(coworker.as_str())
-        .bind(entry_id)
-        .bind(status)
-        .bind(account.as_str())
-        .fetch_optional(self.pool())
-        .await?;
-        Ok(match row {
-            Some(row) => Some(row.try_get("entry")?),
-            None => None,
-        })
+              returning entry";
+        let query = sqlx::query(sql)
+            .bind(coworker.as_str())
+            .bind(entry_id)
+            .bind(status);
+        let row = query
+            .bind(account.as_str())
+            .fetch_optional(self.pool())
+            .await?;
+        Ok(row.map(|row| row.try_get("entry")).transpose()?)
     }
 
     pub async fn update_gateway_entry(
@@ -125,6 +119,16 @@ impl PgStore {
         let query = sqlx::query(sql).bind(coworker.as_str()).bind(seq);
         let query = query.bind(entry).bind(account.as_str()).bind(was);
         Ok(query.execute(self.pool()).await?.rows_affected() == 1)
+    }
+
+    /// The database's clock in ms: what a form-mode card's Submit claim is stamped and judged by
+    /// (#220), so replicas whose own clocks disagree still agree on when a claim lapses.
+    pub async fn clock_ms(&self) -> StoreResult<i64> {
+        let sql = "select (extract(epoch from clock_timestamp()) * 1000)::bigint as ms";
+        Ok(sqlx::query(sql)
+            .fetch_one(self.pool())
+            .await?
+            .try_get("ms")?)
     }
 
     /// Seam B's extra profile fields for a coworker (description, title, avatar shape/colour).
@@ -181,14 +185,12 @@ impl PgStore {
         coworker: &CoworkerId,
         account: &AccountId,
     ) -> StoreResult<Vec<Value>> {
-        let rows = sqlx::query(
-            "select entry from gateway_entry
-             where coworker_id = $1 and account_id = $2 order by seq",
-        )
-        .bind(coworker.as_str())
-        .bind(account.as_str())
-        .fetch_all(self.pool())
-        .await?;
+        let sql = "select entry from gateway_entry
+             where coworker_id = $1 and account_id = $2 order by seq";
+        let query = sqlx::query(sql)
+            .bind(coworker.as_str())
+            .bind(account.as_str());
+        let rows = query.fetch_all(self.pool()).await?;
         rows.into_iter()
             .map(|row| Ok(row.try_get("entry")?))
             .collect()
@@ -202,16 +204,14 @@ impl PgStore {
         account: &AccountId,
         entry_id: &str,
     ) -> StoreResult<Option<(i64, Value)>> {
-        let row = sqlx::query(
-            "select seq, entry from gateway_entry
+        let sql = "select seq, entry from gateway_entry
              where coworker_id = $1 and entry->>'id' = $2 and account_id = $3
-             order by seq desc limit 1",
-        )
-        .bind(coworker.as_str())
-        .bind(entry_id)
-        .bind(account.as_str())
-        .fetch_optional(self.pool())
-        .await?;
+             order by seq desc limit 1";
+        let query = sqlx::query(sql).bind(coworker.as_str()).bind(entry_id);
+        let row = query
+            .bind(account.as_str())
+            .fetch_optional(self.pool())
+            .await?;
         row.map(|row| Ok((row.try_get("seq")?, row.try_get("entry")?)))
             .transpose()
     }

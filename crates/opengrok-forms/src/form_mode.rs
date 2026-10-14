@@ -423,15 +423,18 @@ pub enum SubmitOutcome {
         fingerprint: Option<String>,
         values: serde_json::Map<String, Value>,
     },
-    /// Nothing was queued; the first error says why.
+    /// Nothing was queued, said plainly (`queued: false`), and the first error says why.
     Refused {
         first_error: Option<FirstError>,
         fingerprint: Option<String>,
     },
+    /// Neither said: the return may or may not be queued, so it is treated as possibly sent.
+    Unclear,
 }
 
-/// Read a SubmitReply. A reply that is neither shape is a refusal with no error: nothing was
-/// said to be queued, so nothing is claimed to be.
+/// Read a SubmitReply. Only `queued: true` is queued, and only `queued: false` with the error
+/// that stopped it is a refusal. Anything else is `Unclear`: a return that may have gone is
+/// never offered for a second Submit.
 #[must_use]
 pub fn submit_outcome(reply: &Value) -> SubmitOutcome {
     let fingerprint = text_of(reply, "fingerprint");
@@ -445,10 +448,11 @@ pub fn submit_outcome(reply: &Value) -> SubmitOutcome {
                 .cloned()
                 .unwrap_or_default(),
         },
-        _ => SubmitOutcome::Refused {
+        Some(false) if first_error(reply).is_some() => SubmitOutcome::Refused {
             first_error: first_error(reply),
             fingerprint,
         },
+        _ => SubmitOutcome::Unclear,
     }
 }
 

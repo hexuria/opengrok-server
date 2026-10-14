@@ -202,11 +202,15 @@ fn a_submit_reply_says_whether_it_queued() {
         refused,
         SubmitOutcome::Refused { first_error: Some(ref e), .. } if e.message == "Fill line 14"
     ));
-    // A reply that does not say it queued is not a queued return.
-    assert!(matches!(
+    // A reply that says neither is unclear, never a refusal: it may have queued.
+    assert_eq!(
         submit_outcome(&json!({"fingerprint": "sha256:abc"})),
-        SubmitOutcome::Refused { .. }
-    ));
+        SubmitOutcome::Unclear
+    );
+    assert_eq!(
+        submit_outcome(&json!({"queued": false})),
+        SubmitOutcome::Unclear
+    );
 }
 
 #[test]

@@ -332,12 +332,9 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
     if !refusal.is_empty() {
         return (409, json!({ "error": refusal }));
     }
-    // A Submit already claimed this card (here or on another replica) and has not been settled.
-    // Another Submit is refused before any plugin call; see `submitting` for the rest.
-    let claimed_at = entry.get(SUBMITTING).and_then(Value::as_i64);
-    if claimed_at.is_some() && action == "submit" {
-        return (409, json!({ "error": BEING_SUBMITTED }));
-    }
+    // A Submit claimed this card (here or on another replica) and it has not been settled: no
+    // press that could send or change the return runs until `submitting` says the claim is over.
+    let claimed = entry.get(SUBMITTING).is_some();
     let form = form_request_from(&entry);
     let (Some(plugin), Some(key)) = (form.plugin.clone(), form.form.clone()) else {
         return (
@@ -359,32 +356,21 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
     };
     let card = (plugin.as_str(), &tools, &key);
     let mut entry = entry;
-    if let Some(at) = claimed_at.filter(|_| matches!(action, "save" | "refresh")) {
-        entry = match submitting(host, (account, &coworker), card, (seq, entry), at).await {
+    if claimed && matches!(action, "save" | "refresh" | "submit") {
+        entry = match submitting(host, (account, &coworker), card, (seq, entry)).await {
             Ok(cleared) => cleared,
             Err(refused) => return refused,
         };
     }
     if action == "submit" {
-        if let Some(refused) = already_queued(host, (account, &coworker), card, (seq, &entry)).await
+        if let Err(refused) = already_queued(host, (account, &coworker), card, (seq, &entry)).await
         {
             return refused;
         }
-        // CLAIMED BEFORE IT IS SENT. The lock is one process's; the row is every replica's, so
-        // of two Submits read as drafts on two replicas only the one whose claim lands sends.
-        let mut claimed = entry.clone();
-        claimed[SUBMITTING] = json!(now_ms());
-        let store = &host.agui.auth.store;
-        let claim =
-            store.update_gateway_entry_if((&coworker, account), (seq, Some(&entry)), &claimed);
-        match claim.await {
-            Ok(true) => entry = claimed,
-            Ok(false) => return (409, json!({ "error": BEING_SUBMITTED })),
-            Err(error) => {
-                tracing::error!(%error, "a form-mode card could not be claimed for submit");
-                return (500, json!({ "error": "transcript unavailable" }));
-            }
-        }
+        entry = match claim(host, (account, &coworker), &key, (seq, entry)).await {
+            Ok(claimed) => claimed,
+            Err(refused) => return refused,
+        };
     }
     let call = PluginCall {
         plugin: &plugin,
@@ -398,8 +384,12 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
     if result.awaiting_approval {
         // Nothing was sent: a gate asked first. A failed call keeps its claim instead, since a
         // timeout may have sent it; the next save or refresh asks the plugin (`submitting`).
-        if action == "submit" {
-            unclaim(host, (account, &coworker), seq, &entry).await;
+        if action == "submit"
+            && unclaim(host, (account, &coworker), seq, &entry)
+                .await
+                .is_none()
+        {
+            tracing::warn!("a Submit a gate stopped kept its claim; it lapses on its own");
         }
         let error = format!("this needs a person's yes first: {}", result.content);
         return (409, json!({ "ok": false, "error": error }));
@@ -432,7 +422,9 @@ pub async fn act(host: &HostState, args: &Value, account: &AccountId) -> (u16, V
                     return (409, json!({ "error": error }));
                 }
                 Err(error) => {
-                    tracing::error!(%error, "a refreshed form-mode card could not be kept")
+                    // The card the person would see is not the card the row holds.
+                    tracing::error!(%error, "a refreshed form-mode card could not be kept");
+                    return (500, json!({ "error": "transcript unavailable" }));
                 }
             }
         }
@@ -450,16 +442,34 @@ async fn submitted(
     entry: Value,
     mut body: Value,
 ) -> (u16, Value) {
-    let form_mode::SubmitOutcome::Queued {
-        queue_ref,
-        fingerprint,
-        values,
-    } = form_mode::submit_outcome(&body["reply"])
-    else {
-        // The plugin said plainly that nothing was queued: the claim goes, the draft stays.
-        unclaim(host, (account, coworker), seq, &entry).await;
-        body["ok"] = json!(false);
-        return (200, body);
+    let (queue_ref, fingerprint, values) = match form_mode::submit_outcome(&body["reply"]) {
+        form_mode::SubmitOutcome::Queued {
+            queue_ref,
+            fingerprint,
+            values,
+        } => (queue_ref, fingerprint, values),
+        // The plugin said plainly that nothing was queued, and why: the claim goes, the draft
+        // stays.
+        form_mode::SubmitOutcome::Refused { .. } => {
+            if unclaim(host, (account, coworker), seq, &entry)
+                .await
+                .is_none()
+            {
+                tracing::warn!("a refused Submit kept its claim; it lapses on its own");
+            }
+            body["ok"] = json!(false);
+            return (200, body);
+        }
+        // Neither: it may have been queued. The claim stays, and nothing is sent again until the
+        // plugin's own card says what became of it (`submitting`).
+        form_mode::SubmitOutcome::Unclear => {
+            let error = "the plugin did not say whether it queued this return; it is held as \
+                         being submitted, and checked with the plugin before anything is sent";
+            return (
+                502,
+                json!({ "ok": false, "error": error, "reply": body["reply"] }),
+            );
+        }
     };
     let queue_ref = queue_ref.as_deref();
     let settle = |entry| settle_submitted(entry, queue_ref, fingerprint.as_deref(), &values);
@@ -512,30 +522,82 @@ async fn record(
     Err(settle(was))
 }
 
-/// The key a Submit claims its card with, before the plugin is asked to send (the time it
-/// claimed it). Not a resolution: the card is still the person's draft until it is settled.
+/// The key a Submit claims its card with, before the plugin is asked to send: `{until}`, in the
+/// DATABASE's ms, when the claim lapses. Not a resolution: the card is still the person's draft
+/// until it is settled.
 const SUBMITTING: &str = "formSubmitting";
 
 const BEING_SUBMITTED: &str = "this return is being submitted; wait for it to finish";
 
-/// A claim older than this, on a return the plugin does not hold as queued, is a Submit that
-/// never landed (a crash, a timeout before the plugin had it), and a save or refresh clears it.
-const SUBMIT_STALE_MS: i64 = 60_000;
+/// How long a Submit's claim holds: twice the longest a plugin call can take (connect, call and
+/// the cancel's grace, `OG_PLUGIN_*_TIMEOUT_MS`). A claim is cleared only after this, so a
+/// Submit still sending, on any replica, is never taken for one that never landed.
+pub fn claim_hold_ms(deadlines: opengrok_tools::mcp::Deadlines) -> i64 {
+    i64::try_from(deadlines.longest_call().as_millis().saturating_mul(2)).unwrap_or(i64::MAX)
+}
 
-/// A save or refresh on a card a Submit claimed: the plugin is asked first. A return it holds
-/// as queued settles the card (and the press is refused); a claim still young is a Submit in
-/// flight, and the press waits for it; an old one never landed and is cleared. Never sends.
+fn claim_until(entry: &Value) -> Option<i64> {
+    entry
+        .pointer(&format!("/{SUBMITTING}/until"))
+        .and_then(Value::as_i64)
+}
+
+/// Claim the card for a Submit, on the database's clock, against the card as read. Refused while
+/// another card of this Bot for the same return holds a live claim: the claim is one return's,
+/// and two cards for it are two ways to send it.
+async fn claim(
+    host: &HostState,
+    (account, coworker): (&AccountId, &CoworkerId),
+    key: &form_mode::FormKey,
+    (seq, entry): (i64, Value),
+) -> Result<Value, (u16, Value)> {
+    let unavailable = |error: opengrok_store::StoreError| {
+        tracing::error!(%error, "a form-mode card could not be claimed for submit");
+        (500, json!({ "error": "transcript unavailable" }))
+    };
+    let store = &host.agui.auth.store;
+    let now = store.clock_ms().await.map_err(unavailable)?;
+    let id = entry_id_of(&entry);
+    let cards = store
+        .gateway_transcript(coworker, account)
+        .await
+        .map_err(unavailable)?;
+    let other_live = cards.iter().any(|card| {
+        entry_id_of(card) != id
+            && form_mode::is_form_mode_entry(card)
+            && form_request_from(card).form.as_ref() == Some(key)
+            && claim_until(card).is_some_and(|until| until > now)
+    });
+    if other_live {
+        return Err((409, json!({ "error": BEING_SUBMITTED })));
+    }
+    let hold = claim_hold_ms(opengrok_tools::mcp::Deadlines::from_env());
+    let mut claimed = entry.clone();
+    claimed[SUBMITTING] = json!({ "until": now.saturating_add(hold) });
+    let written = store.update_gateway_entry_if((coworker, account), (seq, Some(&entry)), &claimed);
+    match written.await.map_err(unavailable)? {
+        true => Ok(claimed),
+        false => Err((409, json!({ "error": BEING_SUBMITTED }))),
+    }
+}
+
+/// A press on a card a Submit claimed. The plugin is asked first: a return it holds as queued
+/// settles the card (and the press is refused), and an answer that is not plainly "draft" keeps
+/// the claim. Only a draft whose claim has lapsed on the database's clock is cleared, and the
+/// press goes on. Never sends.
 async fn submitting(
     host: &HostState,
     who: (&AccountId, &CoworkerId),
     card: (&str, &FormModeTools, &form_mode::FormKey),
     (seq, entry): (i64, Value),
-    claimed_at: i64,
 ) -> Result<Value, (u16, Value)> {
-    if let Some(refused) = already_queued(host, who, card, (seq, &entry)).await {
-        return Err(refused);
-    }
-    if now_ms() - claimed_at < SUBMIT_STALE_MS {
+    already_queued(host, who, card, (seq, &entry)).await?;
+    let now = host.agui.auth.store.clock_ms().await.map_err(|error| {
+        tracing::error!(%error, "the database clock could not be read");
+        (500, json!({ "error": "transcript unavailable" }))
+    })?;
+    // A claim with no readable deadline is held, never guessed at.
+    if claim_until(&entry).is_none_or(|until| now < until) {
         return Err((409, json!({ "error": BEING_SUBMITTED })));
     }
     match unclaim(host, who, seq, &entry).await {
@@ -624,7 +686,7 @@ async fn already_queued(
     (account, coworker): (&AccountId, &CoworkerId),
     (plugin, tools, key): (&str, &FormModeTools, &form_mode::FormKey),
     (seq, entry): (i64, &Value),
-) -> Option<(u16, Value)> {
+) -> Result<(), (u16, Value)> {
     let entry_id = entry_id_of(entry);
     let call = PluginCall {
         plugin,
@@ -639,16 +701,22 @@ async fn already_queued(
         Ok(reply) => reply,
         Err(why) => {
             let error = format!("the return could not be checked before sending: {why}");
-            return Some((502, json!({ "ok": false, "error": error })));
+            return Err((502, json!({ "ok": false, "error": error })));
         }
     };
-    let status = reply
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if !matches!(status, "queued" | "sent") {
-        return None;
+    // ONLY A PLAIN "draft" GOES ON. A status missing, or one this server does not know, may be a
+    // return on its way: it is held, as a failed check is.
+    let status = reply.get("status").and_then(Value::as_str);
+    match status {
+        Some("draft") => return Ok(()),
+        Some("queued" | "sent") => {}
+        _ => {
+            let error = "the plugin did not say whether this return is still a draft; \
+                         nothing was sent";
+            return Err((502, json!({ "ok": false, "error": error })));
+        }
     }
+    let status = status.unwrap_or_default();
     let values: serde_json::Map<String, Value> = form_mode::card_request(plugin, &reply)
         .map(|card| {
             card.fields
@@ -663,7 +731,7 @@ async fn already_queued(
     let settled = record(host, (account, coworker), (seq, entry.clone()), settle).await;
     let entry = settled.unwrap_or_else(|unwritten| unwritten);
     let error = format!("this return is already {status}; it can only be viewed");
-    Some((409, json!({ "ok": false, "error": error, "entry": entry })))
+    Err((409, json!({ "ok": false, "error": error, "entry": entry })))
 }
 
 fn is_submitted(entry: &Value) -> bool {
