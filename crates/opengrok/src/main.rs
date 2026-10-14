@@ -23,6 +23,7 @@ use sqlx::postgres::PgPoolOptions;
 /// no ids, so the picker never shows this one; servable and advertised are independent
 /// (docs/setup/environment.md), and a default is chosen for the first.
 const DEFAULT_MODEL: &str = "xai/grok-4.6";
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -397,14 +398,25 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%bind, "opengrok listening");
     // The socket peer rides along because the dev sign-in must know who is REALLY calling: a
     // `Host` header is whatever the caller wrote (`auth/routes.rs::is_local_caller`).
-    axum::serve(
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("server stopped unexpectedly")?;
-    Ok(())
+    .with_graceful_shutdown(async {
+        shutdown_signal().await;
+        opengrok_server::shutdown::begin();
+    });
+
+    tokio::select! {
+        result = serve => result.context("server stopped unexpectedly"),
+        () = async {
+            opengrok_server::shutdown::begun().await;
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => {
+            tracing::warn!("connections still open 10s after shutdown; exiting");
+            Ok(())
+        }
+    }
 }
 
 /// Provider configuration, read from the JSON file named by `OG_CONNECTORS`.

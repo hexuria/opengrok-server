@@ -9,15 +9,18 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+http.workspace = true
 opengrok-core = { path = "../opengrok-core" }
 jsonwebtoken.workspace = true
 rand.workspace = true
+reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
 chrono.workspace = true
-serde_json.workspace = true

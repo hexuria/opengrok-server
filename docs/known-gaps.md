@@ -118,3 +118,36 @@ status level rather than only in the body.
 
 **Note:** the rate limit is real and was measured — a refused probe returns `429` in `ms=0`,
 before any gateway call. That part works.
+
+---
+
+## 4. Non-blocking review findings tracked in #352
+
+**Where:** `crates/opengrok-server/src/local_exec.rs` (`switch_relay`, `revoke_daemon`),
+`crates/opengrok-store/src/postgres.rs` (`set_relay`, `revoke_daemon`),
+`crates/opengrok-store/src/lib.rs` (`StoreError::from`),
+`crates/opengrok-server/src/autonomy/desk.rs` (`Tools::routine`, `edit`, `mutate_schedule`),
+`crates/opengrok-server/src/agui/routes.rs` (`account_events`), and
+`crates/opengrok-events/src/{appended,follow,hub}.rs`.
+
+**What breaks:**
+
+- **#346:** The per-computer relay switch uses `set_relay`, which updates its row without the
+  account's relay lock and can race an enrollment; a later switch-off can race the same way.
+  Enrollment and revoke take that lock. Revoke commits its row change before `revoke_daemon`
+  closes the relay stream, so a re-enrollment can open a new stream in between and have the revoke
+  close it.
+- **#349:** A resumed routine-tool call rechecks the routine's current Bot after an approval card,
+  but this handover path is untested. An edit checks Bot access before `mutate_schedule`; if a
+  conflicting person handover lands before its one retry, the write closure does not repeat that
+  Bot check, so an already-authorized Bot write can land after the routine belongs to the other
+  Bot.
+- **#351:** `GET /ag-ui/events` has no per-token stream cap. Replay checks only the first id in a
+  page, so an interior hole after a consecutive first id is skipped. `StoreError::from` treats
+  every SQLSTATE `23505` as `Conflict`. A mixed-version deployment can omit notes for writes
+  handled by older replicas.
+  Through a transaction-pooling proxy, LISTEN wake-ups do not arrive; the stream's 30-second poll
+  is the fallback.
+
+**Why it was left:** #352 records these as non-blocking review findings, not must-fix items; they
+remain for a later pass.

@@ -759,12 +759,14 @@ async fn a_place_check_asks_for_the_port_again() {
     let h = harness(&database_url).await;
     let ada = h.person().await;
     let coworker = h.hire(&ada).await;
+    let (_, screen) = h.screen(&ada, &coworker).await;
+    let box_id = screen["boxId"].as_str().expect("the coworker's box");
     let ticket = h.ticket_path(&ada, &coworker).await;
     assert_eq!(h.open(&format!("{ticket}/app/ui.js")).await.0, 200);
 
     let (moved, fresh_saw) = h.another_screen().await;
     h.screen.port.store(moved, Ordering::SeqCst);
-    opengrok_server::agui::screen_proxy::screen_tickets_due();
+    opengrok_server::agui::screen_proxy::screen_tickets_due(box_id);
     let taken = h.box_saw.lock().expect("saw").len();
     assert_eq!(h.open(&format!("{ticket}/app/ui.js")).await.0, 200);
     assert_eq!(h.box_saw.lock().expect("saw").len(), taken, "the old port");

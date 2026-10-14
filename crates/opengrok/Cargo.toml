@@ -42,3 +42,4 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 [dev-dependencies]
 # The boot repair's stand-in provider (`tests/unit/repair.rs`) implements `Computer`.
 async-trait.workspace = true
+reqwest.workspace = true
