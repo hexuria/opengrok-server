@@ -68,5 +68,5 @@ pub fn clear_cookie(name: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/auth_cookies.rs"]
+#[path = "../tests/unit/auth_cookies.rs"]
 mod tests;
