@@ -17,7 +17,6 @@ none is current, and nothing links here for instructions. One line each:
 | [`plan-slice16-later.md`](plan-slice16-later.md) | the PolicyApproval card and OAuth 2.1 on `/mcp` | built as ROADMAP 16.policy and 16.oauth; `auth/oauth_mcp.rs` still cites its §2.1 spec digest |
 | [`findings-og139.md`](findings-og139.md) | review findings on PR #139 | the fixed ones are marked; its paths name the `gateway/` modules deleted 20 Sep 2026 |
 | [`desktop-client.md`](desktop-client.md) | connecting the Grok Bot desktop client | the client and its doors were removed 20 Sep 2026; [`../setup/nativechat.md`](../setup/nativechat.md) |
-| [`client-versions-0.18-0.30.md`](client-versions-0.18-0.30.md) | the Grok Bot client's protocol across versions 0.18 to 0.30 | the client was removed 20 Sep 2026; [`../research/client-nativechat.md`](../research/client-nativechat.md) |
 | [`verification/real-client/`](verification/real-client/README.md) | the packaged Grok Bot app against this server: the dead env-var repoint, the `EnsureSandBox` mint | removed with the client, 20 Sep 2026 |
 | [`verification/plan-mode-wire/`](verification/plan-mode-wire/README.md) | capture showing the packaged app's `sendPrompt` sends no `mode` | removed with the client, 20 Sep 2026 |
 | [`artifacts/two-doors.html`](artifacts/two-doors.html) | diagram №2, the two doors into the Grok Bot client | both doors removed 20 Sep 2026; [`../DIAGRAMS.md`](../DIAGRAMS.md) №3 is the AG-UI desk |
