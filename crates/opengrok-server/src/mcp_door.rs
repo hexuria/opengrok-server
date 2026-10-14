@@ -1,7 +1,7 @@
 //! The MCP door — an MCP client (Claude Code first) borrows a coworker's toolbox.
 //!
 //! This is a FRONT DOOR onto the same executor every run uses, not a second tool path. The
-//! bearer names the coworker (a slice-10 bot key), `tools_for_coworker` builds the same
+//! bearer names the coworker (a slice-10 bot key), `tools_for_turn` builds the same
 //! policy-and-auto-review-wired runner a run would get, and every call goes through
 //! `Executor::execute` — identity overwrite, the primary gate, the judge. The door adds
 //! transport, never authority.
