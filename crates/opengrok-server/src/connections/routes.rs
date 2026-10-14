@@ -611,7 +611,7 @@ pub async fn lend(
     Json(request): Json<LendRequest>,
 ) -> Response {
     let coworker = CoworkerId::from_stored(request.coworker_id);
-    mutate(state, headers, id, Some(&coworker), |connection, at_ms| {
+    mutate(state, headers, id, Some(&coworker), false, |connection, at_ms| {
         connection.decide(ConnectionCommand::Lend {
             coworker: coworker.clone(),
             at_ms,
@@ -627,7 +627,7 @@ pub async fn revoke(
     Path(id): Path<String>,
     Json(request): Json<LendRequest>,
 ) -> Response {
-    mutate(state, headers, id, None, |connection, at_ms| {
+    mutate(state, headers, id, None, false, |connection, at_ms| {
         connection.decide(ConnectionCommand::Revoke {
             coworker: CoworkerId::from_stored(request.coworker_id.clone()),
             at_ms,
@@ -641,7 +641,7 @@ pub async fn disconnect(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    mutate(state, headers, id, None, |connection, at_ms| {
+    mutate(state, headers, id, None, true, |connection, at_ms| {
         connection.decide(ConnectionCommand::Disconnect { at_ms })
     })
     .await
@@ -664,6 +664,7 @@ async fn mutate<F>(
     headers: HeaderMap,
     id: String,
     lend_to: Option<&CoworkerId>,
+    delete_secrets: bool,
     decide: F,
 ) -> Response
 where
@@ -737,6 +738,15 @@ where
         .await
     {
         return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+    }
+
+    if delete_secrets {
+        let refresh_id = format!("{id}_refresh");
+        for secret_id in [&id, &refresh_id] {
+            if let Err(error) = state.auth.store.delete_secret(secret_id).await {
+                return (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response();
+            }
+        }
     }
 
     // The connection as `GET /connections` lists it, so one client type reads both (#267). A

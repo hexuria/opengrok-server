@@ -101,11 +101,15 @@ async fn start_provider() -> String {
         axum::routing::post(
             |axum::Form(form): axum::Form<BTreeMap<String, String>>| async move {
                 let code = form.get("code").cloned().unwrap_or_default();
-                axum::Json(json!({
+                let mut token = json!({
                     "access_token": format!("token-for-{code}"),
                     "token_type": "Bearer",
                     "expires_in": 3599,
-                }))
+                });
+                if code == "first" {
+                    token["refresh_token"] = json!("refresh-for-first");
+                }
+                axum::Json(token)
             },
         ),
     );
@@ -485,6 +489,14 @@ async fn a_disconnected_connection_can_be_connected_again() {
     let first_list = h.list(&token).await;
     assert_eq!(first_list.as_array().unwrap().len(), 1);
     let id = first_list[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &format!("{id}_refresh"))
+            .await
+            .expect("open refresh credential")
+            .as_deref(),
+        Some("refresh-for-first")
+    );
     let coworker = h.hire(&token).await;
     let lent = h
         .post(
@@ -496,6 +508,20 @@ async fn a_disconnected_connection_can_be_connected_again() {
     assert_eq!(lent.status().as_u16(), 200);
     assert_eq!(h.disconnect(&token, &id).await.status().as_u16(), 204);
     assert_eq!(h.list(&token).await, json!([]));
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &id)
+            .await
+            .expect("read disconnected access credential"),
+        None
+    );
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &format!("{id}_refresh"))
+            .await
+            .expect("read disconnected refresh credential"),
+        None
+    );
 
     let again = h.connect_through_the_browser(&token, "second").await;
     assert_eq!(again.status().as_u16(), 200);
@@ -524,6 +550,14 @@ async fn a_disconnected_connection_can_be_connected_again() {
             .as_deref(),
         Some("token-for-second"),
         "the new round trip's token is the one kept"
+    );
+    assert_eq!(
+        h.store
+            .open_credential(&h.vault, &format!("{new_id}_refresh"))
+            .await
+            .expect("open new refresh credential"),
+        None,
+        "a sign-in with no new refresh token does not carry one forward"
     );
 }
 
