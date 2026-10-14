@@ -12,8 +12,8 @@ pub mod pages;
 pub mod password;
 pub mod password_reset;
 pub mod refresh_grace;
-pub mod resend;
 pub mod routes;
+pub use opengrok_auth::resend;
 pub use opengrok_auth as token;
 
 pub use routes::{AuthState, router};
