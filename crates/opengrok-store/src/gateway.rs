@@ -121,16 +121,6 @@ impl PgStore {
         Ok(query.execute(self.pool()).await?.rows_affected() == 1)
     }
 
-    /// The database's clock in ms: what a form-mode card's Submit claim is stamped and judged by
-    /// (#220), so replicas whose own clocks disagree still agree on when a claim lapses.
-    pub async fn clock_ms(&self) -> StoreResult<i64> {
-        let sql = "select (extract(epoch from clock_timestamp()) * 1000)::bigint as ms";
-        Ok(sqlx::query(sql)
-            .fetch_one(self.pool())
-            .await?
-            .try_get("ms")?)
-    }
-
     /// Seam B's extra profile fields for a coworker (description, title, avatar shape/colour).
     pub async fn seamb_profile(&self, coworker: &CoworkerId) -> StoreResult<Option<Value>> {
         let row = sqlx::query("select profile from seamb_profile where coworker_id = $1")

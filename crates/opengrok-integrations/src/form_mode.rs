@@ -560,6 +560,14 @@ pub fn claim_live(entry: &Value, now: i64) -> bool {
     claim_until(entry).is_some_and(|until| now < until)
 }
 
+/// The database's clock in ms: what a Submit's claim is stamped and judged by, so replicas
+/// whose own clocks disagree still agree on when a claim lapses.
+pub async fn clock_ms(store: &PgStore) -> opengrok_store::StoreResult<i64> {
+    let sql = "select (extract(epoch from clock_timestamp()) * 1000)::bigint as ms";
+    let row = sqlx::query(sql).fetch_one(store.pool()).await?;
+    Ok(sqlx::Row::try_get(&row, "ms")?)
+}
+
 /// Claim the card for a Submit, on the database's clock, against the card as read. Refused while
 /// another card of this Bot for the same return holds a live claim: the claim is one return's,
 /// and two cards for it are two ways to send it.
@@ -574,7 +582,7 @@ async fn claim(
         (500, json!({ "error": "transcript unavailable" }))
     };
     let store = host.store();
-    let now = store.clock_ms().await.map_err(unavailable)?;
+    let now = clock_ms(store).await.map_err(unavailable)?;
     let id = entry_id_of(&entry);
     let cards = store
         .gateway_transcript(coworker, account)
@@ -610,7 +618,7 @@ async fn submitting(
     (seq, entry): (i64, Value),
 ) -> Result<Value, (u16, Value)> {
     already_queued(host, who, card, (seq, &entry)).await?;
-    let now = host.store().clock_ms().await.map_err(|error| {
+    let now = clock_ms(host.store()).await.map_err(|error| {
         tracing::error!(%error, "the database clock could not be read");
         (500, json!({ "error": "transcript unavailable" }))
     })?;
@@ -898,7 +906,7 @@ pub async fn dismiss(
         );
     }
     // Only a live claim refuses: a lapsed one is checked with the plugin by the next press.
-    let now = match host.store().clock_ms().await {
+    let now = match clock_ms(host.store()).await {
         Ok(now) => now,
         Err(error) => {
             tracing::error!(%error, "the database clock could not be read");

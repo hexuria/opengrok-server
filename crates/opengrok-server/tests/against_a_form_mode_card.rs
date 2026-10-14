@@ -1241,7 +1241,9 @@ impl Harness {
     }
 
     async fn clock(&self) -> i64 {
-        self.store.clock_ms().await.expect("clock")
+        opengrok_integrations::form_mode::clock_ms(&self.store)
+            .await
+            .expect("clock")
     }
 }
 
