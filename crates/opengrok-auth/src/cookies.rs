@@ -14,8 +14,7 @@
 //! because this server is reached over plain HTTP on a LAN today; a hardcoded `Secure` would
 //! silently drop every cookie there and look like a broken login.
 
-use axum::http::HeaderMap;
-use axum::http::header::COOKIE;
+use http::{HeaderMap, header::COOKIE};
 
 /// The access-token cookie. Short-lived, mirrors the JWT's own TTL.
 pub const ACCESS_COOKIE: &str = "og_access";

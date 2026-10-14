@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use super::*;
-use axum::http::HeaderValue;
+use http::HeaderValue;
 
 fn headers_with(cookie: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();

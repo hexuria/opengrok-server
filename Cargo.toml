@@ -40,6 +40,7 @@ license = "MIT"
 proptest = { version = "1", default-features = false, features = ["std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "process"] }
 axum = { version = "0.8", features = ["macros"] }
+http = "1"
 tower = { version = "0.5", features = ["util"] }
 # Already in the tree under axum; named for the screen proxy's websocket splice, which needs the
 # upgraded connection's types. Declared here so the workspace has one line to move with axum.
