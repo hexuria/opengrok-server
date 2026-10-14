@@ -34,6 +34,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_core::run::{RunCommand, RunView};
+use opengrok_integrations::form_mode;
 use opengrok_tools::user_form::front_page;
 use opengrok_tools::user_form::{
     FieldOutcome, FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, HANDOFF_DECLINED_TOOL_RESULT,
@@ -134,10 +135,12 @@ pub async fn submit_user_form(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = form_mode::named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
-    let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+    let store = &state.agui.auth.store;
+    let loaded = form_mode::load_owned_entry(store, account_id, &coworker_id, &entry_id);
+    let (seq, entry) = match loaded.await {
         Ok(row) => row,
         Err(reply) => return reply,
     };
@@ -359,7 +362,7 @@ pub async fn dismiss_user_form(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = form_mode::named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let mode = args.get("mode").and_then(Value::as_str).unwrap_or_default();
@@ -373,7 +376,9 @@ pub async fn dismiss_user_form(
             );
         }
     };
-    let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+    let store = &state.agui.auth.store;
+    let loaded = form_mode::load_owned_entry(store, account_id, &coworker_id, &entry_id);
+    let (seq, entry) = match loaded.await {
         Ok(row) => row,
         Err(reply) => return reply,
     };
@@ -389,7 +394,7 @@ pub async fn dismiss_user_form(
             );
         }
         let who = (account_id, &coworker_id);
-        return super::form_mode::dismiss(state, who, &entry_id, args).await;
+        return form_mode::dismiss(state, who, &entry_id, args).await;
     }
     if !is_unresolved(&entry) {
         // Skip after Open the screen can land as dismissed on the *form* id while a
@@ -461,7 +466,7 @@ pub async fn resolve_box_handoff(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = form_mode::named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let asked = args.get("resolution").and_then(Value::as_str);
@@ -475,7 +480,9 @@ pub async fn resolve_box_handoff(
         );
     };
     let timed_out = word == "timed_out";
-    let (_seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+    let store = &state.agui.auth.store;
+    let loaded = form_mode::load_owned_entry(store, account_id, &coworker_id, &entry_id);
+    let (_seq, entry) = match loaded.await {
         Ok(row) => row,
         Err(reply) => return reply,
     };
@@ -997,55 +1004,6 @@ pub(crate) async fn saved_login_refusal(
         && scope == "account"
         && super::site_logins::shared_with_all_bots(agui, account_id).await;
     (mode != opengrok_core::coworker::BoxMode::Dedicated && !all_bots).then_some(SHARED_COMPUTER)
-}
-
-pub(crate) fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {
-    let entry_id = args.get("entryId").and_then(Value::as_str)?;
-    let agent_id = args
-        .get("agentId")
-        .or_else(|| args.get("id"))
-        .and_then(Value::as_str)?;
-    if entry_id.is_empty() || agent_id.is_empty() {
-        return None;
-    }
-    Some((entry_id.to_string(), CoworkerId::from_stored(agent_id)))
-}
-
-async fn may_use(state: &HostState, account_id: &AccountId, coworker: &CoworkerId) -> bool {
-    state
-        .agui
-        .auth
-        .store
-        .may_use_coworker(account_id, coworker)
-        .await
-        .unwrap_or(false)
-}
-
-/// Null stays the disclosure answer for a coworker the caller may not use. A stamped
-/// `entryId` that is missing from the transcript is an error — NativeChat collapses on Null.
-pub(crate) async fn load_owned_entry(
-    state: &HostState,
-    account_id: &AccountId,
-    coworker_id: &CoworkerId,
-    entry_id: &str,
-) -> Result<(i64, Value), (u16, Value)> {
-    if !may_use(state, account_id, coworker_id).await {
-        return Err((200, Value::Null));
-    }
-    match state
-        .agui
-        .auth
-        .store
-        .find_gateway_entry(coworker_id, account_id, entry_id)
-        .await
-    {
-        Ok(Some(row)) => Ok(row),
-        Ok(None) => Err((404, json!({ "error": "form entry missing" }))),
-        Err(error) => {
-            tracing::error!(%error, "could not load a form or handoff entry");
-            Err((500, json!({ "error": "transcript unavailable" })))
-        }
-    }
 }
 
 fn settle_entry(

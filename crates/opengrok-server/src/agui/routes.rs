@@ -576,7 +576,13 @@ pub(crate) async fn tools_for_turn(
             .await
             .ok()?;
         let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
-        let policy = super::form_mode::always_asking(state, account_id, &coworker_id, policy).await;
+        let policy = opengrok_integrations::form_mode::always_asking(
+            (&state.auth.store, &*state.plugins),
+            account_id,
+            &coworker_id,
+            policy,
+        )
+        .await;
         let (plugins, off) = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
         // A plugin's form needs no computer (#220): offered when the app draws its card and a
         // plugin the model may reach has one.
@@ -710,7 +716,13 @@ pub(crate) async fn tools_for_turn(
         .await
         .ok()?;
     let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
-    let policy = super::form_mode::always_asking(state, account_id, &coworker_id, policy).await;
+    let policy = opengrok_integrations::form_mode::always_asking(
+        (&state.auth.store, &*state.plugins),
+        account_id,
+        &coworker_id,
+        policy,
+    )
+    .await;
 
     // The plugins this coworker may use, connected with its own credentials. On a shared
     // coworker that includes its `bot`-scoped connections, which its OWNER authorised: a member's
@@ -3327,7 +3339,13 @@ async fn start_claimed_turn(
     // the card had an outcome, so the Bot hears it here, on its next turn.
     let form_lines = match (&account_id, &run_coworker) {
         (Some(account), Some(coworker)) => {
-            super::form_mode::turn_line(&state, account, coworker, &input.thread_id).await
+            opengrok_integrations::form_mode::turn_line(
+                &state.auth.store,
+                account,
+                coworker,
+                &input.thread_id,
+            )
+            .await
         }
         _ => String::new(),
     };
@@ -6007,8 +6025,14 @@ impl EventSink for AgUiSink {
             {
                 let who = (account, coworker);
                 let thread = (self.thread_id.as_str(), self.tagged.as_slice());
-                let entry =
-                    super::form_mode::mint(&self.gateway, who, thread, &call_id, &arguments).await;
+                let entry = opengrok_integrations::form_mode::mint(
+                    &self.gateway,
+                    who,
+                    thread,
+                    &call_id,
+                    &arguments,
+                )
+                .await;
                 let entry_id = entry
                     .as_ref()
                     .and_then(|e| e.get("id"))

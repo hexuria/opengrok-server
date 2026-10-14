@@ -1264,7 +1264,7 @@ async fn a_card_claimed_for_submit_is_not_submitted_twice() {
         .await;
     assert_eq!(status, 200);
     let hold =
-        opengrok_server::agui::form_mode::claim_hold_ms(opengrok_tools::mcp::Deadlines::from_env());
+        opengrok_integrations::form_mode::claim_hold_ms(opengrok_tools::mcp::Deadlines::from_env());
     h.claim_until(&entry_id, h.clock().await + hold).await;
     let before = h.bir.calls.lock().unwrap().len();
     let seen = json!({ "fingerprint": h.bir.fingerprint() });
