@@ -8,7 +8,7 @@
 # CLAUDE.md's workspace table made checkable: opengrok-core "depends on nothing", the contract
 # and policy crates do no I/O, and HTTP adapters live only in the server and plugin-api crates.
 #
-# opengrok-harness's edges to store, tools, box and policy are what #101 wants to narrow to
+# opengrok-harness's edges to tools and box are what #101 wants to narrow to
 # traits; each one removed there is a line shortened here.
 
 opengrok-core:
@@ -23,13 +23,15 @@ opengrok-recipes:
     | tokio axum sqlx reqwest hyper
 opengrok-forms: opengrok-box
     | axum sqlx
+opengrok-office:
+    | tokio axum sqlx reqwest hyper
 opengrok-gateway-admin:
     | axum sqlx
 opengrok-jev:
     | axum sqlx
 opengrok-local-exec:
     | axum sqlx
-opengrok-auth:
+opengrok-auth: opengrok-core
     | axum sqlx
 opengrok-box: opengrok-core
     | axum sqlx
@@ -41,13 +43,13 @@ opengrok-testdb:
     | axum reqwest hyper
 opengrok-tools: opengrok-box opengrok-core opengrok-plugins opengrok-policy opengrok-recipes opengrok-forms
     | axum sqlx
-opengrok-harness: opengrok-box opengrok-core opengrok-policy opengrok-store opengrok-tools opengrok-wire
+opengrok-harness: opengrok-box opengrok-core opengrok-tools opengrok-wire
     | axum
 opengrok-integrations: opengrok-core opengrok-plugins opengrok-policy opengrok-store opengrok-tools
     | axum
 opengrok-plugin-api: opengrok-core opengrok-integrations opengrok-store
     |
-opengrok-server: opengrok-plugin-api opengrok-integrations opengrok-box opengrok-core opengrok-auth opengrok-gateway-admin opengrok-harness opengrok-jev opengrok-local-exec opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
+opengrok-server: opengrok-plugin-api opengrok-integrations opengrok-box opengrok-core opengrok-auth opengrok-gateway-admin opengrok-harness opengrok-jev opengrok-local-exec opengrok-office opengrok-plugins opengrok-policy opengrok-recipes opengrok-store opengrok-tools opengrok-wire
     |
 opengrok: opengrok-box opengrok-core opengrok-harness opengrok-plugins opengrok-server opengrok-store
     |

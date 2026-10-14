@@ -8,12 +8,16 @@
 //! the broker only carries an ALREADY-APPROVED command.
 //!
 //! Refuse-if-offline: a command for a machine whose daemon is not connected is refused crisply
-//! rather than queued to wait forever. One daemon per machine; a reconnect replaces the old stream.
+//! rather than queued to wait forever. One daemon per account and machine; a reconnect replaces
+//! only that account's old stream.
 
 use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc, oneshot};
+
+type MachineKey = (String, String);
+type RequestKey = (String, String, String);
 
 /// The outcome of one command, read off the daemon's result frame ([`super::wire`]). Carries both
 /// what the caller sees (stdout/stderr/detail) and what the audit records (the `case`, and an exit
@@ -104,16 +108,13 @@ pub enum DispatchError {
 
 #[derive(Default)]
 struct Inner {
-    /// machine_id → the account whose daemon opened its stream, and the stream. Last connect
-    /// wins. A machine id is the client's to choose: one account's revoke ends no other's stream.
-    providers: HashMap<String, (String, mpsc::UnboundedSender<Value>)>,
-    /// request_id → (the machine it was dispatched to, the caller waiting for its result). The
-    /// machine is kept so a result is only ever accepted from the SAME machine — a daemon for one
-    /// machine cannot resolve another machine's command.
-    waiters: HashMap<String, (String, oneshot::Sender<ExecOutcome>)>,
-    /// request_id → accumulated (stdout, stderr) for the STREAMING shell, which sends chunks across
-    /// several frames before a terminal exit. Dropped when the request resolves.
-    streams: HashMap<String, (String, String)>,
+    /// (account, machine) → stream. A machine id is the client's to choose, so accounts are
+    /// separate providers even when they use the same id.
+    providers: HashMap<MachineKey, mpsc::UnboundedSender<Value>>,
+    /// (account, machine, request) → caller waiting for the daemon's result.
+    waiters: HashMap<RequestKey, oneshot::Sender<ExecOutcome>>,
+    /// (account, machine, request) → accumulated stdout and stderr for streaming shell output.
+    streams: HashMap<RequestKey, (String, String)>,
 }
 
 /// The broker. Cheap to clone through an `Arc`; all state is behind one mutex held only for the
@@ -140,7 +141,7 @@ impl LocalExecBroker {
         let mut inner = self.inner.lock().await;
         inner
             .providers
-            .insert(machine_id.to_string(), (account.to_string(), tx));
+            .insert((account.to_string(), machine_id.to_string()), tx);
         rx
     }
 
@@ -149,21 +150,21 @@ impl LocalExecBroker {
     /// is checked on every POST. A `null`, which is never a frame, tells the route to end.
     pub async fn disconnect(&self, account: &str, machine_id: &str) {
         let mut inner = self.inner.lock().await;
-        if let Some((owner, stream)) = inner.providers.get(machine_id)
-            && owner == account
+        if let Some(stream) = inner
+            .providers
+            .remove(&(account.to_string(), machine_id.to_string()))
         {
             let _ = stream.send(Value::Null);
-            inner.providers.remove(machine_id);
         }
     }
 
-    /// Is a daemon currently connected for this machine?
-    pub async fn has_provider(&self, machine_id: &str) -> bool {
+    /// Is a daemon currently connected for this account's machine?
+    pub async fn has_provider(&self, account: &str, machine_id: &str) -> bool {
         let inner = self.inner.lock().await;
         inner
             .providers
-            .get(machine_id)
-            .is_some_and(|(_, tx)| !tx.is_closed())
+            .get(&(account.to_string(), machine_id.to_string()))
+            .is_some_and(|tx| !tx.is_closed())
     }
 
     /// Push an already-approved exec frame to a machine's daemon and return the channel its result
@@ -171,6 +172,7 @@ impl LocalExecBroker {
     /// `server_message` is the opaque exec payload from [`super::wire`].
     pub async fn dispatch(
         &self,
+        account: &str,
         machine_id: &str,
         request_id: &str,
         approval_id: &str,
@@ -178,7 +180,13 @@ impl LocalExecBroker {
     ) -> Result<oneshot::Receiver<ExecOutcome>, DispatchError> {
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().await;
-        let Some((_, provider)) = inner.providers.get(machine_id) else {
+        let provider_key = (account.to_string(), machine_id.to_string());
+        let request_key = (
+            account.to_string(),
+            machine_id.to_string(),
+            request_id.to_string(),
+        );
+        let Some(provider) = inner.providers.get(&provider_key) else {
             return Err(DispatchError::NoDaemon);
         };
         let frame = json!({
@@ -192,28 +200,30 @@ impl LocalExecBroker {
         });
         if provider.send(frame).is_err() {
             // The daemon's stream is gone even though its entry lingered; clean it up and refuse.
-            inner.providers.remove(machine_id);
+            inner.providers.remove(&provider_key);
             return Err(DispatchError::NoDaemon);
         }
-        inner
-            .waiters
-            .insert(request_id.to_string(), (machine_id.to_string(), tx));
+        inner.waiters.insert(request_key, tx);
         Ok(rx)
     }
 
-    /// A daemon posted a result. Resolve the waiting caller, but ONLY if the posting machine is the
-    /// one the command was dispatched to — a mismatched or unknown id is ignored, so one machine's
-    /// daemon can neither resolve nor observe another's command. A late id (the caller already gave
-    /// up) is ignored too, so a slow daemon can never wedge the broker.
-    pub async fn resolve(&self, from_machine: &str, request_id: &str, outcome: ExecOutcome) {
+    /// A daemon posted a result. Resolve the waiting caller only for the same account and machine.
+    /// A mismatched or late result is ignored, so another account cannot resolve this command.
+    pub async fn resolve(
+        &self,
+        account: &str,
+        from_machine: &str,
+        request_id: &str,
+        outcome: ExecOutcome,
+    ) {
+        let key = (
+            account.to_string(),
+            from_machine.to_string(),
+            request_id.to_string(),
+        );
         let waiter = {
             let mut inner = self.inner.lock().await;
-            match inner.waiters.get(request_id) {
-                Some((machine, _)) if machine == from_machine => {
-                    inner.waiters.remove(request_id).map(|(_, tx)| tx)
-                }
-                _ => None,
-            }
+            inner.waiters.remove(&key)
         };
         if let Some(waiter) = waiter {
             let _ = waiter.send(outcome);
@@ -225,17 +235,22 @@ impl LocalExecBroker {
     /// dropped rather than buffered forever.
     pub async fn accumulate(
         &self,
+        account: &str,
         from_machine: &str,
         request_id: &str,
         is_stderr: bool,
         data: &str,
     ) {
         let mut inner = self.inner.lock().await;
-        let ours = matches!(inner.waiters.get(request_id), Some((m, _)) if m == from_machine);
-        if !ours {
+        let key = (
+            account.to_string(),
+            from_machine.to_string(),
+            request_id.to_string(),
+        );
+        if !inner.waiters.contains_key(&key) {
             return;
         }
-        let (out, err) = inner.streams.entry(request_id.to_string()).or_default();
+        let (out, err) = inner.streams.entry(key).or_default();
         if is_stderr {
             err.push_str(data);
         } else {
@@ -248,20 +263,25 @@ impl LocalExecBroker {
     /// and drop the buffers. Machine-guarded like `resolve`.
     pub async fn finish_stream(
         &self,
+        account: &str,
         from_machine: &str,
         request_id: &str,
         case: &str,
         exit_code: Option<i32>,
         detail: &str,
     ) {
+        let key = (
+            account.to_string(),
+            from_machine.to_string(),
+            request_id.to_string(),
+        );
         let (waiter, buffers) = {
             let mut inner = self.inner.lock().await;
-            let ours = matches!(inner.waiters.get(request_id), Some((m, _)) if m == from_machine);
-            if !ours {
+            if !inner.waiters.contains_key(&key) {
                 (None, (String::new(), String::new()))
             } else {
-                let waiter = inner.waiters.remove(request_id).map(|(_, tx)| tx);
-                let buffers = inner.streams.remove(request_id).unwrap_or_default();
+                let waiter = inner.waiters.remove(&key);
+                let buffers = inner.streams.remove(&key).unwrap_or_default();
                 (waiter, buffers)
             }
         };
@@ -278,11 +298,19 @@ impl LocalExecBroker {
 
     /// Abandon a request: drop its waiter and tell the daemon to cancel it if we still can. Used
     /// when the caller times out.
-    pub async fn cancel(&self, machine_id: &str, request_id: &str) {
+    pub async fn cancel(&self, account: &str, machine_id: &str, request_id: &str) {
         let mut inner = self.inner.lock().await;
-        inner.waiters.remove(request_id);
-        inner.streams.remove(request_id);
-        if let Some((_, provider)) = inner.providers.get(machine_id) {
+        let request_key = (
+            account.to_string(),
+            machine_id.to_string(),
+            request_id.to_string(),
+        );
+        inner.waiters.remove(&request_key);
+        inner.streams.remove(&request_key);
+        if let Some(provider) = inner
+            .providers
+            .get(&(account.to_string(), machine_id.to_string()))
+        {
             let _ = provider.send(json!({ "kind": "cancel", "requestId": request_id }));
         }
     }

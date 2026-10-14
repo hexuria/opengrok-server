@@ -94,3 +94,8 @@ id!(
     "pum",
     "One queued user send that has not yet become a run — NativeChat's follow-up while a turn is in flight."
 );
+id!(
+    DocSessionId,
+    "odoc",
+    "One open office document: the handle an office_* tool call names, backed by a doc_session row."
+);

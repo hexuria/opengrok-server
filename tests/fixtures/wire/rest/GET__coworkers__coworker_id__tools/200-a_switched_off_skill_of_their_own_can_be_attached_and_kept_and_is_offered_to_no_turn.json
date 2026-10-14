@@ -217,6 +217,144 @@
         "enabled": true,
         "label": "Manage computer",
         "summary": "Checks, starts, stops, restarts, resets and updates the Bot's own computer, and looks at your other Bots' screens."
+      },
+      {
+        "name": "office",
+        "description": "Create, read, search, edit and export .docx, .xlsx and .pptx files on this Bot's own computer, as proposals you can review before they are written.",
+        "kind": "builtin",
+        "tools": [
+          {
+            "name": "office_files",
+            "description": "List DOCX, XLSX, and PPTX files and subdirectories under a directory on THIS BOT'S OWN computer (defaults to ~/office), plus open document IDs. Start here when the path is unknown.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Browse documents",
+            "summary": "Lists the .docx, .xlsx and .pptx files on the Bot's computer."
+          },
+          {
+            "name": "office_open",
+            "description": "Open an Office file on this Bot's computer and return its document ID, format, and capabilities.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Open document",
+            "summary": "Opens an Office file and keeps a session you can watch live."
+          },
+          {
+            "name": "office_create",
+            "description": "Create a NEW .docx, .xlsx, or .pptx on this Bot's computer; existing files are never overwritten. A new path is a new document with its own history — to REVISE a file, open it and use office_propose + office_accept instead: the same path updates in place and becomes the next version of the SAME document, which is what the person sees in their version history. Format comes from the path extension and requires the matching payload: docx.paragraphs [{text, style: title|heading1|heading2|normal, bold, italic}]; xlsx.rows string[][] of raw inputs (\"42\" number, \"=SUM(A1:A3)\" formula, other text); pptx.slides [{title, bullets: string[], notes}]. The parent directory must exist.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Create document",
+            "summary": "Makes a new .docx, .xlsx or .pptx file on the Bot's computer."
+          },
+          {
+            "name": "office_outline",
+            "description": "List DOCX paragraphs, PPTX slide paragraphs, or XLSX sheets (sheetId and name). Filter story; headingsOnly is DOCX-only. Paginate with nextOffset.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Document outline",
+            "summary": "Reads a document's headings, sheets or slides."
+          },
+          {
+            "name": "office_grep",
+            "description": "Find literal text with bounded context. DOCX/PPTX return match IDs for office_propose; XLSX returns cell handles for office_propose_cells, searching displayed values case-sensitively. story filters a DOCX/PPTX story or XLSX sheetId. Follow nextCursor; if truncated remains true, narrow query or story.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Search document",
+            "summary": "Finds text inside an open document."
+          },
+          {
+            "name": "office_read",
+            "description": "Read a ref from outline/grep/cells: a DOCX/PPTX paragraph or XLSX cell display text. Default 4000 UTF-16 units; follow nextStart. field selects displayText (default), formula, or value for XLSX.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Read document",
+            "summary": "Reads a span of an open document's text."
+          },
+          {
+            "name": "office_cells",
+            "description": "XLSX only: read a rectangular A1 range on a sheetId from office_outline. Includes empty cells, inputs, formula flags, and cell handles. Follow nextOffset.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Read cells",
+            "summary": "Reads a range of a spreadsheet's cells."
+          },
+          {
+            "name": "office_render",
+            "description": "Render a page as PNG using the document engine. page is one-based: a DOCX page, a PPTX slide, or an XLSX sheet index. Supply proposal to see its proposed result without changing the live document. Returns pageCount where the format has pages.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Render page",
+            "summary": "Rasterizes one page, slide or sheet to an image."
+          },
+          {
+            "name": "office_verify",
+            "description": "Save and reopen the current document or a pending proposal in memory. Reports completed checks explicitly; does not assert semantic or visual correctness.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Verify document",
+            "summary": "Saves and reopens a document to prove the file is still valid."
+          },
+          {
+            "name": "office_close",
+            "description": "Release an open document and its proposals. Export any work you want to keep first.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Close document",
+            "summary": "Ends an open document's session."
+          },
+          {
+            "name": "office_propose",
+            "description": "DOCX/PPTX: stage 1-32 text replacements without changing the document. XLSX uses office_propose_cells. First grep for the exact text you want to replace, then copy the desired occurrence's match ID. Supply edits [{match: ID_FROM_GREP, newText: REPLACEMENT}]. To change part of a sentence, grep that part; do not reuse a match for the whole sentence. New text inherits formatting at its start. No paragraph/embedded-content/tracked-change crossings.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Propose edits",
+            "summary": "Stages text edits you can review before they are written."
+          },
+          {
+            "name": "office_propose_cells",
+            "description": "XLSX only: stage 1-32 whole-cell inputs using cell handles copied from office_cells, office_read, or office_grep. input is what a user types: 123 for a number, =SUM(A1:A3) for a formula, or text. Empty input clears a cell. Review before accepting/exporting.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Propose cell edits",
+            "summary": "Stages spreadsheet edits you can review before they are written."
+          },
+          {
+            "name": "office_review",
+            "description": "List proposals, or supply proposal to inspect exact before/after changes, attribution, status, and staleness. A stale proposal must be re-created from fresh reads.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Review proposals",
+            "summary": "Shows what a staged edit would change."
+          },
+          {
+            "name": "office_accept",
+            "description": "Apply a proposal to the open document atomically and write the file back — the SAME path now holds the next version; no new file is made. Stale targets are rejected. Export afterwards to hand the person a copy.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Accept edits",
+            "summary": "Writes a reviewed proposal to the document."
+          },
+          {
+            "name": "office_reject",
+            "description": "Discard a pending proposal without editing the document.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Reject edits",
+            "summary": "Discards a staged proposal without writing."
+          },
+          {
+            "name": "office_export",
+            "description": "Write a file of the opened format (.docx, .xlsx, .pptx) on this Bot's computer and attach it to your reply for the person — a copy: editing continues on the open document, not the copy. Existing files are never overwritten except a path this session itself exported before, so re-shipping the latest state keeps the same filename instead of inventing -v2 copies. Supply proposal to export a proposed result without accepting it; omit proposal to export accepted edits.",
+            "kind": "builtin",
+            "mode": "always",
+            "label": "Export document",
+            "summary": "Saves the document to a new file and attaches it to the reply."
+          }
+        ],
+        "enabled": true,
+        "label": "Office documents",
+        "summary": "Create, read, search, edit and export .docx, .xlsx and .pptx files on this Bot's own computer, as proposals you can review before they are written."
       }
     ]
   }

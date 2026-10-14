@@ -579,6 +579,13 @@ fn quick() -> Deadlines {
     }
 }
 
+fn generous() -> Deadlines {
+    Deadlines {
+        connect: Duration::from_secs(30),
+        call: Duration::from_secs(30),
+    }
+}
+
 fn endpoint_for(plugin: &str, url: &str) -> Endpoint {
     Endpoint {
         plugin: plugin.to_string(),
@@ -783,6 +790,8 @@ async fn call_with(
         screen_held_in: None,
         form_mode: None,
         screen: Default::default(),
+        thread_id: None,
+        run_id: None,
     };
     let call = opengrok_tools::ToolCall {
         id: "call_1".to_string(),
@@ -847,7 +856,7 @@ async fn one_black_holed_server_does_not_delay_the_others() {
 #[tokio::test]
 async fn a_second_dial_within_the_ttl_reuses_the_session() {
     let (url, seen) = start_server().await;
-    let pool = Pool::new(quick());
+    let pool = Pool::new(generous());
 
     let first = pool
         .dial("acct_1/cw_1", vec![endpoint(&url, &[])], |_| true)
@@ -885,7 +894,7 @@ async fn a_second_dial_within_the_ttl_reuses_the_session() {
 #[tokio::test]
 async fn a_pooled_session_is_never_handed_to_another_credential_or_coworker() {
     let (url, seen) = start_server().await;
-    let pool = Pool::new(quick());
+    let pool = Pool::new(generous());
     let with_token = |token: &str| endpoint(&url, &[("authorization", token)]);
 
     pool.dial("acct_1/cw_1", vec![with_token("Bearer gho_first")], |_| {

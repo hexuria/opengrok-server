@@ -447,14 +447,16 @@ fn auth_state(store: PgStore) -> AuthState {
 /// enqueue), then in the background reply to the first `exec` frame with the given outcome.
 async fn fake_daemon(state: &AuthState, account: &str, machine: &str, reply: ExecOutcome) {
     let broker = state.local_exec.clone();
-    let machine = machine.to_string();
+    let (account, machine) = (account.to_string(), machine.to_string());
     // Connect synchronously — the provider must exist before enqueue dispatches, or it refuses.
-    let mut stream = broker.connect(account, &machine).await;
+    let mut stream = broker.connect(&account, &machine).await;
     tokio::spawn(async move {
         while let Some(frame) = stream.recv().await {
             if frame["kind"] == "exec" {
                 let request_id = frame["requestId"].as_str().unwrap_or_default().to_string();
-                broker.resolve(&machine, &request_id, reply.clone()).await;
+                broker
+                    .resolve(&account, &machine, &request_id, reply.clone())
+                    .await;
                 return;
             }
         }
@@ -782,6 +784,7 @@ async fn the_daemon_is_sent_the_servers_own_split() {
     let broker = state.local_exec.clone();
     let mut stream = broker.connect(&account, &machine).await;
     let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+    let daemon_account = account.clone();
     let daemon_machine = machine.clone();
     tokio::spawn(async move {
         while let Some(frame) = stream.recv().await {
@@ -789,7 +792,7 @@ async fn the_daemon_is_sent_the_servers_own_split() {
                 let request_id = frame["requestId"].as_str().unwrap_or_default().to_string();
                 let _ = seen_tx.send(frame["serverMessage"]["shellStreamArgs"].clone());
                 broker
-                    .resolve(&daemon_machine, &request_id, success())
+                    .resolve(&daemon_account, &daemon_machine, &request_id, success())
                     .await;
                 return;
             }

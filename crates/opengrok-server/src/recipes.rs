@@ -1084,8 +1084,8 @@ struct RunRequest {
     values: Option<Values>,
 }
 
-/// `POST /recipes/{id}/run` — run it now on one of the caller's bots; the receipt comes back
-/// and is written to the recipe's history.
+/// `POST /recipes/{id}/run` — start it on one of the caller's bots; the receipt is written to
+/// the recipe's history, whether or not the caller waits for it.
 async fn run(
     State(state): State<AgUiState>,
     headers: HeaderMap,
@@ -1244,22 +1244,17 @@ pub(crate) fn hold_run(store: PgStore, run_id: String) -> crate::recovery::Lease
     }))
 }
 
-/// Whether the caller asked not to wait (RFC 7240 `Prefer: respond-async`).
-///
-/// OPT-IN, NOT THE DEFAULT, because the page that starts a run reads the receipt out of this
-/// response today. A caller that waits gets exactly the body it always did — the run just no
-/// longer depends on it waiting — and one that says so gets the run id at once and reads the
-/// history. The default can turn over once the client asks.
+/// Runs answer asynchronously unless the caller explicitly prefers to wait for the receipt.
 pub(crate) fn wants_async(headers: &HeaderMap) -> bool {
-    headers
+    !headers
         .get_all(axum::http::header::HeaderName::from_static("prefer"))
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
-        .any(|preference| preference.trim().eq_ignore_ascii_case("respond-async"))
+        .any(|preference| preference.trim().eq_ignore_ascii_case("wait"))
 }
 
-/// The 202 for a caller that preferred not to wait.
+/// The 202 for a run that continues in the background.
 pub(crate) fn accepted(body: Value) -> Response {
     (
         StatusCode::ACCEPTED,

@@ -36,6 +36,8 @@ macro_rules! database_or_skip {
 struct Desk {
     base: String,
     token: String,
+    store: PgStore,
+    minter: Arc<TokenMinter>,
 }
 
 async fn desk(database_url: &str) -> Desk {
@@ -86,13 +88,19 @@ async fn desk(database_url: &str) -> Desk {
     let token = minter
         .mint_access(account.as_str(), "sess-retired", &email, "ultra", now, 3600)
         .expect("mint access");
-    let app = opengrok_server::local_exec::router(AuthState::new(store, minter, email));
+    let app =
+        opengrok_server::local_exec::router(AuthState::new(store.clone(), minter.clone(), email));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let base = format!("http://{}", listener.local_addr().expect("addr"));
     tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
-    Desk { base, token }
+    Desk {
+        base,
+        token,
+        store,
+        minter,
+    }
 }
 
 impl Desk {
@@ -120,20 +128,67 @@ impl Desk {
     /// Enrol a machine, or re-enrol `machine`: its id and its new daemon token. Its mode is
     /// `bypass`, so a command of the person's own goes to it with no card.
     async fn enrol(&self, machine: Option<&str>) -> (String, String) {
+        self.enrol_as(&self.token, machine).await
+    }
+
+    async fn enrol_as(&self, bearer: &str, machine: Option<&str>) -> (String, String) {
         let body = json!({ "label": "Ada's Mac", "machineId": machine });
         let post = reqwest::Method::POST;
-        let (status, enrolled) = self
-            .send(&self.token, post, "/local-exec/daemon", body)
-            .await;
+        let (status, enrolled) = self.send(bearer, post, "/local-exec/daemon", body).await;
         assert_eq!(status, 200, "{enrolled}");
         let id = enrolled["machineId"].as_str().unwrap().to_string();
         let mode = json!({ "machineId": id, "mode": "bypass" });
         let put = reqwest::Method::PUT;
-        let set = self
-            .send(&self.token, put, "/local-exec/policy", mode)
-            .await;
+        let set = self.send(bearer, put, "/local-exec/policy", mode).await;
         assert_eq!(set.0, 204, "{}", set.1);
         (id, enrolled["token"].as_str().unwrap().to_string())
+    }
+
+    async fn another_account(&self) -> String {
+        let account = AccountId::new();
+        let at_ms = chrono::Utc::now().timestamp_millis();
+        let email = format!("retired-{}@og.local", uuid::Uuid::now_v7().simple());
+        let events = Account::default()
+            .decide(AccountCommand::Register {
+                email: email.clone(),
+                password_hash: "x".to_string(),
+                first_name: "Test".to_string(),
+                last_name: "User".to_string(),
+                org_id: String::new(),
+                plan: Plan::Ultra,
+                verified: true,
+                enabled: true,
+                at_ms,
+            })
+            .expect("register second account");
+        let view = AccountView {
+            id: account.clone(),
+            email: email.clone(),
+            plan: Plan::Ultra,
+            trial: false,
+            updated_at_ms: at_ms,
+            password_hash: Some("x".to_string()),
+            first_name: "Test".to_string(),
+            last_name: "User".to_string(),
+            org_id: None,
+            verified: true,
+            enabled: true,
+            avatar_url: None,
+        };
+        self.store
+            .append_account(&account, 0, &events, &view)
+            .await
+            .expect("append second account");
+        self.minter
+            .mint_access(
+                account.as_str(),
+                "sess-second-account",
+                &email,
+                "ultra",
+                chrono::Utc::now().timestamp(),
+                3600,
+            )
+            .expect("mint second account token")
     }
 
     /// Open the command stream as a daemon: the status, and each `data:` frame it is sent,
@@ -182,6 +237,55 @@ async fn rest_of(mut frames: mpsc::UnboundedReceiver<Value>) -> Vec<Value> {
     };
     let ended = tokio::time::timeout(Duration::from_secs(5), ending).await;
     ended.expect("the stream ends")
+}
+
+#[tokio::test]
+async fn a_shared_machine_id_is_connected_only_for_its_account() {
+    let database_url = database_or_skip!();
+    let d = desk(&database_url).await;
+    let other_account = d.another_account().await;
+    let shared_machine = format!("mac_{}", uuid::Uuid::now_v7().simple());
+    let (machine_a, _) = d.enrol(Some(&shared_machine)).await;
+    let (machine_b, daemon_b) = d.enrol_as(&other_account, Some(&shared_machine)).await;
+    assert_eq!(machine_a, machine_b);
+
+    let (status, mut frames) = d.open(&daemon_b).await;
+    assert_eq!(status, 200);
+    assert_eq!(frames.recv().await.unwrap()["kind"], "welcome");
+
+    let (status, listed_a) = d
+        .send(
+            &d.token,
+            reqwest::Method::GET,
+            "/local-exec/daemon",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, 200, "{listed_a}");
+    let row_a = listed_a["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["machineId"] == shared_machine)
+        .expect("A's computer is listed");
+    assert_eq!(row_a["connected"], false, "B's stream is not A's");
+
+    let (status, listed_b) = d
+        .send(
+            &other_account,
+            reqwest::Method::GET,
+            "/local-exec/daemon",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(status, 200, "{listed_b}");
+    let row_b = listed_b["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["machineId"] == shared_machine)
+        .expect("B's computer is listed");
+    assert_eq!(row_b["connected"], true, "B's own stream is connected");
 }
 
 /// RE-ENROLMENT ROTATES THE TOKEN, AND THE OLD ONE'S STREAM GOES WITH IT (#299). It ran on, and

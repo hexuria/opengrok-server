@@ -106,6 +106,29 @@ pub const TOOL_GROUPS: &[(&str, &[&str])] = &[
             "set_network",
         ],
     ),
+    // The office desk's own row name and tool names are opengrok-tools' office_desk::ROW and
+    // office_desk::TOOLS; policy names them literally because the desk lives above it.
+    (
+        "office",
+        &[
+            "office_files",
+            "office_open",
+            "office_create",
+            "office_outline",
+            "office_grep",
+            "office_read",
+            "office_cells",
+            "office_render",
+            "office_verify",
+            "office_close",
+            "office_propose",
+            "office_propose_cells",
+            "office_review",
+            "office_accept",
+            "office_reject",
+            "office_export",
+        ],
+    ),
 ];
 
 /// The group `tool` belongs to, if any.

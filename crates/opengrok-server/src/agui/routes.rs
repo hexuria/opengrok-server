@@ -793,7 +793,10 @@ pub(crate) async fn tools_for_turn(
         // This Bot's own computer (7 Oct 2026), through the desk the Computer pane's routes use.
         .with_computer_desk(Arc::new(crate::computer_desk::Tools {
             state: state.clone(),
-        }));
+        }))
+        // Its office documents on that same computer — attached only here, on the path that
+        // HAS a box, so a boxless coworker is never offered tools that cannot run.
+        .with_office_desk(crate::office_desk::desk(state.clone()));
     // The reverse-exec tool: offered ONLY when this account has an enrolled, enabled machine to
     // reach — otherwise the model is never told about a channel it cannot use. Bound to that
     // machine, and to this coworker for the audit origin. The executor offers it only where the
@@ -944,29 +947,24 @@ async fn live_token(
 
             // Sealed before it is returned, so a crash between here and the next request does not
             // leave the old token in the database and the new one only in memory.
-            if let Ok(sealed) = vault.seal(&chosen.id, &token.access_token) {
-                let _ = state
-                    .auth
-                    .store
-                    .put_secret(&chosen.id, &sealed, at_ms)
-                    .await;
-            }
+            let access_sealed = vault.seal(&chosen.id, &token.access_token).ok();
             // Google omits the refresh token on a refresh, so the stored one is kept.
-            if let Some(rotated) = token.refresh_token_to_store(Some(&refresh_token))
-                && rotated != refresh_token
-                && let Ok(sealed) = vault.seal(&format!("{}_refresh", chosen.id), &rotated)
+            let refresh_sealed = token
+                .refresh_token_to_store(Some(&refresh_token))
+                .filter(|rotated| rotated != &refresh_token)
+                .and_then(|rotated| vault.seal(&format!("{}_refresh", chosen.id), &rotated).ok());
+            if !crate::connections::routes::store_refreshed(
+                &state.auth.store,
+                &chosen.id,
+                access_sealed.as_ref(),
+                refresh_sealed.as_ref(),
+                expires_at,
+                at_ms,
+            )
+            .await
             {
-                let _ = state
-                    .auth
-                    .store
-                    .put_secret(&format!("{}_refresh", chosen.id), &sealed, at_ms)
-                    .await;
+                return None;
             }
-            let _ = state
-                .auth
-                .store
-                .touch_expiry(&chosen.id, expires_at, at_ms)
-                .await;
 
             tracing::info!(
                 connector = chosen.connector,
@@ -1882,18 +1880,23 @@ pub async fn hire(
         Ok(events) => events,
         Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
     };
-    // The template's standing role, in the SAME append as the hire: a second write could fail
-    // after the coworker exists, leaving a coworker the template promised a role and did not get.
-    if let Some(role) = template.as_ref().and_then(|t| t.role.clone())
-        && let Ok(more) = coworker.decide(CoworkerCommand::SetRole {
-            role: Some(role),
-            at_ms,
-        })
-    {
-        events.extend(more);
-    }
     for event in &events {
         coworker.apply(event);
+    }
+    // The template's standing role, in the SAME append as the hire: a second write could fail
+    // after the coworker exists, leaving a coworker the template promised a role and did not get.
+    if let Some(role) = template.as_ref().and_then(|t| t.role.clone()) {
+        let more = match coworker.decide(CoworkerCommand::SetRole {
+            role: Some(role),
+            at_ms,
+        }) {
+            Ok(more) => more,
+            Err(error) => return (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+        };
+        for event in &more {
+            coworker.apply(event);
+        }
+        events.extend(more);
     }
     // Born on the whole default when it gave the pin: its door and effort, in this same append.
     if let Some(default) = &default {
@@ -2517,7 +2520,7 @@ async fn list_tools(
         .collect();
     // The routine tools are listed as their ceiling's one row (#316), as the Tools card shows it,
     // and so are the plugin tools (#359).
-    use opengrok_tools::{computer_desk, plugin_desk, routine};
+    use opengrok_tools::{computer_desk, office_desk, plugin_desk, routine};
     let routines =
         |row: &serde_json::Value| row["name"].as_str().is_some_and(routine::is_routine_tool);
     let (offered, tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(routines);
@@ -2532,7 +2535,13 @@ async fn list_tools(
             .as_str()
             .is_some_and(computer_desk::is_computer_tool)
     };
-    let (computer_offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(computer);
+    let (computer_offered, tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(computer);
+    let office = |row: &serde_json::Value| {
+        row["name"]
+            .as_str()
+            .is_some_and(office_desk::is_office_tool)
+    };
+    let (office_offered, mut tools): (Vec<_>, Vec<_>) = tools.into_iter().partition(office);
     // A plugin's tools the person switched off for this Bot are listed too, as `never`, so its
     // page can switch them back on; they are not offered to the Bot.
     for tool in runner
@@ -2593,6 +2602,11 @@ async fn list_tools(
         &computer_desk::TOOLS,
         computer_desk::description,
     );
+    let office_offered = group(
+        office_offered,
+        &office_desk::TOOLS,
+        office_desk::description,
+    );
     // `enabled` is the group's own switch (7 Oct 2026), apart from its tools' choices.
     tools.push(serde_json::json!({ "name": routine::ROW,
         "description": routine::ROW_DESCRIPTION, "kind": "builtin", "tools": offered,
@@ -2603,6 +2617,9 @@ async fn list_tools(
     tools.push(serde_json::json!({ "name": computer_desk::ROW,
         "description": computer_desk::ROW_DESCRIPTION, "kind": "builtin", "tools": computer_offered,
         "enabled": !runner.executor().is_some_and(|(executor, _)| executor.group_off(computer_desk::ROW)) }));
+    tools.push(serde_json::json!({ "name": office_desk::ROW,
+        "description": office_desk::ROW_DESCRIPTION, "kind": "builtin", "tools": office_offered,
+        "enabled": !runner.executor().is_some_and(|(executor, _)| executor.group_off(office_desk::ROW)) }));
     // What a person reads about each built-in and group, beside the model's words (#359).
     fn for_people(row: &mut serde_json::Value) {
         if let Some((label, summary)) = row["name"]
@@ -2666,7 +2683,7 @@ async fn computer_update(
         Err((status, message)) => return (status, message).into_response(),
     };
     let accepted = provision::coworker_screen(&state, &headers, &account_id, &coworker_id).await;
-    tokio::spawn(update);
+    let _ = update.send(());
     (StatusCode::ACCEPTED, Json(accepted)).into_response()
 }
 
@@ -3327,6 +3344,10 @@ async fn start_claimed_turn(
             let gates: (&[String], &[String]) = (&[], &[]);
             let runner =
                 tools_for_turn(&state, account, coworker, gates, patience, &turn_plugins).await;
+            // The turn's ids onto the context now — an office export's artifact attaches under
+            // them, so the reply that reports the file can hand it over.
+            let runner =
+                runner.map(|r| r.with_turn(input.thread_id.as_str(), input.run_id.as_str()));
             match (runner, chosen.clone()) {
                 (Some(runner), Some((recipe, values))) => {
                     Some(runner.with_chosen_recipe(recipe, values))
@@ -3364,7 +3385,11 @@ async fn start_claimed_turn(
     let system = match (account_id.as_ref(), run_coworker.as_ref()) {
         (Some(account_id), Some(coworker_id)) => {
             let persona = crate::persona::of(&state, coworker_id, coworker_role).await;
-            let has_computer = tools.is_some();
+            let has_computer = tools.as_ref().is_some_and(|runner| {
+                runner.executor().is_some_and(|(_, context)| {
+                    context.box_id.is_some() || context.group_box.is_some()
+                })
+            });
             let reaches_user_machine = tools.as_ref().is_some_and(|runner| {
                 runner
                     .tool_schemas()
@@ -3474,10 +3499,15 @@ async fn start_claimed_turn(
     // The thread's own log, with this turn's new messages at the end — or the client's copy, on
     // a thread the log cannot tell whole (`history`'s module note).
     // This turn's files, read and marked as sent before the turn is asked (#229).
-    let attached = match &account_id {
-        Some(account) => super::attachments::resolve(&state, account, &input).await,
+    let mut attached = match &account_id {
+        Some(account) => {
+            super::attachments::resolve(&state, account, &input, run_coworker.as_ref()).await
+        }
         None => super::attachments::Attached::default(),
     };
+    // A staged Office file announces itself with the run's opening, not with a tool call: the
+    // frames ride the request into the harness.
+    let staged = std::mem::take(&mut attached.customs);
     let asked = super::history::for_turn(&state, account_id.as_ref(), &input, &attached).await;
     let mut messages = asked.messages;
     // ONE system message. A client-supplied `system` in the AG-UI body would be a second claim
@@ -3507,7 +3537,8 @@ async fn start_claimed_turn(
     let source = route.source();
     let who = (run_coworker.as_ref(), account_id.as_ref());
     let thinks = (route, model, effort);
-    let request = turn_request(&state, who, thinks, system.clone(), messages).await;
+    let mut request = turn_request(&state, who, thinks, system.clone(), messages).await;
+    request.customs = staged;
 
     // The journal writes each round to Postgres before the next model call, and stamps the run's
     // owner so only they can read it back. A run that cannot be recorded fails inside the loop
@@ -3622,6 +3653,7 @@ pub(crate) async fn turn_request(
         tools: Vec::new(),
         endpoint,
         fallback_for,
+        customs: Vec::new(),
     }
 }
 

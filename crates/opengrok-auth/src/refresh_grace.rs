@@ -1,0 +1,97 @@
+//! The just-rotated-away refresh plaintext, held for [`opengrok_core::REFRESH_GRACE_MS`].
+//!
+//! The account log stores hashes only. A concurrent `POST /auth/refresh` that presents the old
+//! cookie needs the *already-minted* current refresh so both responses Set-Cookie the same pair.
+//! That plaintext lives here, keyed by the previous hash, then is dropped. Per replica: a loser
+//! on another process still 401s (NativeChat single-flights on one host). Never a durable copy.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use opengrok_core::REFRESH_GRACE_MS;
+use opengrok_core::id::{AccountId, SessionId};
+use tokio::sync::Notify;
+
+/// How long a race loser waits for this replica's winner to stash the current refresh.
+///
+/// `remember` runs in the same task after append commits, with no await between them — but the
+/// loser's `append` Conflict (or empty `decide`) can be polled first. `yield_now` is not enough
+/// on a busy runtime; we subscribe to [`Notify`] and fail closed after this cap. Never a second
+/// rotate while waiting: that would invalidate the winner's cookies.
+const REUSE_WAIT: Duration = Duration::from_millis(100);
+
+#[derive(Clone)]
+pub struct GraceSlot {
+    pub current_refresh: String,
+    pub account_id: AccountId,
+    pub session_id: SessionId,
+    pub email: String,
+    pub plan: String,
+}
+
+pub struct RefreshGrace {
+    slots: Mutex<HashMap<String, (GraceSlot, i64)>>,
+    notify: Notify,
+}
+
+impl std::fmt::Debug for RefreshGrace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RefreshGrace(<redacted>)")
+    }
+}
+
+impl Default for RefreshGrace {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::new(HashMap::new()),
+            notify: Notify::new(),
+        }
+    }
+}
+
+impl RefreshGrace {
+    pub fn remember(&self, previous_hash: String, slot: GraceSlot, at_ms: i64) {
+        {
+            let Ok(mut slots) = self.slots.lock() else {
+                return;
+            };
+            slots.retain(|_, (_, stored_at)| at_ms.saturating_sub(*stored_at) <= REFRESH_GRACE_MS);
+            slots.insert(previous_hash, (slot, at_ms));
+        }
+        self.notify.notify_waiters();
+    }
+
+    pub fn reuse(&self, previous_hash: &str, at_ms: i64) -> Option<GraceSlot> {
+        let Ok(mut slots) = self.slots.lock() else {
+            return None;
+        };
+        slots.retain(|_, (_, stored_at)| at_ms.saturating_sub(*stored_at) <= REFRESH_GRACE_MS);
+        slots.get(previous_hash).map(|(slot, _)| slot.clone())
+    }
+
+    /// Wait until [`Self::remember`] stashes this previous hash, or [`REUSE_WAIT`] elapses.
+    pub async fn wait_for_reuse(&self, previous_hash: &str, at_ms: i64) -> Option<GraceSlot> {
+        let deadline = tokio::time::Instant::now() + REUSE_WAIT;
+        loop {
+            if let Some(slot) = self.reuse(previous_hash, at_ms) {
+                return Some(slot);
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return self.reuse(previous_hash, at_ms);
+            }
+            // Subscribe before the second lookup so a remember between the two is not lost.
+            let notified = self.notify.notified();
+            if let Some(slot) = self.reuse(previous_hash, at_ms) {
+                return Some(slot);
+            }
+            tokio::select! {
+                () = notified => {}
+                () = tokio::time::sleep(remaining) => {
+                    return self.reuse(previous_hash, at_ms);
+                }
+            }
+        }
+    }
+}

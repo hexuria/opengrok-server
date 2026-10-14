@@ -17,6 +17,7 @@ members = [
   "crates/opengrok-tools",   # tool definitions and the executor
   "crates/opengrok-recipes", # a taught tape into the box's recipe steps; the lint that keeps them runnable
   "crates/opengrok-forms",   # the in-chat form schema and safe fill
+  "crates/opengrok-office",  # the OOXML engine behind the office_* tools
   "crates/opengrok-gateway-admin", # the gateway's administrative key desk
   "crates/opengrok-jev",       # the typed classifier client
   "crates/opengrok-local-exec", # the approved command transport

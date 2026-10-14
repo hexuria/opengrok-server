@@ -32,8 +32,14 @@ fn builtin_rows() -> impl Iterator<Item = &'static str> {
         !routine::is_routine_tool(name)
             && !plugin_desk::is_plugin_desk_tool(name)
             && !computer_desk::is_computer_tool(name)
+            && !opengrok_tools::office_desk::is_office_tool(name)
     });
-    rows.chain([routine::ROW, plugin_desk::ROW, computer_desk::ROW])
+    rows.chain([
+        routine::ROW,
+        plugin_desk::ROW,
+        computer_desk::ROW,
+        opengrok_tools::office_desk::ROW,
+    ])
 }
 
 /// The rows as `ceiling` sets them, plus one per plugin it still switches on that this server no
@@ -64,7 +70,10 @@ async fn rows(
             // A group's switch is its own (7 Oct 2026): on unless the person switched the whole
             // group off, whatever its tools' own choices are.
             let on = match name {
-                routine::ROW | plugin_desk::ROW | computer_desk::ROW => group_on(ceiling, name),
+                routine::ROW
+                | plugin_desk::ROW
+                | computer_desk::ROW
+                | opengrok_tools::office_desk::ROW => group_on(ceiling, name),
                 name => ceiling.allows(name),
             };
             let mut row = json!({ "name": name, "kind": "builtin",
@@ -84,6 +93,9 @@ async fn rows(
             }
             if name == computer_desk::ROW {
                 row["label"] = json!(computer_desk::ROW_LABEL);
+            }
+            if name == opengrok_tools::office_desk::ROW {
+                row["label"] = json!(opengrok_tools::office_desk::ROW_LABEL);
             }
             row
         })
@@ -254,7 +266,8 @@ async fn save(
             Some(_)
                 if name == routine::ROW
                     || name == plugin_desk::ROW
-                    || name == computer_desk::ROW =>
+                    || name == computer_desk::ROW
+                    || name == opengrok_tools::office_desk::ROW =>
             {
                 named_groups.insert(name);
                 true

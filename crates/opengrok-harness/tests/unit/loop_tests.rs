@@ -263,6 +263,44 @@ async fn the_opening_says_where_the_turn_asks_in_the_same_write() {
     );
 }
 
+/// What a turn staged before the model was asked rides the request into the same opening write
+/// as the inference source — so a replay paints it too, in first-seen order, before the first
+/// tool call. A carry-on segment opens nothing, so it announces nothing either.
+#[tokio::test]
+async fn a_request_carrying_customs_opens_with_them() {
+    let journal = MemoryJournal::new();
+    let asked = ModelRequest {
+        customs: vec![
+            (
+                "opengrok.officeDoc".to_string(),
+                serde_json::json!({"docId": "ds_1", "path": "/home/bot/office/report.docx"}),
+            ),
+            ("anything.else".to_string(), serde_json::json!({"a": 1})),
+        ],
+        ..request("hello")
+    };
+    let events = run_conversation(&MockDoor::echoing(), None, &journal, asked, "t1", "r1", 1).await;
+    let names: Vec<&str> = events
+        .iter()
+        .filter(|event| event.event_type == EventType::Custom)
+        .filter_map(|event| event.extra["name"].as_str())
+        .collect();
+    assert_eq!(
+        names[..3],
+        [INFERENCE_SOURCE_NAME, "opengrok.officeDoc", "anything.else"],
+        "the source first, then the staged frames in order: {names:?}"
+    );
+    let opening = journal.batches().remove(0);
+    let journaled: Vec<&str> = opening
+        .iter()
+        .filter_map(|event| event.extra.get("name").and_then(|name| name.as_str()))
+        .collect();
+    assert!(
+        journaled.contains(&"opengrok.officeDoc"),
+        "journaled with the opening, so a replay repaints it: {journaled:?}"
+    );
+}
+
 /// A reply of nothing but whitespace is not a reply. With or without a computer, it used to end
 /// RUN_FINISHED with an empty bubble: the empty success (CLAUDE.md, three facts №3).
 #[tokio::test]

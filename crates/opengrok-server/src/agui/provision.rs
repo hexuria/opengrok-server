@@ -19,6 +19,7 @@ use opengrok_core::coworker::{BoxMode, Coworker, CoworkerCommand, CoworkerError,
 use opengrok_core::id::{AccountId, BoxId, CoworkerId};
 
 use serde_json::{Value, json};
+use tokio::sync::oneshot;
 
 use crate::agui::AgUiState;
 
@@ -1200,6 +1201,21 @@ pub async fn update_scope_box(
         }
     }
     tracing::info!(scope, scope_id = %scope_id, old = %old_box_id, new = %new_box_id, "computer: rebuilt on the newest image");
+    // The rebuilt box runs on the old one's volumes, so its office documents are the same
+    // files: the sessions move with it now, rather than waiting for a fetch to rehydrate them
+    // while the agent's own office tools answer "not found" for its documents.
+    match store
+        .move_doc_sessions_box(&old_box_id, &new_box_id, at_ms)
+        .await
+    {
+        Ok(moved) if moved > 0 => {
+            tracing::info!(old = %old_box_id, new = %new_box_id, moved, "computer: office documents followed the rebuild");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, old = %old_box_id, new = %new_box_id, "computer: office documents did not follow the rebuild; the next read rehydrates them");
+        }
+    }
 
     let _ = store
         .set_box_update_phase(scope, &scope_id, UPDATE_STARTING, None, at_ms)
@@ -1216,15 +1232,14 @@ pub async fn update_scope_box(
     let _ = store.clear_box_update(scope, &scope_id).await;
 }
 
-/// Record an update of a coworker's computer as accepted and answer the work that runs it, for the
-/// caller to spawn once it has replied: a reply read after the spawn could already carry the
-/// work's failure, and did, so the 202's shape changed from run to run (#311). The status route
-/// carries the phases. Refuses while one is already running.
+/// Record a coworker's update and spawn its durable work behind a start signal. The caller sends
+/// that signal once it has built the 202; dropping the request drops the sender and starts the
+/// work too, so a disconnect cannot leave the scope pulling without an update task.
 pub async fn begin_update_for_coworker(
     state: &AgUiState,
     account_id: &AccountId,
     coworker_id: &CoworkerId,
-) -> Result<impl Future<Output = ()> + Send + 'static, (axum::http::StatusCode, String)> {
+) -> Result<oneshot::Sender<()>, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
     let Some(row) = scoped_box_row_for(state, account_id, coworker_id).await else {
         return Err((
@@ -1250,13 +1265,16 @@ pub async fn begin_update_for_coworker(
     {
         return Err((StatusCode::SERVICE_UNAVAILABLE, error.to_string()));
     }
-    // Heard when it begins and when it ends; its phases in between are on the status route.
-    announce_computer(state, account_id, coworker_id).await;
     let (state, account, coworker) = (state.clone(), account_id.clone(), coworker_id.clone());
-    Ok(async move {
+    let (start, started) = oneshot::channel();
+    tokio::spawn(async move {
+        let _ = started.await;
+        // Heard when it begins and when it ends; its phases in between are on the status route.
+        announce_computer(&state, &account, &coworker).await;
         update_scope_box(state.clone(), org_id, scope, scope_id).await;
         announce_computer(&state, &account, &coworker).await;
-    })
+    });
+    Ok(start)
 }
 
 /// Destroy a coworker's computer, data and all, and provision a fresh one in its place.

@@ -101,15 +101,26 @@ async fn create(
     }
 
     // Images and videos, and what a person attaches to a message (#229, nativechat#90): a PDF
-    // or a text file, which reach the model as words rather than pixels.
+    // or a text file, which reach the model as words rather than pixels; and an Office
+    // document, which is staged onto the bot's own computer for the office_* tools
+    // (attachments.rs) instead of being read here. A document sent as a bare zip or
+    // octet-stream — what some uploaders call one — is accepted on its extension alone.
+    let office = request
+        .mime
+        .starts_with("application/vnd.openxmlformats-officedocument.")
+        || (matches!(
+            request.mime.as_str(),
+            "application/octet-stream" | "application/zip"
+        ) && opengrok_office::Kind::from_filename(&request.filename).is_some());
     let accepted = ["image/", "video/", "text/"]
         .iter()
         .any(|prefix| request.mime.starts_with(prefix))
-        || request.mime == "application/pdf";
+        || request.mime == "application/pdf"
+        || office;
     if !accepted {
         return (
             StatusCode::BAD_REQUEST,
-            "only images, videos, PDFs and text files are accepted",
+            "only images, videos, PDFs, text and Office files are accepted",
         )
             .into_response();
     }
@@ -132,6 +143,21 @@ async fn create(
     let id = format!("art_{}", uuid::Uuid::now_v7());
     let at_ms = now_ms();
 
+    // The office version chain's keys are the server's alone: `docSessionId` and `version`
+    // mark a session's kept copies, `via` says which verb kept them, `exportPath` lets the
+    // owning session rewrite a file. A client naming them would graft its upload onto a
+    // document's chain — or claim a path export then refuses to protect — so they are
+    // dropped here, before the row exists; other meta a client sends round-trips as always.
+    let meta = match request.meta {
+        Some(serde_json::Value::Object(mut map)) => {
+            for key in ["docSessionId", "version", "via", "exportPath"] {
+                map.remove(key);
+            }
+            serde_json::Value::Object(map)
+        }
+        other => other.unwrap_or(json!({})),
+    };
+
     let row = ArtifactRow {
         id: id.clone(),
         account_id: account.as_str().to_string(),
@@ -143,7 +169,7 @@ async fn create(
         run_id: request.run_id,
         step_index: request.step_index,
         thread_id: request.thread_id,
-        meta: request.meta.unwrap_or(json!({})),
+        meta,
         created_at_ms: at_ms,
         deleted_at_ms: None,
     };
