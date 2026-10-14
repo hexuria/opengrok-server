@@ -3,6 +3,6 @@
   "path": "/account/inference-source",
   "status": 400,
   "body": {
-    "error": "relayEnabled must be true or false"
+    "error": "planFallback must be an object or null"
   }
 }
