@@ -587,6 +587,12 @@ async fn unsaved_or(
     read: Value,
 ) -> Value {
     let id = entry_id_of(&read);
+    // Recorded since, by another replica or another press: the row is the record, and a held copy
+    // that can never land again (its write is against a draft that is gone) is dropped.
+    if is_submitted(&read) {
+        unsaved().remove(&id);
+        return read;
+    }
     let Some(mut held) = unsaved().get(&id).cloned() else {
         return read;
     };
