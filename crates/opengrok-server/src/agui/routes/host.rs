@@ -290,6 +290,10 @@ pub(super) struct AgUiSink {
     pub(super) gateway: crate::host_state::HostState,
     pub(super) coworker_id: Option<CoworkerId>,
     pub(super) account_id: Option<opengrok_core::id::AccountId>,
+    pub(super) thread_id: String,
+    /// The plugins this turn's message tagged: a form-mode card may be opened on one of them
+    /// although it is switched off, as its tools may be called.
+    pub(super) tagged: Vec<String>,
     pub(super) form_hold: Mutex<crate::agui::user_form::UserFormSseHold>,
 }
 
@@ -354,6 +358,46 @@ impl EventSink for AgUiSink {
                     }
                 }
                 if !self.send(event) {
+                    return;
+                }
+                continue;
+            }
+            // A form-mode call answered at once: its card is minted now, from the plugin, and
+            // its held frames go out carrying the card's id, then the card itself.
+            let form_call = self
+                .form_hold
+                .lock()
+                .ok()
+                .and_then(|h| h.form_mode_call(&event));
+            if let (Some((call_id, arguments)), Some(coworker), Some(account)) =
+                (form_call, &self.coworker_id, &self.account_id)
+            {
+                let who = (account, coworker);
+                let thread = (self.thread_id.as_str(), self.tagged.as_slice());
+                let entry = opengrok_integrations::form_mode::mint(
+                    &self.gateway,
+                    who,
+                    thread,
+                    &call_id,
+                    &arguments,
+                )
+                .await;
+                let entry_id = entry
+                    .as_ref()
+                    .and_then(|e| e.get("id"))
+                    .and_then(|id| id.as_str());
+                let mut out = self.release_form(&call_id, entry_id);
+                if let Some(id) = entry_id {
+                    event
+                        .extra
+                        .insert("entryId".to_string(), serde_json::json!(id));
+                }
+                out.push(event);
+                let frame = entry
+                    .as_ref()
+                    .map(opengrok_tools::user_form::replay::agui_user_form_frame);
+                out.extend(frame.and_then(|frame| serde_json::from_value(frame).ok()));
+                if !out.into_iter().all(|event| self.send(event)) {
                     return;
                 }
                 continue;

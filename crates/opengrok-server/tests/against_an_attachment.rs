@@ -1501,6 +1501,7 @@ async fn the_agents_documents_follow_a_replaced_computer() {
             screen: Arc::new(Mutex::new(opengrok_box::Screen::Shared)),
             thread_id: Some("thread".to_string()),
             run_id: Some("run".to_string()),
+            form_mode: None,
         };
         let tools = &tools;
         async move {
@@ -1702,6 +1703,7 @@ async fn an_export_may_rewrite_only_paths_the_session_shipped() {
         screen: Arc::new(Mutex::new(opengrok_box::Screen::Shared)),
         thread_id: Some("thread".to_string()),
         run_id: Some("run".to_string()),
+        form_mode: None,
     };
     let box_io: &dyn Computer = computer.as_ref();
     let opened = opengrok_tools::office_desk::OfficeDesk::answer(
@@ -1812,6 +1814,7 @@ fn desk_context(who: &Person, coworker: &CoworkerId, box_id: &str) -> opengrok_t
         screen: Arc::new(Mutex::new(opengrok_box::Screen::Shared)),
         thread_id: Some("thread".to_string()),
         run_id: Some("run".to_string()),
+        form_mode: None,
     }
 }
 

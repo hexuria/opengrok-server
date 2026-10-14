@@ -12,6 +12,7 @@ fn password_and_otp_are_secret_without_the_flag() {
         required: true,
         secret: false,
         at: None,
+        ..Default::default()
     };
     let otp = FormField {
         id: "o".into(),
@@ -20,6 +21,7 @@ fn password_and_otp_are_secret_without_the_flag() {
         required: true,
         secret: false,
         at: None,
+        ..Default::default()
     };
     let email = FormField {
         id: "e".into(),
@@ -28,6 +30,7 @@ fn password_and_otp_are_secret_without_the_flag() {
         required: true,
         secret: false,
         at: None,
+        ..Default::default()
     };
     assert!(password.is_secret());
     assert!(otp.is_secret());
@@ -330,6 +333,7 @@ fn shared_values_omit_secrets() {
                 required: true,
                 secret: false,
                 at: None,
+                ..Default::default()
             },
             FormField {
                 id: "password".into(),
@@ -338,6 +342,7 @@ fn shared_values_omit_secrets() {
                 required: true,
                 secret: false,
                 at: None,
+                ..Default::default()
             },
         ],
         domain: None,
@@ -346,6 +351,7 @@ fn shared_values_omit_secrets() {
         passkey_mode: None,
         same_page: false,
         submit: false,
+        ..Default::default()
     };
     let values = BTreeMap::from([
         ("email".into(), "ada@example.com".into()),
@@ -518,6 +524,7 @@ fn field(id: &str, kind: &str, at: Option<(i32, i32)>) -> FormField {
         required: true,
         secret: false,
         at: at.map(|(x, y)| FieldAt { x, y }),
+        ..Default::default()
     }
 }
 
@@ -542,6 +549,7 @@ async fn positioned_fields_are_clicked_before_they_are_typed() {
         passkey_mode: None,
         same_page: true,
         submit: true,
+        ..Default::default()
     };
     let values = BTreeMap::from([
         ("email".into(), "ada@example.com".into()),
@@ -610,6 +618,7 @@ async fn a_positioned_form_types_every_field_without_same_page_but_does_not_retu
         passkey_mode: None,
         same_page: false,
         submit: false,
+        ..Default::default()
     };
     assert!(!types_only_first_field(&form));
     let values = BTreeMap::from([
@@ -681,6 +690,7 @@ async fn a_skipped_field_on_a_same_page_form_is_still_tabbed_past() {
         passkey_mode: None,
         same_page: true,
         submit: false,
+        ..Default::default()
     };
     let values = BTreeMap::from([
         ("email".into(), "ada@example.com".into()),
@@ -740,6 +750,7 @@ async fn fill_types_only_the_first_field_by_default() {
                 required: true,
                 secret: false,
                 at: None,
+                ..Default::default()
             },
             FormField {
                 id: "password".into(),
@@ -748,6 +759,7 @@ async fn fill_types_only_the_first_field_by_default() {
                 required: true,
                 secret: false,
                 at: None,
+                ..Default::default()
             },
         ],
         domain: None,
@@ -756,6 +768,7 @@ async fn fill_types_only_the_first_field_by_default() {
         passkey_mode: None,
         same_page: false,
         submit: false,
+        ..Default::default()
     };
     let values = BTreeMap::from([
         ("email".into(), "ada@example.com".into()),
@@ -795,6 +808,7 @@ async fn a_single_password_field_may_press_return() {
             required: true,
             secret: false,
             at: None,
+            ..Default::default()
         }],
         domain: None,
         live_host: None,
@@ -802,6 +816,7 @@ async fn a_single_password_field_may_press_return() {
         passkey_mode: None,
         same_page: false,
         submit: false,
+        ..Default::default()
     };
     let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
     let outcomes =
@@ -836,6 +851,7 @@ async fn same_page_with_submit_tabs_and_returns() {
                 required: true,
                 secret: false,
                 at: None,
+                ..Default::default()
             },
             FormField {
                 id: "password".into(),
@@ -844,6 +860,7 @@ async fn same_page_with_submit_tabs_and_returns() {
                 required: true,
                 secret: false,
                 at: None,
+                ..Default::default()
             },
         ],
         domain: None,
@@ -852,6 +869,7 @@ async fn same_page_with_submit_tabs_and_returns() {
         passkey_mode: None,
         same_page: true,
         submit: true,
+        ..Default::default()
     };
     let values = BTreeMap::from([
         ("email".into(), "ada@example.com".into()),
@@ -888,6 +906,7 @@ fn return_is_opt_in_on_multi_field_forms() {
         required: true,
         secret: false,
         at: None,
+        ..Default::default()
     };
     let password = FormField {
         id: "password".into(),
@@ -896,6 +915,7 @@ fn return_is_opt_in_on_multi_field_forms() {
         required: true,
         secret: false,
         at: None,
+        ..Default::default()
     };
     let multi = FormRequest {
         fields: vec![email.clone(), password.clone()],
@@ -935,6 +955,7 @@ fn submitted_values_keep_only_this_forms_fields() {
             required: true,
             secret: false,
             at: None,
+            ..Default::default()
         }],
         domain: None,
         live_host: None,
@@ -942,6 +963,7 @@ fn submitted_values_keep_only_this_forms_fields() {
         passkey_mode: None,
         same_page: false,
         submit: false,
+        ..Default::default()
     };
     let raw = json!({
         "email": "ada@example.com",
@@ -1039,6 +1061,7 @@ async fn a_failed_type_is_fill_failed_and_does_not_press_return() {
             required: true,
             secret: false,
             at: None,
+            ..Default::default()
         }],
         domain: None,
         live_host: None,
@@ -1046,6 +1069,7 @@ async fn a_failed_type_is_fill_failed_and_does_not_press_return() {
         passkey_mode: None,
         same_page: false,
         submit: false,
+        ..Default::default()
     };
     let values = BTreeMap::from([("password".into(), "s3cret-pass".into())]);
     let outcomes =
@@ -1096,6 +1120,7 @@ fn facebook_login(password_at: (i32, i32)) -> FormRequest {
         passkey_mode: None,
         same_page: true,
         submit: true,
+        ..Default::default()
     }
 }
 

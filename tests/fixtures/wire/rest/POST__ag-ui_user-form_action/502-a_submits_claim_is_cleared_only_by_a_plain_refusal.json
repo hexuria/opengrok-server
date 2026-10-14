@@ -1,0 +1,12 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/action",
+  "status": 502,
+  "body": {
+    "ok": false,
+    "error": "the plugin did not say whether it queued this return; it is held as being submitted, and checked with the plugin before anything is sent",
+    "reply": {
+      "fingerprint": "sha256:x"
+    }
+  }
+}

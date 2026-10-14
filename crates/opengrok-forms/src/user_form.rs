@@ -29,7 +29,7 @@ pub const REQUEST_USER_FORM: &str = "request_user_form";
 /// Transcribed field types from official 0.29/0.30 `user-form/view.tsx`.
 pub const SECRET_TYPES: &[&str] = &["password", "otp"];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FormField {
     pub id: String,
     pub label: String,
@@ -46,6 +46,40 @@ pub struct FormField {
     /// after Facebook redrew its page with an error (21 Sep 2026).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<FieldAt>,
+    /// The choices of a radio or select box. Read only on a collect or form-mode card: a login
+    /// card's fields are typed into a page and have no choices of ours.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<FormOption>,
+    /// The value the plugin holds for this box now. FORM MODE ONLY: a collect card's prefill is
+    /// added by `sanitize_arguments`, which knows to leave a secret field empty, and a login card
+    /// keeps no value at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The one error to show under this box: the plugin's first error, never a list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Where the box is on the paper form: its page, its part, and its line (the BIR item).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    /// Computed by the plugin; the person cannot type into it.
+    #[serde(
+        default,
+        rename = "readOnly",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub read_only: bool,
+}
+
+/// One choice of a radio or select box.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FormOption {
+    pub value: String,
+    #[serde(default)]
+    pub label: String,
 }
 
 /// A point on the box's screen, as the model saw it.
@@ -106,6 +140,36 @@ pub struct FormRequest {
     /// with exactly one typed field, still Returns. Combined forms must set this explicitly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub submit: bool,
+    /// The chat box drives this card and a plugin holds its values (`crate::form_mode`). Every
+    /// key below is kept only when this is true, so a login card's shape does not change.
+    #[serde(
+        default,
+        rename = "formMode",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub form_mode: bool,
+    /// The plugin whose `extensions.formMode` names the card's tools. The tools come from the
+    /// plugin's manifest, never from here and never from the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<crate::form_mode::FormPage>,
+    /// Problems no box on the card can fix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The field id the card opens on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
+    /// The plugin's submission fingerprint of the draft the person sees. Submit sends it back,
+    /// so a draft that changed underneath the person is refused rather than sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// Which return this is. Every action carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub form: Option<crate::form_mode::FormKey>,
+    /// The plugin's word for the draft: `draft`, `queued` or `sent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /// What the model reads when the person hands the computer back after Open-the-screen.
@@ -177,6 +241,8 @@ pub fn fully_positioned(form: &FormRequest) -> bool {
 #[must_use]
 pub fn form_request_from(value: &Value) -> FormRequest {
     let source = form_source(value);
+    let form_mode = crate::form_mode::is_form_mode_source(source);
+    let chosen = form_mode || is_chat_collection(value);
     let fields = source
         .get("fields")
         .and_then(Value::as_array)
@@ -209,6 +275,7 @@ pub fn form_request_from(value: &Value) -> FormRequest {
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
                         at: field_at(field),
+                        ..crate::form_mode::field_extras(field, chosen, form_mode)
                     })
                 })
                 .collect()
@@ -254,6 +321,7 @@ pub fn form_request_from(value: &Value) -> FormRequest {
             .get("submit")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        ..crate::form_mode::request_extras(source, form_mode)
     }
 }
 
@@ -261,6 +329,11 @@ pub fn form_request_from(value: &Value) -> FormRequest {
 /// the model smuggled are dropped so a password cannot sit on the entry waiting for submit.
 #[must_use]
 pub fn sanitize_arguments(arguments: &Value) -> Value {
+    // A form-mode call names its return and nothing else: the card's boxes, values and
+    // fingerprint come from the plugin's card tool, never from the model.
+    if crate::form_mode::is_form_mode_source(form_source(arguments)) {
+        return crate::form_mode::sanitize_request(form_source(arguments));
+    }
     let form = form_request_from(arguments);
     let mut body = json!({
         "title": form.title,
@@ -412,9 +485,14 @@ pub fn is_user_form_entry(entry: &Value) -> bool {
 }
 
 /// Unresolved iff `formResolution` is absent and `widgetDismissed` is not true — official 0.30.
+///
+/// A FORM-MODE CARD IS NEVER UNRESOLVED IN THIS SENSE. Unresolved means a run is parked on the
+/// card and the box's screen is held for it; a form-mode card parks nothing and is not on the
+/// box. Read as unresolved, it held every screen tool for as long as it was open, and the hold
+/// sweep timed it out after ten minutes and answered whichever sign-in happened to be parked.
 #[must_use]
 pub fn is_unresolved(entry: &Value) -> bool {
-    if !is_user_form_entry(entry) {
+    if !is_user_form_entry(entry) || crate::form_mode::is_form_mode_entry(entry) {
         return false;
     }
     if entry
@@ -655,6 +733,9 @@ fn collection_resolution(
 /// (the waiting tool result has not landed yet) and none for a non-form entry.
 #[must_use]
 pub fn history_line(entry: &Value) -> Option<String> {
+    if crate::form_mode::is_form_mode_entry(entry) {
+        return crate::form_mode::history_line(entry);
+    }
     if !is_user_form_entry(entry) {
         return None;
     }
@@ -977,6 +1058,171 @@ pub fn overall_resolution(outcomes: &[FieldOutcome]) -> FormResolution {
     } else {
         FormResolution::Submitted
     }
+}
+
+/// The call a card answers: its `callId`, when it has a non-empty one.
+pub fn call_id_of(entry: &Value) -> Option<&str> {
+    entry
+        .get("callId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// A `sand://box` handoff entry: one that carries a `boxRequestId`.
+pub fn is_handoff_entry(entry: &Value) -> bool {
+    entry
+        .get("boxRequestId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+}
+
+/// A user-form the person escalated to the computer.
+pub fn is_escalated_form(entry: &Value) -> bool {
+    is_user_form_entry(entry)
+        && entry.get("formResolution").and_then(Value::as_str) == Some("escalated")
+}
+
+/// An escalated form whose handoff's end is not on it yet.
+pub fn awaits_its_handoff(entry: &Value) -> bool {
+    is_escalated_form(entry)
+        && entry
+            .get("boxResolution")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+}
+
+/// A handoff entry, or the escalated form it answers, with how the handoff ended.
+pub fn settle_handoff(mut entry: Value, resolution: &str, timed_out: bool) -> Value {
+    if let Some(map) = entry.as_object_mut() {
+        map.insert("boxResolution".to_string(), json!(resolution));
+        if timed_out {
+            map.insert("timedOut".to_string(), json!(true));
+        }
+    }
+    entry
+}
+
+/// How a handoff ends: the word stamped on the box and on its escalated form, and the sentence
+/// the model is answered with. One table both ways, so the replay reads an old answer back into
+/// exactly the word this verb wrote it for.
+pub static HANDOFF_ENDINGS: [(&str, &str); 3] = [
+    ("handed_back", HAND_BACK_TOOL_RESULT),
+    ("declined", HANDOFF_DECLINED_TOOL_RESULT),
+    ("timed_out", HOLD_TIMED_OUT_TOOL_RESULT),
+];
+
+/// `request_user_form` as the model is offered it: its three uses (a collect form, a sign-in,
+/// and a plugin's form) and the card it may ask for. Beside the schema it describes, so the
+/// words the model reads change with the fields they name.
+#[must_use]
+pub fn tool_spec() -> (&'static str, Value) {
+    (
+        "Ask the person to fill a form in chat. Three uses. \
+         A collect form (collect true) is how you ask for fields you do not have yet: a new \
+         profile, a missing name, a TIN they must confirm. Put what they already told you \
+         on each field as value, so the card is prefilled, and leave value off the fields \
+         that are still missing. Mark those required. Wait. The answers come back as \
+         Shared fields and nothing is typed into a page. Do not invent a shell command \
+         for the form. \
+         A sign-in is the other use: an OTP or a field they must type into a page. \
+         NativeChat offers the person their saved logins for that site on the card; they \
+         confirm with Touch ID, and the values are typed into the page out of your view. \
+         Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
+         attaches a screenshot of what was typed. Raise this instead and wait. The person \
+         fills in chat; the server clicks each field at the position you give (`at`, in \
+         your screenshot's pixels) and types there, never showing you the secret. Give \
+         `at` for every field you can see. After it settles, screenshot and confirm what \
+         the page shows — filling is not login. When the page shows the email and password \
+         fields TOGETHER (Facebook, most sites), raise ONE card with both fields and \
+         `samePage: true` — do not split them. Only a page that asks for the email alone \
+         (Google) gets an email-only card: raise it, observe, and if a password page comes \
+         next call this again with a password-only form (new entryId, challengeKind \
+         \"password\"). \
+         If another in-sandbox challenge appears (an authenticator code, phone \
+         verification on the same page), call this again with otp fields, \
+         challengeKind \"otp\", the page host as liveHost and the field's `at`; \
+         NativeChat offers the person's saved authenticator code for that site on the \
+         card. Never re-raise a sign-in form that already settled. A passkey prompt: call this with \
+         challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site \
+         offers to add one and the person asked), no fields, liveHost set; when the result \
+         says it is loaded, click the site's passkey button. A captcha, or a page \
+         outside this box, is not another password form: the person finishes on the \
+         computer (Open the screen). If they dismiss or decline, continue without those \
+         credentials and do not loop. \
+         A plugin form (formMode true) opens a return a plugin holds, such as a BIR form, \
+         as a card the person fills in chat: give only formMode, the form \
+         {form, tin, period} and, when more than one plugin has forms, plugin. The \
+         plugin draws the boxes: send fields as an empty list and no values. It answers \
+         at once: end \
+         your turn, and you are told on a later turn whether it was submitted or \
+         dismissed. A dismissed plugin form may be opened again when the person asks.",
+        json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "Short title shown on the card." },
+                "instruction": { "type": "string", "description": "What the person should do." },
+                "formMode": {
+                    "type": "boolean",
+                    "description": "Open a plugin's form (a BIR return) as a card the person fills. Give form, and plugin when several plugins have forms; no fields."
+                },
+                "form": {
+                    "type": "object",
+                    "description": "With formMode: which return. form is the form number (0619E), tin 9 to 14 digits with no dashes, period YYYY-MM, YYYY-Qn or YYYY.",
+                    "properties": {
+                        "form": { "type": "string" },
+                        "tin": { "type": "string" },
+                        "period": { "type": "string" }
+                    },
+                    "required": ["form", "tin", "period"]
+                },
+                "plugin": { "type": "string", "description": "With formMode: the plugin whose form this is, e.g. bir." },
+                "collect": {
+                    "type": "boolean",
+                    "description": "Ask in chat and return the answers. Nothing is typed into a page. Set this when you need fields the person must supply or confirm. Prefill fields they already answered with value."
+                },
+                "passkeyMode": {
+                    "type": "string",
+                    "description": "With challengeKind passkey: use (sign in with the person's passkey) or register (the site offers to add one)."
+                },
+                "challengeKind": {
+                    "type": "string",
+                    "description": "Optional hint: password, otp, passkey, captcha, outside_sandbox. passkey takes no fields (with passkeyMode use|register). Captcha/outside-sandbox must not be another password form."
+                },
+                "samePage": {
+                    "type": "boolean",
+                    "description": "The fields share one page (Facebook's email and password do). Set it on every one-page card. Without it and without positions, only the first field is typed."
+                },
+                "submit": {
+                    "type": "boolean",
+                    "description": "Press Return after the fill, i.e. press the page's own Log in. Set it on a one-page login card. A single field, and a fully positioned login, Return on their own."
+                },
+                "fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "label": { "type": "string" },
+                            "type": { "type": "string", "description": "text, email, password, otp, …" },
+                            "value": { "type": "string", "description": "Prefill for a collect form. The person can edit it. Never set this on a secret field. Dropped unless collect is true." },
+                            "required": { "type": "boolean" },
+                            "secret": { "type": "boolean", "description": "Mask this field; password and otp are secret even without this." },
+                            "at": {
+                                "type": "object",
+                                "description": "Where this field is on your screenshot, in its pixels: the fill clicks it before typing, so the value lands in this field whatever the page has focused. Give it whenever you can see the field.",
+                                "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
+                                "required": ["x", "y"]
+                            }
+                        },
+                        "required": ["id", "label"]
+                    }
+                },
+                "domain": { "type": "string" },
+                "liveHost": { "type": "string", "description": "Host currently on the box's screen, when known." }
+            },
+            "required": ["title", "fields"],
+        }),
+    )
 }
 
 #[cfg(test)]

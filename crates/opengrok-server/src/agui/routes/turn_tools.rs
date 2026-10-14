@@ -60,29 +60,35 @@ pub(crate) async fn tools_for_turn(
     // tool the model is told about but that always refuses is a dead end it keeps trying. Its
     // plugins are another matter: they are the person's accounts at services, not programs on a
     // box, so a Bot without a computer still gets those (#359).
+    let reach = (&state.auth.store, &*state.plugins);
     if coworker.computer().is_none() {
-        let policy = state
-            .auth
-            .store
-            .policy_to_use(account_id, &coworker_id)
-            .await
-            .ok()?;
-        let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
+        let policy = opengrok_integrations::turn::tools_policy;
+        let policy = policy(reach, account_id, &coworker_id, &turn.mentioned).await?;
         let (plugins, off) = connect_plugins(state, account_id, &coworker_id, &policy, turn).await;
-        if plugins.tools.is_empty() && plugins.unavailable.is_empty() && off.is_empty() {
+        // A plugin's form needs no computer (#220).
+        let offers = opengrok_integrations::turn::offers_form_cards;
+        let form_cards = offers(reach, account_id, &coworker_id, turn).await;
+        if plugins.tools.is_empty()
+            && plugins.unavailable.is_empty()
+            && off.is_empty()
+            && !form_cards
+        {
             return None;
         }
-        let context = opengrok_tools::ToolContext::from_coworker(
+        let mut context = opengrok_tools::ToolContext::from_coworker(
             account_id.clone(),
             coworker_id.clone(),
             &coworker,
         );
+        context.form_mode = turn.form_mode;
         let executor = opengrok_tools::Executor::without_a_computer(policy)
+            .with_form_cards(form_cards)
             .with_plugins(plugins)
             .with_switched_off(off)
             .with_plugin_desk(plugin_desk(state))
             .with_approved(approved.iter().cloned())
             .with_review_approved(review_approved.iter().cloned());
+        let executor = with_auto_review(state, account_id, &coworker_id, executor).await;
         return Some(ToolRunner::new(executor, context));
     }
     // Resolve the provider for this coworker's computer by its account's effective sharing mode and
@@ -178,13 +184,8 @@ pub(crate) async fn tools_for_turn(
     // The policy a turn runs under, so a member of the org talking to a shared coworker gets the
     // tools its owner's grant allows — the same answer the run door's gate just gave. Callers
     // that must be the owner (routines, the tool listing) gate on that before they get here.
-    let policy = state
-        .auth
-        .store
-        .policy_to_use(account_id, &coworker_id)
-        .await
-        .ok()?;
-    let policy = opengrok_policy::with_mentioned(policy, &turn.mentioned);
+    let policy = opengrok_integrations::turn::tools_policy;
+    let policy = policy(reach, account_id, &coworker_id, &turn.mentioned).await?;
 
     // The plugins this coworker may use, connected with its own credentials. On a shared
     // coworker that includes its `bot`-scoped connections, which its OWNER authorised: a member's
@@ -254,6 +255,7 @@ pub(crate) async fn tools_for_turn(
     let held_in = form_hold_thread(state, account_id, &coworker_id).await;
     context.screen_hold = transcript_hold || held_in.is_some();
     context.screen_held_in = held_in;
+    context.form_mode = turn.form_mode;
 
     // The recipes this bot was granted: offered as `run_recipe` only with a screen to run on.
     let recipes = if screen {
@@ -302,6 +304,19 @@ pub(crate) async fn tools_for_turn(
             }));
     }
 
+    let executor = with_auto_review(state, account_id, &coworker_id, executor).await;
+    Some(ToolRunner::new(executor, context))
+}
+
+/// `executor` under this Bot's auto-review, when its account has it on: the judge every call
+/// a Bot's tools make passes, with a computer or without one. A Bot without a computer still runs
+/// plugin tools (#359, #220), from its turns and from the MCP door, and those are judged too.
+async fn with_auto_review(
+    state: &AgUiState,
+    account_id: &opengrok_core::id::AccountId,
+    coworker_id: &CoworkerId,
+    executor: opengrok_tools::Executor,
+) -> opengrok_tools::Executor {
     // THE TIER WALK HAPPENS HERE, ONCE PER RUN (docs/AUTO-REVIEW.md §3). Per tool call the check
     // is one in-memory test on the runner; a run that started before a PUT keeps the policy it
     // started with, and a resumed run rebuilds its runner through this function and re-resolves.
@@ -325,12 +340,11 @@ pub(crate) async fn tools_for_turn(
                 .for_coworker(
                     coworker_id.as_str(),
                     account_id.as_str(),
-                    crate::spend::key_for(state, &coworker_id, account_id).await,
+                    crate::spend::key_for(state, coworker_id, account_id).await,
                 );
-        executor = executor.with_auto_review(policy, Arc::new(judge));
+        return executor.with_auto_review(policy, Arc::new(judge));
     }
-
-    Some(ToolRunner::new(executor, context))
+    executor
 }
 
 /// The desk a turn's plugin tools answer through, on the registry the Plugins routes serve.

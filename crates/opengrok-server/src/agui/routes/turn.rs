@@ -358,7 +358,11 @@ async fn start_claimed_turn(
     // The plugins this message named, kept to those its driving account installed on a Bot it
     // owns; read once, so the tools and the sentence naming them cannot disagree.
     let asked_plugins = mentioned_plugins_from(&input);
+    // Provenance: an app that draws form-mode cards sends `forwardedProps.formMode: true` (#220,
+    // Tier 1); without it no form-mode card is ever minted.
+    let drawn = input.forwarded_props.get("formMode") == Some(&serde_json::json!(true));
     let mut turn_plugins = opengrok_integrations::turn::TurnPlugins {
+        form_mode: Some(drawn),
         chosen: plugin_accounts_from(&input),
         ..Default::default()
     };
@@ -392,6 +396,20 @@ async fn start_claimed_turn(
             opengrok_integrations::turn::switched_off(store, account, coworker, &mentioned).await
         }
         _ => Vec::new(),
+    };
+    // What this conversation's form-mode cards came to (#220): a card's call answered before
+    // the card had an outcome, so the Bot hears it here, on its next turn.
+    let form_lines = match (&account_id, &run_coworker) {
+        (Some(account), Some(coworker)) => {
+            opengrok_integrations::form_mode::turn_line(
+                &state.auth.store,
+                account,
+                coworker,
+                &input.thread_id,
+            )
+            .await
+        }
+        _ => String::new(),
     };
     // No bearer, no identity, and therefore no computer tools.
     let tools = match (&account_id, &run_coworker) {
@@ -503,7 +521,7 @@ async fn start_claimed_turn(
                 &persona,
                 route.asks(&model),
                 Some(&format!(
-                    "{speaker}\n\n{}{}{}{}{}{}{}{}{}",
+                    "{speaker}\n\n{}{}{}{}{}{}{}{}{}{}",
                     crate::persona::computer_system_prompt(
                         has_computer,
                         has_screen,
@@ -519,6 +537,7 @@ async fn start_claimed_turn(
                     crate::persona::preferred_tools_line(&preferred),
                     crate::persona::mentioned_plugins_line(&mentioned, &asked_plugins),
                     crate::persona::plugins_off_line(&plugins_off),
+                    form_lines,
                     // After what it may do, as the author's words they are, and before this
                     // message's own choices: a skill it may reach for on any turn.
                     tools
@@ -642,6 +661,7 @@ async fn start_claimed_turn(
     ));
     // The HTTP body is the live sink. Awaiting the conversation first, then wrapping the
     // Vec in `stream::iter`, is what made NativeChat paint the whole reply at once.
+    let tagged = turn_plugins.mentioned.clone();
     tokio::spawn(async move {
         let _lease = lease;
         // Card mint + `entryId` stamp happen inside the sink, **before** the CUSTOM frame
@@ -651,6 +671,8 @@ async fn start_claimed_turn(
             gateway,
             coworker_id: journal.coworker_id.clone(),
             account_id: journal.account_id.clone(),
+            thread_id: journal.thread_id.clone(),
+            tagged,
             form_hold: Mutex::new(crate::agui::user_form::UserFormSseHold::default()),
         };
         let _ = run_conversation_within(

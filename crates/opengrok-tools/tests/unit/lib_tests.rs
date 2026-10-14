@@ -656,6 +656,7 @@ fn without_a_computer_the_models_box_id_is_removed_not_kept() {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        form_mode: None,
         screen: Default::default(),
         thread_id: None,
         run_id: None,
@@ -677,6 +678,7 @@ async fn a_coworker_without_a_computer_is_refused_not_crashed() {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        form_mode: None,
         screen: Default::default(),
         thread_id: None,
         run_id: None,
@@ -1360,6 +1362,7 @@ fn no_box_context() -> ToolContext {
         group_box: None,
         screen_hold: false,
         screen_held_in: None,
+        form_mode: None,
         screen: Default::default(),
         thread_id: None,
         run_id: None,
@@ -3457,6 +3460,60 @@ async fn request_user_form_awaits_and_does_not_type() {
     assert!(!result.content.contains("s3cret"), "{result:?}");
 }
 
+/// A form-mode call parks nothing and touches no box (#220): the turn ends with the card's
+/// promise, and only an app that draws the card gets one. A screen hold does not stop it, since
+/// the form is the plugin's and not on the box.
+#[tokio::test]
+async fn a_form_mode_call_answers_at_once_and_parks_nothing() {
+    let spy = Arc::new(SpyComputer::default());
+    let executor = allowing(spy.clone());
+    let form = json!({"formMode": true, "form": {"form": "0619E", "tin": "123456789000", "period": "2026-09"}});
+    let mut drawn = context_with_box("box_mine");
+    drawn.form_mode = Some(true);
+    drawn.screen_hold = true;
+    let open = executor
+        .execute(&drawn, &call(REQUEST_USER_FORM, form.clone()))
+        .await;
+    assert!(open.ok && !open.awaiting_approval, "{open:?}");
+    assert_eq!(open.content, opengrok_forms::form_mode::FORM_OPEN);
+    let undrawn = executor
+        .execute(
+            &context_with_box("box_mine"),
+            &call(REQUEST_USER_FORM, form.clone()),
+        )
+        .await;
+    // No client sent this turn (a routine, a run carried on after a card): said so, not "this
+    // app", which would send the person looking for a setting.
+    assert!(!undrawn.ok && !undrawn.awaiting_approval, "{undrawn:?}");
+    assert!(
+        undrawn
+            .content
+            .ends_with(opengrok_forms::form_mode::FORM_MODE_NOT_LIVE),
+        "{undrawn:?}"
+    );
+    let mut app = context_with_box("box_mine");
+    app.form_mode = Some(false);
+    let unable = executor
+        .execute(&app, &call(REQUEST_USER_FORM, form.clone()))
+        .await;
+    assert!(
+        unable
+            .content
+            .ends_with(opengrok_forms::form_mode::FORM_MODE_UNAVAILABLE),
+        "{unable:?}"
+    );
+    let nameless =
+        json!({"formMode": true, "form": {"form": "0619E", "tin": "12-3", "period": "2026"}});
+    let bad = executor
+        .execute(&drawn, &call(REQUEST_USER_FORM, nameless))
+        .await;
+    assert!(
+        !bad.ok && bad.content.contains("tin is 9 to 14 digits"),
+        "{bad:?}"
+    );
+    assert_eq!(spy.last_box(), None);
+}
+
 #[tokio::test]
 async fn a_form_open_refuses_computer_type_without_a_png() {
     let spy = Arc::new(SpyComputer::default());
@@ -3701,4 +3758,160 @@ async fn a_tool_whose_arguments_are_not_an_object_is_refused_before_it_runs() {
         .await;
     assert!(listed.ok, "{listed:?}");
     assert_eq!(awake.ran(), 1, "a real object still runs");
+}
+
+/// A plugin's form never touches a box (#220): a Bot with no computer is offered
+/// `request_user_form` for it alone, in a schema with nothing a sign-in takes, and a box whose
+/// network is off still opens one.
+#[tokio::test]
+async fn a_plugin_form_needs_no_computer_and_no_network() {
+    let form = json!({"formMode": true, "title": "0619-E", "fields": [],
+                      "form": {"form": "0619E", "tin": "123456789000", "period": "2026-09"}});
+    let mut drawn = context_with_box("box_mine");
+    drawn.form_mode = Some(true);
+
+    let boxless = Executor::without_a_computer(permissive());
+    assert!(boxless.tool_names().is_empty());
+    let boxless = boxless.with_form_cards(true);
+    assert_eq!(boxless.tool_names(), [REQUEST_USER_FORM]);
+    let (account, coworker) = (
+        AccountId::from_stored("acct_1"),
+        CoworkerId::from_stored("cw_1"),
+    );
+    let schemas = boxless.tool_schemas(&account, &coworker);
+    let schema = schemas[0].to_string();
+    assert!(
+        schema.contains("formMode") && !schema.contains("samePage"),
+        "{schema}"
+    );
+    let open = boxless
+        .execute(&drawn, &call(REQUEST_USER_FORM, form.clone()))
+        .await;
+    assert!(open.ok, "{open:?}");
+    let sign_in = json!({"title": "Log in", "fields": [{"id": "password", "label": "Password", "type": "password"}]});
+    let refused = boxless
+        .execute(&drawn, &call(REQUEST_USER_FORM, sign_in))
+        .await;
+    assert!(!refused.ok && !refused.awaiting_approval, "{refused:?}");
+
+    let spy = Arc::new(SpyComputer::default());
+    let offline = allowing(spy.clone())
+        .with_screen(true)
+        .with_egress_tunnel(true)
+        .with_egress_policy(EgressPolicy::Never);
+    assert!(offline.network_off());
+    let open = offline
+        .execute(&drawn, &call(REQUEST_USER_FORM, form))
+        .await;
+    assert!(open.ok, "{open:?}");
+    assert_eq!(spy.last_box(), None);
+}
+
+/// An office desk that answers every verb and counts the calls that reached it.
+#[derive(Default)]
+struct CountingDesk {
+    answered: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingDesk {
+    fn reply(&self) -> Result<crate::office_desk::Reply, String> {
+        self.answered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::office_desk::Reply {
+            result: json!({ "files": [] }),
+            customs: Vec::new(),
+            image: None,
+        })
+    }
+
+    fn answered(&self) -> usize {
+        self.answered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl crate::office_desk::OfficeDesk for CountingDesk {
+    async fn answer(
+        &self,
+        _context: &ToolContext,
+        _box_io: &dyn Computer,
+        _box_id: &str,
+        _ask: crate::office_desk::Ask,
+    ) -> Result<crate::office_desk::Reply, String> {
+        self.reply()
+    }
+
+    async fn close(
+        &self,
+        _context: &ToolContext,
+        _document: &str,
+    ) -> Result<crate::office_desk::Reply, String> {
+        self.reply()
+    }
+}
+
+/// A Bot with no computer has no office desk (it is attached only where a box is): its office
+/// tools are not offered, and one called anyway, `office_close` included, is refused in words.
+/// Since #220 a computerless Bot runs a call that does not need the box through its plugins;
+/// an office call must never take that road.
+#[tokio::test]
+async fn a_bot_without_a_computer_is_refused_its_office_tools() {
+    use crate::office_desk::{OFFICE_CLOSE, OFFICE_FILES};
+    let executor = Executor::without_a_computer(permissive()).with_form_cards(true);
+    assert!(
+        executor
+            .tool_names()
+            .iter()
+            .all(|name| !crate::office_desk::is_office_tool(name)),
+        "{:?}",
+        executor.tool_names()
+    );
+    let boxless = ToolContext {
+        box_id: None,
+        ..context_with_box("box_mine")
+    };
+    for (name, arguments) in [
+        (OFFICE_FILES, json!({})),
+        (OFFICE_CLOSE, json!({ "document": "doc_1" })),
+    ] {
+        let result = executor.execute(&boxless, &call(name, arguments)).await;
+        assert!(
+            !result.ok && !result.awaiting_approval,
+            "{name}: {result:?}"
+        );
+        assert!(
+            result
+                .content
+                .contains("office documents are not on offer here"),
+            "{name}: {result:?}"
+        );
+    }
+}
+
+/// An office call on a Bot with a computer passes the auto-review judge like any other tool:
+/// with a judge that blocks, the desk is never reached; with one that allows, it is, once.
+#[tokio::test]
+async fn an_office_call_is_judged_by_auto_review() {
+    use crate::office_desk::OFFICE_FILES;
+    let spy = Arc::new(SpyComputer::default());
+    for (verdict, reached) in [(ReviewVerdict::Block, 0), (ReviewVerdict::Allow, 1)] {
+        let desk = Arc::new(CountingDesk::default());
+        let judge = CountingJudge::new(verdict);
+        let executor = allowing(spy.clone())
+            .with_office_desk(desk.clone())
+            .with_auto_review(blocking_policy(), judge.clone());
+        let result = executor
+            .execute(
+                &context_with_box("box_mine"),
+                &call(OFFICE_FILES, json!({})),
+            )
+            .await;
+        assert_eq!(
+            judge.calls(),
+            1,
+            "{verdict:?}: the judge was asked: {result:?}"
+        );
+        assert_eq!(desk.answered(), reached, "{verdict:?}: {result:?}");
+        assert_eq!(result.ok, reached == 1, "{verdict:?}: {result:?}");
+    }
 }

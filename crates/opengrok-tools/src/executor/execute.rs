@@ -22,7 +22,13 @@ impl Executor {
         // and the card. Whatever the model wrote for these keys is discarded rather than checked.
         let arguments = overwrite_identity(&call.arguments, context);
         let tool_name = self.internal_tool_name(&call.name);
-        if self.boxless && Self::builtin_tool_names().contains(&tool_name.as_str()) {
+        // A plugin's form is the one built-in a Bot with no computer may use: it never touches a
+        // box. Every other, and a sign-in form, is refused in words.
+        let plugin_form = tool_name == REQUEST_USER_FORM
+            && self.form_cards
+            && user_form::form_mode::is_form_mode_source(&arguments);
+        if self.boxless && Self::builtin_tool_names().contains(&tool_name.as_str()) && !plugin_form
+        {
             return ToolResult::refused(&call.id, NO_COMPUTER);
         }
         // grok-box:local has neither binary (checked 22 Sep 2026). A box shell that names
@@ -178,10 +184,11 @@ impl Executor {
         // hand-off cards below: a login card raised for a box that cannot browse would have
         // the person type a password that is then thrown away.
         if self.network_off() && BROWSER_TOOLS.contains(&tool_name.as_str()) {
-            // A collect card never touches the box. A login card on a machine that
-            // cannot browse would take a password and throw it away.
-            let collect =
-                tool_name == REQUEST_USER_FORM && user_form::is_chat_collection(&call.arguments);
+            // A collect card and a plugin's form never touch the box. A login card on a
+            // machine that cannot browse would take a password and throw it away.
+            let collect = tool_name == REQUEST_USER_FORM
+                && (user_form::is_chat_collection(&call.arguments)
+                    || user_form::form_mode::is_form_mode_source(&call.arguments));
             if !collect {
                 return ToolResult::refused(&call.id, NETWORK_OFF);
             }
@@ -193,6 +200,15 @@ impl Executor {
         if tool_name == REQUEST_USER_FORM {
             if let Gate::Deny(why) = &gate {
                 return ToolResult::refused(&call.id, why.as_str());
+            }
+            // NOT A PARK. A form-mode card is answered by the person's presses, each of which
+            // runs on its own, so the turn ends at once and the server mints the card from the
+            // plugin's card tool. It is not on the box either, so no screen hold stops it.
+            if user_form::form_mode::is_form_mode_source(&call.arguments) {
+                return match user_form::form_mode::open_answer(&call.arguments, context.form_mode) {
+                    Ok(said) => ToolResult::ok(&call.id, said),
+                    Err(why) => ToolResult::refused(&call.id, why),
+                };
             }
             if context.screen_hold {
                 return ToolResult::refused(
@@ -338,6 +354,12 @@ impl Executor {
             }
         } else {
             let Some(box_id) = context.box_id.as_ref() else {
+                // A plugin's tool is the person's account at a service, not a program on a box
+                // (#359): a Bot with no computer still runs it, and a plugin's form card (#220)
+                // is nothing but such calls. Its gates have all been passed above.
+                if !needs_the_box(&tool_name) {
+                    return self.call_plugin_tool(&call.id, &tool_name, arguments).await;
+                }
                 return ToolResult::refused(
                     &call.id,
                     "this coworker has no computer yet, so nothing can be run",

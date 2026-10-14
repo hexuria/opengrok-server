@@ -36,6 +36,9 @@ async fn installed(store: &PgStore, account: &AccountId, bot: &CoworkerId) -> Ve
 pub struct TurnPlugins {
     pub mentioned: Vec<String>,
     pub chosen: BTreeMap<String, BTreeMap<String, String>>,
+    /// Whether the app that sent this turn draws a plugin's form card (`forwardedProps.formMode`,
+    /// #220); `None` when no app sent it (a routine, a run carried on after a card).
+    pub form_mode: Option<bool>,
 }
 
 impl TurnPlugins {
@@ -281,6 +284,107 @@ pub async fn endpoints(
         );
     }
     endpoints
+}
+
+/// Every plugin this Bot could reach that declares `extensions.formMode` (#220), by name: this
+/// server's own first, then the account's installs, less any a server plugin shadows, as their
+/// servers are (`endpoints`). Whether one is switched on is not asked here: its `alwaysAsk`
+/// only narrows, and a card's actions are widened to its plugin by `mentioned`'s own rule.
+pub async fn form_mode_plugins(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+    operator: &BTreeMap<String, Plugin>,
+) -> Vec<(String, opengrok_plugins::FormModeTools)> {
+    let server = operator
+        .values()
+        .filter(|p| !p.manifest.name.contains('.'))
+        .filter_map(|p| Some((p.manifest.name.clone(), p.form_mode()?)));
+    let mut found: Vec<_> = server.collect();
+    for installation in installed(store, account, bot).await {
+        if operator.contains_key(&installation.name) || installation.name.contains('.') {
+            continue;
+        }
+        if let Some(tools) = installation.bundle.form_mode() {
+            found.push((installation.name, tools));
+        }
+    }
+    found
+}
+
+/// `form_mode_plugins`, less those this turn may not reach of its own accord: switched off for
+/// this Bot and not tagged in its message. What a model's call to open a card may be widened to;
+/// a person's press on a card already open is not narrowed by it.
+pub async fn form_mode_plugins_on(
+    (store, operator): (&PgStore, &BTreeMap<String, Plugin>),
+    account: &AccountId,
+    bot: &CoworkerId,
+    tagged: &[String],
+) -> Vec<(String, opengrok_plugins::FormModeTools)> {
+    let Some(policy) = turn_policy(store, account, bot).await else {
+        return Vec::new();
+    };
+    let on = |name: &str| match operator.contains_key(name) {
+        true => opengrok_policy::admits_plugin(account, bot, name, &policy),
+        false => switched_on(account, bot, name, &policy),
+    };
+    let plugins = form_mode_plugins(store, account, bot, operator).await;
+    plugins
+        .into_iter()
+        .filter(|(name, _)| tagged.contains(name) || on(name))
+        .collect()
+}
+
+/// Every tool of a plugin this Bot could reach that always asks a person first (#220), by
+/// internal name: `opengrok_plugins::form_mode::always_ask_tools`, over the plugins
+/// `form_mode_plugins` reads, card block usable or not. It only narrows, so nothing is skipped
+/// for being switched off.
+pub async fn always_ask_tools(
+    store: &PgStore,
+    account: &AccountId,
+    bot: &CoworkerId,
+    operator: &BTreeMap<String, Plugin>,
+) -> Vec<String> {
+    let server = operator.values().filter(|p| !p.manifest.name.contains('.'));
+    let mut tools: Vec<String> = server
+        .flat_map(|p| p.always_ask_tools(&p.manifest.name))
+        .collect();
+    for installation in installed(store, account, bot).await {
+        if !operator.contains_key(&installation.name) && !installation.name.contains('.') {
+            tools.extend(installation.bundle.always_ask_tools(&installation.name));
+        }
+    }
+    tools
+}
+
+/// The policy a Bot's tools run under on one turn, as every turn and the MCP door build it: the
+/// Bot's own (`policy_to_use`), widened to the plugins this message tagged
+/// (`opengrok_policy::with_mentioned`), and narrowed by every form-mode plugin's `alwaysAsk`
+/// (`form_mode::always_asking`). `None` when the Bot's policy could not be read.
+pub async fn tools_policy(
+    (store, operator): (&PgStore, &BTreeMap<String, Plugin>),
+    account: &AccountId,
+    bot: &CoworkerId,
+    mentioned: &[String],
+) -> Option<Context> {
+    let policy = store.policy_to_use(account, bot).await.ok()?;
+    let policy = opengrok_policy::with_mentioned(policy, mentioned);
+    let reach = (store, operator);
+    Some(crate::form_mode::always_asking(reach, account, bot, policy).await)
+}
+
+/// Whether a Bot is offered `request_user_form` for a plugin's form (#220): the app that sent
+/// the turn draws the card, and a plugin the model may reach (switched on, or tagged) has one.
+pub async fn offers_form_cards(
+    reach: (&PgStore, &BTreeMap<String, Plugin>),
+    account: &AccountId,
+    bot: &CoworkerId,
+    turn: &TurnPlugins,
+) -> bool {
+    turn.form_mode == Some(true)
+        && !form_mode_plugins_on(reach, account, bot, &turn.mentioned)
+            .await
+            .is_empty()
 }
 
 /// The policy a turn of `bot` runs under, as the turn reads it (`policy_to_use`), so a skill is
