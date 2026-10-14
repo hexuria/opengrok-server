@@ -14,7 +14,7 @@
         "height": 800
       },
       "createdAtMs": 1790000000000,
-      "updatedAtMs": 1790000001000,
+      "updatedAtMs": 1790000000000,
       "deletedAtMs": null,
       "latestVersion": 1,
       "relation": "mine",
@@ -28,7 +28,7 @@
         "kind": "filtered",
         "note": "filtered",
         "createdBy": "acct_0199bb4e-0000-7000-8000-000000000002",
-        "createdAtMs": 1790000001000,
+        "createdAtMs": 1790000000000,
         "body": {
           "steps": [
             {
@@ -59,7 +59,7 @@
           "ran": 0,
           "error": "the box is unreachable: the stand-in box is down"
         },
-        "atMs": 1790000002000,
+        "atMs": 1790000001000,
         "leaseUntilMs": null,
         "state": "finished",
         "artifacts": []
@@ -77,7 +77,7 @@
           "ran": 0,
           "error": "the box is unreachable: the stand-in box is down"
         },
-        "atMs": 1790000003000,
+        "atMs": 1790000002000,
         "leaseUntilMs": null,
         "state": "finished",
         "artifacts": []
@@ -95,7 +95,7 @@
           "ran": 0,
           "error": "the box is unreachable: the stand-in box is down"
         },
-        "atMs": 1790000004000,
+        "atMs": 1790000003000,
         "leaseUntilMs": null,
         "state": "finished",
         "artifacts": []
@@ -113,7 +113,7 @@
           "ran": 0,
           "error": "the box is unreachable: the stand-in box is down"
         },
-        "atMs": 1790000005000,
+        "atMs": 1790000004000,
         "leaseUntilMs": null,
         "state": "finished",
         "artifacts": []
@@ -131,7 +131,7 @@
           "ran": 0,
           "error": "the box is unreachable: the stand-in box is down"
         },
-        "atMs": 1790000006000,
+        "atMs": 1790000005000,
         "leaseUntilMs": null,
         "state": "finished",
         "artifacts": []
