@@ -29,7 +29,20 @@ use base64::Engine;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 
-use crate::{StoreError, StoreResult};
+/// Why a vault call failed. `Corrupt` is a key a person mistyped; `Unopenable` is a sealed blob
+/// that no held key opens — the store maps each onto its own error variant unchanged.
+#[derive(Debug, thiserror::Error)]
+pub enum VaultError {
+    /// The key given could not be used: bad base64, or not 32 bytes.
+    #[error("{0}")]
+    Corrupt(String),
+    /// A sealed credential that will not open. Its own variant because the cure is a key, not a
+    /// database: folded into `Corrupt` it read as "store unavailable" to the person revealing it.
+    #[error("{0}")]
+    Unopenable(String),
+}
+
+pub type VaultResult<T> = Result<T, VaultError>;
 
 /// Encrypts and decrypts credentials. One per process, built from the keys at boot: the current
 /// key seals, and it or any retired key opens.
@@ -81,24 +94,24 @@ impl HeldKey {
     /// Both failures are named separately because they need different fixes: one is a typo in the
     /// value, the other is a value of the wrong size. `var` names which value, because with a
     /// retired key in play the operator is looking at more than one.
-    fn decode(var: &str, kek: &str) -> StoreResult<Self> {
+    fn decode(var: &str, kek: &str) -> VaultResult<Self> {
         let raw = base64::engine::general_purpose::STANDARD
             .decode(kek.trim())
             .map_err(|error| {
-                StoreError::Corrupt(format!(
+                VaultError::Corrupt(format!(
                     "{var} is not valid base64: {error}; \
                      generate one with `openssl rand -base64 32`"
                 ))
             })?;
         if raw.len() != 32 {
-            return Err(StoreError::Corrupt(format!(
+            return Err(VaultError::Corrupt(format!(
                 "{var} must decode to 32 bytes, got {}; \
                  generate one with `openssl rand -base64 32`",
                 raw.len()
             )));
         }
         let key = Key::try_from(raw.as_slice())
-            .map_err(|_| StoreError::Corrupt(format!("{var} is the wrong size")))?;
+            .map_err(|_| VaultError::Corrupt(format!("{var} is the wrong size")))?;
         use sha2::Digest;
         let digest = sha2::Sha256::new()
             .chain_update(b"opengrok credential key id v1\0")
@@ -114,7 +127,7 @@ impl HeldKey {
 impl Vault {
     /// The current key (`OG_CREDENTIAL_KEK`) and the retired ones (`OG_CREDENTIAL_KEK_OLD`).
     /// A key listed twice, or the current key pasted into the retired list, is one key.
-    pub fn from_base64_keys(current: &str, retired: &[&str]) -> StoreResult<Self> {
+    pub fn from_base64_keys(current: &str, retired: &[&str]) -> VaultResult<Self> {
         let current = HeldKey::decode("OG_CREDENTIAL_KEK", current)?;
         let mut held: Vec<HeldKey> = Vec::new();
         for (n, kek) in retired.iter().enumerate() {
@@ -148,7 +161,7 @@ impl Vault {
     }
 
     /// Seal a credential against the row it will live in, always under the current key.
-    pub fn seal(&self, id: &str, plaintext: &str) -> StoreResult<Sealed> {
+    pub fn seal(&self, id: &str, plaintext: &str) -> VaultResult<Sealed> {
         let nonce_bytes: [u8; 12] = {
             use rand::RngExt;
             rand::rng().random()
@@ -166,7 +179,7 @@ impl Vault {
                     aad: id.as_bytes(),
                 },
             )
-            .map_err(|_| StoreError::Corrupt("a credential could not be sealed".to_string()))?;
+            .map_err(|_| VaultError::Corrupt("a credential could not be sealed".to_string()))?;
 
         Ok(Sealed {
             nonce: nonce_bytes.to_vec(),
@@ -177,8 +190,8 @@ impl Vault {
 
     /// Open a credential for the row it belongs to. Every failure is `Unopenable`, and which
     /// sentence it carries depends only on the row's key id — see the three constants above.
-    pub fn open(&self, id: &str, sealed: &Sealed) -> StoreResult<String> {
-        let unopenable = |why: &str| StoreError::Unopenable(why.to_string());
+    pub fn open(&self, id: &str, sealed: &Sealed) -> VaultResult<String> {
+        let unopenable = |why: &str| VaultError::Unopenable(why.to_string());
         let bytes: [u8; 12] = sealed
             .nonce
             .as_slice()
@@ -205,3 +218,7 @@ impl Vault {
         String::from_utf8(plaintext).map_err(|_| unopenable(ALTERED))
     }
 }
+
+// Calls only the tests make, kept beside them like `tests/unit/*`: nothing the server serves asks.
+#[path = "../tests/support/vault_seam.rs"]
+mod vault_seam;

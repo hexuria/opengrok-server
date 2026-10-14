@@ -3058,16 +3058,14 @@ dependencies = [
 name = "opengrok-store"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
- "chacha20poly1305",
  "chrono",
  "opengrok-core",
  "opengrok-events",
  "opengrok-policy",
  "opengrok-testdb",
  "opengrok-tools",
+ "opengrok-vault",
  "opengrok-wire",
- "rand 0.10.2",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3105,6 +3103,17 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "opengrok-vault"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "chacha20poly1305",
+ "rand 0.10.2",
+ "sha2 0.11.0",
+ "thiserror",
 ]
 
 [[package]]

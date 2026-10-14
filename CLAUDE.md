@@ -89,6 +89,7 @@ crates/
   opengrok-jev        the typed classifier client
   opengrok-local-exec the approved command transport
   opengrok-auth       access and refresh token primitives
+  opengrok-vault      the credential vault: sealed blobs and the keys that open them
   opengrok-tools    tool definitions and the executor; MCP client (rmcp) for plugins: mem0, cua, skills
   opengrok-policy   what a principal may make a coworker do
   opengrok-integrations  the plugin registry adapter, account installs and their per-turn use; OAuth provider rules
