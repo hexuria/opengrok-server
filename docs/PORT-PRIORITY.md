@@ -11,7 +11,7 @@
 > pass; per-tier statuses live in [`ROADMAP.md`](ROADMAP.md). Kept as the reference for what
 > each tier contains and for the measured corrections in §6.
 
-Derived 30 Aug 2026 from the live client at `/Volumes/goldcoders/OSS/opengrok`, re-verified
+Derived 30 Aug 2026 from the live client at `/Volumes/goldcoders/hexuria/opengrok`, re-verified
 against source rather than recalled. Successor to the ordering implied by
 `research/client-grok-bot.md` §9; that document remains the per-command reference and is not
 replaced. Where the two disagree, the corrections in §6 here are the measured ones.
