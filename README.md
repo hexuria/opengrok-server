@@ -34,7 +34,7 @@ record of what was there.
 
 ```sh
 # 1. Postgres (the gateway's dev instance) and OpenGrok's database
-cd /Volumes/goldcoders/OSS/open-ai-gateway && just dev
+cd /Volumes/goldcoders/hexuria/open-ai-gateway && just dev
 docker exec oag-dev-postgres-1 psql -U oag -d postgres -c 'create database opengrok'
 
 # 2. configuration
