@@ -2,6 +2,7 @@
 //! routes remain in the server and the plugin API.
 pub mod accounts;
 pub mod attempts;
+pub mod form_mode;
 pub mod installed;
 pub mod mcp_oauth;
 pub mod net;

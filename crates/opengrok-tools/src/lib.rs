@@ -74,6 +74,11 @@ pub struct ToolContext {
     /// The conversation whose form or handoff holds the screen, when the hold is tied to a run.
     /// Named in the refusal: a turn held by another conversation cannot see why otherwise.
     pub screen_held_in: Option<String>,
+    /// Whether the client that sent this turn draws form-mode cards (`forwardedProps.formMode`,
+    /// #220); `None` when no client sent it (a routine, a run resumed after a card). Without a
+    /// yes a `request_user_form` with `formMode` is refused in words: a card nobody can draw
+    /// would show the person nothing while the model is told the form is open.
+    pub form_mode: Option<bool>,
     /// Which of its computer's screens this Bot uses (#376): its own on a computer it shares, the
     /// one screen on a computer of its own or a group's. One cell for every copy of the context a
     /// turn makes.
@@ -105,6 +110,7 @@ impl ToolContext {
             group_box: None,
             screen_hold: false,
             screen_held_in: None,
+            form_mode: None,
             screen: Arc::default(),
             thread_id: None,
             run_id: None,

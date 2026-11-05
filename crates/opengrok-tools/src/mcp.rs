@@ -442,6 +442,12 @@ impl Default for Deadlines {
 }
 
 impl Deadlines {
+    /// The longest one call can take before it is given up: connecting, the call itself, and
+    /// the grace its cancellation is given. A call still in flight is younger than this.
+    pub fn longest_call(&self) -> Duration {
+        self.connect + self.call + CANCEL_GRACE
+    }
+
     /// The defaults, overridden by the environment where it says something usable.
     pub fn from_env() -> Self {
         let defaults = Self::default();

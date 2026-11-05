@@ -104,6 +104,9 @@ pub struct Executor {
     /// offered, and one called anyway is refused in words rather than sent to a box that is not
     /// there.
     boxless: bool,
+    /// On a Bot with no computer: offer `request_user_form` for a plugin's form only (#220),
+    /// which never touches a box. Set when the turn's app draws the card and a plugin has one.
+    form_cards: bool,
 }
 
 /// The box a Bot with no computer is given so its plugin tools can run: every box call is
@@ -298,6 +301,7 @@ impl Executor {
             office_desk: None,
             switched_off: Vec::new(),
             boxless: false,
+            form_cards: false,
         }
     }
 
@@ -317,6 +321,13 @@ impl Executor {
             boxless: true,
             ..Self::with_policy(Arc::new(NoComputer), policy)
         }
+    }
+
+    /// Offer a Bot with no computer `request_user_form` for plugin forms (`form_cards`).
+    #[must_use]
+    pub fn with_form_cards(mut self, offered: bool) -> Self {
+        self.form_cards = offered;
+        self
     }
 
     /// Whether a box stands behind this executor.
@@ -956,7 +967,7 @@ impl Executor {
         Self::builtin_tool_names()
             .iter()
             .copied()
-            .filter(move |_| !self.boxless)
+            .filter(move |name| !self.boxless || (self.form_cards && *name == REQUEST_USER_FORM))
             .filter(move |name| self.screen || !SCREEN_TOOLS.contains(name))
             .filter(move |name| {
                 !self.network_off() || !BROWSER_TOOLS.contains(name) || *name == REQUEST_USER_FORM
@@ -1261,8 +1272,12 @@ impl Executor {
         };
         let mut schemas = Vec::new();
         for name in self.offered_builtins() {
+            let spec = match self.boxless {
+                true => user_form::form_mode::boxless_spec(),
+                false => builtin_tool_spec(name),
+            };
             if permitted(name)
-                && let Some((description, mut parameters)) = builtin_tool_spec(name)
+                && let Some((description, mut parameters)) = spec
             {
                 if let Some(group) = &self.group_box_name
                     && let Some(properties) = parameters
@@ -1498,91 +1513,7 @@ fn builtin_tool_spec(name: &str) -> Option<(&'static str, Value)> {
                 "required": ["action"],
             }),
         )),
-        REQUEST_USER_FORM => Some((
-            "Ask the person to fill a form in chat. Two uses. \
-             A collect form (collect true) is how you ask for fields you do not have yet: a new \
-             profile, a missing name, a TIN they must confirm. Put what they already told you \
-             on each field as value, so the card is prefilled, and leave value off the fields \
-             that are still missing. Mark those required. Wait. The answers come back as \
-             Shared fields and nothing is typed into a page. Do not invent a shell command \
-             for the form. \
-             A sign-in is the other use: an OTP or a field they must type into a page. \
-             NativeChat offers the person their saved logins for that site on the card; they \
-             confirm with Touch ID, and the values are typed into the page out of your view. \
-             Do NOT type passwords, one-time codes, or other secrets with `computer`: that \
-             attaches a screenshot of what was typed. Raise this instead and wait. The person \
-             fills in chat; the server clicks each field at the position you give (`at`, in \
-             your screenshot's pixels) and types there, never showing you the secret. Give \
-             `at` for every field you can see. After it settles, screenshot and confirm what \
-             the page shows — filling is not login. When the page shows the email and password \
-             fields TOGETHER (Facebook, most sites), raise ONE card with both fields and \
-             `samePage: true` — do not split them. Only a page that asks for the email alone \
-             (Google) gets an email-only card: raise it, observe, and if a password page comes \
-             next call this again with a password-only form (new entryId, challengeKind \
-             \"password\"). \
-             If another in-sandbox challenge appears (an authenticator code, phone \
-             verification on the same page), call this again with otp fields, \
-             challengeKind \"otp\", the page host as liveHost and the field's `at`; \
-             NativeChat offers the person's saved authenticator code for that site on the \
-             card. Never re-raise a form that already settled. A passkey prompt: call this with \
-             challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site \
-             offers to add one and the person asked), no fields, liveHost set; when the result \
-             says it is loaded, click the site's passkey button. A captcha, or a page \
-             outside this box, is not another password form: the person finishes on the \
-             computer (Open the screen). If they dismiss or decline, continue without those \
-             credentials and do not loop.",
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string", "description": "Short title shown on the card." },
-                    "instruction": { "type": "string", "description": "What the person should do." },
-                    "collect": {
-                        "type": "boolean",
-                        "description": "Ask in chat and return the answers. Nothing is typed into a page. Set this when you need fields the person must supply or confirm. Prefill fields they already answered with value."
-                    },
-                    "passkeyMode": {
-                        "type": "string",
-                        "description": "With challengeKind passkey: use (sign in with the person's passkey) or register (the site offers to add one)."
-                    },
-                    "challengeKind": {
-                        "type": "string",
-                        "description": "Optional hint: password, otp, passkey, captcha, outside_sandbox. passkey takes no fields (with passkeyMode use|register). Captcha/outside-sandbox must not be another password form."
-                    },
-                    "samePage": {
-                        "type": "boolean",
-                        "description": "The fields share one page (Facebook's email and password do). Set it on every one-page card. Without it and without positions, only the first field is typed."
-                    },
-                    "submit": {
-                        "type": "boolean",
-                        "description": "Press Return after the fill, i.e. press the page's own Log in. Set it on a one-page login card. A single field, and a fully positioned login, Return on their own."
-                    },
-                    "fields": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": { "type": "string" },
-                                "label": { "type": "string" },
-                                "type": { "type": "string", "description": "text, email, password, otp, …" },
-                                "value": { "type": "string", "description": "Prefill for a collect form. The person can edit it. Never set this on a secret field. Dropped unless collect is true." },
-                                "required": { "type": "boolean" },
-                                "secret": { "type": "boolean", "description": "Mask this field; password and otp are secret even without this." },
-                                "at": {
-                                    "type": "object",
-                                    "description": "Where this field is on your screenshot, in its pixels: the fill clicks it before typing, so the value lands in this field whatever the page has focused. Give it whenever you can see the field.",
-                                    "properties": { "x": { "type": "integer" }, "y": { "type": "integer" } },
-                                    "required": ["x", "y"]
-                                }
-                            },
-                            "required": ["id", "label"]
-                        }
-                    },
-                    "domain": { "type": "string" },
-                    "liveHost": { "type": "string", "description": "Host currently on the box's screen, when known." }
-                },
-                "required": ["title", "fields"],
-            }),
-        )),
+        REQUEST_USER_FORM => Some(user_form::tool_spec()),
         USER_MACHINE_SHELL => Some((
             "Run a shell command on the USER'S OWN machine — the real computer they enrolled,              NOT this bot's sandboxed box. It runs only with the user's consent under their              reverse-exec policy: a command may run, be refused, or be held for the user to approve              (in which case you should wait rather than retry). Use this ONLY when the task is about              the user's own machine; for your own work use `shell`.",
             serde_json::json!({

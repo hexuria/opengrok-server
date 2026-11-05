@@ -34,12 +34,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use opengrok_core::id::{AccountId, CoworkerId};
 use opengrok_core::run::{RunCommand, RunView};
+use opengrok_integrations::form_mode;
 use opengrok_tools::user_form::front_page;
+use opengrok_tools::user_form::replay::agui_user_form_frame;
 use opengrok_tools::user_form::{
-    FieldOutcome, FormRequest, FormResolution, HAND_BACK_TOOL_RESULT, HANDOFF_DECLINED_TOOL_RESULT,
-    HOLD_TIMED_OUT_TOOL_RESULT, audit_lengths, fill_into_focus, form_request_from,
-    handoff_instruction, is_live_handoff, is_unresolved, is_user_form_entry, model_facing_result,
-    overall_resolution, shared_values, submitted_values, tool_result_content,
+    FieldOutcome, FormRequest, FormResolution, HANDOFF_DECLINED_TOOL_RESULT, HANDOFF_ENDINGS,
+    audit_lengths, awaits_its_handoff, call_id_of, fill_into_focus, form_request_from,
+    handoff_instruction, is_escalated_form, is_handoff_entry, is_live_handoff, is_unresolved,
+    is_user_form_entry, model_facing_result, overall_resolution, settle_handoff, shared_values,
+    submitted_values, tool_result_content,
 };
 use opengrok_wire::agui::{Event, EventType};
 use serde_json::{Value, json};
@@ -134,15 +137,22 @@ pub async fn submit_user_form(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = form_mode::named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
-    let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+    let store = &state.agui.auth.store;
+    let loaded = form_mode::load_owned_entry(store, account_id, &coworker_id, &entry_id);
+    let (seq, entry) = match loaded.await {
         Ok(row) => row,
         Err(reply) => return reply,
     };
     if !is_user_form_entry(&entry) {
         return (400, json!({ "error": "that entry is not a user-form" }));
+    }
+    // No run waits on a form-mode card, so this verb's resume would answer whichever sign-in is
+    // parked; its presses have their own route.
+    if opengrok_tools::user_form::form_mode::is_form_mode_entry(&entry) {
+        return (409, json!({ "error": FORM_MODE_CARD }));
     }
     if !is_unresolved(&entry) {
         return heal_or_already(state, account_id, &coworker_id, &entry).await;
@@ -354,7 +364,7 @@ pub async fn dismiss_user_form(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = form_mode::named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let mode = args.get("mode").and_then(Value::as_str).unwrap_or_default();
@@ -368,12 +378,25 @@ pub async fn dismiss_user_form(
             );
         }
     };
-    let (seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+    let store = &state.agui.auth.store;
+    let loaded = form_mode::load_owned_entry(store, account_id, &coworker_id, &entry_id);
+    let (seq, entry) = match loaded.await {
         Ok(row) => row,
         Err(reply) => return reply,
     };
     if !is_user_form_entry(&entry) {
         return (400, json!({ "error": "that entry is not a user-form" }));
+    }
+    // A form-mode card is closed, not settled: its draft stays and nothing resumes.
+    if opengrok_tools::user_form::form_mode::is_form_mode_entry(&entry) {
+        if resolution != FormResolution::Dismissed {
+            return (
+                400,
+                json!({ "error": "a form-mode card is only dismissed" }),
+            );
+        }
+        let who = (account_id, &coworker_id);
+        return form_mode::dismiss(state, who, &entry_id, args).await;
     }
     if !is_unresolved(&entry) {
         // Skip after Open the screen can land as dismissed on the *form* id while a
@@ -426,15 +449,6 @@ pub async fn dismiss_user_form(
     (200, settled)
 }
 
-/// How a handoff ends: the word stamped on the box and on its escalated form, and the sentence
-/// the model is answered with. One table both ways, so the replay reads an old answer back into
-/// exactly the word this verb wrote it for.
-static HANDOFF_ENDINGS: [(&str, &str); 3] = [
-    ("handed_back", HAND_BACK_TOOL_RESULT),
-    ("declined", HANDOFF_DECLINED_TOOL_RESULT),
-    ("timed_out", HOLD_TIMED_OUT_TOOL_RESULT),
-];
-
 /// `resolveBoxHandoff {entryId, agentId, resolution: handed_back|declined|timed_out}`.
 /// Stamps `boxResolution` on every live `sand://box` sibling and on the escalated form it
 /// answers, and resumes the waiting user-form run. Accepts the handoff entry id **or** the
@@ -445,7 +459,7 @@ pub async fn resolve_box_handoff(
     args: &Value,
     account_id: &AccountId,
 ) -> (u16, Value) {
-    let Some((entry_id, coworker_id)) = named_entry(args) else {
+    let Some((entry_id, coworker_id)) = form_mode::named_entry(args) else {
         return (400, json!({ "error": "entryId and agentId are required" }));
     };
     let asked = args.get("resolution").and_then(Value::as_str);
@@ -459,7 +473,9 @@ pub async fn resolve_box_handoff(
         );
     };
     let timed_out = word == "timed_out";
-    let (_seq, entry) = match load_owned_entry(state, account_id, &coworker_id, &entry_id).await {
+    let store = &state.agui.auth.store;
+    let loaded = form_mode::load_owned_entry(store, account_id, &coworker_id, &entry_id);
+    let (_seq, entry) = match loaded.await {
         Ok(row) => row,
         Err(reply) => return reply,
     };
@@ -925,12 +941,8 @@ async fn settle_open_form(
     Ok(Some(settled))
 }
 
-fn call_id_of(entry: &Value) -> Option<&str> {
-    entry
-        .get("callId")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-}
+/// Said when a login card's verb is sent for a form-mode card.
+pub const FORM_MODE_CARD: &str = "form-mode card: use /ag-ui/user-form/action";
 
 /// The wire word NativeChat reads when a saved login is refused.
 pub const SHARED_COMPUTER: &str = "shared-computer";
@@ -980,55 +992,6 @@ pub(crate) async fn saved_login_refusal(
     (mode != opengrok_core::coworker::BoxMode::Dedicated && !all_bots).then_some(SHARED_COMPUTER)
 }
 
-fn named_entry(args: &Value) -> Option<(String, CoworkerId)> {
-    let entry_id = args.get("entryId").and_then(Value::as_str)?;
-    let agent_id = args
-        .get("agentId")
-        .or_else(|| args.get("id"))
-        .and_then(Value::as_str)?;
-    if entry_id.is_empty() || agent_id.is_empty() {
-        return None;
-    }
-    Some((entry_id.to_string(), CoworkerId::from_stored(agent_id)))
-}
-
-async fn may_use(state: &HostState, account_id: &AccountId, coworker: &CoworkerId) -> bool {
-    state
-        .agui
-        .auth
-        .store
-        .may_use_coworker(account_id, coworker)
-        .await
-        .unwrap_or(false)
-}
-
-/// Null stays the disclosure answer for a coworker the caller may not use. A stamped
-/// `entryId` that is missing from the transcript is an error — NativeChat collapses on Null.
-async fn load_owned_entry(
-    state: &HostState,
-    account_id: &AccountId,
-    coworker_id: &CoworkerId,
-    entry_id: &str,
-) -> Result<(i64, Value), (u16, Value)> {
-    if !may_use(state, account_id, coworker_id).await {
-        return Err((200, Value::Null));
-    }
-    match state
-        .agui
-        .auth
-        .store
-        .find_gateway_entry(coworker_id, account_id, entry_id)
-        .await
-    {
-        Ok(Some(row)) => Ok(row),
-        Ok(None) => Err((404, json!({ "error": "form entry missing" }))),
-        Err(error) => {
-            tracing::error!(%error, "could not load a form or handoff entry");
-            Err((500, json!({ "error": "transcript unavailable" })))
-        }
-    }
-}
-
 fn settle_entry(
     mut entry: Value,
     resolution: FormResolution,
@@ -1060,37 +1023,6 @@ fn settle_entry(
         }
     }
     entry
-}
-
-fn settle_handoff(mut entry: Value, resolution: &str, timed_out: bool) -> Value {
-    if let Some(map) = entry.as_object_mut() {
-        map.insert("boxResolution".to_string(), json!(resolution));
-        if timed_out {
-            map.insert("timedOut".to_string(), json!(true));
-        }
-    }
-    entry
-}
-
-fn is_handoff_entry(entry: &Value) -> bool {
-    entry
-        .get("boxRequestId")
-        .and_then(Value::as_str)
-        .is_some_and(|id| !id.is_empty())
-}
-
-fn is_escalated_form(entry: &Value) -> bool {
-    is_user_form_entry(entry)
-        && entry.get("formResolution").and_then(Value::as_str) == Some("escalated")
-}
-
-/// An escalated form whose handoff's end is not on it yet.
-fn awaits_its_handoff(entry: &Value) -> bool {
-    is_escalated_form(entry)
-        && entry
-            .get("boxResolution")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
 }
 
 /// Stamp `boxResolution` on every still-live sand://box sibling. One Skip must not
@@ -1574,147 +1506,6 @@ pub(crate) async fn journal_agui_custom(
     }
 }
 
-/// CUSTOM NativeChat already hydrates for settled / cold-load cards. Not live HITL.
-pub(crate) fn agui_user_form_frame(entry: &Value) -> Value {
-    let entry_id = entry.get("id").and_then(Value::as_str).unwrap_or("");
-    let message = entry
-        .get("message")
-        .cloned()
-        .unwrap_or_else(|| json!({ "type": "user-form" }));
-    let form_request = message.get("formRequest").cloned().unwrap_or(Value::Null);
-    let resolution = entry.get("formResolution").cloned().unwrap_or(Value::Null);
-    let call_id = entry.get("callId").cloned().unwrap_or(Value::Null);
-    json!({
-        "type": "CUSTOM",
-        "name": "user-form",
-        "entryId": entry_id,
-        "callId": call_id,
-        "formRequest": form_request,
-        "formResolution": resolution,
-        "message": message,
-        "value": entry,
-    })
-}
-
-fn overlay_form(event: &mut Value, form: &Value) {
-    let Some(map) = event.as_object_mut() else {
-        return;
-    };
-    if let Some(id) = form.get("id") {
-        map.insert("entryId".to_string(), id.clone());
-    }
-    if map
-        .get("callId")
-        .and_then(Value::as_str)
-        .is_none_or(str::is_empty)
-        && let Some(call_id) = form.get("callId")
-    {
-        map.insert("callId".to_string(), call_id.clone());
-    }
-    if let Some(message) = form.get("message") {
-        map.insert("message".to_string(), message.clone());
-        if let Some(request) = message.get("formRequest") {
-            map.insert("formRequest".to_string(), request.clone());
-        }
-    }
-    if let Some(resolution) = form.get("formResolution") {
-        map.insert("formResolution".to_string(), resolution.clone());
-    }
-    // HOW ITS HANDOFF ENDED, beside `formResolution` (agreed with nativechat for #143): until it
-    // is there an escalated form is live. On a park as much as on a `user-form` frame — a form
-    // settled after its run stopped waiting has no `user-form` frame, only its park.
-    if let Some(ended) = form.get("boxResolution") {
-        map.insert("boxResolution".to_string(), ended.clone());
-        if let Some(timed_out) = form.get("timedOut") {
-            map.insert("timedOut".to_string(), timed_out.clone());
-        }
-    }
-    map.insert("value".to_string(), form.clone());
-}
-
-/// A form escalated before its handoff's end was stamped on it (#143), with that end read back
-/// from its run's answer to its call. ONLY THE SERVER'S OWN SENTENCES COUNT: any other result is
-/// not a handoff's ending, and a word read into it would be invented. None found leaves the form
-/// as it was, which reads as still live.
-fn with_backfilled_handoff(form: &Value, events: &[Value]) -> Value {
-    let ended = call_id_of(form)
-        .filter(|_| awaits_its_handoff(form))
-        .and_then(|call| {
-            events.iter().find_map(|event| {
-                let answer = (event.get("type").and_then(Value::as_str)
-                    == Some("TOOL_CALL_RESULT")
-                    && event.get("toolCallId").and_then(Value::as_str) == Some(call))
-                .then(|| event.get("content").and_then(Value::as_str))
-                .flatten()?;
-                HANDOFF_ENDINGS
-                    .iter()
-                    .find(|(_, sentence)| *sentence == answer)
-            })
-        });
-    match ended {
-        Some((word, _)) => settle_handoff(form.clone(), word, *word == "timed_out"),
-        None => form.clone(),
-    }
-}
-
-fn user_form_event_id(event: &Value) -> Option<&str> {
-    event
-        .get("entryId")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .or_else(|| event.pointer("/value/id").and_then(Value::as_str))
-        .or_else(|| event.pointer("/value/entryId").and_then(Value::as_str))
-}
-
-fn is_user_form_agui(event: &Value) -> bool {
-    if event.get("type").and_then(Value::as_str) != Some("CUSTOM") {
-        return false;
-    }
-    let name = event.get("name").and_then(Value::as_str).unwrap_or("");
-    if name == "user-form" {
-        return true;
-    }
-    if name == "run-awaiting-approval"
-        && event.get("reason").and_then(Value::as_str) == Some("user-form")
-    {
-        return true;
-    }
-    event
-        .get("message")
-        .and_then(|message| message.get("type"))
-        .and_then(Value::as_str)
-        == Some("user-form")
-}
-
-fn form_fingerprint(request: &Value) -> String {
-    let title = request.get("title").and_then(Value::as_str).unwrap_or("");
-    let ids = request
-        .get("fields")
-        .and_then(Value::as_array)
-        .map(|fields| {
-            fields
-                .iter()
-                .filter_map(|field| field.get("id").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .unwrap_or_default();
-    format!("{title}|{ids}")
-}
-
-fn event_fingerprint(event: &Value) -> Option<String> {
-    let request = event
-        .get("formRequest")
-        .or_else(|| event.get("arguments"))
-        .or_else(|| event.pointer("/message/formRequest"))
-        .or_else(|| event.pointer("/value/message/formRequest"))?;
-    Some(form_fingerprint(request))
-}
-
-fn entry_fingerprint(entry: &Value) -> Option<String> {
-    entry.pointer("/message/formRequest").map(form_fingerprint)
-}
-
 /// Live HITL CUSTOM NativeChat keys Continue off — `run-awaiting-approval` / `user-form`.
 pub(crate) fn is_live_user_form_custom(event: &Event) -> bool {
     event.event_type == EventType::Custom
@@ -1781,6 +1572,30 @@ impl UserFormSseHold {
         }
     }
 
+    /// The call and its sanitised arguments when `event` is the result of a held form-mode call
+    /// the executor accepted: the moment its card is to be minted. Read from the result's own
+    /// `ok`, never its words, so a refusal (a bad identity, an app that cannot draw the card)
+    /// mints nothing, and rewording the promise cannot stop every card.
+    pub(crate) fn form_mode_call(&self, event: &Event) -> Option<(String, Value)> {
+        use opengrok_tools::user_form::form_mode;
+        if event.event_type != EventType::ToolCallResult
+            || event.extra.get("ok").and_then(Value::as_bool) != Some(true)
+        {
+            return None;
+        }
+        let call_id = Self::tool_call_id(event).filter(|id| self.form_ids.contains(*id))?;
+        let text: String = self
+            .held
+            .iter()
+            .filter(|held| held.event_type == EventType::ToolCallArgs)
+            .filter(|held| Self::tool_call_id(held) == Some(call_id))
+            .filter_map(|held| held.extra.get("delta").and_then(Value::as_str))
+            .collect();
+        let arguments =
+            opengrok_tools::user_form::sanitize_arguments(&serde_json::from_str(&text).ok()?);
+        form_mode::is_form_mode_source(&arguments).then(|| (call_id.to_string(), arguments))
+    }
+
     /// Frames for this `toolCallId`, now carrying the gateway `entryId`.
     pub(crate) fn release_for(&mut self, call_id: &str, entry_id: Option<&str>) -> Vec<Event> {
         if call_id.is_empty() {
@@ -1822,141 +1637,6 @@ impl UserFormSseHold {
             rest
         } else {
             Vec::new()
-        }
-    }
-}
-
-/// Fold current gateway user-form state into AG-UI replay events so a cold
-/// NativeChat rebuilds ✓ Submitted (and idle cards) from `GET /ag-ui/threads/{id}`
-/// / `GET /ag-ui/runs/{id}` — not only from live unresolved CUSTOMs.
-pub(crate) fn hydrate_agui_events(
-    mut events: Vec<Value>,
-    forms: &[Value],
-    started_at_ms: i64,
-    updated_at_ms: i64,
-) -> Vec<Value> {
-    let forms: Vec<Value> = forms
-        .iter()
-        .filter(|entry| is_user_form_entry(entry))
-        .map(|entry| with_backfilled_handoff(entry, &events))
-        .collect();
-    if forms.is_empty() {
-        return events;
-    }
-    let mut used = HashSet::new();
-    for event in &mut events {
-        if !is_user_form_agui(event) {
-            continue;
-        }
-        if let Some(id) = user_form_event_id(event).map(str::to_string)
-            && let Some(form) = forms
-                .iter()
-                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id.as_str()))
-        {
-            overlay_form(event, form);
-            used.insert(id);
-            continue;
-        }
-        // Same-completion stacked Website login cards share a fingerprint. Join
-        // on `callId` so replay does not stamp the last card onto the first TOOL_CALL.
-        if let Some(call_id) = event
-            .get("callId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            && let Some(form) = forms.iter().find(|entry| {
-                let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
-                !used.contains(id) && entry.get("callId").and_then(Value::as_str) == Some(call_id)
-            })
-        {
-            overlay_form(event, form);
-            if let Some(id) = form.get("id").and_then(Value::as_str) {
-                used.insert(id.to_string());
-            }
-            continue;
-        }
-        if let Some(fingerprint) = event_fingerprint(event)
-            && let Some(form) = forms.iter().find(|entry| {
-                let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
-                !used.contains(id)
-                    && entry_fingerprint(entry).as_deref() == Some(fingerprint.as_str())
-            })
-        {
-            overlay_form(event, form);
-            if let Some(id) = form.get("id").and_then(Value::as_str) {
-                used.insert(id.to_string());
-            }
-        }
-    }
-    // A card is appended only to the run that made its call. Two runs a few seconds apart in one
-    // thread both have it in their window and each hydrates against the coworker's whole
-    // transcript, so the window alone painted it once per run. A card that names no call (written
-    // before cards carried one) has only the window to go on.
-    let calls: HashSet<String> = events
-        .iter()
-        .flat_map(|event| [event.get("callId"), event.get("toolCallId")])
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect();
-    const SLACK_MS: i64 = 5_000;
-    for form in &forms {
-        let Some(id) = form.get("id").and_then(Value::as_str) else {
-            continue;
-        };
-        if used.contains(id) {
-            continue;
-        }
-        if call_id_of(form).is_some_and(|call| !calls.contains(call)) {
-            continue;
-        }
-        let at = form.get("timestampMs").and_then(Value::as_i64).unwrap_or(0);
-        if at < started_at_ms.saturating_sub(SLACK_MS)
-            || at > updated_at_ms.saturating_add(SLACK_MS)
-        {
-            continue;
-        }
-        // Overlaid like a matched frame, so it carries how its handoff ended too.
-        let mut frame = agui_user_form_frame(form);
-        overlay_form(&mut frame, form);
-        events.push(frame);
-        used.insert(id.to_string());
-    }
-    stamp_tool_calls(&mut events);
-    events
-}
-
-/// NativeChat paints TOOL_CALL frames as Website login cards. Live HITL stamps
-/// `entryId` on the CUSTOM; replay overlays the same id onto matching TOOL_CALLs
-/// so stacked cards stay Continue-able after a reconnect.
-fn stamp_tool_calls(events: &mut [Value]) {
-    let mut by_call: BTreeMap<String, String> = BTreeMap::new();
-    for event in events.iter() {
-        if !is_user_form_agui(event) {
-            continue;
-        }
-        let Some(call_id) = event.get("callId").and_then(Value::as_str) else {
-            continue;
-        };
-        if let Some(entry_id) = user_form_event_id(event) {
-            by_call.insert(call_id.to_string(), entry_id.to_string());
-        }
-    }
-    if by_call.is_empty() {
-        return;
-    }
-    for event in events.iter_mut() {
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
-        if kind != "TOOL_CALL_START" && kind != "TOOL_CALL_ARGS" && kind != "TOOL_CALL_END" {
-            continue;
-        }
-        let Some(call_id) = event.get("toolCallId").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(entry_id) = by_call.get(call_id) else {
-            continue;
-        };
-        if let Some(map) = event.as_object_mut() {
-            map.insert("entryId".to_string(), json!(entry_id));
         }
     }
 }

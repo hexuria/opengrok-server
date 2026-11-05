@@ -58,16 +58,13 @@ impl PgStore {
         entry_id: &str,
         entry: &Value,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "update gateway_entry set entry = $3
-              where coworker_id = $1 and entry->>'id' = $2 and account_id = $4",
-        )
-        .bind(coworker.as_str())
-        .bind(entry_id)
-        .bind(entry)
-        .bind(account.as_str())
-        .execute(self.pool())
-        .await?;
+        let sql = "update gateway_entry set entry = $3
+              where coworker_id = $1 and entry->>'id' = $2 and account_id = $4";
+        let query = sqlx::query(sql)
+            .bind(coworker.as_str())
+            .bind(entry_id)
+            .bind(entry);
+        query.bind(account.as_str()).execute(self.pool()).await?;
         Ok(())
     }
 
@@ -81,23 +78,20 @@ impl PgStore {
         entry_id: &str,
         status: &str,
     ) -> StoreResult<Option<Value>> {
-        let row = sqlx::query(
-            "update gateway_entry
+        let sql = "update gateway_entry
                 set entry = jsonb_set(entry::jsonb, '{message,approval,status}', to_jsonb($3::text))::jsonb
               where coworker_id = $1 and entry->>'id' = $2 and account_id = $4
                 and entry->'message'->'approval' is not null
-              returning entry",
-        )
-        .bind(coworker.as_str())
-        .bind(entry_id)
-        .bind(status)
-        .bind(account.as_str())
-        .fetch_optional(self.pool())
-        .await?;
-        Ok(match row {
-            Some(row) => Some(row.try_get("entry")?),
-            None => None,
-        })
+              returning entry";
+        let query = sqlx::query(sql)
+            .bind(coworker.as_str())
+            .bind(entry_id)
+            .bind(status);
+        let row = query
+            .bind(account.as_str())
+            .fetch_optional(self.pool())
+            .await?;
+        Ok(row.map(|row| row.try_get("entry")).transpose()?)
     }
 
     pub async fn update_gateway_entry(
@@ -107,17 +101,24 @@ impl PgStore {
         seq: i64,
         entry: &Value,
     ) -> StoreResult<()> {
-        sqlx::query(
-            "update gateway_entry set entry = $3
-              where coworker_id = $1 and seq = $2 and account_id = $4",
-        )
-        .bind(coworker.as_str())
-        .bind(seq)
-        .bind(entry)
-        .bind(account.as_str())
-        .execute(self.pool())
-        .await?;
-        Ok(())
+        let unconditional = self.update_gateway_entry_if((coworker, account), (seq, None), entry);
+        unconditional.await.map(drop)
+    }
+
+    /// With `was`, only while the row is still `was` and no submit settled it (#220): a card's
+    /// lock is one process's, so a stale write from another replica stops here.
+    pub async fn update_gateway_entry_if(
+        &self,
+        (coworker, account): (&CoworkerId, &AccountId),
+        (seq, was): (i64, Option<&Value>),
+        entry: &Value,
+    ) -> StoreResult<bool> {
+        let sql = "update gateway_entry set entry = $3 where coworker_id = $1 and seq = $2 and \
+                   account_id = $4 and ($5::jsonb is null or (entry = $5 and \
+                   coalesce(entry->>'formResolution', '') <> 'submitted'))";
+        let query = sqlx::query(sql).bind(coworker.as_str()).bind(seq);
+        let query = query.bind(entry).bind(account.as_str()).bind(was);
+        Ok(query.execute(self.pool()).await?.rows_affected() == 1)
     }
 
     /// Seam B's extra profile fields for a coworker (description, title, avatar shape/colour).
@@ -174,14 +175,12 @@ impl PgStore {
         coworker: &CoworkerId,
         account: &AccountId,
     ) -> StoreResult<Vec<Value>> {
-        let rows = sqlx::query(
-            "select entry from gateway_entry
-             where coworker_id = $1 and account_id = $2 order by seq",
-        )
-        .bind(coworker.as_str())
-        .bind(account.as_str())
-        .fetch_all(self.pool())
-        .await?;
+        let sql = "select entry from gateway_entry
+             where coworker_id = $1 and account_id = $2 order by seq";
+        let query = sqlx::query(sql)
+            .bind(coworker.as_str())
+            .bind(account.as_str());
+        let rows = query.fetch_all(self.pool()).await?;
         rows.into_iter()
             .map(|row| Ok(row.try_get("entry")?))
             .collect()
@@ -195,16 +194,14 @@ impl PgStore {
         account: &AccountId,
         entry_id: &str,
     ) -> StoreResult<Option<(i64, Value)>> {
-        let row = sqlx::query(
-            "select seq, entry from gateway_entry
+        let sql = "select seq, entry from gateway_entry
              where coworker_id = $1 and entry->>'id' = $2 and account_id = $3
-             order by seq desc limit 1",
-        )
-        .bind(coworker.as_str())
-        .bind(entry_id)
-        .bind(account.as_str())
-        .fetch_optional(self.pool())
-        .await?;
+             order by seq desc limit 1";
+        let query = sqlx::query(sql).bind(coworker.as_str()).bind(entry_id);
+        let row = query
+            .bind(account.as_str())
+            .fetch_optional(self.pool())
+            .await?;
         row.map(|row| Ok((row.try_get("seq")?, row.try_get("entry")?)))
             .transpose()
     }

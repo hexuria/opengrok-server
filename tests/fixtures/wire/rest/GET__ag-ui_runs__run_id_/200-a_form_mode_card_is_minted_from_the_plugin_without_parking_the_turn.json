@@ -1,0 +1,362 @@
+{
+  "method": "GET",
+  "path": "/ag-ui/runs/0199bb4e-0000-7000-8000-000000000001",
+  "status": 200,
+  "body": {
+    "runId": "0199bb4e-0000-7000-8000-000000000001",
+    "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
+    "status": "finished",
+    "startedAtMs": 1790000000000,
+    "failure": null,
+    "finishReason": null,
+    "pending": null,
+    "events": [
+      {
+        "type": "RUN_STARTED",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "timestamp": 100
+      },
+      {
+        "type": "TEXT_MESSAGE_START",
+        "messageId": "m-0199bb4e000070008000000000000003",
+        "role": "user",
+        "timestamp": 100
+      },
+      {
+        "type": "TEXT_MESSAGE_CONTENT",
+        "messageId": "m-0199bb4e000070008000000000000003",
+        "delta": "open my 0619-E for September",
+        "timestamp": 100
+      },
+      {
+        "type": "TEXT_MESSAGE_END",
+        "messageId": "m-0199bb4e000070008000000000000003",
+        "timestamp": 100
+      },
+      {
+        "name": "opengrok.inferenceSource",
+        "type": "CUSTOM",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "value": {
+          "kind": "gateway",
+          "model": "oag/cheap"
+        },
+        "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "timestamp": 100
+      },
+      {
+        "type": "TOOL_CALL_START",
+        "timestamp": 100,
+        "toolCallId": "call-0199bb4e000070008000000000000004",
+        "toolCallName": "request_user_form",
+        "entryId": "e_0199bb4e-0000-7000-8000-000000000005"
+      },
+      {
+        "type": "TOOL_CALL_ARGS",
+        "delta": "{\"formMode\":true,\"title\":\"BIR 0619-E\",\"form\":{\"form\":\"0619E\",\"tin\":\"123456789000\",\"period\":\"2026-09\"},\"values\":{\"frm0619E:txtTax14\":\"999\"},\"fingerprint\":\"sha256:forged\"}",
+        "timestamp": 100,
+        "toolCallId": "call-0199bb4e000070008000000000000004",
+        "entryId": "e_0199bb4e-0000-7000-8000-000000000005"
+      },
+      {
+        "type": "TOOL_CALL_END",
+        "timestamp": 100,
+        "toolCallId": "call-0199bb4e000070008000000000000004",
+        "entryId": "e_0199bb4e-0000-7000-8000-000000000005"
+      },
+      {
+        "ok": true,
+        "type": "TOOL_CALL_RESULT",
+        "content": "The form is open in the chat. End your turn now. Do not ask for its boxes in chat and do not call bir_form_fill or bir_form_save while it is open; the person fills it and every change saves itself. You will be told when it is submitted or dismissed.",
+        "timestamp": 100,
+        "durationMs": 0,
+        "toolCallId": "call-0199bb4e000070008000000000000004"
+      },
+      {
+        "role": "assistant",
+        "type": "TEXT_MESSAGE_START",
+        "messageId": "msg_0199bb4e-0000-7000-8000-000000000001_1",
+        "timestamp": 100
+      },
+      {
+        "type": "TEXT_MESSAGE_CONTENT",
+        "delta": "The form is open.",
+        "messageId": "msg_0199bb4e-0000-7000-8000-000000000001_1",
+        "timestamp": 100
+      },
+      {
+        "type": "TEXT_MESSAGE_END",
+        "messageId": "msg_0199bb4e-0000-7000-8000-000000000001_1",
+        "timestamp": 100
+      },
+      {
+        "name": "run-timing",
+        "type": "CUSTOM",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "value": {
+          "tools": [
+            {
+              "ms": 3,
+              "name": "request_user_form"
+            }
+          ],
+          "budget": {
+            "idle_ms": 240000,
+            "max_rounds": 8,
+            "max_wall_ms": 900000,
+            "call_timeout_ms": 180000,
+            "max_computer_rounds": 24
+          },
+          "context": {
+            "limit": 128000,
+            "left_out": 0,
+            "estimated": [
+              7851,
+              7982
+            ]
+          },
+          "model_ms": [
+            3,
+            3
+          ],
+          "total_ms": 3,
+          "tool_rounds": 1,
+          "tool_wait_ms": 3,
+          "auto_review_ms": 3
+        },
+        "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "total_ms": 3,
+        "timestamp": 100,
+        "tool_rounds": 1
+      },
+      {
+        "type": "RUN_FINISHED",
+        "runId": "0199bb4e-0000-7000-8000-000000000001",
+        "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
+        "timestamp": 100
+      },
+      {
+        "type": "CUSTOM",
+        "name": "user-form",
+        "entryId": "e_0199bb4e-0000-7000-8000-000000000005",
+        "callId": null,
+        "formRequest": {
+          "form": {
+            "tin": "123456789000",
+            "form": "0619E",
+            "period": "2026-09"
+          },
+          "focus": "frm0619E:txtTax14",
+          "pages": [
+            {
+              "n": 1,
+              "title": "Part II · Tax Remittance"
+            }
+          ],
+          "title": "Form 0619-E",
+          "fields": [
+            {
+              "id": "frm0619E:rdoTaxWithheld",
+              "line": "4",
+              "page": 1,
+              "part": "I",
+              "type": "radio",
+              "label": "Any Taxes Withheld?",
+              "value": "Y",
+              "secret": false,
+              "options": [
+                {
+                  "label": "Yes",
+                  "value": "Y"
+                },
+                {
+                  "label": "No",
+                  "value": "N"
+                }
+              ],
+              "required": true
+            },
+            {
+              "id": "frm0619E:txtTax14",
+              "line": "14",
+              "page": 1,
+              "part": "II",
+              "type": "text",
+              "error": "Please fill up Part II - Tax Remittance if item 4 is set to Yes.",
+              "label": "Amount of Remittance",
+              "value": "",
+              "secret": false,
+              "required": true
+            },
+            {
+              "id": "frm0619E:txtTax16",
+              "line": "16",
+              "page": 1,
+              "part": "II",
+              "type": "text",
+              "label": "Net Amount of Remittance",
+              "value": "0.00",
+              "secret": false,
+              "readOnly": true,
+              "required": false
+            }
+          ],
+          "plugin": "bir",
+          "status": "draft",
+          "formMode": true,
+          "fingerprint": "sha256:draft-0",
+          "instruction": ""
+        },
+        "formResolution": null,
+        "message": {
+          "type": "user-form",
+          "formRequest": {
+            "form": {
+              "tin": "123456789000",
+              "form": "0619E",
+              "period": "2026-09"
+            },
+            "focus": "frm0619E:txtTax14",
+            "pages": [
+              {
+                "n": 1,
+                "title": "Part II · Tax Remittance"
+              }
+            ],
+            "title": "Form 0619-E",
+            "fields": [
+              {
+                "id": "frm0619E:rdoTaxWithheld",
+                "line": "4",
+                "page": 1,
+                "part": "I",
+                "type": "radio",
+                "label": "Any Taxes Withheld?",
+                "value": "Y",
+                "secret": false,
+                "options": [
+                  {
+                    "label": "Yes",
+                    "value": "Y"
+                  },
+                  {
+                    "label": "No",
+                    "value": "N"
+                  }
+                ],
+                "required": true
+              },
+              {
+                "id": "frm0619E:txtTax14",
+                "line": "14",
+                "page": 1,
+                "part": "II",
+                "type": "text",
+                "error": "Please fill up Part II - Tax Remittance if item 4 is set to Yes.",
+                "label": "Amount of Remittance",
+                "value": "",
+                "secret": false,
+                "required": true
+              },
+              {
+                "id": "frm0619E:txtTax16",
+                "line": "16",
+                "page": 1,
+                "part": "II",
+                "type": "text",
+                "label": "Net Amount of Remittance",
+                "value": "0.00",
+                "secret": false,
+                "readOnly": true,
+                "required": false
+              }
+            ],
+            "plugin": "bir",
+            "status": "draft",
+            "formMode": true,
+            "fingerprint": "sha256:draft-0",
+            "instruction": ""
+          }
+        },
+        "value": {
+          "id": "e_0199bb4e-0000-7000-8000-000000000005",
+          "kind": "send-message",
+          "message": {
+            "type": "user-form",
+            "formRequest": {
+              "form": {
+                "tin": "123456789000",
+                "form": "0619E",
+                "period": "2026-09"
+              },
+              "focus": "frm0619E:txtTax14",
+              "pages": [
+                {
+                  "n": 1,
+                  "title": "Part II · Tax Remittance"
+                }
+              ],
+              "title": "Form 0619-E",
+              "fields": [
+                {
+                  "id": "frm0619E:rdoTaxWithheld",
+                  "line": "4",
+                  "page": 1,
+                  "part": "I",
+                  "type": "radio",
+                  "label": "Any Taxes Withheld?",
+                  "value": "Y",
+                  "secret": false,
+                  "options": [
+                    {
+                      "label": "Yes",
+                      "value": "Y"
+                    },
+                    {
+                      "label": "No",
+                      "value": "N"
+                    }
+                  ],
+                  "required": true
+                },
+                {
+                  "id": "frm0619E:txtTax14",
+                  "line": "14",
+                  "page": 1,
+                  "part": "II",
+                  "type": "text",
+                  "error": "Please fill up Part II - Tax Remittance if item 4 is set to Yes.",
+                  "label": "Amount of Remittance",
+                  "value": "",
+                  "secret": false,
+                  "required": true
+                },
+                {
+                  "id": "frm0619E:txtTax16",
+                  "line": "16",
+                  "page": 1,
+                  "part": "II",
+                  "type": "text",
+                  "label": "Net Amount of Remittance",
+                  "value": "0.00",
+                  "secret": false,
+                  "readOnly": true,
+                  "required": false
+                }
+              ],
+              "plugin": "bir",
+              "status": "draft",
+              "formMode": true,
+              "fingerprint": "sha256:draft-0",
+              "instruction": ""
+            }
+          },
+          "threadId": "cw_0199bb4e-0000-7000-8000-000000000002",
+          "timestampMs": 1790000001000,
+          "requestCallId": "call-0199bb4e000070008000000000000004"
+        }
+      }
+    ]
+  }
+}

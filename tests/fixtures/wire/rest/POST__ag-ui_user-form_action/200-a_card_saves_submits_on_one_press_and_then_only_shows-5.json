@@ -1,0 +1,13 @@
+{
+  "method": "POST",
+  "path": "/ag-ui/user-form/action",
+  "status": 200,
+  "body": {
+    "ok": true,
+    "action": "focus",
+    "reply": {
+      "ok": true,
+      "scrolled": false
+    }
+  }
+}

@@ -100,7 +100,7 @@ pub(super) async fn events_for_client(
             .unwrap_or_default(),
         None => Vec::new(),
     };
-    crate::agui::user_form::hydrate_agui_events(
+    opengrok_tools::user_form::replay::hydrate_agui_events(
         run.emitted.clone(),
         &forms,
         started_at_ms,
@@ -268,7 +268,7 @@ pub async fn replay_thread(
             };
             Some(super::history::with_prompt_frames(
                 &run,
-                crate::agui::user_form::hydrate_agui_events(
+                opengrok_tools::user_form::replay::hydrate_agui_events(
                     run.emitted.clone(),
                     &forms,
                     summary.started_at_ms,

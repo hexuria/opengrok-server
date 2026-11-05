@@ -9,7 +9,7 @@
     "messages": [
       {
         "role": "system",
-        "content": "Your replies come from gpt-6-luna on the person's own plan.\n\nYou are Luna.\n\nNobody is talking with you: this turn is a routine you run on your own schedule for Test User, who hired you. It fired at 2026-10-14 19:41, Wednesday UTC."
+        "content": "Your replies come from gpt-6-luna on the person's own plan.\n\nYou are Luna.\n\nNobody is talking with you: this turn is a routine you run on your own schedule for Test User, who hired you. It fired at 2026-10-14 15:41, Wednesday UTC."
       },
       {
         "role": "user",
@@ -83,7 +83,7 @@
         "type": "function",
         "function": {
           "name": "request_user_form",
-          "description": "Ask the person to fill a form in chat. Two uses. A collect form (collect true) is how you ask for fields you do not have yet: a new profile, a missing name, a TIN they must confirm. Put what they already told you on each field as value, so the card is prefilled, and leave value off the fields that are still missing. Mark those required. Wait. The answers come back as Shared fields and nothing is typed into a page. Do not invent a shell command for the form. A sign-in is the other use: an OTP or a field they must type into a page. NativeChat offers the person their saved logins for that site on the card; they confirm with Touch ID, and the values are typed into the page out of your view. Do NOT type passwords, one-time codes, or other secrets with `computer`: that attaches a screenshot of what was typed. Raise this instead and wait. The person fills in chat; the server clicks each field at the position you give (`at`, in your screenshot's pixels) and types there, never showing you the secret. Give `at` for every field you can see. After it settles, screenshot and confirm what the page shows — filling is not login. When the page shows the email and password fields TOGETHER (Facebook, most sites), raise ONE card with both fields and `samePage: true` — do not split them. Only a page that asks for the email alone (Google) gets an email-only card: raise it, observe, and if a password page comes next call this again with a password-only form (new entryId, challengeKind \"password\"). If another in-sandbox challenge appears (an authenticator code, phone verification on the same page), call this again with otp fields, challengeKind \"otp\", the page host as liveHost and the field's `at`; NativeChat offers the person's saved authenticator code for that site on the card. Never re-raise a form that already settled. A passkey prompt: call this with challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site offers to add one and the person asked), no fields, liveHost set; when the result says it is loaded, click the site's passkey button. A captcha, or a page outside this box, is not another password form: the person finishes on the computer (Open the screen). If they dismiss or decline, continue without those credentials and do not loop.",
+          "description": "Ask the person to fill a form in chat. Three uses. A collect form (collect true) is how you ask for fields you do not have yet: a new profile, a missing name, a TIN they must confirm. Put what they already told you on each field as value, so the card is prefilled, and leave value off the fields that are still missing. Mark those required. Wait. The answers come back as Shared fields and nothing is typed into a page. Do not invent a shell command for the form. A sign-in is the other use: an OTP or a field they must type into a page. NativeChat offers the person their saved logins for that site on the card; they confirm with Touch ID, and the values are typed into the page out of your view. Do NOT type passwords, one-time codes, or other secrets with `computer`: that attaches a screenshot of what was typed. Raise this instead and wait. The person fills in chat; the server clicks each field at the position you give (`at`, in your screenshot's pixels) and types there, never showing you the secret. Give `at` for every field you can see. After it settles, screenshot and confirm what the page shows — filling is not login. When the page shows the email and password fields TOGETHER (Facebook, most sites), raise ONE card with both fields and `samePage: true` — do not split them. Only a page that asks for the email alone (Google) gets an email-only card: raise it, observe, and if a password page comes next call this again with a password-only form (new entryId, challengeKind \"password\"). If another in-sandbox challenge appears (an authenticator code, phone verification on the same page), call this again with otp fields, challengeKind \"otp\", the page host as liveHost and the field's `at`; NativeChat offers the person's saved authenticator code for that site on the card. Never re-raise a sign-in form that already settled. A passkey prompt: call this with challengeKind \"passkey\", passkeyMode \"use\" (or \"register\" when the site offers to add one and the person asked), no fields, liveHost set; when the result says it is loaded, click the site's passkey button. A captcha, or a page outside this box, is not another password form: the person finishes on the computer (Open the screen). If they dismiss or decline, continue without those credentials and do not loop. A plugin form (formMode true) opens a return a plugin holds, such as a BIR form, as a card the person fills in chat: give only formMode, the form {form, tin, period} and, when more than one plugin has forms, plugin. The plugin draws the boxes: send fields as an empty list and no values. It answers at once: end your turn, and you are told on a later turn whether it was submitted or dismissed. A dismissed plugin form may be opened again when the person asks.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -94,6 +94,34 @@
               "instruction": {
                 "type": "string",
                 "description": "What the person should do."
+              },
+              "formMode": {
+                "type": "boolean",
+                "description": "Open a plugin's form (a BIR return) as a card the person fills. Give form, and plugin when several plugins have forms; no fields."
+              },
+              "form": {
+                "type": "object",
+                "description": "With formMode: which return. form is the form number (0619E), tin 9 to 14 digits with no dashes, period YYYY-MM, YYYY-Qn or YYYY.",
+                "properties": {
+                  "form": {
+                    "type": "string"
+                  },
+                  "tin": {
+                    "type": "string"
+                  },
+                  "period": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "form",
+                  "tin",
+                  "period"
+                ]
+              },
+              "plugin": {
+                "type": "string",
+                "description": "With formMode: the plugin whose form this is, e.g. bir."
               },
               "collect": {
                 "type": "boolean",

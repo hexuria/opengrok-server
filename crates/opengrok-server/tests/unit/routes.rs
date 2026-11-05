@@ -612,7 +612,7 @@ fn an_attached_stream_sends_only_the_logs_own_frames() {
         }
     });
     let (from, to) = run_time_window(&[]).unwrap_or(EMPTY_WINDOW);
-    let hydrated = crate::agui::user_form::hydrate_agui_events(
+    let hydrated = opengrok_tools::user_form::replay::hydrate_agui_events(
         Vec::new(),
         std::slice::from_ref(&card),
         from,
@@ -648,7 +648,11 @@ fn a_run_with_no_timestamps_gets_no_transcript_cards() {
         "a run with no timestamp yet reports no start, not the empty window's bound"
     );
     let (from, to) = window.unwrap_or(EMPTY_WINDOW);
-    let out =
-        crate::agui::user_form::hydrate_agui_events(emitted, std::slice::from_ref(&card), from, to);
+    let out = opengrok_tools::user_form::replay::hydrate_agui_events(
+        emitted,
+        std::slice::from_ref(&card),
+        from,
+        to,
+    );
     assert_eq!(out.len(), 1, "{out:?}");
 }

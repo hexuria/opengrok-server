@@ -518,6 +518,31 @@ pub fn with_mentioned(mut context: Context, plugins: &[String]) -> Context {
     context
 }
 
+/// `context` with each of `tools` held for a person's yes, for a plugin that declares them
+/// `alwaysAsk` (a tax return's submit, #220).
+///
+/// A NARROWING ONLY. `needs_approval` is checked inside the profile, so a tool the ceiling and
+/// grant do not admit is still denied, and one they do now parks for a yes rather than running.
+/// Applied on every turn after the grant is read, so the person's own choice of "always" for such
+/// a tool, which writes the grant, cannot lift it.
+#[must_use]
+pub fn with_always_ask(mut context: Context, tools: &[String]) -> Context {
+    if tools.is_empty() {
+        return context;
+    }
+    if let Some(grant) = context.grant.as_mut() {
+        grant.needs_approval = match std::mem::replace(&mut grant.needs_approval, ToolSet::None) {
+            ToolSet::All => ToolSet::All,
+            ToolSet::None => ToolSet::Only(tools.iter().cloned().collect()),
+            ToolSet::Only(mut names) => {
+                names.extend(tools.iter().cloned());
+                ToolSet::Only(names)
+            }
+        };
+    }
+    context
+}
+
 /// Whether ANY tool whose name starts with `prefix` could be run (or held for a yes) — so a
 /// caller can skip reaching a plugin server the coworker could use nothing from.
 ///
@@ -1138,5 +1163,25 @@ mod tests {
             "gmail.api.",
             &profile_without
         ));
+    }
+
+    /// A plugin's `alwaysAsk` tool parks for a yes whatever the grant says, and admits nothing
+    /// the layers did not: a tool outside the profile stays denied (#220).
+    #[test]
+    fn an_always_ask_tool_asks_and_widens_nothing() {
+        let submit = "bir.bir-mcp.bir_form_submit".to_string();
+        let save = "bir.bir-mcp.bir_form_save";
+        let decide_on = |context: &Context, tool: &str| {
+            decide(&principal(), &coworker(), Action::RunTool(tool), context)
+        };
+        let on = granted(ToolSet::only(["bir.*"]), ToolSet::only(["bir.*"]));
+        assert!(decide_on(&on, &submit).is_allowed());
+        let asked = with_always_ask(on, std::slice::from_ref(&submit));
+        assert!(decide_on(&asked, &submit).needs_approval());
+        assert!(decide_on(&asked, save).is_allowed());
+        let off = granted(ToolSet::only(["shell"]), ToolSet::only(["shell"]));
+        let off = with_always_ask(off, std::slice::from_ref(&submit));
+        assert!(!decide_on(&off, &submit).is_allowed());
+        assert!(!decide_on(&off, &submit).needs_approval());
     }
 }
